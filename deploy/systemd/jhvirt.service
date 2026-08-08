@@ -1,0 +1,33 @@
+[Unit]
+Description=justhpc-virt-manager
+Documentation=file:/opt/jhvirt/docs/DEPLOY.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=jhvirt
+Group=jhvirt
+WorkingDirectory=/opt/jhvirt
+ExecStart=/opt/jhvirt/bin/justhpc-virt-server -config /opt/jhvirt/config/virt-manager.yaml
+Restart=on-failure
+RestartSec=5s
+
+# Секреты (пароль СУБД) — из файла с правами 0600, а не в юните: юнит читают все.
+# Минус перед путём означает «нет файла — не ошибка».
+EnvironmentFile=-/opt/jhvirt/config/jhvirt.env
+
+# Сервису нужны только свои каталоги. Если локальное хранилище копий лежит вне
+# /opt/jhvirt, добавьте его путь в ReadWritePaths — иначе запись будет отклонена
+# ядром, а причина в сообщении об ошибке видна не сразу.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/jhvirt/data /opt/jhvirt/logs
+
+# Восстановление и проверка держат много открытых объектов хранилища.
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

@@ -172,11 +172,18 @@ cd deploy && docker compose --profile s3 up -d --build
 ### Бинарь
 
 ```bash
-make dist                       # соберёт web/dist и bin/justhpc-virt-server-linux-amd64
-./bin/justhpc-virt-server -config config/virt-manager.yaml
+./scripts/build.sh --target linux/amd64
 ```
 
-Требуется Go 1.26+ и Node 20+ (только для сборки интерфейса).
+Соберёт комплект `dist/jhvirt-<версия>-linux-amd64.tar.gz`: бинари, интерфейс,
+конфигурацию, юнит systemd и скрипт установки. На сервере:
+
+```bash
+tar xzf jhvirt-<версия>-linux-amd64.tar.gz && sudo jhvirt-<версия>-linux-amd64/install.sh
+```
+
+Нужны Go 1.26+ и Node 20+. Компилятор C и `make` не требуются, поэтому собрать
+Linux-бинарь можно и из-под Windows. Подробности — [docs/BUILD.md](docs/BUILD.md).
 
 ### Разработка
 
@@ -289,6 +296,7 @@ jvbackup restore -repo /backup -run <id> -out /var/tmp -format qcow2
 
 ## Документация
 
+- [`docs/BUILD.md`](docs/BUILD.md) — сборка, установка из комплекта и обновление.
 - [`docs/DEPLOY.md`](docs/DEPLOY.md) — **боевое развёртывание**: Docker и systemd,
   PostgreSQL, TLS, чек-лист перед запуском, приёмочный прогон, обновление.
 - [`docs/DISK-ARCHITECTURE.md`](docs/DISK-ARCHITECTURE.md) — как устроены диски

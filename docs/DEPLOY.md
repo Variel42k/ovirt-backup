@@ -109,36 +109,24 @@ docker compose logs justhpc-virt-manager | grep -i "база данных под
 ### 3.1. Соберите комплект
 
 ```bash
-make dist        # web/dist + bin/justhpc-virt-server-linux-amd64
+./scripts/build.sh --target linux/amd64
 ```
 
-Если `make` недоступен (типично для Windows и минимальных образов) — те же две
-команды напрямую. Собирать можно на любой платформе: Go кросс-компилирует, cgo
-не используется.
-
-```bash
-npm --prefix web run build
-
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath     -ldflags "-s -w -X main.version=1.0.0"     -o bin/justhpc-virt-server-linux-amd64 ./cmd/justhpc-virt-server
-
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w"     -o bin/jvbackup-linux-amd64 ./cmd/jvbackup
-```
-
-Для ARM-сервера замените `GOARCH=amd64` на `GOARCH=arm64`.
+Получится `dist/jhvirt-<версия>-linux-amd64.tar.gz` со всем необходимым, включая
+скрипт установки. Подробности и ключи — в [BUILD.md](BUILD.md).
 
 ### 3.2. Установите
 
 ```bash
-useradd --system --home /opt/jhvirt --shell /usr/sbin/nologin jhvirt
-mkdir -p /opt/jhvirt/{bin,config,data,logs,web}
-cp bin/justhpc-virt-server-linux-amd64 /opt/jhvirt/bin/justhpc-virt-server
-cp -r web/dist /opt/jhvirt/web/dist
-cp config/virt-manager.yaml /opt/jhvirt/config/
-chown -R jhvirt:jhvirt /opt/jhvirt
-chmod 750 /opt/jhvirt/data
+scp dist/jhvirt-<версия>-linux-amd64.tar.gz server:/tmp/
+ssh server 'tar xzf /tmp/jhvirt-<версия>-linux-amd64.tar.gz -C /tmp &&             sudo /tmp/jhvirt-<версия>-linux-amd64/install.sh'
 ```
 
-`/etc/systemd/system/jhvirt.service`:
+Скрипт создаёт пользователя `jhvirt`, раскладывает файлы в `/opt/jhvirt`, ставит
+юнит и делает `daemon-reload`. Службу не запускает и конфигурацию не заполняет —
+это ваши решения.
+
+Юнит, который он ставит (`deploy/systemd/jhvirt.service` в репозитории):
 
 ```ini
 [Unit]

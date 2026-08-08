@@ -5,7 +5,7 @@
 конфигурация, юнит systemd и скрипт установки.
 
 ```bash
-./scripts/build.sh --target linux/amd64
+./run build --target linux/amd64
 ```
 
 ```
@@ -39,14 +39,14 @@
 ### Под текущую платформу
 
 ```bash
-./scripts/build.sh
+./run build
 ```
 
 ### Под сервер
 
 ```bash
-./scripts/build.sh --target linux/amd64    # обычный сервер
-./scripts/build.sh --target linux/arm64    # ARM
+./run build --target linux/amd64    # обычный сервер
+./run build --target linux/arm64    # ARM
 ```
 
 ### Полезные ключи
@@ -56,7 +56,8 @@
 | `--version 1.2.0` | явная версия вместо взятой из git |
 | `--skip-web` | только бинари; `web/dist` должен быть собран заранее |
 | `--no-archive` | разложить в `dist/`, не паковать в архив |
-| `--help` | краткая справка |
+
+`./run` без аргументов покажет все команды.
 
 Версия по умолчанию берётся из `git describe`. Суффикс `-dirty` означает, что в
 рабочем каталоге есть несохранённые правки — он намеренно оставлен видимым,
@@ -64,16 +65,16 @@
 
 ### Windows
 
-Скрипт работает в Git Bash (идёт вместе с Git for Windows):
+`./run` работает в Git Bash (идёт вместе с Git for Windows):
 
 ```bash
-./scripts/build.sh --target linux/amd64
+./run build --target linux/amd64
 ```
 
-Из PowerShell или cmd — тем же способом через bash:
+Из PowerShell или cmd — через тот же bash:
 
 ```powershell
-& "C:\Program Files\Git\bin\bash.exe" scripts/build.sh --target linux/amd64
+& "C:\Program Files\Git\bin\bash.exe" run build --target linux/amd64
 ```
 
 Права на файлы в архиве не зависят от системы сборки: NTFS не хранит бит
@@ -149,20 +150,18 @@ sudo /tmp/jhvirt-1.0.0-linux-amd64/install.sh
 ## Разработка
 
 ```bash
-go run ./cmd/justhpc-virt-server -config config/virt-manager.yaml   # сервер на :8080
-cd web && npm run dev                                              # интерфейс на :9000
+./run dev     # сервер на :8080
+./run web     # интерфейс на :9000, /api проксируется на сервер
 ```
 
 В режиме разработки интерфейс живёт на своём порту и проксирует `/api` на
 сервер, поэтому пересобирать SPA после каждой правки не нужно.
 
-Перед коммитом:
+Перед коммитом — одна команда: формат, `go vet`, тесты и проверка типов
+интерфейса.
 
 ```bash
-gofmt -w -s $(find . -name '*.go' -not -path './web/*')
-go vet ./...
-go test ./...
-cd web && npm run typecheck
+./run check
 ```
 
 Тесты не требуют внешних сервисов: база поднимается во временном каталоге,
@@ -171,7 +170,7 @@ cd web && npm run typecheck
 ### Детектор гонок
 
 ```bash
-go test -race ./...
+./run test -race
 ```
 
 Требует `CGO_ENABLED=1` и компилятора C — единственное место, где cgo нужен.
@@ -183,7 +182,7 @@ go test -race ./...
 ## Docker
 
 ```bash
-docker build -t justhpc-virt-manager:1.0.0 .
+./run docker
 ```
 
 Образ многоступенчатый: Node собирает интерфейс, Go — бинарь, финальный слой на
@@ -199,6 +198,7 @@ qcow2 и режима проверки `qemu`; без него работает 
 | Сообщение | Причина |
 |---|---|
 | `не найден go` | Go не установлен или не в `PATH` |
+| `неизвестная команда` | опечатка; `./run` покажет список |
 | `не найден npm` | нет Node; либо соберите с `--skip-web`, если `web/dist` уже готов |
 | `нет web/dist/index.html` | указан `--skip-web`, но интерфейс не собран |
 | `-race requires cgo` | нет компилятора C; тесты без `-race` пройдут |

@@ -109,7 +109,7 @@ docker compose logs justhpc-virt-manager | grep -i "база данных под
 ### 3.1. Соберите комплект
 
 ```bash
-./scripts/build.sh --target linux/amd64
+./run build --target linux/amd64
 ```
 
 Получится `dist/jhvirt-<версия>-linux-amd64.tar.gz` со всем необходимым, включая
@@ -119,7 +119,9 @@ docker compose logs justhpc-virt-manager | grep -i "база данных под
 
 ```bash
 scp dist/jhvirt-<версия>-linux-amd64.tar.gz server:/tmp/
-ssh server 'tar xzf /tmp/jhvirt-<версия>-linux-amd64.tar.gz -C /tmp &&             sudo /tmp/jhvirt-<версия>-linux-amd64/install.sh'
+ssh server
+tar xzf /tmp/jhvirt-<версия>-linux-amd64.tar.gz -C /tmp
+sudo /tmp/jhvirt-<версия>-linux-amd64/install.sh
 ```
 
 Скрипт создаёт пользователя `jhvirt`, раскладывает файлы в `/opt/jhvirt`, ставит

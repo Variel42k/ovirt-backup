@@ -172,7 +172,7 @@ cd deploy && docker compose --profile s3 up -d --build
 ### Бинарь
 
 ```bash
-./scripts/build.sh --target linux/amd64
+./run build --target linux/amd64
 ```
 
 Соберёт комплект `dist/jhvirt-<версия>-linux-amd64.tar.gz`: бинари, интерфейс,
@@ -187,10 +187,14 @@ Linux-бинарь можно и из-под Windows. Подробности —
 
 ### Разработка
 
+Все команды — через `./run`; он же собирает и проверяет. `make` не нужен, но
+Makefile есть и делегирует сюда же.
+
 ```bash
-make run          # сервер на :8080
-make web-dev      # интерфейс на :9000 с проксированием /api
-make check        # формат, go vet, тесты
+./run dev         # сервер на :8080
+./run web         # интерфейс на :9000 с проксированием /api
+./run check       # формат, go vet, тесты, проверка типов
+./run             # список команд
 ```
 
 ---

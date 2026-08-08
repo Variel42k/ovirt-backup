@@ -1,0 +1,271 @@
+#!/bin/sh
+# Единая точка входа для работы с проектом: ./run <команда>
+#
+# Одна команда вместо make, набора скриптов и запоминания флагов go build.
+# POSIX sh: make отсутствует в стандартной установке Windows и в минимальных
+# образах CI, а собирать и проверять проект должно быть можно везде, где есть
+# Go и Node.
+#
+# ./run без аргументов покажет список команд.
+
+set -eu
+
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+cd "$ROOT"
+
+die() { printf 'ошибка: %s\n' "$*" >&2; exit 1; }
+say() { printf '%s\n' "$*"; }
+step() { printf '\n==> %s\n' "$*"; }
+
+need() {
+    command -v "$1" >/dev/null 2>&1 || die "не найден $1 — $2"
+}
+
+# Файлы Go без веб-каталога: gofmt не должен трогать чужие зависимости.
+go_files() {
+    find . -name '*.go' -not -path './web/*' -not -path './dist/*'
+}
+
+# Версия из git, иначе dev. Суффикс -dirty оставляем видимым: он означает
+# несохранённые правки, и «та самая сборка» не должна путаться с похожей.
+version() {
+    if [ -n "${JHV_VERSION:-}" ]; then
+        printf '%s\n' "$JHV_VERSION"
+    elif command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1; then
+        git describe --tags --always --dirty 2>/dev/null || echo dev
+    else
+        echo dev
+    fi
+}
+
+# --- Команды ----------------------------------------------------------------
+
+cmd_help() {
+    cat <<'EOF'
+justhpc-virt-manager — команды разработки и сборки
+
+  ./run build [ключи]   собрать комплект для переноса на сервер
+  ./run dev             запустить сервер (:8080) с конфигурацией по умолчанию
+  ./run web             запустить интерфейс в режиме разработки (:9000)
+
+  ./run test [-race]    тесты Go
+  ./run check           формат, go vet, тесты, проверка типов интерфейса
+  ./run fmt             отформатировать код
+
+  ./run docker          собрать docker-образ
+  ./run version         показать версию, из которой соберётся бинарь
+  ./run clean           удалить артефакты сборки
+
+Ключи build:
+  --target ос/арх       кросс-сборка, например linux/amd64 или linux/arm64
+  --version X.Y.Z       явная версия вместо взятой из git
+  --skip-web            только бинари; web/dist должен быть собран заранее
+  --no-archive          разложить в dist/, не паковать в архив
+
+Примеры:
+  ./run build --target linux/amd64
+  ./run check
+  ./run test -race
+
+Установка собранного комплекта выполняется на сервере его собственным
+скриптом: см. docs/BUILD.md.
+EOF
+}
+
+cmd_version() { version; }
+
+cmd_fmt() {
+    need gofmt "он идёт вместе с Go"
+    step "форматирование Go"
+    # shellcheck disable=SC2046
+    gofmt -w -s $(go_files)
+    say "готово"
+}
+
+cmd_vet() {
+    need go "нужен Go 1.26+ (https://go.dev/dl/)"
+    step "go vet"
+    go vet ./...
+    say "замечаний нет"
+}
+
+cmd_test() {
+    need go "нужен Go 1.26+"
+    if [ "${1:-}" = "-race" ]; then
+        step "тесты с детектором гонок"
+        # -race — единственное место, где нужен cgo: детектор реализован в
+        # рантайме на C. Сам проект собирается без него.
+        CGO_ENABLED=1 go test -race ./... || die \
+            "если сообщение про cgo — нужен компилятор C; без -race тесты пройдут"
+    else
+        step "тесты"
+        go test ./...
+    fi
+}
+
+cmd_check() {
+    cmd_fmt
+    cmd_vet
+    cmd_test
+    if [ -d web/node_modules ]; then
+        step "проверка типов интерфейса"
+        (cd web && npm run typecheck)
+    else
+        say ""
+        say "проверка типов пропущена: web/node_modules не установлены (npm --prefix web ci)"
+    fi
+    say ""
+    say "всё чисто"
+}
+
+cmd_dev() {
+    need go "нужен Go 1.26+"
+    step "сервер на :8080 (Ctrl+C — остановить)"
+    go run ./cmd/justhpc-virt-server -config config/virt-manager.yaml
+}
+
+cmd_web() {
+    need npm "нужен Node 20+"
+    [ -d web/node_modules ] || (cd web && npm install --no-audit --no-fund)
+    step "интерфейс на :9000, /api проксируется на :8080"
+    (cd web && npm run dev)
+}
+
+cmd_docker() {
+    need docker "нужен Docker"
+    V="$(version)"
+    step "сборка образа justhpc-virt-manager:$V"
+    docker build --build-arg "VERSION=$V" -t "justhpc-virt-manager:$V" .
+    say "готово: justhpc-virt-manager:$V"
+}
+
+cmd_clean() {
+    step "удаление артефактов"
+    rm -rf bin dist web/dist coverage.out
+    say "удалено: bin/ dist/ web/dist/ coverage.out"
+    say "оставлено: web/node_modules (переустановка долгая; ./run clean-all уберёт и их)"
+}
+
+cmd_clean_all() {
+    cmd_clean
+    rm -rf web/node_modules
+    say "удалено также: web/node_modules"
+}
+
+cmd_build() {
+    TARGET=""; VERSION=""; SKIP_WEB=0; NO_ARCHIVE=0
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --target)     TARGET="${2:-}"; shift 2 ;;
+            --version)    VERSION="${2:-}"; shift 2 ;;
+            --skip-web)   SKIP_WEB=1; shift ;;
+            --no-archive) NO_ARCHIVE=1; shift ;;
+            *)            die "неизвестный ключ build: $1 (см. ./run help)" ;;
+        esac
+    done
+
+    # Проверяем окружение до начала работы: узнать об отсутствии Node после
+    # четырёх минут компиляции Go — потерянные четыре минуты.
+    need go "нужен Go 1.26+ (https://go.dev/dl/)"
+    [ "$SKIP_WEB" -eq 1 ] || need npm \
+        "нужен Node 20+, либо соберите с --skip-web, если web/dist уже готов"
+
+    [ -n "$VERSION" ] || VERSION="$(version)"
+
+    if [ -n "$TARGET" ]; then
+        GOOS="${TARGET%/*}"; GOARCH="${TARGET#*/}"
+        [ "$GOOS" != "$TARGET" ] || die "цель задаётся как ос/арх, например linux/amd64"
+    else
+        GOOS="$(go env GOOS)"; GOARCH="$(go env GOARCH)"
+    fi
+
+    say "Go:      $(go env GOVERSION)"
+    [ "$SKIP_WEB" -eq 1 ] || say "Node:    $(node --version 2>/dev/null || echo unknown)"
+    say "версия:  $VERSION"
+    say "цель:    $GOOS/$GOARCH"
+
+    SUFFIX=""; [ "$GOOS" = "windows" ] && SUFFIX=".exe"
+    NAME="jhvirt-$VERSION-$GOOS-$GOARCH"
+    OUT="$ROOT/dist/$NAME"
+    rm -rf "$OUT"
+    mkdir -p "$OUT/bin" "$OUT/config" "$OUT/web" "$OUT/systemd" "$OUT/docs"
+
+    if [ "$SKIP_WEB" -eq 0 ]; then
+        step "веб-интерфейс"
+        if [ ! -d web/node_modules ]; then
+            say "    зависимости не установлены, ставим"
+            (cd web && npm ci --no-audit --no-fund) || \
+                (cd web && npm install --no-audit --no-fund)
+        fi
+        (cd web && npm run build)
+    else
+        step "веб-интерфейс пропущен (--skip-web)"
+    fi
+    [ -f web/dist/index.html ] || die "нет web/dist/index.html — интерфейс не собран"
+
+    # CGO_ENABLED=0 не оптимизация, а требование: драйвер SQLite здесь на чистом
+    # Go, и без cgo бинарь статический — работает в любом дистрибутиве
+    # независимо от версии libc.
+    step "бинари"
+    LDFLAGS="-s -w -X main.version=$VERSION"
+    for c in justhpc-virt-server jvbackup; do
+        CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" \
+            go build -trimpath -ldflags "$LDFLAGS" -o "$OUT/bin/$c$SUFFIX" "./cmd/$c"
+        say "    $c$SUFFIX"
+    done
+
+    cp -r web/dist "$OUT/web/dist"
+    cp config/virt-manager.yaml "$OUT/config/"
+    cp scripts/install.sh "$OUT/install.sh"
+    cp deploy/systemd/jhvirt.service "$OUT/systemd/"
+    for doc in DEPLOY OPERATIONS BUILD; do
+        [ -f "docs/$doc.md" ] && cp "docs/$doc.md" "$OUT/docs/"
+    done
+    cp README.md "$OUT/docs/"
+    printf '%s\n' "$VERSION" > "$OUT/VERSION"
+
+    say ""
+    if [ "$NO_ARCHIVE" -eq 1 ]; then
+        say "готово: dist/$NAME/"
+        return
+    fi
+
+    # Бинари пакуются отдельным проходом с явным режимом 0755: NTFS не хранит
+    # бит исполнения, поэтому chmod при сборке из Windows ничего не даёт и на
+    # сервере файл разворачивается неисполняемым. Права в комплекте не должны
+    # зависеть от того, где его собирали.
+    (
+        cd dist
+        tar cf "$NAME.tar" --exclude="$NAME/bin" --exclude="$NAME/install.sh" "$NAME"
+        tar rf "$NAME.tar" --mode=0755 "$NAME/bin" "$NAME/install.sh"
+        rm -f "$NAME.tar.gz"
+        gzip -9 "$NAME.tar"
+    )
+    say "готово: dist/$NAME.tar.gz ($(du -h "dist/$NAME.tar.gz" 2>/dev/null | cut -f1 || echo '?'))"
+    say ""
+    say "Установка на сервере:"
+    say "  scp dist/$NAME.tar.gz server:/tmp/"
+    say "  ssh server 'tar xzf /tmp/$NAME.tar.gz -C /tmp && sudo /tmp/$NAME/install.sh'"
+}
+
+# --- Диспетчер --------------------------------------------------------------
+
+COMMAND="${1:-help}"
+[ $# -gt 0 ] && shift
+
+case "$COMMAND" in
+    build)          cmd_build "$@" ;;
+    dev)            cmd_dev ;;
+    web)            cmd_web ;;
+    test)           cmd_test "$@" ;;
+    check)          cmd_check ;;
+    fmt|format)     cmd_fmt ;;
+    vet)            cmd_vet ;;
+    docker)         cmd_docker ;;
+    version)        cmd_version ;;
+    clean)          cmd_clean ;;
+    clean-all)      cmd_clean_all ;;
+    help|-h|--help) cmd_help ;;
+    *)              printf 'неизвестная команда: %s\n\n' "$COMMAND" >&2; cmd_help >&2; exit 1 ;;
+esac

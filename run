@@ -60,15 +60,18 @@ justhpc-virt-manager — команды разработки и сборки
   --target ос/арх       кросс-сборка, например linux/amd64 или linux/arm64
   --version X.Y.Z       явная версия вместо взятой из git
   --skip-web            только бинари; web/dist должен быть собран заранее
-  --no-archive          разложить в dist/, не паковать в архив
+  --tar                 оставить рядом и обычный tar.gz
+  --no-archive          разложить в dist/, не паковать
 
 Примеры:
   ./run build --target linux/amd64
   ./run check
   ./run test -race
 
-Установка собранного комплекта выполняется на сервере его собственным
-скриптом: см. docs/BUILD.md.
+build даёт один файл dist/jhvirt-<версия>-<ос>-<арх>.run: скрипт с архивом
+внутри. Копируется на сервер и запускается — распаковка и установка внутри.
+
+  scp dist/jhvirt-*.run server:/tmp/ && ssh server 'sudo sh /tmp/jhvirt-*.run'
 EOF
 }
 
@@ -153,7 +156,7 @@ cmd_clean_all() {
 }
 
 cmd_build() {
-    TARGET=""; VERSION=""; SKIP_WEB=0; NO_ARCHIVE=0
+    TARGET=""; VERSION=""; SKIP_WEB=0; NO_ARCHIVE=0; KEEP_TAR=0
 
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -161,6 +164,7 @@ cmd_build() {
             --version)    VERSION="${2:-}"; shift 2 ;;
             --skip-web)   SKIP_WEB=1; shift ;;
             --no-archive) NO_ARCHIVE=1; shift ;;
+            --tar)        KEEP_TAR=1; shift ;;
             *)            die "неизвестный ключ build: $1 (см. ./run help)" ;;
         esac
     done
@@ -235,6 +239,7 @@ cmd_build() {
     # бит исполнения, поэтому chmod при сборке из Windows ничего не даёт и на
     # сервере файл разворачивается неисполняемым. Права в комплекте не должны
     # зависеть от того, где его собирали.
+    step "упаковка"
     (
         cd dist
         tar cf "$NAME.tar" --exclude="$NAME/bin" --exclude="$NAME/install.sh" "$NAME"
@@ -242,11 +247,197 @@ cmd_build() {
         rm -f "$NAME.tar.gz"
         gzip -9 "$NAME.tar"
     )
-    say "готово: dist/$NAME.tar.gz ($(du -h "dist/$NAME.tar.gz" 2>/dev/null | cut -f1 || echo '?'))"
+
+    make_installer "$NAME" "$VERSION" "$GOOS/$GOARCH"
+
+    if [ "$KEEP_TAR" -eq 1 ]; then
+        say "    dist/$NAME.tar.gz (--tar)"
+    else
+        rm -f "dist/$NAME.tar.gz"
+    fi
+
     say ""
-    say "Установка на сервере:"
-    say "  scp dist/$NAME.tar.gz server:/tmp/"
-    say "  ssh server 'tar xzf /tmp/$NAME.tar.gz -C /tmp && sudo /tmp/$NAME/install.sh'"
+    say "готово: dist/$NAME.run ($(du -h "dist/$NAME.run" 2>/dev/null | cut -f1 || echo '?'))"
+    say ""
+    say "Установка на сервере — один файл, распаковывать не нужно:"
+    say "  scp dist/$NAME.run server:/tmp/"
+    say "  ssh server 'sudo sh /tmp/$NAME.run'"
+}
+
+# Склеивает самораспаковывающийся установщик: текстовый заголовок, метка и
+# сразу за ней tar.gz. Заголовок пишется с плейсхолдерами и подставляется
+# через sed — с раскрытием переменных в heredoc пришлось бы экранировать в нём
+# каждый $0, $@ и подстановку команды, а это ровно тот код, который потом
+# ломается незаметно.
+make_installer() {
+    N="$1"; V="$2"; P="$3"
+
+    SUM=""
+    if command -v sha256sum >/dev/null 2>&1; then
+        SUM="$(sha256sum "dist/$N.tar.gz" | cut -d' ' -f1)"
+    elif command -v shasum >/dev/null 2>&1; then
+        SUM="$(shasum -a 256 "dist/$N.tar.gz" | cut -d' ' -f1)"
+    else
+        say "    предупреждение: нет sha256sum, установщик не сможет проверить целостность"
+    fi
+
+    HDR="dist/.header.$$"
+    cat > "$HDR" <<'HEADER_EOF'
+#!/bin/sh
+# justhpc-virt-manager @VERSION@ (@PLATFORM@) — установщик в одном файле.
+#
+# Файл состоит из этого скрипта и приклеенного следом архива tar.gz. Скрипт
+# находит начало архива по строке-метке, сверяет контрольную сумму,
+# распаковывает во временный каталог и запускает установщик из комплекта.
+# Временный каталог удаляется в любом случае, включая прерывание.
+#
+#   sudo sh ./@NAME@.run                установить или обновить
+#   sudo sh ./@NAME@.run --uninstall    удалить службу, сохранив данные
+#   sh ./@NAME@.run --extract [каталог] только распаковать, не устанавливать
+#   sh ./@NAME@.run --check             проверить целостность файла
+#   sh ./@NAME@.run --version
+#
+# Переменные окружения передаются через sudo явным присваиванием:
+#   sudo PREFIX=/srv/jhvirt sh ./@NAME@.run
+
+set -eu
+
+VERSION="@VERSION@"
+PLATFORM="@PLATFORM@"
+SHA256="@SHA256@"
+NAME="@NAME@"
+
+die() { printf 'ошибка: %s\n' "$*" >&2; exit 1; }
+say() { printf '%s\n' "$*"; }
+
+# Путь к самому себе: архив читается из этого же файла, а $0 при запуске
+# «sh ./file.run» относительный.
+SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+[ -r "$SELF" ] || die "не могу прочитать себя: $SELF"
+
+# Номер строки, с которой начинается архив. Читаем только начало файла:
+# незачем прогонять четырнадцать мегабайт сжатых данных через awk. Метка
+# ищется с якорем начала строки, поэтому упоминания её в комментариях выше
+# не мешают.
+payload_start() {
+    head -n 200 "$SELF" | awk '/^__JHVIRT_ARCHIVE__$/ { print NR + 1; exit }'
+}
+
+payload() {
+    OFFSET="$(payload_start)"
+    [ -n "$OFFSET" ] || die "метка архива не найдена — файл повреждён или изменён"
+    tail -n +"$OFFSET" "$SELF"
+}
+
+verify() {
+    if [ -z "$SHA256" ]; then
+        say "предупреждение: контрольная сумма не зашита, целостность не проверена"
+        return 0
+    fi
+    if command -v sha256sum >/dev/null 2>&1; then
+        ACTUAL="$(payload | sha256sum | cut -d' ' -f1)"
+    elif command -v shasum >/dev/null 2>&1; then
+        ACTUAL="$(payload | shasum -a 256 | cut -d' ' -f1)"
+    else
+        say "предупреждение: в системе нет sha256sum, целостность не проверена"
+        return 0
+    fi
+    [ "$ACTUAL" = "$SHA256" ] || die "контрольная сумма не сошлась.
+  ожидалось: $SHA256
+  получено:  $ACTUAL
+Скорее всего файл побился при копировании — перенесите его заново."
+}
+
+extract() {
+    mkdir -p "$1"
+    payload | tar xzf - -C "$1" || die "не удалось распаковать архив"
+}
+
+usage() {
+    cat <<USAGE
+justhpc-virt-manager $VERSION ($PLATFORM) — установщик в одном файле.
+
+  sudo sh ./$NAME.run                установить или обновить
+  sudo sh ./$NAME.run --uninstall    удалить службу, сохранив данные
+  sh ./$NAME.run --extract [каталог] только распаковать, не устанавливать
+  sh ./$NAME.run --check             проверить целостность файла
+  sh ./$NAME.run --version
+
+Переменные окружения передаются через sudo явным присваиванием:
+  sudo PREFIX=/srv/jhvirt sh ./$NAME.run
+
+Установка не запускает службу и не заполняет конфигурацию — что делать
+дальше, скрипт напечатает в конце.
+USAGE
+}
+
+case "${1:-}" in
+    --version)  say "$VERSION ($PLATFORM)"; exit 0 ;;
+    --help|-h)  usage; exit 0 ;;
+    --check)    verify; say "целостность подтверждена: $VERSION ($PLATFORM)"; exit 0 ;;
+    --extract)
+        DEST="${2:-$PWD}"
+        verify
+        extract "$DEST"
+        say "распаковано: $DEST/$NAME"
+        say "установка:   sudo $DEST/$NAME/install.sh"
+        exit 0 ;;
+esac
+
+# Несовпадение платформы ловим здесь: иначе оно всплывёт как «Exec format
+# error» уже после установки, и связь с тем, что скопировали сборку под
+# другую архитектуру, будет неочевидна.
+case "$PLATFORM" in
+    linux/amd64) WANT="x86_64" ;;
+    linux/arm64) WANT="aarch64" ;;
+    *)           WANT="" ;;
+esac
+HAVE="$(uname -m 2>/dev/null || echo "")"
+if [ -n "$WANT" ] && [ -n "$HAVE" ] && [ "$WANT" != "$HAVE" ]; then
+    die "комплект собран под $PLATFORM (${WANT}), а система — ${HAVE}.
+Нужна сборка под эту архитектуру: ./run build --target linux/<арх>"
+fi
+
+if [ "$(id -u)" -ne 0 ]; then
+    if [ $# -gt 0 ]; then
+        die "нужны права root: sudo sh $0 $*"
+    fi
+    die "нужны права root: sudo sh $0"
+fi
+
+say "justhpc-virt-manager $VERSION ($PLATFORM)"
+verify
+
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/jhvirt-install.XXXXXX")" ||
+    die "не удалось создать временный каталог"
+trap 'rm -rf "$TMP"' EXIT INT TERM HUP
+
+extract "$TMP"
+[ -f "$TMP/$NAME/install.sh" ] || die "в архиве нет install.sh"
+chmod 0755 "$TMP/$NAME/install.sh" 2>/dev/null || true
+
+# Не exec: он заменил бы процесс и обработчик trap, а временный каталог
+# остался бы в /tmp навсегда. Код возврата пробрасывается через set -e.
+"$TMP/$NAME/install.sh" "$@"
+
+# Выход обязателен: ниже начинается двоичный архив, и без этой строки оболочка
+# дочитала бы скрипт до метки и попыталась выполнить её как команду. Установка
+# при этом проходит, но код возврата становится 127 — то есть успешная
+# установка выглядит как провал. Не удалять.
+exit 0
+
+__JHVIRT_ARCHIVE__
+HEADER_EOF
+
+    sed -e "s|@VERSION@|$V|g" \
+        -e "s|@PLATFORM@|$P|g" \
+        -e "s|@SHA256@|$SUM|g" \
+        -e "s|@NAME@|$N|g" "$HDR" > "dist/$N.run"
+    rm -f "$HDR"
+
+    cat "dist/$N.tar.gz" >> "dist/$N.run"
+    chmod 0755 "dist/$N.run"
+    say "    dist/$N.run"
 }
 
 # --- Диспетчер --------------------------------------------------------------

@@ -175,11 +175,12 @@ cd deploy && docker compose --profile s3 up -d --build
 ./run build --target linux/amd64
 ```
 
-Соберёт комплект `dist/jhvirt-<версия>-linux-amd64.tar.gz`: бинари, интерфейс,
-конфигурацию, юнит systemd и скрипт установки. На сервере:
+Соберёт один файл `dist/jhvirt-<версия>-linux-amd64.run` — установщик со вшитым
+архивом: бинари, интерфейс, конфигурация, юнит systemd. На сервере ничего
+распаковывать не нужно:
 
 ```bash
-tar xzf jhvirt-<версия>-linux-amd64.tar.gz && sudo jhvirt-<версия>-linux-amd64/install.sh
+sudo sh ./jhvirt-<версия>-linux-amd64.run
 ```
 
 Нужны Go 1.26+ и Node 20+. Компилятор C и `make` не требуются, поэтому собрать

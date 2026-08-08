@@ -112,17 +112,22 @@ docker compose logs justhpc-virt-manager | grep -i "база данных под
 ./run build --target linux/amd64
 ```
 
-Получится `dist/jhvirt-<версия>-linux-amd64.tar.gz` со всем необходимым, включая
-скрипт установки. Подробности и ключи — в [BUILD.md](BUILD.md).
+Получится один файл `dist/jhvirt-<версия>-linux-amd64.run` — установщик со
+вшитым архивом. Подробности и ключи — в [BUILD.md](BUILD.md).
 
 ### 3.2. Установите
 
 ```bash
-scp dist/jhvirt-<версия>-linux-amd64.tar.gz server:/tmp/
-ssh server
-tar xzf /tmp/jhvirt-<версия>-linux-amd64.tar.gz -C /tmp
-sudo /tmp/jhvirt-<версия>-linux-amd64/install.sh
+scp dist/jhvirt-<версия>-linux-amd64.run server:/tmp/
 ```
+
+```bash
+ssh server 'sudo sh /tmp/jhvirt-<версия>-linux-amd64.run'
+```
+
+Файл сам сверит контрольную сумму и архитектуру, распакуется во временный
+каталог и запустит установку. Другой каталог — `sudo PREFIX=/srv/jhvirt sh ...`;
+переменные через `sudo` передаются только явным присваиванием.
 
 Скрипт создаёт пользователя `jhvirt`, раскладывает файлы в `/opt/jhvirt`, ставит
 юнит и делает `daemon-reload`. Службу не запускает и конфигурацию не заполняет —

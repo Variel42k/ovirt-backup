@@ -36,11 +36,15 @@ if [ "${1:-}" = "--uninstall" ]; then
 
     rm -rf "$PREFIX/bin" "$PREFIX/web"
     say ""
+    # Выравнивание держится на одинаковой длине $PREFIX во всех трёх строках,
+    # а не на подсчёте пробелов: висячий отступ разъехался бы при другом PREFIX.
     say "Служба удалена. Намеренно оставлены:"
-    say "  $PREFIX/data   — ключ шифрования и база; без ключа не расшифровать"
-    say "                   пароли подключений и зашифрованные копии"
+    say "  $PREFIX/data   — ключ шифрования и база"
     say "  $PREFIX/config — конфигурация"
     say "  $PREFIX/logs   — журналы"
+    say ""
+    say "Без secret.key из data не расшифровать пароли подключений и"
+    say "зашифрованные копии. Не удаляйте его, пока копии нужны."
     say ""
     say "Удалить полностью: rm -rf $PREFIX && userdel $USER_NAME"
     exit 0
@@ -58,8 +62,12 @@ UPGRADE=0
 [ -x "$PREFIX/bin/justhpc-virt-server" ] && UPGRADE=1
 
 if [ "$UPGRADE" -eq 1 ]; then
-    OLD="$("$PREFIX/bin/justhpc-virt-server" -version 2>/dev/null || echo '?')"
-    NEW="$("$SRC/bin/justhpc-virt-server" -version 2>/dev/null || echo '?')"
+    # -version печатает «justhpc-virt-server 1.0.0»; в строке обновления нужна
+    # только сама версия, иначе имя программы дублируется дважды.
+    OLD="$("$PREFIX/bin/justhpc-virt-server" -version 2>/dev/null | awk '{print $NF}' || true)"
+    NEW="$("$SRC/bin/justhpc-virt-server" -version 2>/dev/null | awk '{print $NF}' || true)"
+    [ -n "$OLD" ] || OLD='?'
+    [ -n "$NEW" ] || NEW='?'
     say "==> обновление: $OLD -> $NEW"
 else
     say "==> установка в $PREFIX"

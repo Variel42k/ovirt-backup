@@ -1,0 +1,490 @@
+<script setup lang="ts">
+import { computed, onMounted, ref, watch } from 'vue'
+import { useQuasar } from 'quasar'
+import { api, notifyError, notifyOk } from '@/api/client'
+import { dateTime, runStatus, statusColor } from '@/api/format'
+import { useAppStore } from '@/stores/app'
+import { useAuthStore } from '@/stores/auth'
+import BackupTypeHelpCard from '@/components/BackupTypeHelpCard.vue'
+import HelpButton from '@/components/HelpButton.vue'
+import type { BackupJob, VM } from '@/api/types'
+
+const $q = useQuasar()
+const app = useAppStore()
+const auth = useAuthStore()
+
+const jobs = ref<BackupJob[]>([])
+const loading = ref(false)
+const dialog = ref(false)
+const editing = ref<BackupJob | null>(null)
+const vmsOfServer = ref<VM[]>([])
+
+const emptyForm = () => ({
+  name: '',
+  enabled: true,
+  server_id: '',
+  vm_ids: [] as string[],
+  exclude_vm_ids: [] as string[],
+  type: 'incremental',
+  full_every: 7,
+  fallback_type: 'snapshot',
+  schedule: '0 1 * * *',
+  max_duration_minutes: 0,
+  storage_target_ids: [] as string[],
+  retention: { keep_last: 3, keep_hourly: 0, keep_daily: 7, keep_weekly: 4, keep_monthly: 6, keep_yearly: 0, max_age: 0 },
+  quiesce: true,
+  verify_after: 'chain',
+  export_qcow2: false,
+  encrypt: false,
+  priority: 0,
+  concurrency: 1,
+})
+
+const form = ref(emptyForm())
+
+// Частые расписания — чтобы не заставлять оператора вспоминать синтаксис cron.
+const schedulePresets = [
+  { label: 'Каждый час', value: '0 * * * *' },
+  { label: 'Каждые 4 часа', value: '0 */4 * * *' },
+  { label: 'Ежедневно в 01:00', value: '0 1 * * *' },
+  { label: 'Ежедневно в 22:00', value: '0 22 * * *' },
+  { label: 'По будням в 23:00', value: '0 23 * * 1-5' },
+  { label: 'Еженедельно, вс 02:00', value: '0 2 * * 0' },
+  { label: 'Ежемесячно, 1-го в 03:00', value: '0 3 1 * *' },
+]
+
+const needsFullEvery = computed(() => ['incremental', 'differential'].includes(form.value.type))
+
+async function load() {
+  loading.value = true
+  try {
+    jobs.value = await api.listJobs()
+  } catch (err) {
+    notifyError(err, 'Не удалось загрузить задания')
+  } finally {
+    loading.value = false
+  }
+}
+
+async function loadVMs() {
+  if (!form.value.server_id) {
+    vmsOfServer.value = []
+    return
+  }
+  try {
+    vmsOfServer.value = await api.listVMs(form.value.server_id)
+  } catch {
+    vmsOfServer.value = []
+  }
+}
+
+function openCreate() {
+  editing.value = null
+  form.value = emptyForm()
+  form.value.server_id = app.servers[0]?.id ?? ''
+  form.value.storage_target_ids = app.enabledStorages[0] ? [app.enabledStorages[0].id] : []
+  void loadVMs()
+  dialog.value = true
+}
+
+function openEdit(job: BackupJob) {
+  editing.value = job
+  form.value = {
+    ...emptyForm(),
+    ...job,
+    vm_ids: job.vm_ids ?? [],
+    exclude_vm_ids: job.exclude_vm_ids ?? [],
+    max_duration_minutes: job.max_duration ? Math.round(job.max_duration / 60_000_000_000) : 0,
+    verify_after: job.verify_after ?? '',
+  }
+  void loadVMs()
+  dialog.value = true
+}
+
+async function save() {
+  try {
+    if (editing.value) {
+      await api.updateJob(editing.value.id, form.value)
+      notifyOk('Задание обновлено')
+    } else {
+      await api.createJob(form.value)
+      notifyOk('Задание создано')
+    }
+    dialog.value = false
+    await load()
+  } catch (err) {
+    notifyError(err, 'Не удалось сохранить задание')
+  }
+}
+
+async function runNow(job: BackupJob) {
+  try {
+    const result = await api.runJob(job.id)
+    notifyOk(`Задание запущено, ВМ в очереди: ${result.vms ?? 0}`)
+  } catch (err) {
+    notifyError(err, 'Не удалось запустить задание')
+  }
+}
+
+function confirmDelete(job: BackupJob) {
+  $q.dialog({
+    title: 'Удалить задание',
+    message: `Задание «${job.name}» будет удалено. Уже созданные бэкапы останутся в хранилищах.`,
+    cancel: { label: 'Отмена', flat: true },
+    ok: { label: 'Удалить', color: 'negative' },
+  }).onOk(async () => {
+    try {
+      await api.deleteJob(job.id)
+      notifyOk('Задание удалено')
+      await load()
+    } catch (err) {
+      notifyError(err, 'Не удалось удалить')
+    }
+  })
+}
+
+async function preview(job: BackupJob) {
+  try {
+    const rows = await api.previewJob(job.id)
+    const included = rows.filter((r: { included: boolean }) => r.included)
+    $q.dialog({
+      title: `Отбор задания «${job.name}»`,
+      message:
+        `<div>Под условия попадает ВМ: <b>${included.length}</b> из ${rows.length}.</div>` +
+        '<ul style="max-height:300px;overflow:auto;margin-top:8px">' +
+        rows
+          .map(
+            (r: { vm_name: string; included: boolean; reason: string }) =>
+              `<li>${r.included ? '✅' : '⬜'} ${r.vm_name} <span style="opacity:.6">— ${r.reason}</span></li>`,
+          )
+          .join('') +
+        '</ul>',
+      html: true,
+      ok: { label: 'Закрыть', flat: true },
+    })
+  } catch (err) {
+    notifyError(err, 'Не удалось получить отбор')
+  }
+}
+
+watch(() => form.value.server_id, loadVMs)
+onMounted(async () => {
+  await app.bootstrap()
+  await load()
+})
+
+const columns = [
+  { name: 'name', label: 'Задание', field: 'name', align: 'left' as const, sortable: true },
+  { name: 'server', label: 'Сервер', field: 'server_id', align: 'left' as const },
+  { name: 'type', label: 'Тип', field: 'type', align: 'left' as const, sortable: true },
+  { name: 'schedule', label: 'Расписание', field: 'schedule', align: 'left' as const },
+  { name: 'storages', label: 'Хранилища', field: 'storage_target_ids', align: 'left' as const },
+  { name: 'last', label: 'Последний запуск', field: 'last_run_at', align: 'left' as const },
+  { name: 'next', label: 'Следующий', field: 'next_run_at', align: 'left' as const },
+  { name: 'actions', label: '', field: 'id', align: 'right' as const },
+]
+</script>
+
+<template>
+  <q-page padding>
+    <div class="row items-center q-mb-md">
+      <div class="text-h5">Задания бэкапа</div>
+      <q-space />
+      <q-btn flat dense round icon="refresh" :loading="loading" @click="load" />
+      <q-btn
+        v-if="auth.canWrite()"
+        color="primary"
+        icon="add"
+        label="Новое задание"
+        unelevated
+        class="q-ml-sm"
+        @click="openCreate"
+      />
+    </div>
+
+    <q-table
+      :rows="jobs"
+      :columns="columns"
+      row-key="id"
+      flat
+      bordered
+      :loading="loading"
+      class="jhv-table"
+      no-data-label="Заданий нет. Создайте первое или используйте готовое расписание на странице ВМ."
+    >
+      <template #body-cell-name="props">
+        <q-td :props="props">
+          {{ props.row.name }}
+          <q-badge v-if="!props.row.enabled" color="grey-7" class="q-ml-sm">выключено</q-badge>
+          <div class="text-caption text-grey-7">
+            <template v-if="props.row.vm_ids?.length">ВМ: {{ props.row.vm_ids.length }}</template>
+            <template v-else>все ВМ сервера</template>
+            <template v-if="props.row.quiesce"> · заморозка ФС</template>
+            <template v-if="props.row.encrypt"> · шифрование</template>
+          </div>
+        </q-td>
+      </template>
+
+      <template #body-cell-server="props">
+        <q-td :props="props">{{ app.serverName(props.row.server_id) }}</q-td>
+      </template>
+
+      <template #body-cell-type="props">
+        <q-td :props="props">
+          {{ app.backupTypeTitle(props.row.type) }}
+          <div v-if="props.row.full_every" class="text-caption text-grey-7">
+            полный каждые {{ props.row.full_every }}
+          </div>
+        </q-td>
+      </template>
+
+      <template #body-cell-schedule="props">
+        <q-td :props="props">
+          <span class="jhv-mono">{{ props.row.schedule || 'вручную' }}</span>
+        </q-td>
+      </template>
+
+      <template #body-cell-storages="props">
+        <q-td :props="props">
+          <q-chip
+            v-for="id in props.row.storage_target_ids"
+            :key="id"
+            dense
+            square
+            color="grey-3"
+            text-color="dark"
+          >
+            {{ app.storageName(id) }}
+          </q-chip>
+        </q-td>
+      </template>
+
+      <template #body-cell-last="props">
+        <q-td :props="props">
+          <q-chip v-if="props.row.last_status" dense :color="statusColor(props.row.last_status)" text-color="white">
+            {{ runStatus(props.row.last_status) }}
+          </q-chip>
+          <div class="text-caption text-grey-7">{{ dateTime(props.row.last_run_at) }}</div>
+        </q-td>
+      </template>
+
+      <template #body-cell-next="props">
+        <q-td :props="props">{{ dateTime(props.row.next_run_at) }}</q-td>
+      </template>
+
+      <template #body-cell-actions="props">
+        <q-td :props="props">
+          <q-btn flat dense round icon="visibility" @click="preview(props.row)">
+            <q-tooltip>Показать, какие ВМ попадают под отбор</q-tooltip>
+          </q-btn>
+          <q-btn v-if="auth.canWrite()" flat dense round icon="play_arrow" color="positive" @click="runNow(props.row)">
+            <q-tooltip>Запустить сейчас</q-tooltip>
+          </q-btn>
+          <q-btn v-if="auth.canWrite()" flat dense round icon="edit" @click="openEdit(props.row)" />
+          <q-btn v-if="auth.canWrite()" flat dense round icon="delete" color="negative" @click="confirmDelete(props.row)" />
+        </q-td>
+      </template>
+    </q-table>
+
+    <q-dialog v-model="dialog" persistent>
+      <q-card style="width: 860px; max-width: 96vw">
+        <q-card-section class="text-h6">{{ editing ? 'Изменить задание' : 'Новое задание' }}</q-card-section>
+        <q-separator />
+
+        <q-card-section style="max-height: 70vh" class="scroll q-gutter-md">
+          <div class="row q-col-gutter-md">
+            <div class="col-12 col-sm-6">
+              <q-input v-model="form.name" label="Имя задания" outlined dense />
+            </div>
+            <div class="col-12 col-sm-6">
+              <q-select
+                v-model="form.server_id"
+                :options="app.servers.map((s) => ({ label: s.name, value: s.id }))"
+                emit-value
+                map-options
+                label="Сервер"
+                outlined
+                dense
+              />
+            </div>
+          </div>
+
+          <q-select
+            v-model="form.vm_ids"
+            :options="vmsOfServer.map((v) => ({ label: v.name, value: v.id }))"
+            emit-value
+            map-options
+            multiple
+            use-chips
+            clearable
+            label="Виртуальные машины"
+            hint="Пусто — все ВМ выбранного сервера"
+            outlined
+            dense
+          />
+
+          <div class="row items-center">
+            <div class="text-subtitle2">Что и как копировать</div>
+            <HelpButton article="hot-backup" label="Останавливается ли ВМ" />
+          </div>
+
+          <div class="row q-col-gutter-md">
+            <div class="col-12 col-sm-4">
+              <q-select
+                v-model="form.type"
+                :options="(app.meta?.backup_types ?? []).map((t) => ({ label: t.title, value: t.value }))"
+                emit-value
+                map-options
+                label="Тип бэкапа"
+                outlined
+                dense
+              />
+            </div>
+            <div class="col-6 col-sm-4">
+              <q-input
+                v-model.number="form.full_every"
+                type="number"
+                label="Полный каждые N запусков"
+                :disable="!needsFullEvery"
+                hint="Ограничивает длину цепочки"
+                outlined
+                dense
+              >
+                <template #append><HelpButton article="chains" label="Цепочки" /></template>
+              </q-input>
+            </div>
+            <div class="col-6 col-sm-4">
+              <q-select
+                v-model="form.fallback_type"
+                :options="[
+                  { label: 'Полный через снапшот', value: 'snapshot' },
+                  { label: 'Полный (CBT)', value: 'full' },
+                ]"
+                emit-value
+                map-options
+                label="Если CBT недоступен"
+                outlined
+                dense
+              >
+                <template #append><HelpButton article="cbt" label="Что такое CBT" /></template>
+              </q-select>
+            </div>
+          </div>
+
+          <!-- Выбранная стратегия объясняется там же, где выбирается. -->
+          <BackupTypeHelpCard :type="form.type" />
+
+          <div class="row q-col-gutter-md">
+            <div class="col-12 col-sm-7">
+              <q-input v-model="form.schedule" label="Расписание (cron)" outlined dense class="jhv-mono">
+                <template #append>
+                  <q-btn-dropdown flat dense icon="event" auto-close>
+                    <q-list dense>
+                      <q-item
+                        v-for="preset in schedulePresets"
+                        :key="preset.value"
+                        clickable
+                        @click="form.schedule = preset.value"
+                      >
+                        <q-item-section>
+                          <q-item-label>{{ preset.label }}</q-item-label>
+                          <q-item-label caption class="jhv-mono">{{ preset.value }}</q-item-label>
+                        </q-item-section>
+                      </q-item>
+                    </q-list>
+                  </q-btn-dropdown>
+                </template>
+              </q-input>
+              <div class="jhv-reason">
+                Пять полей: минуты, часы, день месяца, месяц, день недели. Пусто — только ручной запуск.
+                Часовой пояс: {{ app.meta?.capabilities.scheduler_timezone }}.
+              </div>
+            </div>
+            <div class="col-12 col-sm-5">
+              <q-input
+                v-model.number="form.max_duration_minutes"
+                type="number"
+                label="Предел длительности, мин"
+                hint="0 — без ограничения"
+                outlined
+                dense
+              />
+            </div>
+          </div>
+
+          <q-select
+            v-model="form.storage_target_ids"
+            :options="app.enabledStorages.map((s) => ({ label: s.name, value: s.id }))"
+            emit-value
+            map-options
+            multiple
+            use-chips
+            label="Хранилища"
+            hint="Несколько хранилищ — бэкап выполняется в каждое отдельно (правило 3-2-1)"
+            outlined
+            dense
+          />
+
+          <div class="row items-center">
+            <div class="text-subtitle2">Хранение копий</div>
+            <HelpButton article="retention" label="Как работают правила хранения" />
+          </div>
+          <div class="row q-col-gutter-sm">
+            <div class="col-6 col-sm-2">
+              <q-input v-model.number="form.retention.keep_last" type="number" label="Последних" outlined dense />
+            </div>
+            <div class="col-6 col-sm-2">
+              <q-input v-model.number="form.retention.keep_hourly" type="number" label="Часовых" outlined dense />
+            </div>
+            <div class="col-6 col-sm-2">
+              <q-input v-model.number="form.retention.keep_daily" type="number" label="Суточных" outlined dense />
+            </div>
+            <div class="col-6 col-sm-2">
+              <q-input v-model.number="form.retention.keep_weekly" type="number" label="Недельных" outlined dense />
+            </div>
+            <div class="col-6 col-sm-2">
+              <q-input v-model.number="form.retention.keep_monthly" type="number" label="Месячных" outlined dense />
+            </div>
+            <div class="col-6 col-sm-2">
+              <q-input v-model.number="form.retention.keep_yearly" type="number" label="Годовых" outlined dense />
+            </div>
+          </div>
+          <div class="jhv-reason">
+            Копия сохраняется, если её удерживает хотя бы одно правило. Звенья, от которых зависят
+            сохраняемые инкременты, не удаляются никогда — иначе цепочка перестала бы восстанавливаться.
+          </div>
+
+          <div class="row q-col-gutter-md items-center">
+            <div class="col-12 col-sm-4">
+              <q-select
+                v-model="form.verify_after"
+                :options="[{ label: 'Не проверять', value: '' }, ...(app.meta?.verify_modes ?? []).map((m) => ({ label: m.title, value: m.value }))]"
+                emit-value
+                map-options
+                label="Проверка после бэкапа"
+                outlined
+                dense
+              >
+                <template #append><HelpButton article="verify" label="Режимы проверки" /></template>
+              </q-select>
+            </div>
+            <div class="col-12 col-sm-8 q-gutter-md">
+              <q-toggle v-model="form.enabled" label="Задание включено" />
+              <span class="items-center inline-block">
+                <q-toggle v-model="form.quiesce" label="Заморозка ФС гостя" />
+                <HelpButton article="quiesce" label="Что делает заморозка" />
+              </span>
+              <q-toggle v-model="form.encrypt" label="Шифрование" />
+            </div>
+          </div>
+        </q-card-section>
+
+        <q-separator />
+        <q-card-actions align="right">
+          <q-btn flat label="Отмена" v-close-popup />
+          <q-btn color="primary" unelevated label="Сохранить" @click="save" />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
+  </q-page>
+</template>

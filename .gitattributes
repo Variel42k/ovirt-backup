@@ -1,0 +1,19 @@
+# Единые переводы строк в репозитории.
+#
+# Без этого файла Windows-клиент коммитит CRLF, а раннер CI разворачивает их же —
+# и shell-скрипты падают с «bad interpreter: no such file or directory», потому
+# что \r попадает в путь к интерпретатору. Ошибка выглядит как что угодно, кроме
+# проблемы с переводами строк.
+* text=auto eol=lf
+
+*.sh      text eol=lf
+*.yml     text eol=lf
+*.yaml    text eol=lf
+Makefile  text eol=lf
+Dockerfile text eol=lf
+
+# Двоичное не трогать.
+*.png binary
+*.jpg binary
+*.gz  binary
+*.ico binary

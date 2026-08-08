@@ -1,0 +1,16 @@
+.git
+.gitignore
+bin/
+data/
+logs/
+web/node_modules/
+web/dist/
+deploy/backups/
+docs/
+*.md
+!README.md
+coverage.out
+.idea/
+.vscode/
+*.key
+.env

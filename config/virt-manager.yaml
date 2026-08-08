@@ -1,0 +1,117 @@
+# justhpc-virt-manager — основной конфигурационный файл.
+#
+# Любой параметр переопределяется переменной окружения с префиксом JHV_,
+# где точки в пути ключа заменены на подчёркивания. Примеры:
+#   JHV_SERVER_PORT=9443
+#   JHV_DATABASE_DRIVER=postgres
+#   JHV_DATABASE_POSTGRES_PASSWORD=secret
+#   JHV_MONITOR_REMEDIATION_DRY_RUN=false
+
+server:
+  addr: "0.0.0.0"
+  port: 8080
+  # Базовый URL, по которому SPA обращается к API (используется для CORS и ссылок в уведомлениях).
+  external_url: "http://localhost:8080"
+  read_timeout: 30s
+  write_timeout: 0s # 0 — без ограничения: скачивание/восстановление образов длится долго
+  shutdown_timeout: 30s
+  # Раздавать собранную SPA из ./web/dist (если каталог существует).
+  serve_spa: true
+  spa_dir: "./web/dist"
+  cors_origins:
+    - "http://localhost:9000"
+    - "http://localhost:5173"
+  tls:
+    enabled: false
+    cert_file: ""
+    key_file: ""
+
+auth:
+  enabled: true
+  session_ttl: 12h
+  # Учётная запись, создаваемая при первом старте, если таблица пользователей пуста.
+  # Если пароль не задан — будет сгенерирован и один раз выведен в лог.
+  bootstrap_user: "admin"
+  bootstrap_password: ""
+  # Статические токены для интеграций: заголовок `Authorization: Bearer <token>`.
+  api_tokens: []
+
+database:
+  # sqlite | postgres
+  driver: "sqlite"
+  run_migrations_on_startup: true
+  sqlite:
+    path: "./data/jhvirt.db"
+    busy_timeout: 10s
+  postgres:
+    host: "localhost"
+    port: 5432
+    user: "jhvirt"
+    password: ""
+    database: "jhvirt"
+    sslmode: "disable"
+    max_conns: 10
+
+logging:
+  level: "info" # trace|debug|info|warn|error
+  format: "console" # console|json
+  file: "./logs/jhvirt.log" # пусто — только stdout
+  max_size_mb: 100
+  max_backups: 7
+  max_age_days: 30
+
+# Шифрование секретов (пароли подключения к oVirt, ключи S3) в БД.
+# Ключ — 32 байта в base64. Если пусто, ключ создаётся при первом старте
+# в файле рядом с БД (secret.key) с правами 0600.
+secrets:
+  key_base64: ""
+  key_file: "./data/secret.key"
+
+monitor:
+  enabled: true
+  interval: 30s
+  timeout: 20s
+  # Сколько хранить историю проб состояния.
+  history_retention: 168h
+  # Порог: сколько подряд неудачных проб до перевода объекта в состояние «авария».
+  failure_threshold: 3
+  remediation:
+    enabled: true
+    # true — только логировать намеченные действия, ничего не выполнять.
+    dry_run: true
+    cooldown: 10m
+    max_attempts_per_hour: 3
+    # Разрешённые классы действий (по умолчанию — только безопасные).
+    allow_vm_start: true
+    allow_vm_unpause: true
+    allow_host_activate: true
+    # Перезагрузка хоста через питание (fencing) — потенциально разрушительно.
+    allow_host_fence: false
+
+backup:
+  # Число одновременно выполняемых заданий бэкапа.
+  workers: 2
+  # Размер чанка данных, байт (кратен 64 KiB).
+  chunk_size: 4194304
+  # none | zstd
+  compression: "zstd"
+  compression_level: 3
+  temp_dir: "./data/tmp"
+  # Путь к qemu-img для опционального экспорта в qcow2. Пусто — искать в PATH.
+  qemu_img_path: ""
+  transfer:
+    # true — качать через прокси движка (порт 54323) вместо прямого обращения к хосту (54322).
+    # Прокси медленнее, но работает, когда хосты недоступны с бэкап-сервера напрямую.
+    prefer_proxy: false
+    inactivity_timeout: 60s
+    request_timeout: 10m
+    # Сколько дисков одной ВМ качать параллельно.
+    max_parallel_disks: 2
+    # Число попыток на диапазон при сетевой ошибке.
+    range_retries: 3
+
+scheduler:
+  enabled: true
+  timezone: "Europe/Moscow"
+  # Задания, которые запустились бы в момент простоя сервиса, будут выполнены при старте.
+  catch_up_missed: true

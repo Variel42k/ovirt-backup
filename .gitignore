@@ -1,0 +1,24 @@
+/bin/
+/data/
+/logs/
+coverage.out
+*.test
+
+# Собранный интерфейс и зависимости
+/web/dist/
+/web/node_modules/
+/web/.vite/
+
+# Каталог, куда compose монтирует локальное хранилище копий: туда попадают
+# сами бэкапы, а им в репозитории не место.
+/deploy/backups/
+
+# Локальные переопределения конфигурации и секреты — в репозиторий не попадают
+/config/virt-manager.local.yaml
+*.key
+.env
+
+.idea/
+.vscode/
+*.swp
+.DS_Store

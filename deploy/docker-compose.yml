@@ -1,0 +1,119 @@
+# Развёртывание justhpc-virt-manager в Docker.
+#
+#   docker compose up -d                       — только сервис (SQLite, локальные бэкапы)
+#   docker compose --profile s3 up -d          — плюс MinIO для проверки сценариев с S3
+#   JHV_DB_DRIVER=postgres docker compose --profile postgres up -d   — на PostgreSQL
+#
+# Профиль поднимает базу, но выбор СУБД делает JHV_DB_DRIVER: без него сервис
+# останется на SQLite, а поднятый PostgreSQL будет простаивать.
+#
+# Пароль первого администратора выводится в журнал при первом запуске:
+#   docker compose logs justhpc-virt-manager | grep -i "УЧЁТНАЯ ЗАПИСЬ"
+
+name: justhpc-virt-manager
+
+services:
+  justhpc-virt-manager:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        VERSION: ${VERSION:-dev}
+    image: justhpc-virt-manager:${VERSION:-dev}
+    restart: unless-stopped
+    ports:
+      - "${JHV_PORT:-8080}:8080"
+    environment:
+      JHV_SERVER_ADDR: "0.0.0.0"
+      JHV_SERVER_PORT: "8080"
+      JHV_SERVER_EXTERNAL_URL: "${JHV_EXTERNAL_URL:-http://localhost:8080}"
+      JHV_DATABASE_DRIVER: "${JHV_DB_DRIVER:-sqlite}"
+      JHV_DATABASE_SQLITE_PATH: "/app/data/jhvirt.db"
+      # Читаются только при JHV_DB_DRIVER=postgres; имя хоста — имя сервиса ниже.
+      JHV_DATABASE_POSTGRES_HOST: "${POSTGRES_HOST:-postgres}"
+      JHV_DATABASE_POSTGRES_PORT: "${POSTGRES_PORT:-5432}"
+      JHV_DATABASE_POSTGRES_USER: "${POSTGRES_USER:-jhvirt}"
+      JHV_DATABASE_POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-jhvirt}"
+      JHV_DATABASE_POSTGRES_DATABASE: "${POSTGRES_DB:-jhvirt}"
+      JHV_DATABASE_POSTGRES_SSLMODE: "${POSTGRES_SSLMODE:-disable}"
+      JHV_SECRETS_KEY_FILE: "/app/data/secret.key"
+      JHV_BACKUP_TEMP_DIR: "/app/data/tmp"
+      JHV_LOGGING_FORMAT: "json"
+      JHV_LOGGING_FILE: ""
+      JHV_SCHEDULER_TIMEZONE: "${TZ:-Europe/Moscow}"
+      # Авто-восстановление по умолчанию только фиксирует намеченные действия.
+      # Отключите dry_run, когда убедитесь по журналу, что решения верные.
+      JHV_MONITOR_REMEDIATION_DRY_RUN: "${JHV_REMEDIATION_DRY_RUN:-true}"
+      # Пароль первого администратора; пусто — будет сгенерирован и напечатан.
+      JHV_AUTH_BOOTSTRAP_PASSWORD: "${JHV_ADMIN_PASSWORD:-}"
+      TZ: "${TZ:-Europe/Moscow}"
+    volumes:
+      - jhvirt-data:/app/data
+      # Каталог для локального хранилища бэкапов. Смонтируйте сюда NFS-шару,
+      # если бэкапы должны уезжать на отдельную СХД.
+      - ${JHV_BACKUP_DIR:-./backups}:/backups
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: false
+
+  # Объектное хранилище для проверки сценариев с S3 без облака.
+  # Консоль: http://localhost:9001 (minioadmin / minioadmin-secret)
+  minio:
+    image: minio/minio:latest
+    profiles: ["s3"]
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: "${MINIO_USER:-minioadmin}"
+      MINIO_ROOT_PASSWORD: "${MINIO_PASSWORD:-minioadmin-secret}"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # Создаёт bucket, чтобы хранилище можно было подключить сразу после старта.
+  minio-init:
+    image: minio/mc:latest
+    profiles: ["s3"]
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 ${MINIO_USER:-minioadmin} ${MINIO_PASSWORD:-minioadmin-secret} &&
+      mc mb --ignore-existing local/jhvirt-backups &&
+      echo 'bucket jhvirt-backups готов'
+      "
+
+  postgres:
+    image: postgres:17-alpine
+    profiles: ["postgres"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: "${POSTGRES_USER:-jhvirt}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-jhvirt}"
+      POSTGRES_DB: "${POSTGRES_DB:-jhvirt}"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-jhvirt}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  jhvirt-data:
+  minio-data:
+  postgres-data:

@@ -1,0 +1,368 @@
+package api
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/base64"
+	"errors"
+	"fmt"
+	"net/http"
+	"strings"
+	"time"
+
+	"golang.org/x/crypto/bcrypt"
+
+	"adveng/jh_virt/internal/model"
+	"adveng/jh_virt/internal/store"
+)
+
+const sessionCookie = "jhvirt_session"
+
+// secureCookies decides whether the session cookie gets the Secure flag.
+//
+// Own TLS is the obvious case. The one that matters more in practice is a
+// reverse proxy terminating TLS in front of a service speaking plain HTTP —
+// the most common production layout there is. Deciding by TLS.Enabled alone
+// leaves the session cookie unmarked in exactly that setup, and a cookie
+// without Secure is one the browser will send over plain HTTP.
+//
+// external_url is the operator's own statement of how the browser reaches the
+// service, which is precisely the question Secure answers.
+func (s *Server) secureCookies() bool {
+	return s.cfg.Server.TLS.Enabled ||
+		strings.HasPrefix(strings.ToLower(s.cfg.Server.ExternalURL), "https://")
+}
+
+type contextKey string
+
+const principalKey contextKey = "principal"
+
+// principal is the authenticated caller.
+type principal struct {
+	Username string
+	Role     model.Role
+	// Token пуст для запросов, авторизованных статическим API-токеном.
+	Token string
+}
+
+// principalFrom extracts the caller from the request context.
+func principalFrom(ctx context.Context) *principal {
+	p, _ := ctx.Value(principalKey).(*principal)
+	return p
+}
+
+// EnsureBootstrapUser creates the first administrator when the user table is
+// empty. A generated password is printed once — writing it into the config
+// would leave a credential lying in a file nobody rotates.
+func EnsureBootstrapUser(ctx context.Context, st *store.Store, username, password string) (string, error) {
+	count, err := st.CountUsers(ctx)
+	if err != nil {
+		return "", err
+	}
+	if count > 0 {
+		return "", nil
+	}
+	if username == "" {
+		username = "admin"
+	}
+
+	generated := ""
+	if password == "" {
+		password, err = generatePassword()
+		if err != nil {
+			return "", err
+		}
+		generated = password
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return "", err
+	}
+	user := &model.User{Username: username, PasswordHash: string(hash), Role: model.RoleAdmin}
+	if err := st.CreateUser(ctx, user); err != nil {
+		return "", err
+	}
+	return generated, nil
+}
+
+// MinPasswordLength is the shortest password the service accepts anywhere.
+const MinPasswordLength = 10
+
+// ResetPassword sets a new password for an existing account and returns it.
+//
+// This is the way back in after the bootstrap password is lost. Without it the
+// only recovery is deleting the database, which would also delete every
+// connection, schedule and backup record — a disproportionate price for a
+// mislaid password.
+//
+// An empty password means "generate one", which keeps the operator from
+// choosing something weak under pressure and matches how bootstrap behaves.
+func ResetPassword(ctx context.Context, st *store.Store, username, password string) (string, error) {
+	user, err := st.GetUserByName(ctx, username)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return "", fmt.Errorf("учётная запись %q не найдена", username)
+		}
+		return "", err
+	}
+
+	if password == "" {
+		password, err = generatePassword()
+		if err != nil {
+			return "", err
+		}
+	} else if len(password) < MinPasswordLength {
+		return "", fmt.Errorf("пароль должен быть не короче %d символов", MinPasswordLength)
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return "", err
+	}
+	user.PasswordHash = string(hash)
+	// A forgotten password on a disabled account usually means the account was
+	// disabled by mistake; leaving it disabled would make the reset useless.
+	user.Disabled = false
+	if err := st.UpdateUser(ctx, user); err != nil {
+		return "", err
+	}
+
+	// Existing sessions were issued against the old password; a reset is
+	// normally a response to losing control of it, so they must not survive.
+	if _, err := st.DeleteUserSessions(ctx, user.ID); err != nil {
+		return "", fmt.Errorf("закрытие действующих сессий: %w", err)
+	}
+	return password, nil
+}
+
+// generatePassword produces a printable random password.
+func generatePassword() (string, error) {
+	buf := make([]byte, 18)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(buf), nil
+}
+
+type loginRequest struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+type loginResponse struct {
+	Username  string     `json:"username"`
+	Role      model.Role `json:"role"`
+	ExpiresAt time.Time  `json:"expires_at"`
+}
+
+func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	var req loginRequest
+	if err := decodeJSON(r, &req); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+
+	user, err := s.store.GetUserByName(r.Context(), req.Username)
+	if err != nil || user.Disabled {
+		// Same answer for "no such user" and "wrong password": telling them
+		// apart is a free account-enumeration oracle.
+		s.audit(r, "auth.login", model.ScopeServer, req.Username, false, "неверные учётные данные")
+		writeJSON(w, http.StatusUnauthorized, errorResponse{
+			Error: "неверное имя пользователя или пароль", Code: "unauthorized",
+		})
+		return
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.Password)); err != nil {
+		s.audit(r, "auth.login", model.ScopeServer, req.Username, false, "неверный пароль")
+		writeJSON(w, http.StatusUnauthorized, errorResponse{
+			Error: "неверное имя пользователя или пароль", Code: "unauthorized",
+		})
+		return
+	}
+
+	token, err := newSessionToken()
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	expires := time.Now().UTC().Add(s.cfg.Auth.SessionTTL)
+	session := &model.Session{
+		Token:     token,
+		UserID:    user.ID,
+		Username:  user.Username,
+		Role:      user.Role,
+		UserAgent: r.UserAgent(),
+		RemoteIP:  clientIP(r),
+		ExpiresAt: expires,
+	}
+	if err := s.store.CreateSession(r.Context(), session); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	_ = s.store.TouchUserLogin(r.Context(), user.ID)
+
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookie,
+		Value:    token,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   s.secureCookies(),
+		SameSite: http.SameSiteLaxMode,
+		Expires:  expires,
+	})
+	s.audit(r, "auth.login", model.ScopeServer, user.Username, true, "")
+	writeJSON(w, http.StatusOK, loginResponse{Username: user.Username, Role: user.Role, ExpiresAt: expires})
+}
+
+func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	if cookie, err := r.Cookie(sessionCookie); err == nil {
+		_ = s.store.DeleteSession(r.Context(), cookie.Value)
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name: sessionCookie, Value: "", Path: "/", HttpOnly: true, MaxAge: -1,
+		Secure: s.secureCookies(), SameSite: http.SameSiteLaxMode,
+	})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
+	p := principalFrom(r.Context())
+	if p == nil {
+		writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "не авторизован", Code: "unauthorized"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"username":       p.Username,
+		"role":           p.Role,
+		"can_write":      p.Role.CanWrite(),
+		"can_administer": p.Role.CanAdmin(),
+	})
+}
+
+// authenticate resolves the caller from a session cookie or a static API
+// token and attaches it to the request context.
+func (s *Server) authenticate(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.cfg.Auth.Enabled {
+			// Authentication off means the service is expected to sit behind
+			// something else that does it; everyone is an administrator here.
+			ctx := context.WithValue(r.Context(), principalKey,
+				&principal{Username: "anonymous", Role: model.RoleAdmin})
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
+
+		if p := s.principalFromToken(r); p != nil {
+			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), principalKey, p)))
+			return
+		}
+
+		cookie, err := r.Cookie(sessionCookie)
+		if err != nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+		session, err := s.store.GetSession(r.Context(), cookie.Value)
+		if err != nil {
+			if !errors.Is(err, store.ErrNotFound) {
+				s.log.Warn().Err(err).Msg("не удалось проверить сессию")
+			}
+			next.ServeHTTP(w, r)
+			return
+		}
+		ctx := context.WithValue(r.Context(), principalKey, &principal{
+			Username: session.Username, Role: session.Role, Token: session.Token,
+		})
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// principalFromToken checks the Authorization header against the configured
+// static tokens, used by integrations that cannot hold a cookie.
+func (s *Server) principalFromToken(r *http.Request) *principal {
+	header := r.Header.Get("Authorization")
+	if !strings.HasPrefix(header, "Bearer ") {
+		return nil
+	}
+	presented := strings.TrimSpace(strings.TrimPrefix(header, "Bearer "))
+	if presented == "" {
+		return nil
+	}
+	for _, token := range s.cfg.Auth.APITokens {
+		// Constant-time comparison: a timing side channel on a bearer token is
+		// a real, demonstrated attack.
+		if subtle.ConstantTimeCompare([]byte(token), []byte(presented)) == 1 {
+			return &principal{Username: "api-token", Role: model.RoleAdmin}
+		}
+	}
+	return nil
+}
+
+// requireAuth rejects unauthenticated callers.
+func (s *Server) requireAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if principalFrom(r.Context()) == nil {
+			writeJSON(w, http.StatusUnauthorized, errorResponse{
+				Error: "требуется вход в систему", Code: "unauthorized",
+			})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// requireRole guards a handler with a minimum role.
+func (s *Server) requireRole(check func(model.Role) bool, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		p := principalFrom(r.Context())
+		if p == nil {
+			writeJSON(w, http.StatusUnauthorized, errorResponse{
+				Error: "требуется вход в систему", Code: "unauthorized",
+			})
+			return
+		}
+		if !check(p.Role) {
+			writeJSON(w, http.StatusForbidden, errorResponse{
+				Error: "недостаточно прав для этой операции", Code: "forbidden",
+			})
+			return
+		}
+		next(w, r)
+	}
+}
+
+// writer wraps a handler that changes state.
+func (s *Server) writer(next http.HandlerFunc) http.HandlerFunc {
+	return s.requireRole(model.Role.CanWrite, next)
+}
+
+// admin wraps a handler that changes configuration.
+func (s *Server) admin(next http.HandlerFunc) http.HandlerFunc {
+	return s.requireRole(model.Role.CanAdmin, next)
+}
+
+func newSessionToken() (string, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(buf), nil
+}
+
+// audit records a state-changing call. Failures to write the audit line are
+// logged but never fail the request.
+func (s *Server) audit(r *http.Request, action string, scope model.Scope, objectID string, success bool, detail string) {
+	actor := "anonymous"
+	if p := principalFrom(r.Context()); p != nil {
+		actor = p.Username
+	}
+	entry := model.AuditEntry{
+		Actor: actor, Action: action, Scope: scope, ObjectID: objectID,
+		Detail: detail, Success: success, RemoteIP: clientIP(r),
+	}
+	if err := s.store.Audit(context.WithoutCancel(r.Context()), entry); err != nil {
+		s.log.Debug().Err(err).Str("действие", action).Msg("не удалось записать событие аудита")
+	}
+}

@@ -1,0 +1,705 @@
+<script setup lang="ts">
+import { computed, onMounted, ref, watch } from 'vue'
+import { useQuasar } from 'quasar'
+import { api, notifyError, notifyOk } from '@/api/client'
+import { bytes, dateTime } from '@/api/format'
+import { useAppStore } from '@/stores/app'
+import { useAuthStore } from '@/stores/auth'
+import BackupTypeHelpCard from '@/components/BackupTypeHelpCard.vue'
+import HelpArticleBody from '@/components/HelpArticleBody.vue'
+import type { AuditEntry, LogStatus, User } from '@/api/settings-types'
+import type { RemediationArchive, RemediationMode, RemediationPeriod } from '@/api/types'
+
+const $q = useQuasar()
+const app = useAppStore()
+const auth = useAuthStore()
+
+const tab = ref('system')
+const users = ref<User[]>([])
+const audit = ref<AuditEntry[]>([])
+const loading = ref(false)
+
+const dialog = ref(false)
+const editing = ref<User | null>(null)
+const form = ref({ username: '', password: '', role: 'operator', disabled: false })
+
+async function load() {
+  loading.value = true
+  try {
+    if (auth.canAdmin()) {
+      const [userList, auditList] = await Promise.all([api.listUsers(), api.audit(300)])
+      users.value = userList
+      audit.value = auditList
+    }
+  } catch (err) {
+    notifyError(err, 'Не удалось загрузить настройки')
+  } finally {
+    loading.value = false
+  }
+}
+
+function openCreate() {
+  editing.value = null
+  form.value = { username: '', password: '', role: 'operator', disabled: false }
+  dialog.value = true
+}
+
+function openEdit(user: User) {
+  editing.value = user
+  form.value = { username: user.username, password: '', role: user.role, disabled: user.disabled }
+  dialog.value = true
+}
+
+async function save() {
+  try {
+    if (editing.value) {
+      await api.updateUser(editing.value.id, { role: form.value.role, disabled: form.value.disabled, password: form.value.password })
+      notifyOk('Пользователь обновлён')
+    } else {
+      await api.createUser(form.value)
+      notifyOk('Пользователь создан')
+    }
+    dialog.value = false
+    await load()
+  } catch (err) {
+    notifyError(err, 'Не удалось сохранить')
+  }
+}
+
+function confirmDelete(user: User) {
+  $q.dialog({
+    title: 'Удалить пользователя',
+    message: `Учётная запись «${user.username}» будет удалена вместе с её сессиями.`,
+    cancel: { label: 'Отмена', flat: true },
+    ok: { label: 'Удалить', color: 'negative' },
+  }).onOk(async () => {
+    try {
+      await api.deleteUser(user.id)
+      notifyOk('Пользователь удалён')
+      await load()
+    } catch (err) {
+      notifyError(err, 'Не удалось удалить')
+    }
+  })
+}
+
+const mode = ref<RemediationMode | null>(null)
+const modeBusy = ref(false)
+const modePeriods = computed(() => mode.value?.history ?? [])
+const archive = ref<RemediationArchive | null>(null)
+const archiveOpen = ref(false)
+
+async function loadMode() {
+  try {
+    mode.value = await api.remediationMode()
+  } catch (err) {
+    notifyError(err, 'Не удалось получить режим авто-восстановления')
+  }
+}
+
+/**
+ * Выход из режима проверки — момент, когда автоматика начинает трогать боевые
+ * машины, поэтому спрашиваем подтверждение и обоснование. Обоснование попадает
+ * в архив и в журнал: через полгода «почему включили» должно иметь ответ.
+ */
+function askMode(dryRun: boolean) {
+  const leaving = !dryRun
+  $q.dialog({
+    title: leaving ? 'Выйти из режима проверки' : 'Включить режим проверки',
+    message: leaving
+      ? 'Авто-восстановление начнёт выполнять действия по-настоящему: запускать ВМ, снимать с паузы, ' +
+        'при разрешении — перезагружать хосты по питанию. Наблюдения текущего периода будут сохранены в архив.'
+      : 'Действия перестанут выполняться — они будут только записываться. Это безопасно и обратимо.',
+    prompt: { model: '', type: 'text', label: 'Основание (попадёт в архив и журнал)', isValid: () => true },
+    cancel: { label: 'Отмена', flat: true },
+    ok: { label: leaving ? 'Перейти в боевой режим' : 'Включить проверку', color: leaving ? 'negative' : 'warning' },
+  }).onOk(async (note: string) => {
+    modeBusy.value = true
+    try {
+      await api.setRemediationMode({ dry_run: dryRun, confirm: true, note })
+      notifyOk(dryRun ? 'Режим проверки включён' : 'Авто-восстановление переведено в боевой режим')
+      await Promise.all([loadMode(), app.reloadMeta()])
+    } catch (err) {
+      notifyError(err, 'Не удалось переключить режим')
+    } finally {
+      modeBusy.value = false
+    }
+  })
+}
+
+const logStatus = ref<LogStatus | null>(null)
+const logLevels = ref<string[]>([])
+const logLines = ref<string[]>([])
+const logTailSize = ref(200)
+const logLoading = ref(false)
+const logFilter = ref('')
+
+/** Строки журнала — JSON; показываем разобранными, но с исходником под рукой. */
+const parsedLog = computed(() =>
+  logLines.value
+    .map((raw) => {
+      try {
+        const d = JSON.parse(raw) as Record<string, unknown>
+        return { raw, level: String(d.level ?? ''), time: String(d.time ?? ''),
+                 message: String(d.message ?? ''), fields: d }
+      } catch {
+        return { raw, level: '', time: '', message: raw, fields: {} }
+      }
+    })
+    .filter((l) => !logFilter.value || l.raw.toLowerCase().includes(logFilter.value.toLowerCase()))
+    .reverse(),
+)
+
+function levelColor(level: string): string {
+  switch (level) {
+    case 'error':
+    case 'fatal':
+      return 'negative'
+    case 'warn':
+      return 'warning'
+    case 'debug':
+    case 'trace':
+      return 'grey-6'
+    default:
+      return 'primary'
+  }
+}
+
+async function loadLogs() {
+  logLoading.value = true
+  try {
+    const [status, tail] = await Promise.all([api.logStatus(), api.logTail(logTailSize.value)])
+    logStatus.value = status.status
+    logLevels.value = status.levels
+    logLines.value = tail.lines
+  } catch (err) {
+    notifyError(err, 'Не удалось загрузить журнал')
+  } finally {
+    logLoading.value = false
+  }
+}
+
+async function changeLogLevel(level: string) {
+  try {
+    await api.setLogLevel(level)
+    notifyOk(`Уровень журналирования: ${level}`)
+    await loadLogs()
+  } catch (err) {
+    notifyError(err, 'Не удалось изменить уровень')
+  }
+}
+
+function confirmRotate() {
+  $q.dialog({
+    title: 'Сменить файл журнала',
+    message:
+      'Текущий файл будет закрыт, сжат и сохранён как архив, запись продолжится в новый. ' +
+      'Старые архивы сверх настроенного количества удаляются.',
+    cancel: { label: 'Отмена', flat: true },
+    ok: { label: 'Сменить', color: 'primary' },
+  }).onOk(async () => {
+    try {
+      await api.rotateLog()
+      notifyOk('Файл журнала сменён')
+      await loadLogs()
+    } catch (err) {
+      notifyError(err, 'Не удалось сменить файл')
+    }
+  })
+}
+
+async function openArchive(period: RemediationPeriod) {
+  try {
+    archive.value = await api.remediationArchive(period.id)
+    archiveOpen.value = true
+  } catch (err) {
+    notifyError(err, 'Не удалось открыть архив')
+  }
+}
+
+watch(tab, (value) => {
+  if (value === 'logs' && !logStatus.value) void loadLogs()
+})
+
+onMounted(async () => {
+  await app.loadMeta()
+  await loadMode()
+  // Справка — содержимое вкладки «Справка», грузим сразу вместе со страницей.
+  await app.loadHelp().catch(() => undefined)
+  await load()
+})
+</script>
+
+<template>
+  <q-page padding>
+    <div class="text-h5 q-mb-md">Настройки</div>
+
+    <q-card flat bordered>
+      <q-tabs v-model="tab" align="left" active-color="primary" indicator-color="primary" dense>
+        <q-tab name="system" label="Система" />
+        <q-tab v-if="auth.canAdmin()" name="users" :label="`Пользователи (${users.length})`" />
+        <q-tab v-if="auth.canAdmin()" name="audit" label="Аудит" />
+        <q-tab v-if="auth.canAdmin()" name="logs" label="Журнал" />
+        <q-tab name="reference" label="Справка" />
+      </q-tabs>
+      <q-separator />
+
+      <q-tab-panels v-model="tab" animated>
+        <q-tab-panel name="system">
+          <div class="row q-col-gutter-md">
+            <div class="col-12 col-md-6">
+              <q-list bordered separator dense>
+                <q-item-label header>Параметры развёртывания</q-item-label>
+                <q-item>
+                  <q-item-section>База данных</q-item-section>
+                  <q-item-section side>{{ app.meta?.capabilities.database_type }}</q-item-section>
+                </q-item>
+                <q-item>
+                  <q-item-section>Сжатие бэкапов</q-item-section>
+                  <q-item-section side>{{ app.meta?.capabilities.compression }}</q-item-section>
+                </q-item>
+                <q-item>
+                  <q-item-section>Размер чанка</q-item-section>
+                  <q-item-section side>{{ bytes(app.meta?.capabilities.chunk_size) }}</q-item-section>
+                </q-item>
+                <q-item>
+                  <q-item-section>qemu-img</q-item-section>
+                  <q-item-section side>
+                    {{ app.meta?.capabilities.qemu_img ? 'доступен' : 'не установлен' }}
+                  </q-item-section>
+                </q-item>
+                <q-item>
+                  <q-item-section>Часовой пояс расписаний</q-item-section>
+                  <q-item-section side>{{ app.meta?.capabilities.scheduler_timezone }}</q-item-section>
+                </q-item>
+                <q-item>
+                  <q-item-section>Аутентификация</q-item-section>
+                  <q-item-section side>
+                    {{ app.meta?.capabilities.auth_enabled ? 'включена' : 'выключена' }}
+                  </q-item-section>
+                </q-item>
+              </q-list>
+            </div>
+
+            <div class="col-12 col-md-6">
+              <q-list bordered separator dense>
+                <q-item-label header>Авто-восстановление</q-item-label>
+                <q-item>
+                  <q-item-section>Состояние</q-item-section>
+                  <q-item-section side>
+                    <q-chip
+                      dense
+                      :color="app.meta?.capabilities.remediation_enabled ? 'positive' : 'grey-6'"
+                      text-color="white"
+                    >
+                      {{ app.meta?.capabilities.remediation_enabled ? 'включено' : 'выключено' }}
+                    </q-chip>
+                  </q-item-section>
+                </q-item>
+                <q-item>
+                  <q-item-section>
+                    <q-item-label>Режим проверки</q-item-label>
+                    <q-item-label caption>
+                      действия только записываются, но не выполняются
+                    </q-item-label>
+                  </q-item-section>
+                  <q-item-section side>
+                    <q-toggle
+                      :model-value="mode?.dry_run ?? false"
+                      :disable="!auth.canAdmin() || modeBusy"
+                      color="warning"
+                      @update:model-value="askMode"
+                    />
+                  </q-item-section>
+                </q-item>
+                <q-item v-if="mode?.current">
+                  <q-item-section>
+                    <q-item-label caption>
+                      {{ mode.dry_run ? 'наблюдение идёт с' : 'в боевом режиме с' }}
+                      {{ dateTime(mode.current.started_at) }}
+                      <template v-if="mode.current.changed_by">
+                        · переключил {{ mode.current.changed_by }}
+                      </template>
+                    </q-item-label>
+                    <q-item-label v-if="mode.dry_run && mode.observed" caption>
+                      накоплено решений: <b>{{ mode.observed.total }}</b>
+                      (подавлено {{ mode.observed.suppressed }}, пропущено {{ mode.observed.skipped }},
+                      объектов {{ mode.observed.objects }}) — это и попадёт в архив
+                    </q-item-label>
+                  </q-item-section>
+                </q-item>
+              </q-list>
+
+              <div class="jhv-reason q-pa-sm">
+                Режим переключается на ходу и переживает перезапуск службы. Пока он включён,
+                в журнал подробно пишется каждое решение — что предложено, к какому объекту,
+                почему и что было бы сделано. При выходе из режима наблюдения сохраняются
+                в архив: это обоснование того, что автоматике можно доверить боевые машины.
+                Остальные параметры авто-восстановления (какие действия разрешены, cooldown,
+                лимит попыток) задаются в <code>config/virt-manager.yaml</code>.
+              </div>
+
+              <template v-if="modePeriods.length">
+                <div class="text-subtitle2 q-mt-md q-mb-xs">История режимов</div>
+                <q-list bordered separator dense>
+                  <q-item v-for="p in modePeriods" :key="p.id">
+                    <q-item-section avatar>
+                      <q-icon
+                        :name="p.dry_run ? 'science' : 'play_circle'"
+                        :color="p.dry_run ? 'warning' : 'positive'"
+                      />
+                    </q-item-section>
+                    <q-item-section>
+                      <q-item-label>
+                        {{ p.dry_run ? 'Режим проверки' : 'Боевой режим' }}
+                        <q-badge v-if="!p.ended_at" color="primary" class="q-ml-xs">сейчас</q-badge>
+                      </q-item-label>
+                      <q-item-label caption>
+                        {{ dateTime(p.started_at) }}
+                        <template v-if="p.ended_at"> — {{ dateTime(p.ended_at) }}</template>
+                        · {{ p.changed_by }}
+                      </q-item-label>
+                      <q-item-label v-if="p.summary" caption>
+                        решений {{ p.summary.total }}, подавлено {{ p.summary.suppressed }},
+                        пропущено {{ p.summary.skipped }}
+                      </q-item-label>
+                      <q-item-label v-if="p.note" caption class="jhv-wrap">{{ p.note }}</q-item-label>
+                    </q-item-section>
+                    <q-item-section v-if="p.archive_path" side>
+                      <q-btn flat dense no-caps size="sm" color="primary"
+                             icon="description" label="Архив" @click="openArchive(p)" />
+                    </q-item-section>
+                  </q-item>
+                </q-list>
+              </template>
+            </div>
+          </div>
+        </q-tab-panel>
+
+        <q-tab-panel name="users" class="q-pa-none">
+          <div class="row items-center q-pa-md">
+            <div class="text-subtitle1">Локальные учётные записи</div>
+            <q-space />
+            <q-btn color="primary" unelevated icon="add" label="Добавить" @click="openCreate" />
+          </div>
+          <q-list separator dense>
+            <q-item v-for="user in users" :key="user.id">
+              <q-item-section avatar><q-icon name="person" /></q-item-section>
+              <q-item-section>
+                <q-item-label>
+                  {{ user.username }}
+                  <q-badge v-if="user.disabled" color="grey-7" class="q-ml-sm">заблокирован</q-badge>
+                </q-item-label>
+                <q-item-label caption>
+                  {{ app.meta?.roles.find((r) => r.value === user.role)?.title ?? user.role }} ·
+                  последний вход {{ dateTime(user.last_login_at) }}
+                </q-item-label>
+              </q-item-section>
+              <q-item-section side>
+                <div class="row q-gutter-xs">
+                  <q-btn flat dense round icon="edit" @click="openEdit(user)" />
+                  <q-btn flat dense round icon="delete" color="negative" @click="confirmDelete(user)" />
+                </div>
+              </q-item-section>
+            </q-item>
+          </q-list>
+        </q-tab-panel>
+
+        <q-tab-panel name="audit" class="q-pa-none">
+          <q-list separator dense>
+            <q-item v-for="entry in audit" :key="entry.id">
+              <q-item-section avatar>
+                <q-icon :name="entry.success ? 'check' : 'close'" :color="entry.success ? 'positive' : 'negative'" />
+              </q-item-section>
+              <q-item-section>
+                <q-item-label>{{ entry.action }}</q-item-label>
+                <q-item-label caption class="jhv-wrap">
+                  {{ entry.actor }} · {{ entry.remote_ip }} · {{ entry.object_id }}
+                  <template v-if="entry.detail"> · {{ entry.detail }}</template>
+                </q-item-label>
+              </q-item-section>
+              <q-item-section side>{{ dateTime(entry.at) }}</q-item-section>
+            </q-item>
+            <q-item v-if="!audit.length">
+              <q-item-section class="text-grey-7">Записей аудита нет.</q-item-section>
+            </q-item>
+          </q-list>
+        </q-tab-panel>
+
+        <q-tab-panel v-if="auth.canAdmin()" name="logs">
+          <div class="row items-center q-col-gutter-sm q-mb-md">
+            <q-select
+              :model-value="logStatus?.level"
+              :options="logLevels"
+              label="Уровень"
+              outlined dense style="width: 150px"
+              @update:model-value="changeLogLevel"
+            />
+            <q-select
+              v-model="logTailSize"
+              :options="[100, 200, 500, 1000]"
+              label="Строк"
+              outlined dense style="width: 120px"
+              @update:model-value="loadLogs"
+            />
+            <q-input v-model="logFilter" label="Фильтр" outlined dense clearable style="width: 260px" />
+            <q-space />
+            <q-btn flat dense icon="cached" label="Сменить файл" :disable="!logStatus?.to_file"
+                   @click="confirmRotate" />
+            <q-btn flat dense round icon="refresh" :loading="logLoading" @click="loadLogs" />
+          </div>
+
+          <div class="jhv-reason q-mb-md">
+            Уровень меняется на ходу и действует до перезапуска службы: поднять подробность во
+            время разбоя можно, не перезапуская мониторинг, ради которого разбор и идёт.
+            Постоянное значение задаётся в <code>logging.level</code>.
+          </div>
+
+          <q-banner v-if="logStatus && !logStatus.to_file" dense class="bg-orange-1 q-mb-md">
+            <template #avatar><q-icon name="warning" color="warning" /></template>
+            Журнал в файл не пишется — задан только вывод в поток службы.
+            Укажите <code>logging.file</code>, чтобы включить файл, ротацию и просмотр отсюда.
+          </q-banner>
+
+          <template v-else-if="logStatus">
+            <q-markup-table flat bordered dense class="q-mb-md">
+              <thead>
+                <tr>
+                  <th class="text-left">Файл</th>
+                  <th class="text-left">Размер</th>
+                  <th class="text-left">Изменён</th>
+                  <th class="text-left"></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="f in logStatus.files ?? []" :key="f.name">
+                  <td class="jhv-mono">{{ f.name }}</td>
+                  <td>{{ bytes(f.size_bytes) }}</td>
+                  <td>{{ dateTime(f.modified_at) }}</td>
+                  <td>
+                    <q-badge v-if="f.current" color="primary">пишется сейчас</q-badge>
+                    <q-badge v-else-if="f.compressed" color="grey-6">архив, сжат</q-badge>
+                    <q-badge v-else color="grey-6">архив</q-badge>
+                  </td>
+                </tr>
+              </tbody>
+            </q-markup-table>
+
+            <div class="jhv-reason q-mb-md">
+              Ротация: по размеру свыше {{ logStatus.max_size_mb }} МБ и раз в сутки в полночь.
+              Хранится до {{ logStatus.max_backups }} архивов не старше {{ logStatus.max_age_days }} дней,
+              архивы сжимаются. Всего на диске {{ bytes(logStatus.total_bytes) }}.
+              Суточная смена нужна потому, что предельный возраст чистит архивы, а не активный
+              файл: на тихой установке он иначе рос бы годами, ни разу не сменившись.
+            </div>
+          </template>
+
+          <div class="text-subtitle2 q-mb-xs">
+            Последние записи
+            <span class="text-caption text-grey-7">(новые сверху)</span>
+          </div>
+          <q-list bordered separator dense class="jhv-log">
+            <q-item v-for="(line, i) in parsedLog" :key="i">
+              <q-item-section avatar top>
+                <q-badge :color="levelColor(line.level)">{{ line.level || '—' }}</q-badge>
+              </q-item-section>
+              <q-item-section>
+                <q-item-label class="jhv-wrap">{{ line.message }}</q-item-label>
+                <q-item-label caption class="jhv-mono jhv-wrap">{{ line.raw }}</q-item-label>
+              </q-item-section>
+            </q-item>
+            <q-item v-if="!parsedLog.length">
+              <q-item-section class="text-grey-7">
+                {{ logFilter ? 'Под фильтр ничего не подошло.' : 'Записей нет.' }}
+              </q-item-section>
+            </q-item>
+          </q-list>
+        </q-tab-panel>
+        <q-tab-panel name="reference">
+          <div class="text-subtitle1 q-mb-sm">Как это работает</div>
+          <div class="jhv-reason q-mb-sm">
+            Те же статьи открываются кнопкой «?» рядом с полями формы задания — там,
+            где вопрос обычно и возникает.
+          </div>
+          <q-list bordered separator class="q-mb-lg">
+            <q-expansion-item
+              v-for="article in app.help?.articles ?? []"
+              :key="article.id"
+              :label="article.title"
+              :caption="article.summary"
+              expand-separator
+              icon="menu_book"
+            >
+              <q-card flat>
+                <q-card-section>
+                  <HelpArticleBody :article="article" />
+                </q-card-section>
+              </q-card>
+            </q-expansion-item>
+          </q-list>
+
+          <div class="text-subtitle1 q-mb-sm">Типы бэкапа</div>
+          <q-list bordered separator class="q-mb-lg">
+            <q-expansion-item
+              v-for="t in app.help?.backup_types ?? []"
+              :key="t.value"
+              :label="t.title"
+              :caption="t.summary"
+              expand-separator
+              icon="backup"
+            >
+              <q-card flat>
+                <q-card-section>
+                  <BackupTypeHelpCard :type="t.value" />
+                  <div class="text-caption text-grey-7 q-mt-sm">
+                    значение в API: <code class="jhv-mono">{{ t.value }}</code>
+                  </div>
+                </q-card-section>
+              </q-card>
+            </q-expansion-item>
+          </q-list>
+
+          <div class="text-subtitle1 q-mb-sm">Режимы проверки</div>
+          <q-list bordered separator dense class="q-mb-lg">
+            <q-item v-for="m in app.meta?.verify_modes ?? []" :key="m.value">
+              <q-item-section>
+                <q-item-label>
+                  {{ m.title }}
+                  <q-badge v-if="m.needs_hypervisor" color="orange" class="q-ml-xs">нужен KVM-хост</q-badge>
+                </q-item-label>
+                <q-item-label caption class="jhv-wrap">{{ m.description }}</q-item-label>
+              </q-item-section>
+              <q-item-section side><code class="jhv-mono">{{ m.value }}</code></q-item-section>
+            </q-item>
+          </q-list>
+
+          <div class="text-subtitle1 q-mb-sm">Восстановительные действия</div>
+          <q-list bordered separator dense>
+            <q-item v-for="a in app.meta?.remediation_actions ?? []" :key="a.value">
+              <q-item-section>
+                <q-item-label>{{ a.title }}</q-item-label>
+                <q-item-label v-if="a.description" caption class="text-negative">{{ a.description }}</q-item-label>
+              </q-item-section>
+              <q-item-section side><code class="jhv-mono">{{ a.value }}</code></q-item-section>
+            </q-item>
+          </q-list>
+        </q-tab-panel>
+      </q-tab-panels>
+    </q-card>
+
+    <q-dialog v-model="dialog" persistent>
+      <q-card style="width: 480px; max-width: 95vw">
+        <q-card-section class="text-h6">
+          {{ editing ? `Пользователь «${editing.username}»` : 'Новый пользователь' }}
+        </q-card-section>
+        <q-separator />
+        <q-card-section class="q-gutter-md">
+          <q-input v-model="form.username" label="Имя пользователя" outlined dense :disable="!!editing" />
+          <q-input
+            v-model="form.password"
+            label="Пароль"
+            type="password"
+            :hint="editing ? 'Пусто — не менять' : 'Не короче 10 символов'"
+            outlined
+            dense
+          />
+          <q-select
+            v-model="form.role"
+            :options="(app.meta?.roles ?? []).map((r) => ({ label: r.title, value: r.value }))"
+            emit-value
+            map-options
+            label="Роль"
+            outlined
+            dense
+          />
+          <q-toggle v-model="form.disabled" label="Заблокирован" />
+        </q-card-section>
+        <q-separator />
+        <q-card-actions align="right">
+          <q-btn flat label="Отмена" v-close-popup />
+          <q-btn color="primary" unelevated label="Сохранить" @click="save" />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
+    <!-- Архив периода наблюдения -->
+    <q-dialog v-model="archiveOpen">
+      <q-card style="width: 900px; max-width: 96vw">
+        <q-card-section class="text-h6">
+          Архив режима проверки
+          <div class="text-caption text-grey-7">
+            {{ dateTime(archive?.started_at) }} — {{ dateTime(archive?.ended_at) }}
+            · длился {{ archive?.duration }} · закрыл {{ archive?.closed_by }}
+          </div>
+        </q-card-section>
+        <q-separator />
+
+        <q-card-section style="max-height: 70vh" class="scroll">
+          <div v-if="archive?.close_note" class="jhv-reason q-mb-md">
+            Основание перехода: {{ archive.close_note }}
+          </div>
+
+          <div class="row q-col-gutter-sm q-mb-md">
+            <div class="col-6 col-sm-3">
+              <q-card flat bordered><q-card-section class="q-pa-sm">
+                <div class="text-caption text-grey-7">решений</div>
+                <div class="text-h6">{{ archive?.summary.total }}</div>
+              </q-card-section></q-card>
+            </div>
+            <div class="col-6 col-sm-3">
+              <q-card flat bordered><q-card-section class="q-pa-sm">
+                <div class="text-caption text-grey-7">подавлено</div>
+                <div class="text-h6 text-warning">{{ archive?.summary.suppressed }}</div>
+              </q-card-section></q-card>
+            </div>
+            <div class="col-6 col-sm-3">
+              <q-card flat bordered><q-card-section class="q-pa-sm">
+                <div class="text-caption text-grey-7">пропущено</div>
+                <div class="text-h6">{{ archive?.summary.skipped }}</div>
+              </q-card-section></q-card>
+            </div>
+            <div class="col-6 col-sm-3">
+              <q-card flat bordered><q-card-section class="q-pa-sm">
+                <div class="text-caption text-grey-7">объектов</div>
+                <div class="text-h6">{{ archive?.summary.objects }}</div>
+              </q-card-section></q-card>
+            </div>
+          </div>
+
+          <q-markup-table v-if="archive?.decisions.length" flat bordered dense>
+            <thead>
+              <tr>
+                <th class="text-left">Когда</th>
+                <th class="text-left">Объект</th>
+                <th class="text-left">Действие</th>
+                <th class="text-left">Почему</th>
+                <th class="text-left">Исход</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="d in archive.decisions" :key="d.id">
+                <td>{{ dateTime(d.created_at) }}</td>
+                <td>{{ d.object_name }}</td>
+                <td>{{ app.actionTitle(d.action) }}</td>
+                <td class="jhv-wrap">{{ d.reason }}</td>
+                <td class="jhv-wrap">
+                  <q-chip dense :color="d.status === 'dry_run' ? 'warning' : 'grey-6'" text-color="white">
+                    {{ d.status === 'dry_run' ? 'подавлено' : d.status }}
+                  </q-chip>
+                  <div v-if="d.error" class="text-caption text-grey-7">{{ d.error }}</div>
+                </td>
+              </tr>
+            </tbody>
+          </q-markup-table>
+          <div v-else class="jhv-reason">
+            За период наблюдения автоматика не приняла ни одного решения — нечего было исправлять.
+          </div>
+        </q-card-section>
+
+        <q-separator />
+        <q-card-actions align="right">
+          <q-btn flat label="Закрыть" v-close-popup />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
+  </q-page>
+</template>

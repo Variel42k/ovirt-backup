@@ -1,0 +1,50 @@
+// Плотная сетка: на экранах мониторинга важнее увидеть больше строк, чем
+// получить воздух между ними.
+.jhv-table {
+  th {
+    font-weight: 600;
+  }
+  td,
+  th {
+    padding: 6px 12px !important;
+  }
+}
+
+.jhv-mono {
+  font-family: ui-monospace, 'JetBrains Mono', 'Cascadia Code', Consolas, monospace;
+  font-size: 12px;
+}
+
+.jhv-metric {
+  &__value {
+    font-size: 30px;
+    line-height: 1.1;
+    font-weight: 600;
+  }
+  &__label {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    opacity: 0.7;
+  }
+}
+
+.jhv-reason {
+  font-size: 12px;
+  opacity: 0.75;
+  line-height: 1.35;
+}
+
+// Карточка рекомендованного варианта бэкапа должна читаться с первого взгляда.
+.jhv-option--recommended {
+  border: 2px solid var(--q-primary);
+}
+
+.jhv-option--blocked {
+  opacity: 0.6;
+}
+
+.jhv-wrap {
+  white-space: normal;
+  word-break: break-word;
+}

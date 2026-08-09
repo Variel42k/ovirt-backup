@@ -11,6 +11,7 @@ import (
 
 	"adveng/jh_virt/internal/ovirt"
 	"adveng/jh_virt/internal/repo"
+	"adveng/jh_virt/internal/scheduler"
 	"adveng/jh_virt/internal/store"
 )
 
@@ -66,6 +67,10 @@ func (s *Server) writeError(w http.ResponseWriter, r *http.Request, err error) {
 		status, code = http.StatusNotFound, "not_found"
 	case errors.Is(err, store.ErrConflict):
 		status, code = http.StatusConflict, "conflict"
+	case errors.Is(err, scheduler.ErrJobBusy):
+		// 409, а не 500: запрос корректен, просто сейчас неуместен, и
+		// интерфейсу нужно показать это как состояние, а не как поломку.
+		status, code = http.StatusConflict, "job_busy"
 	case errors.Is(err, errBadRequest):
 		status, code = http.StatusBadRequest, "bad_request"
 	case errors.Is(err, errForbidden):

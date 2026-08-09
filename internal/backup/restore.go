@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -15,6 +16,59 @@ import (
 	"adveng/jh_virt/internal/ovirt"
 	"adveng/jh_virt/internal/repo"
 )
+
+// ErrOutputDirNotAllowed сообщает, что запрошенный каталог восстановления вне
+// разрешённых. Отдельная ошибка, чтобы API ответил 400, а не 500.
+var ErrOutputDirNotAllowed = errors.New("каталог восстановления не разрешён")
+
+// ResolveOutputDir проверяет каталог из запроса и возвращает его в
+// нормализованном виде.
+//
+// Проверка нужна потому, что каталог задаёт клиент, а результат — образ на
+// десятки гигабайт. Без ограничения любой оператор мог бы записать его в любой
+// путь, доступный службе: заполнить раздел с базой, положить файл в каталог
+// конфигурации, вытеснить журналы.
+//
+// Пустая строка разрешена и означает «каталог по умолчанию» — его подставляет
+// вызывающий код.
+func ResolveOutputDir(dir string, roots []string) (string, error) {
+	if dir == "" {
+		return "", nil
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", fmt.Errorf("%w: %s", ErrOutputDirNotAllowed, dir)
+	}
+	abs = filepath.Clean(abs)
+
+	if len(roots) == 0 {
+		return "", fmt.Errorf("%w: в конфигурации не задан ни один разрешённый каталог "+
+			"(backup.restore_dirs)", ErrOutputDirNotAllowed)
+	}
+	for _, root := range roots {
+		if withinRoot(abs, root) {
+			return abs, nil
+		}
+	}
+	return "", fmt.Errorf("%w: %s. Разрешены только %v — добавьте каталог в "+
+		"backup.restore_dirs, если он нужен", ErrOutputDirNotAllowed, abs, roots)
+}
+
+// withinRoot сообщает, лежит ли path внутри root или совпадает с ним.
+//
+// Сравнение идёт по filepath.Rel, а не по префиксу строки: префикс считал бы
+// /srv/restore-чужое находящимся внутри /srv/restore.
+func withinRoot(path, root string) bool {
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(filepath.Clean(absRoot), path)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (!strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel))
+}
 
 // RestoreRequest describes what to restore and where.
 type RestoreRequest struct {
@@ -155,12 +209,30 @@ func (e *Engine) runRestore(ctx context.Context, set *ChainSet, req RestoreReque
 func (e *Engine) restoreToFile(ctx context.Context, set *ChainSet, reader *ChainReader,
 	diskID string, req RestoreRequest, record *model.RestoreRun, progress func(int64)) error {
 
-	dir := req.OutputDir
+	roots := e.cfg.RestoreRoots()
+	dir, err := ResolveOutputDir(req.OutputDir, roots)
+	if err != nil {
+		return err
+	}
 	if dir == "" {
 		dir = e.cfg.TempDir
 	}
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return fmt.Errorf("создание каталога %s: %w", dir, err)
+	}
+	// Повторная проверка уже существующего каталога: до MkdirAll путь был
+	// строкой, теперь это каталог на диске, и он может оказаться символьной
+	// ссылкой наружу разрешённого корня. Проверять только строку значило бы
+	// оставить обход в одну команду ln -s.
+	if req.OutputDir != "" {
+		real, err := filepath.EvalSymlinks(dir)
+		if err != nil {
+			return fmt.Errorf("проверка каталога %s: %w", dir, err)
+		}
+		if _, err := ResolveOutputDir(real, roots); err != nil {
+			return fmt.Errorf("%w (каталог ведёт на %s)", err, real)
+		}
+		dir = real
 	}
 
 	chain := set.Manifests[diskID]

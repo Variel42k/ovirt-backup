@@ -130,6 +130,12 @@ func (d *Dispatcher) executeLibvirt(ctx context.Context, srv *model.Server, req 
 	if err := d.store.CreateBackupRun(ctx, run); err != nil {
 		return nil, fmt.Errorf("сохранение записи о бэкапе: %w", err)
 	}
+	// Тот же колбэк, что и в движке oVirt: без него отмена и счётчик
+	// выполняющихся работали бы для одного типа серверов и молча не работали
+	// для другого.
+	if req.OnRunCreated != nil {
+		req.OnRunCreated(run)
+	}
 
 	backend, err := repo.Open(ctx, target)
 	if err != nil {

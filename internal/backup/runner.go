@@ -75,6 +75,17 @@ type RunRequest struct {
 	OVADirectory string
 
 	TriggeredBy string
+
+	// OnRunCreated вызывается один раз, сразу после того как запись о бэкапе
+	// сохранена и у него появился идентификатор — но до того, как началось
+	// копирование данных.
+	//
+	// Без этого вызывающая сторона узнаёт идентификатор только из результата
+	// Execute, то есть когда работа уже закончена. Отменять тогда нечего, и
+	// счётчик выполняющихся бэкапов показывать нечего. Колбэк выполняется в
+	// той же горутине, что и бэкап, поэтому он обязан быть коротким и не
+	// блокироваться.
+	OnRunCreated func(*model.BackupRun)
 }
 
 // Execute performs one backup and returns the completed run record.
@@ -160,6 +171,9 @@ func (e *Engine) Execute(ctx context.Context, req RunRequest) (*model.BackupRun,
 
 	if err := e.store.CreateBackupRun(ctx, run); err != nil {
 		return nil, fmt.Errorf("сохранение записи о бэкапе: %w", err)
+	}
+	if req.OnRunCreated != nil {
+		req.OnRunCreated(run)
 	}
 
 	backend, err := repo.Open(ctx, target)

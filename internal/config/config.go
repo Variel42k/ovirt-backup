@@ -140,6 +140,29 @@ type BackupConfig struct {
 	TempDir          string         `mapstructure:"temp_dir"`
 	QemuImgPath      string         `mapstructure:"qemu_img_path"`
 	Transfer         TransferConfig `mapstructure:"transfer"`
+
+	// RestoreDirs ограничивает каталоги, куда разрешено восстанавливать
+	// образы. Каталог приходит из запроса, а восстановленный образ — это
+	// десятки гигабайт: без списка любой оператор мог бы записать их в любой
+	// доступный службе путь. temp_dir разрешён всегда и добавлять его сюда не
+	// нужно.
+	RestoreDirs []string `mapstructure:"restore_dirs"`
+}
+
+// RestoreRoots возвращает каталоги, внутри которых разрешено создавать файлы
+// восстановления. temp_dir входит всегда: это каталог самой службы, и запрет
+// на него сделал бы восстановление в файл невозможным из коробки.
+func (b BackupConfig) RestoreRoots() []string {
+	roots := make([]string, 0, len(b.RestoreDirs)+1)
+	if b.TempDir != "" {
+		roots = append(roots, b.TempDir)
+	}
+	for _, d := range b.RestoreDirs {
+		if d != "" {
+			roots = append(roots, d)
+		}
+	}
+	return roots
 }
 
 type TransferConfig struct {
@@ -294,6 +317,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("backup.compression", "zstd")
 	v.SetDefault("backup.compression_level", 3)
 	v.SetDefault("backup.temp_dir", "./data/tmp")
+	v.SetDefault("backup.restore_dirs", []string{})
 	v.SetDefault("backup.qemu_img_path", "")
 	v.SetDefault("backup.transfer.prefer_proxy", false)
 	v.SetDefault("backup.transfer.inactivity_timeout", "60s")

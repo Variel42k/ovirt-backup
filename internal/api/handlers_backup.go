@@ -326,19 +326,12 @@ func (s *Server) handleAdHocBackup(w http.ResponseWriter, r *http.Request) {
 
 	// The run outlives this request: a full backup takes hours, and the client
 	// must not have to hold a connection open for it.
-	go func() {
-		ctx := context.WithoutCancel(r.Context())
-		run, err := s.engine.Execute(ctx, runReq)
-		if err != nil {
-			s.log.Error().Err(err).Str("вм", req.VMID).Msg("разовый бэкап не выполнен")
-			return
-		}
-		if runReq.VerifyAfter != "" && run.Status != model.RunFailed {
-			if _, err := s.engine.Verify(ctx, run.ID, runReq.VerifyAfter, model.VerifyOptions{}); err != nil {
-				s.log.Warn().Err(err).Str("run", run.ID).Msg("проверка после разового бэкапа не пройдена")
-			}
-		}
-	}()
+	//
+	// Через планировщик, а не напрямую в движок: он держит предел
+	// backup.workers, регистрирует запуск как отменяемый и сам выполняет
+	// проверку после бэкапа. Прямой вызов движка всё это обходил, и десять
+	// нажатий кнопки давали десять параллельных бэкапов при workers: 2.
+	s.scheduler.RunOnce(context.WithoutCancel(r.Context()), runReq)
 
 	writeJSON(w, http.StatusAccepted, map[string]string{
 		"status":  "queued",
@@ -611,6 +604,15 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	if target == model.RestoreToNewDisk && req.TargetDomainID == "" {
 		s.writeError(w, r, badRequest("для нового диска нужно указать домен хранения"))
 		return
+	}
+	// Каталог проверяем здесь, а не только в движке: иначе отказ прилетел бы
+	// в фоновую горутину и увиделся бы оператором как «восстановление не
+	// выполнено» без внятной причины.
+	if target == model.RestoreToFile {
+		if _, err := backup.ResolveOutputDir(req.OutputDir, s.cfg.Backup.RestoreRoots()); err != nil {
+			s.writeError(w, r, badRequest("%s", err))
+			return
+		}
 	}
 
 	actor := "api"

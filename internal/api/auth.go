@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,6 +19,25 @@ import (
 )
 
 const sessionCookie = "jhvirt_session"
+
+// dummyPasswordHash сверяется вместо настоящего, когда учётной записи нет.
+//
+// Стоимость должна совпадать с той, которой хешируются реальные пароли,
+// иначе время ответа снова начнёт отличаться и оракул вернётся. Пароль под
+// хешем случайный и нигде не сохраняется: совпасть с ним нельзя.
+var dummyPasswordHash = func() string {
+	filler := make([]byte, 32)
+	if _, err := rand.Read(filler); err != nil {
+		// Единственная причина отказа crypto/rand — неработающий источник
+		// энтропии, при котором нельзя выпускать и токены сессий.
+		panic("нет источника случайных чисел: " + err.Error())
+	}
+	h, err := bcrypt.GenerateFromPassword(filler, bcrypt.DefaultCost)
+	if err != nil {
+		panic("не удалось подготовить заглушку пароля: " + err.Error())
+	}
+	return string(h)
+}()
 
 // secureCookies decides whether the session cookie gets the Secure flag.
 //
@@ -164,23 +184,48 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if ok, retryAfter := s.logins.Allow(req.Username); !ok {
+		s.audit(r, "auth.login", model.ScopeServer, req.Username, false,
+			fmt.Sprintf("слишком много неудачных попыток, пауза %s", retryAfter))
+		s.log.Warn().Str("пользователь", req.Username).Str("адрес", clientIP(r)).
+			Dur("пауза", retryAfter).Msg("вход временно приостановлен: подбор пароля")
+		w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())))
+		writeJSON(w, http.StatusTooManyRequests, errorResponse{
+			Error: fmt.Sprintf("слишком много неудачных попыток; повторите через %s", retryAfter),
+			Code:  "too_many_attempts",
+		})
+		return
+	}
+
 	user, err := s.store.GetUserByName(r.Context(), req.Username)
-	if err != nil || user.Disabled {
+
+	// Пароль сверяем всегда, в том числе когда учётной записи нет: иначе
+	// несуществующее имя отвечало бы мгновенно, а существующее — после bcrypt,
+	// и разница во времени выдавала бы имена учётных записей, сколько бы
+	// одинаковым ни был текст ответа.
+	hash := dummyPasswordHash
+	if err == nil {
+		hash = user.PasswordHash
+	}
+	passwordOK := bcrypt.CompareHashAndPassword([]byte(hash), []byte(req.Password)) == nil
+
+	if err != nil || user.Disabled || !passwordOK {
+		reason := "неверные учётные данные"
+		if err == nil && user.Disabled {
+			reason = "учётная запись отключена"
+		} else if err == nil {
+			reason = "неверный пароль"
+		}
+		s.logins.Fail(req.Username)
+		s.audit(r, "auth.login", model.ScopeServer, req.Username, false, reason)
 		// Same answer for "no such user" and "wrong password": telling them
 		// apart is a free account-enumeration oracle.
-		s.audit(r, "auth.login", model.ScopeServer, req.Username, false, "неверные учётные данные")
 		writeJSON(w, http.StatusUnauthorized, errorResponse{
 			Error: "неверное имя пользователя или пароль", Code: "unauthorized",
 		})
 		return
 	}
-	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.Password)); err != nil {
-		s.audit(r, "auth.login", model.ScopeServer, req.Username, false, "неверный пароль")
-		writeJSON(w, http.StatusUnauthorized, errorResponse{
-			Error: "неверное имя пользователя или пароль", Code: "unauthorized",
-		})
-		return
-	}
+	s.logins.Reset(req.Username)
 
 	token, err := newSessionToken()
 	if err != nil {

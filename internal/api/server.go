@@ -37,6 +37,10 @@ type Server struct {
 	bus        *events.Bus
 	log        zerolog.Logger
 	logs       *logging.Manager
+	// logins притормаживает подбор пароля. В памяти, а не в базе: ограничение
+	// действует на процесс, переживать перезапуск ему не нужно, а запись в
+	// базу на каждую неудачную попытку сама стала бы точкой приложения силы.
+	logins *loginLimiter
 }
 
 // Deps bundles what the API needs, so adding a dependency does not change
@@ -61,6 +65,7 @@ func New(d Deps) *Server {
 		cfg: d.Config, store: d.Store, pool: d.Pool, libvirt: d.LibvirtPool, engine: d.Engine,
 		scheduler: d.Scheduler, monitor: d.Monitor, remediator: d.Remediator,
 		bus: d.Bus, log: d.Logger, logs: d.Logs,
+		logins: newLoginLimiter(),
 	}
 }
 

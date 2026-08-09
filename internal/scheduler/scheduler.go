@@ -4,6 +4,7 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"slices"
@@ -21,6 +22,11 @@ import (
 	"adveng/jh_virt/internal/repo"
 	"adveng/jh_virt/internal/store"
 )
+
+// ErrJobBusy сообщает, что задание уже выполняется и повторный запуск
+// отклонён. Отдельная ошибка, а не просто текст: по ней API отвечает 409, а
+// планировщик отличает штатный пропуск от настоящего сбоя.
+var ErrJobBusy = errors.New("задание уже выполняется")
 
 // cronParser accepts the standard five-field syntax plus the @daily-style
 // descriptors, which is what operators expect from a crontab field.
@@ -53,6 +59,11 @@ type Scheduler struct {
 	mu      sync.Mutex
 	entries map[string]cron.EntryID
 	running map[string]context.CancelFunc
+	// active содержит задания, которые выполняются прямо сейчас. Нужен
+	// потому, что running считает отдельные бэкапы, а перекрываться могут
+	// именно задания: задание длиннее своего интервала иначе запустится
+	// вторым экземпляром поверх первого.
+	active map[string]struct{}
 
 	// workers ограничивает число одновременно выполняющихся бэкапов.
 	workers chan struct{}
@@ -74,6 +85,7 @@ func New(st *store.Store, engine *dispatch.Dispatcher, cfg config.Config, bus *e
 		cron:    cron.New(cron.WithLocation(cfg.Location()), cron.WithParser(cronParser)),
 		entries: map[string]cron.EntryID{},
 		running: map[string]context.CancelFunc{},
+		active:  map[string]struct{}{},
 		workers: make(chan struct{}, workers),
 	}
 }
@@ -212,7 +224,16 @@ func (s *Scheduler) runScheduled(jobID string) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if _, err := s.TriggerJob(ctx, jobID, "scheduler"); err != nil {
+	_, err := s.TriggerJob(ctx, jobID, "scheduler")
+	switch {
+	case err == nil:
+	case errors.Is(err, ErrJobBusy):
+		// Не ошибка, а сообщение о том, что задание не укладывается в свой
+		// интервал. По уровню «ошибка» оно бы повторялось каждый тик и
+		// утопило бы журнал в шуме, скрыв настоящие сбои.
+		s.log.Warn().Str("задание", jobID).
+			Msg("пропуск запуска: предыдущий ещё выполняется — задание не укладывается в интервал расписания")
+	default:
 		s.log.Error().Err(err).Str("задание", jobID).Msg("запуск задания по расписанию не удался")
 	}
 }
@@ -235,6 +256,15 @@ func (s *Scheduler) TriggerJob(ctx context.Context, jobID, triggeredBy string) (
 	if len(vms) == 0 {
 		s.log.Warn().Str("задание", job.Name).Msg("задание не выбрало ни одной ВМ")
 		return nil, nil
+	}
+
+	// Заявка на задание — после всех проверок и до первого бэкапа. Если
+	// предыдущий запуск ещё идёт, второй не начинаем: для инкрементальных
+	// цепочек два одновременных бэкапа одной ВМ вдобавок соревнуются за
+	// родительский чекпоинт и оставляют цепочку в неопределённом состоянии.
+	if !s.claimJob(job.ID) {
+		return nil, fmt.Errorf("%w: задание %q ещё выполняется с прошлого раза; "+
+			"дождитесь окончания или отмените текущие бэкапы", ErrJobBusy, job.Name)
 	}
 
 	now := time.Now().UTC()
@@ -289,11 +319,48 @@ func (s *Scheduler) TriggerJob(ctx context.Context, jobID, triggeredBy string) (
 	// Wait in the background so an operator pressing "run now" gets an
 	// immediate answer while the work continues.
 	go func() {
+		defer s.releaseJob(job.ID)
 		wg.Wait()
 		s.finishJob(ctx, job)
 	}()
 
 	return queued, nil
+}
+
+// claimJob помечает задание выполняющимся. Возвращает false, если оно уже
+// помечено — то есть предыдущий запуск не закончился.
+func (s *Scheduler) claimJob(jobID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, busy := s.active[jobID]; busy {
+		return false
+	}
+	s.active[jobID] = struct{}{}
+	return true
+}
+
+func (s *Scheduler) releaseJob(jobID string) {
+	s.mu.Lock()
+	delete(s.active, jobID)
+	s.mu.Unlock()
+}
+
+// JobActive сообщает, выполняется ли задание прямо сейчас.
+func (s *Scheduler) JobActive(jobID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, busy := s.active[jobID]
+	return busy
+}
+
+// RunOnce ставит в очередь один бэкап вне задания — то, что запускают кнопкой
+// «сделать бэкап сейчас».
+//
+// Идёт тем же путём, что и запуск по расписанию, намеренно: иначе разовые
+// бэкапы обходили бы предел backup.workers, не попадали бы в список
+// выполняющихся и их нельзя было бы отменить.
+func (s *Scheduler) RunOnce(ctx context.Context, req backup.RunRequest) {
+	go s.executeOne(ctx, req, nil)
 }
 
 // executeOne runs a single backup, respecting the worker limit.
@@ -320,17 +387,28 @@ func (s *Scheduler) executeOne(ctx context.Context, req backup.RunRequest, job *
 	}
 	defer cancel()
 
+	// Отмену регистрируем по колбэку, а не по результату Execute: результат
+	// возвращается, когда бэкап уже закончился, и отменять там нечего.
+	// Идентификатор запоминаем, чтобы снять регистрацию даже если Execute
+	// вернёт ошибку и никакой записи.
+	var runID string
+	req.OnRunCreated = func(r *model.BackupRun) {
+		runID = r.ID
+		s.mu.Lock()
+		s.running[r.ID] = cancel
+		s.mu.Unlock()
+	}
+	defer func() {
+		if runID == "" {
+			return
+		}
+		s.mu.Lock()
+		delete(s.running, runID)
+		s.mu.Unlock()
+	}()
+
 	run, err := s.engine.Execute(runCtx, req)
 	if run != nil {
-		s.mu.Lock()
-		s.running[run.ID] = cancel
-		s.mu.Unlock()
-		defer func() {
-			s.mu.Lock()
-			delete(s.running, run.ID)
-			s.mu.Unlock()
-		}()
-
 		s.bus.Publish(events.Event{
 			Kind: events.KindBackupRun, ServerID: run.ServerID, ObjectID: run.ID,
 			Message: fmt.Sprintf("%s: бэкап %s — %s", run.VMName, run.Type.Title(), run.Status),

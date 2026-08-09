@@ -1,0 +1,37 @@
+# Образ из уже собранного комплекта.
+#
+# Отличается от корневого Dockerfile тем, что ничего не компилирует: бинарь и
+# веб-интерфейс уже лежат рядом, их собрали на машине сборки. Поэтому на
+# сервере не нужны ни Go, ни Node, ни исходники — образ строится за секунды из
+# того, что приехало в .run.
+#
+# Корневой Dockerfile остаётся для сборки из репозитория; этот едет внутрь
+# комплекта и используется установщиком.
+
+FROM alpine:3.21
+
+# qemu-img нужен только для экспорта восстановленных образов в qcow2 и режима
+# проверки «qemu-img check»; всё остальное работает без него.
+RUN apk add --no-cache ca-certificates tzdata qemu-img && \
+    addgroup -g 10001 jhvirt && \
+    adduser -u 10001 -G jhvirt -h /app -D jhvirt
+
+WORKDIR /app
+COPY bin/justhpc-virt-server /app/justhpc-virt-server
+COPY web/dist /app/web/dist
+COPY config/virt-manager.yaml /app/config/virt-manager.yaml
+
+# Ключ шифрования секретов и временные файлы восстановления; при локальном
+# хранилище — сами копии. База живёт снаружи, в PostgreSQL.
+RUN mkdir -p /app/data /app/logs /backups /restores && \
+    chown -R jhvirt:jhvirt /app /backups /restores
+VOLUME ["/app/data", "/backups"]
+
+USER jhvirt
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD wget -qO- http://127.0.0.1:8080/healthz || exit 1
+
+ENTRYPOINT ["/app/justhpc-virt-server"]
+CMD ["-config", "/app/config/virt-manager.yaml"]

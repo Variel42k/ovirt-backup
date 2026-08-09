@@ -104,10 +104,16 @@ jhvirt-1.0.0-linux-amd64/
 ├── web/dist/                   собранный интерфейс
 ├── config/virt-manager.yaml    конфигурация по умолчанию
 ├── systemd/jhvirt.service      юнит
+├── compose/                    docker-compose.yml и .env.example
+├── Dockerfile                  образ из готового бинаря, без Go и Node
 ├── docs/                       DEPLOY, OPERATIONS, README
 ├── install.sh                  установка и обновление
 └── VERSION
 ```
+
+Dockerfile в комплекте не собирает проект: бинарь и интерфейс уже лежат рядом,
+их собрали на машине сборки. Поэтому образ строится за секунды и на сервере не
+нужны ни Go, ни Node, ни исходники.
 
 Почему один файл, а не архив рядом со скриптом: переносится всегда целиком, а
 разошедшиеся версии архива и установщика попросту невозможны.
@@ -124,9 +130,23 @@ ssh server 'sudo sh /tmp/jhvirt-1.0.0-linux-amd64.run'
 Через `sh` — потому что бит исполнения не переживает файловую систему Windows.
 Если собирали на Linux, `sudo ./jhvirt-1.0.0-linux-amd64.run` тоже работает.
 
+Установщик спросит, каким способом ставить, и покажет только доступные на этой
+машине:
+
+```
+Как устанавливать?
+
+  1) docker compose  — сервис и PostgreSQL в контейнерах
+  2) podman-compose  — то же на podman (обычный путь на RHEL)
+  3) systemd         — бинарь службой, PostgreSQL отдельно
+```
+
 | Команда | Что делает |
 |---|---|
-| `sudo sh ./jhvirt-*.run` | установка или обновление в `/opt/jhvirt` |
+| `sudo sh ./jhvirt-*.run` | выбор способа диалогом |
+| `sudo sh ./jhvirt-*.run --mode docker` | без диалога: docker compose |
+| `sudo sh ./jhvirt-*.run --mode podman` | без диалога: podman-compose |
+| `sudo sh ./jhvirt-*.run --mode systemd` | без диалога: бинарь и systemd |
 | `sudo PREFIX=/srv/jhvirt sh ./jhvirt-*.run` | другой каталог |
 | `sudo sh ./jhvirt-*.run --uninstall` | удалить службу, сохранив данные |
 | `sh ./jhvirt-*.run --extract [каталог]` | только распаковать, ничего не ставить |

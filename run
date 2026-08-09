@@ -333,7 +333,7 @@ cmd_build() {
     NAME="jhvirt-$VERSION-$GOOS-$GOARCH"
     OUT="$ROOT/dist/$NAME"
     rm -rf "$OUT"
-    mkdir -p "$OUT/bin" "$OUT/config" "$OUT/web" "$OUT/systemd" "$OUT/docs"
+    mkdir -p "$OUT/bin" "$OUT/config" "$OUT/web" "$OUT/systemd" "$OUT/compose" "$OUT/docs"
 
     if [ "$SKIP_WEB" -eq 0 ]; then
         step "веб-интерфейс"
@@ -363,6 +363,18 @@ cmd_build() {
     cp config/virt-manager.yaml "$OUT/config/"
     cp scripts/install.sh "$OUT/install.sh"
     cp deploy/systemd/jhvirt.service "$OUT/systemd/"
+
+    # Всё для установки в контейнерах. Dockerfile отдельный: он не собирает
+    # проект, а берёт готовый бинарь и web/dist из этого же комплекта, поэтому
+    # на сервере не нужны ни Go, ни Node, ни исходники.
+    cp deploy/docker-compose.yml "$OUT/compose/"
+    cp deploy/.env.example "$OUT/compose/"
+    # Dockerfile кладётся в корень комплекта, а не в compose/, чтобы пути
+    # сборки совпадали с репозиторием: из compose/ контекст «..» — это корень
+    # комплекта, ровно как из deploy/ это корень репозитория. Иначе
+    # compose-файл пришлось бы править при упаковке, а расходящиеся копии
+    # одного файла рано или поздно разъезжаются.
+    cp deploy/Dockerfile.bundle "$OUT/Dockerfile"
     for doc in DEPLOY OPERATIONS BUILD; do
         [ -f "docs/$doc.md" ] && cp "docs/$doc.md" "$OUT/docs/"
     done

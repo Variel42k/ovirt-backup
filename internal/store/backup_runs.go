@@ -282,11 +282,11 @@ func scanRun(row rowScanner) (*model.BackupRun, error) {
 // how the rest of the schema carries structures across both engines.
 func encodeSkipped(items []model.SkippedDisk) string {
 	if len(items) == 0 {
-		return ""
+		return "null"
 	}
 	body, err := json.Marshal(items)
 	if err != nil {
-		return ""
+		return "null"
 	}
 	return string(body)
 }
@@ -360,7 +360,7 @@ func (s *Store) CreateVerifyRun(ctx context.Context, v *model.VerifyRun) error {
 		v.CreatedAt = time.Now().UTC()
 	}
 	_, err := s.db.Exec(ctx, `INSERT INTO verify_runs (`+verifyColumns+`) VALUES (?,?,?,?,?,?,?,?,?,?)`,
-		v.ID, v.RunID, string(v.Mode), string(v.Status), v.Progress, v.Details, v.Error,
+		v.ID, v.RunID, string(v.Mode), string(v.Status), v.Progress, jsonOrNull(v.Details), v.Error,
 		v.StartedAt, v.EndedAt, v.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("insert verify run: %w", err)
@@ -372,7 +372,7 @@ func (s *Store) CreateVerifyRun(ctx context.Context, v *model.VerifyRun) error {
 func (s *Store) UpdateVerifyRun(ctx context.Context, v *model.VerifyRun) error {
 	_, err := s.db.Exec(ctx, `UPDATE verify_runs SET status=?, progress=?, details=?, error=?,
 		started_at=?, ended_at=? WHERE id=?`,
-		string(v.Status), v.Progress, v.Details, v.Error, v.StartedAt,
+		string(v.Status), v.Progress, jsonOrNull(v.Details), v.Error, v.StartedAt,
 		v.EndedAt, v.ID)
 	return err
 }

@@ -50,6 +50,7 @@ justhpc-virt-manager — команды разработки и сборки
 
   ./run test [-race]    тесты Go (базу для них поднимает сам)
   ./run test-db …       start|stop|status временной базы для тестов
+  ./run race            тесты с детектором гонок (в контейнере, нужен docker)
   ./run check           формат, go vet, тесты, проверка типов интерфейса
   ./run fmt             отформатировать код
 
@@ -174,6 +175,28 @@ cmd_test_db() {
             ;;
         *) die "./run test-db start|stop|status" ;;
     esac
+}
+
+# Детектор гонок в контейнере.
+#
+# Ему нужен cgo и компилятор C, которых на машине разработчика под Windows
+# обычно нет. Образ golang их приносит с собой, поэтому прогон доступен всем,
+# а не только тем, кто настроил toolchain.
+cmd_race() {
+    need docker "нужен Docker: детектору гонок нужен компилятор C"
+
+    DSN="${JHV_TEST_POSTGRES_DSN:-}"
+    if [ -z "$DSN" ]; then
+        step "временная база для тестов"
+        DSN="$(start_test_pg)" || die "не удалось поднять базу"
+        say "    $TEST_PG_NAME на порту $TEST_PG_PORT"
+    fi
+    # Внутри контейнера localhost — это он сам, поэтому база доступна через
+    # host-gateway, а не через localhost из строки подключения снаружи.
+    DSN_IN="$(printf '%s' "$DSN" | sed 's/host=localhost/host=host.docker.internal/')"
+
+    step "тесты с детектором гонок (в контейнере)"
+    docker run --rm         -v "$(pwd -W 2>/dev/null || pwd):/src" -w /src         -e JHV_TEST_POSTGRES_DSN="$DSN_IN"         --add-host=host.docker.internal:host-gateway         golang:1.26 go test -race -count=1 ./...
 }
 
 cmd_check() {
@@ -521,6 +544,7 @@ case "$COMMAND" in
     web)            cmd_web ;;
     test)           cmd_test "$@" ;;
     test-db)        cmd_test_db "$@" ;;
+    race)           cmd_race ;;
     check)          cmd_check ;;
     fmt|format)     cmd_fmt ;;
     vet)            cmd_vet ;;

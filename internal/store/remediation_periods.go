@@ -48,7 +48,9 @@ func (s *Store) OpenRemediationPeriod(ctx context.Context, dryRun bool, changedB
 
 	_, err := s.db.Exec(ctx, `INSERT INTO remediation_periods (`+periodColumns+
 		`) VALUES (?,?,?,?,?,?,?,?,?)`,
-		period.ID, dryRun, now, nil, changedBy, note, "", "", now)
+		// archive_path — обычная строка, summary — JSONB: пустая строка там
+		// некорректна, «ничего нет» выражается JSON null.
+		period.ID, dryRun, now, nil, changedBy, note, "", "null", now)
 	if err != nil {
 		return nil, fmt.Errorf("open remediation period: %w", err)
 	}
@@ -67,7 +69,7 @@ func (s *Store) CloseRemediationPeriod(ctx context.Context, id, archivePath stri
 	}
 	_, err := s.db.Exec(ctx,
 		`UPDATE remediation_periods SET ended_at=?, archive_path=?, summary=? WHERE id=? AND ended_at IS NULL`,
-		time.Now().UTC(), archivePath, summary, id)
+		time.Now().UTC(), archivePath, jsonOrNull(summary), id)
 	if err != nil {
 		return fmt.Errorf("close remediation period: %w", err)
 	}

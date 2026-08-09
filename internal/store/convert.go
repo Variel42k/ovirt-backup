@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"encoding/json"
+	"strings"
 	"time"
 )
 
@@ -49,6 +50,19 @@ func decodeJSON(s string, dst any) {
 		return
 	}
 	_ = json.Unmarshal([]byte(s), dst)
+}
+
+// jsonOrNull подставляет JSON null вместо пустой строки.
+//
+// Колонки JSONB не принимают "" — это не пустое значение, а некорректный JSON.
+// В коде же «ничего нет» естественно выражается пустой строкой, и переписывать
+// ради этого каждую структуру значило бы разносить знание о представлении в
+// базе по всему сервису.
+func jsonOrNull(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return "null"
+	}
+	return s
 }
 
 // decodeStrings is the common case of a JSON array of strings.

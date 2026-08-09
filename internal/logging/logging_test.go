@@ -146,6 +146,45 @@ func TestRotateCreatesArchiveAndKeepsWriting(t *testing.T) {
 	if archives < 1 {
 		t.Error("архив не создан")
 	}
+
+	waitForCompression(t, filepath.Dir(path))
+}
+
+// waitForCompression дожидается, пока архив станет сжатым.
+//
+// Нужно не ради проверки как таковой, а ради уборки: lumberjack сжимает архив
+// в фоновой горутине, которую Rotate не дожидается и присоединить нельзя.
+// Без ожидания t.TempDir() удаляет каталог, пока горутина ещё пишет в него
+// .gz, и тест падает не на своём утверждении, а на «directory not empty» —
+// причём случайно и только на Linux, где расклад по времени другой.
+//
+// Заодно это настоящая проверка: Compress: true обещает, что архивы сжимаются.
+func waitForCompression(t *testing.T, dir string) {
+	t.Helper()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatalf("чтение каталога журналов: %v", err)
+		}
+		compressed, plain := 0, 0
+		for _, e := range entries {
+			switch {
+			case strings.HasSuffix(e.Name(), ".gz"):
+				compressed++
+			case strings.Contains(e.Name(), "-"): // архив: <префикс>-<время>.log
+				plain++
+			}
+		}
+		if compressed > 0 && plain == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("архив не сжался за 5 с: сжатых %d, несжатых %d", compressed, plain)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // Смена файла раз в сутки не должна плодить пустые архивы на простаивающей

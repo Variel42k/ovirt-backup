@@ -6,8 +6,8 @@ RUN npm ci --no-audit --no-fund || npm install --no-audit --no-fund
 COPY web/ ./
 RUN npm run build:fast
 
-# Сборка бинаря. CGO не нужен: драйвер SQLite — чистый Go, поэтому образ
-# получается статическим и не тянет за собой libc сборочного дистрибутива.
+# Сборка бинаря. CGO не нужен ни для чего, поэтому образ получается
+# статическим и не тянет за собой libc сборочного дистрибутива.
 FROM golang:1.26-alpine AS build
 WORKDIR /build
 RUN apk add --no-cache git
@@ -32,8 +32,8 @@ COPY --from=build /out/justhpc-virt-server /app/justhpc-virt-server
 COPY --from=web /build/web/dist /app/web/dist
 COPY config/virt-manager.yaml /app/config/virt-manager.yaml
 
-# Данные (SQLite, ключ шифрования, временные файлы восстановления) и, если
-# используется локальное хранилище, сами бэкапы.
+# Ключ шифрования секретов и временные файлы восстановления; при локальном
+# хранилище — сами копии. База живёт снаружи, в PostgreSQL.
 RUN mkdir -p /app/data /app/logs /backups && chown -R jhvirt:jhvirt /app /backups
 VOLUME ["/app/data", "/backups"]
 

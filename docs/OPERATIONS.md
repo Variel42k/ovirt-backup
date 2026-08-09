@@ -182,29 +182,18 @@ iSCSI, `DomainBlockStatsFlags` libvirt для дисков.
 | Что | Зачем |
 |---|---|
 | `data/secret.key` | без него не расшифровать пароли подключений и зашифрованные бэкапы |
-| `data/jhvirt.db` (или БД PostgreSQL) | каталог бэкапов, задания, история |
+| База PostgreSQL | каталог копий, задания, история, учётные записи |
 | `config/virt-manager.yaml` | настройки |
 
-**Копию базы SQLite нельзя снять, просто скопировав `jhvirt.db` у работающей
-службы.** База открыта в режиме WAL, и часть свежих транзакций лежит не в нём,
-а в `jhvirt.db-wal`. Копия одного файла окажется без них, а вместе они
-копируются неатомарно — то есть получится состояние, которого не было. Либо
-остановите службу и скопируйте все три файла:
+Снимок базы снимается на живой службе, останавливать её не нужно:
 
 ```bash
-systemctl stop jhvirt && cp data/jhvirt.db data/jhvirt.db-wal data/jhvirt.db-shm /куда/то/ && systemctl start jhvirt
+pg_dump -U jhvirt jhvirt > /srv/backups/jhvirt-$(date +%F).sql
 ```
 
-Либо, если установлен `sqlite3`, снимите согласованную копию на ходу:
+В Docker — `docker compose exec -T postgres pg_dump -U jhvirt jhvirt > …`.
 
-```bash
-sqlite3 data/jhvirt.db "VACUUM INTO '/куда/то/jhvirt.db'"
-```
 
-В сборке сервиса драйвер SQLite на чистом Go, отдельной утилиты `sqlite3` он
-не приносит — её ставят из репозитория дистрибутива.
-
-PostgreSQL такого ограничения не имеет: `pg_dump` работает на живой базе.
 
 Данные бэкапов самодостаточны: каталог запуска содержит `run.json` и манифесты,
 и разбирается без базы (см. [BACKUP-FORMAT.md](BACKUP-FORMAT.md)).

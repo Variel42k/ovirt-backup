@@ -288,13 +288,17 @@ type RemediationConfig struct {
 }
 
 type BackupConfig struct {
-	Workers          int            `mapstructure:"workers"`
-	ChunkSize        int            `mapstructure:"chunk_size"`
-	Compression      string         `mapstructure:"compression"`
-	CompressionLevel int            `mapstructure:"compression_level"`
-	TempDir          string         `mapstructure:"temp_dir"`
-	QemuImgPath      string         `mapstructure:"qemu_img_path"`
-	Transfer         TransferConfig `mapstructure:"transfer"`
+	Workers          int    `mapstructure:"workers"`
+	ChunkSize        int    `mapstructure:"chunk_size"`
+	Compression      string `mapstructure:"compression"`
+	CompressionLevel int    `mapstructure:"compression_level"`
+	// HeavyWorkers ограничивает число одновременных проверок и восстановлений.
+	// Обе операции читают цепочку целиком из хранилища, поэтому предел общий и
+	// отдельный от workers: бэкапы упираются в гипервизор, а эти — в хранилище.
+	HeavyWorkers int            `mapstructure:"heavy_workers"`
+	TempDir      string         `mapstructure:"temp_dir"`
+	QemuImgPath  string         `mapstructure:"qemu_img_path"`
+	Transfer     TransferConfig `mapstructure:"transfer"`
 
 	// RestoreDirs ограничивает каталоги, куда разрешено восстанавливать
 	// образы. Каталог приходит из запроса, а восстановленный образ — это
@@ -477,6 +481,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("backup.chunk_size", 4*1024*1024)
 	v.SetDefault("backup.compression", "zstd")
 	v.SetDefault("backup.compression_level", 3)
+	v.SetDefault("backup.heavy_workers", 2)
 	v.SetDefault("backup.temp_dir", "./data/tmp")
 	v.SetDefault("backup.restore_dirs", []string{})
 	v.SetDefault("backup.qemu_img_path", "")

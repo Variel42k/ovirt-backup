@@ -118,11 +118,14 @@ func (e *Engine) Restore(ctx context.Context, req RestoreRequest) (*model.Restor
 		return nil, errors.New("восстановление в существующий диск возможно только для одного диска за раз")
 	}
 
+	// Запись создаётся до ожидания очереди со статусом «ожидает»: восстановление
+	// может простоять в ней долго, и всё это время оператор должен видеть, что
+	// его запрос принят.
 	record := &model.RestoreRun{
 		ID:             uuid.NewString(),
 		RunID:          req.RunID,
 		Target:         req.Target,
-		Status:         model.RunRunning,
+		Status:         model.RunPending,
 		DiskIDs:        diskIDs,
 		OutputFormat:   req.OutputFormat,
 		TargetServerID: req.TargetServerID,
@@ -131,13 +134,24 @@ func (e *Engine) Restore(ctx context.Context, req RestoreRequest) (*model.Restor
 		TargetVMID:     req.AttachToVMID,
 		CreatedAt:      time.Now().UTC(),
 	}
-	started := record.CreatedAt
-	record.StartedAt = &started
 	if err := e.store.CreateRestoreRun(ctx, record); err != nil {
 		return nil, err
 	}
 
 	log := e.log.With().Str("restore", record.ID).Str("backup", req.RunID).Logger()
+
+	if err := e.acquireHeavy(ctx); err != nil {
+		record.Status = model.RunFailed
+		record.Error = "отменено в очереди: " + err.Error()
+		_ = e.store.UpdateRestoreRun(context.WithoutCancel(ctx), record)
+		return record, err
+	}
+	defer e.releaseHeavy()
+
+	started := time.Now().UTC()
+	record.StartedAt = &started
+	record.Status = model.RunRunning
+	_ = e.store.UpdateRestoreRun(ctx, record)
 	log.Info().Strs("диски", diskIDs).Str("цель", string(req.Target)).Msg("восстановление запущено")
 
 	err = e.runRestore(ctx, set, req, record, diskIDs, func(done, total int64) {

@@ -35,10 +35,26 @@ type Engine struct {
 	// единственный способ обойти направление зависимостей: пробный запуск
 	// живёт в internal/kvm, который сам построен на этом пакете.
 	external map[model.VerifyMode]ExternalVerifier
+
+	// heavy ограничивает число одновременных проверок и восстановлений.
+	//
+	// Обе операции читают цепочку целиком из хранилища, поэтому предел у них
+	// общий: десять нажатий «проверить» иначе дают десять параллельных чтений
+	// по терабайту, и от этого страдает не сервис, а хранилище вместе с идущими
+	// в этот момент бэкапами.
+	//
+	// Бэкапы считаются отдельно (backup.workers): они упираются в гипервизор,
+	// а не в хранилище копий, и смешивать пределы значило бы дать одному виду
+	// работы вытеснять другой.
+	heavy chan struct{}
 }
 
 // NewEngine builds the backup engine.
 func NewEngine(st *store.Store, pool *ovirt.Pool, cfg config.BackupConfig, cipher *secret.Cipher, log zerolog.Logger) *Engine {
+	heavy := cfg.HeavyWorkers
+	if heavy < 1 {
+		heavy = 1
+	}
 	return &Engine{
 		store:    st,
 		pool:     pool,
@@ -46,8 +62,24 @@ func NewEngine(st *store.Store, pool *ovirt.Pool, cfg config.BackupConfig, ciphe
 		cipher:   cipher,
 		log:      log,
 		external: map[model.VerifyMode]ExternalVerifier{},
+		heavy:    make(chan struct{}, heavy),
 	}
 }
+
+// acquireHeavy занимает место в очереди проверок и восстановлений.
+//
+// Ожидание прерывается вместе с контекстом: операция, отменённая пока стояла
+// в очереди, не должна начаться через час, когда до неё дойдёт черёд.
+func (e *Engine) acquireHeavy(ctx context.Context) error {
+	select {
+	case e.heavy <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (e *Engine) releaseHeavy() { <-e.heavy }
 
 // RunRequest describes one backup to execute.
 type RunRequest struct {

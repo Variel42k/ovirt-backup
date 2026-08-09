@@ -123,20 +123,34 @@ func (e *Engine) Verify(ctx context.Context, runID string, mode model.VerifyMode
 		mode = model.VerifyManifest
 	}
 
+	// Запись создаётся до ожидания очереди и со статусом «ожидает»: оператор
+	// нажал кнопку и должен увидеть результат нажатия сразу, а не гадать,
+	// дошло ли оно, пока впереди стоят две другие проверки.
 	record := &model.VerifyRun{
 		ID:        uuid.NewString(),
 		RunID:     runID,
 		Mode:      mode,
-		Status:    model.RunRunning,
+		Status:    model.RunPending,
 		CreatedAt: time.Now().UTC(),
 	}
-	started := record.CreatedAt
-	record.StartedAt = &started
 	if err := e.store.CreateVerifyRun(ctx, record); err != nil {
 		return nil, err
 	}
 
 	log := e.log.With().Str("verify", record.ID).Str("backup", runID).Str("режим", string(mode)).Logger()
+
+	if err := e.acquireHeavy(ctx); err != nil {
+		record.Status = model.RunFailed
+		record.Error = "отменено в очереди: " + err.Error()
+		_ = e.store.UpdateVerifyRun(context.WithoutCancel(ctx), record)
+		return record, err
+	}
+	defer e.releaseHeavy()
+
+	started := time.Now().UTC()
+	record.StartedAt = &started
+	record.Status = model.RunRunning
+	_ = e.store.UpdateVerifyRun(ctx, record)
 	log.Info().Msg("проверка бэкапа запущена")
 
 	report, err := e.verify(ctx, runID, mode, opts, record)

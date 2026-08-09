@@ -14,8 +14,17 @@
 # Пароль первого администратора выводится в журнал при первом запуске:
 #   docker compose logs justhpc-virt-manager | grep -i "УЧЁТНАЯ ЗАПИСЬ"
 
-name: justhpc-virt-manager
+# version нужен ради docker-compose v1: без него он разбирает файл по схеме
+# первой версии, где нет ключа services. Docker Compose v2 и podman-compose это
+# поле игнорируют (v2 предупредит, что оно устарело, — это ожидаемо).
+#
+# Именно 2.4, а не 3.x: в третьей схеме нет depends_on с condition, а он здесь
+# нужен — сервис не должен стартовать раньше готовой базы.
+version: "2.4"
 
+# Имя проекта задаётся через COMPOSE_PROJECT_NAME в .env, а не ключом name:
+# сверху. Ключ name понимают только docker compose v2 и podman-compose, а
+# docker-compose v1 на нём отказывается разбирать файл целиком.
 services:
   justhpc-virt-manager:
     build:

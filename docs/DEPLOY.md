@@ -241,11 +241,38 @@ JHV_LOG_FILE=/app/logs/jhvirt.log
 
 ---
 
-## 2.10. RHEL, Alma, Rocky: там podman, а не Docker
+## 2.10. Docker, docker-compose, podman
 
-На RHEL-семействе — а это и есть типичный хост под oVirt и РЕД Виртуализацию —
-`docker` обычно оказывается podman в режиме эмуляции, причём **без провайдера
-compose**. Выглядит это так:
+Compose-файл рассчитан на три реализации сразу, и каждая проверена разбором
+этого самого файла:
+
+| Реализация | Команда | Проверено |
+|---|---|---|
+| Docker Compose v2 (плагин) | `docker compose up -d` | разбор и запуск |
+| docker-compose v1 (Python) | `docker-compose up -d` | разбор |
+| podman-compose | `podman-compose up -d` | разбор |
+
+Ради этого в файле две вещи, которые иначе выглядели бы странно:
+
+- **`version: "2.4"`.** Docker Compose v2 его игнорирует и предупреждает, что
+  поле устарело, — так и должно быть. Но `docker-compose` v1 без него
+  разбирает файл по схеме первой версии, где ключа `services` вообще нет, и
+  отказывается работать. Именно `2.4`, а не `3.x`: в третьей схеме нет
+  `depends_on` с `condition`, а он здесь нужен, чтобы сервис не стартовал
+  раньше готовой базы.
+- **Имя проекта в `COMPOSE_PROJECT_NAME`,** а не ключом `name:` сверху. Ключ
+  `name` понимают только v2 и podman-compose; v1 на нём отказывается разбирать
+  файл целиком: `'name' does not match any of the regexes: '^x-'`.
+
+По той же причине параметры базы передаются раздельными переменными, а не
+собранной в YAML строкой подключения: сборка требовала бы вложенной
+подстановки `${A:-…${B:?…}…}`, а на неё за пределами Docker Compose
+рассчитывать нельзя.
+
+### На RHEL, Alma, Rocky
+
+Там `docker` — это обычно podman в режиме эмуляции, **и провайдера compose нет
+ни одного**:
 
 ```
 Emulate Docker CLI using podman.
@@ -254,55 +281,43 @@ Error: looking up compose provider failed
         * exec: "podman-compose": executable file not found in $PATH
 ```
 
-Сам podman установлен и работает — не хватает только того, что читает
-`docker-compose.yml`. Три пути, по убыванию уместности на RHEL.
-
-### Без контейнеров вообще — п. 3
-
-**Для RHEL это самый короткий путь.** Один файл `.run`, системный PostgreSQL из
-репозитория дистрибутива, служба под systemd. Ни podman, ни compose не нужны:
-
-```bash
-dnf install -y postgresql-server && postgresql-setup --initdb && systemctl enable --now postgresql
-```
-
-Дальше — [п. 3](#3-бинарь-и-systemd). Компоновка та же, что и в контейнере, а
-обновление и откат делает тот же `.run`.
-
-### Плагин docker compose к podman
-
-Тот самый бинарь, для которого написан наш файл, — его podman подхватывает
-как провайдера:
-
-```bash
-mkdir -p /usr/local/lib/docker/cli-plugins
-```
-
-```bash
-curl -sSL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64 -o /usr/local/lib/docker/cli-plugins/docker-compose && chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
-```
-
-Понадобится сокет podman, если он ещё не поднят:
-
-```bash
-systemctl enable --now podman.socket
-```
-
-### podman-compose
+Сам podman установлен и работает — не хватает того, что читает
+`docker-compose.yml`. Ставится из репозитория дистрибутива:
 
 ```bash
 dnf install -y podman-compose
 ```
 
-Отдельная реализация на Python, а не тот же бинарь. Наш файл писался под неё
-осознанно: вложенных подстановок вида `${A:-…${B:?…}…}` в нём нет, параметры
-базы передаются раздельными переменными именно поэтому. Но `depends_on` с
-`condition: service_healthy` поддерживается не во всех версиях — если служба
-стартует раньше базы, она перезапустится и поднимется со второй попытки,
-`restart: unless-stopped` это закрывает.
+Дальше всё как обычно, только команда другая:
 
-Проверить, что вариант рабочий, стоит до боевой установки: у нас он не
-проверялся, в отличие от Docker Compose и пути через systemd.
+```bash
+cd deploy && cp .env.example .env && chmod 600 .env
+```
+
+```bash
+podman-compose up -d
+```
+
+Если привычнее `docker compose`, podman умеет быть его провайдером — поставьте
+плагин и включите сокет:
+
+```bash
+mkdir -p /usr/local/lib/docker/cli-plugins && curl -sSL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64 -o /usr/local/lib/docker/cli-plugins/docker-compose && chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+```
+
+```bash
+systemctl enable --now podman.socket
+```
+
+**Что проверено, а что нет.** Файл разбирается всеми тремя реализациями — это
+проверено на podman-compose 1.4.1 из Fedora и docker-compose 1.29.2. Полный
+запуск со сборкой образа прогонялся только на Docker Compose v2. Если под
+podman что-то себя поведёт иначе, вероятнее всего это `depends_on` с
+`condition`: при его игнорировании сервис стартует раньше базы, падает и
+поднимается со второй попытки — `restart: unless-stopped` это закрывает.
+
+Контейнеры не обязательны вовсе: на RHEL короче поставить бинарём под systemd
+и взять PostgreSQL из репозитория дистрибутива — см. п. 3.
 
 ---
 

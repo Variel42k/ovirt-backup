@@ -316,4 +316,4 @@ jvbackup restore -repo /backup -run <id> -out /var/tmp -format qcow2
 ## Лицензия и статус
 
 Внутренний проект. Границы текущей версии описаны в
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#что-осталось-за-рамками).
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#10-что-осталось-за-рамками).

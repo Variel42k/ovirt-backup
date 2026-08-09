@@ -139,43 +139,30 @@
 
 ## Развёртывание
 
+Одна команда. Скрипт спросит, чем запускать, подготовит конфигурацию, запустит
+и напечатает пароль администратора.
+
+```bash
+cd deploy && ./install.sh
+```
+
+```
+Чем запускать?
+
+  1) docker compose   — сервис и PostgreSQL в контейнерах
+  2) docker-compose   — то же, старой командой через дефис
+  3) podman-compose   — то же на podman
+  4) systemd          — бинарь службой, PostgreSQL отдельно
+
+Показано только то, что есть на этой машине.
+```
+
+Без диалога: `./install.sh --mode podman --url https://virt.example.org`.
+Снять: `./install.sh --uninstall` — данные и тома остаются.
+
 Вариант один — боевой. Ознакомительного с готовыми паролями нет намеренно:
 конфигурация «пока так, потом заменим» остаётся в бою чаще, чем заменяется, а
 по журналу неотличима от настоящей.
-
-### Docker
-
-```bash
-cd deploy && ./setup-env.sh
-```
-
-Скрипт сгенерирует пароль базы, спросит внешний адрес и поставит права `0600`.
-Просто скопировать `.env.example` недостаточно: пароль в нём пуст, а compose
-считает пустое значение таким же отсутствующим, как незаданное.
-
-```bash
-cd deploy && docker compose up -d --build
-```
-
-Пароль первого администратора печатается один раз отдельным блоком:
-
-```bash
-cd deploy && docker compose logs justhpc-virt-manager | grep -A6 "УЧЁТНАЯ ЗАПИСЬ"
-```
-
-Потеряли — задайте новый, база при этом остаётся нетронутой:
-
-```bash
-cd deploy && docker compose run --rm justhpc-virt-manager -reset-password admin
-```
-
-Файл понимают три реализации: `docker compose`, `docker-compose` и
-`podman-compose` — команда меняется, остальное нет.
-
-> **На RHEL, Alma и Rocky `docker` — это обычно podman без провайдера
-> compose,** и команда выше упадёт с «looking up compose provider failed».
-> Лечится `dnf install -y podman-compose`, дальше `podman-compose up -d`.
-> Подробно — [DEPLOY.md, п. 2.10](docs/DEPLOY.md#210-docker-docker-compose-podman).
 
 Полная процедура с TLS, сохранностью ключа шифрования и приёмочным прогоном —
 **[DEPLOY.md](docs/DEPLOY.md)**.

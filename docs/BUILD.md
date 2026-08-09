@@ -196,6 +196,29 @@ ssh server 'sudo sh /tmp/jhvirt-1.0.0-linux-amd64.run'
 Тесты не требуют внешних сервисов: база поднимается во временном каталоге,
 гипервизор не нужен.
 
+### Тесты хранилища на PostgreSQL
+
+`./run test` гоняет хранилище на SQLite. Схема написана на пересечении
+диалектов, но SQLite типизирован динамически и прощает то, чего PostgreSQL не
+прощает: так в схему попала колонка `INTEGER`, в которую код писал `bool` —
+SQLite молча писал 0/1, pgx отказался кодировать, и служба не поднималась на
+PostgreSQL вообще при полностью зелёных тестах.
+
+Тот же набор тестов против настоящего PostgreSQL:
+
+```bash
+docker run --rm -d --name jhvirt-pg -p 5432:5432 -e POSTGRES_USER=jhvirt -e POSTGRES_PASSWORD=jhvirt -e POSTGRES_DB=jhvirt_test postgres:17-alpine
+```
+
+```bash
+./run test-pg "host=localhost port=5432 user=jhvirt password=jhvirt dbname=jhvirt_test sslmode=disable"
+```
+
+Строка подключения принимается и в виде URL `postgres://…`, но там пароль
+обязан быть percent-кодирован; форма `ключ=значение` экранирования не требует.
+
+Это стоит прогонять перед выпуском и при любой правке миграций.
+
 ### Детектор гонок
 
 ```bash

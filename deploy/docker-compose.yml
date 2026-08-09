@@ -38,8 +38,20 @@ services:
       JHV_DATABASE_POSTGRES_SSLMODE: "${POSTGRES_SSLMODE:-disable}"
       JHV_SECRETS_KEY_FILE: "/app/data/secret.key"
       JHV_BACKUP_TEMP_DIR: "/app/data/tmp"
+      # Каталоги, куда разрешено восстанавливать образы. Путь приходит от
+      # клиента, поэтому список закрыт; temp_dir разрешён всегда. Значения —
+      # пути внутри контейнера, и каждый из них должен быть смонтирован ниже.
+      JHV_BACKUP_RESTORE_DIRS: "${JHV_RESTORE_DIRS:-/restores}"
+      # Пусто — в контейнере это правильно: журнал уходит в поток и его
+      # забирает docker logs. Просмотр журнала из интерфейса при этом
+      # недоступен — ему нужен файл. Нужен просмотр: /app/logs/jhvirt.log
+      # (каталог уже в томе с данными).
       JHV_LOGGING_FORMAT: "json"
-      JHV_LOGGING_FILE: ""
+      JHV_LOGGING_FILE: "${JHV_LOG_FILE:-}"
+      # Адреса dev-сервера интерфейса из конфигурации по умолчанию в бою не
+      # нужны: страница на localhost:9000 у оператора иначе сможет обращаться
+      # к API с его куками.
+      JHV_SERVER_CORS_ORIGINS: "${JHV_CORS_ORIGINS:-}"
       JHV_SCHEDULER_TIMEZONE: "${TZ:-Europe/Moscow}"
       # Авто-восстановление по умолчанию только фиксирует намеченные действия.
       # Отключите dry_run, когда убедитесь по журналу, что решения верные.
@@ -48,10 +60,22 @@ services:
       JHV_AUTH_BOOTSTRAP_PASSWORD: "${JHV_ADMIN_PASSWORD:-}"
       TZ: "${TZ:-Europe/Moscow}"
     volumes:
+      # Ключ шифрования секретов, база SQLite и временные файлы. Терять нельзя:
+      # без secret.key не расшифровать ни пароли подключений, ни копии.
       - jhvirt-data:/app/data
       # Каталог для локального хранилища бэкапов. Смонтируйте сюда NFS-шару,
       # если бэкапы должны уезжать на отдельную СХД.
       - ${JHV_BACKUP_DIR:-./backups}:/backups
+      # Куда складываются восстановленные образы. Отдельно от хранилища копий
+      # намеренно: восстановление не должно съедать место под сами копии.
+      - ${JHV_RESTORE_DIR:-./restores}:/restores
+    # Столько же, сколько в юните systemd: восстановление и проверка держат
+    # много открытых объектов хранилища. На хостах, где предел по умолчанию
+    # равен 1024, без этого проверка большой цепочки упирается в него.
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
       interval: 30s

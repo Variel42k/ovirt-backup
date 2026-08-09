@@ -48,7 +48,8 @@ justhpc-virt-manager — команды разработки и сборки
   ./run dev             запустить сервер (:8080) с конфигурацией по умолчанию
   ./run web             запустить интерфейс в режиме разработки (:9000)
 
-  ./run test [-race]    тесты Go
+  ./run test [-race]    тесты Go (SQLite)
+  ./run test-pg [dsn]   те же тесты хранилища против PostgreSQL
   ./run check           формат, go vet, тесты, проверка типов интерфейса
   ./run fmt             отформатировать код
 
@@ -104,6 +105,27 @@ cmd_test() {
         step "тесты"
         go test ./...
     fi
+}
+
+# Тот же набор тестов хранилища, но против PostgreSQL.
+#
+# Схема написана на пересечении диалектов, а проверялась только на SQLite —
+# и он прощает то, чего PostgreSQL не прощает. Так в схему попала колонка
+# INTEGER, в которую код писал bool: SQLite молча писал 0/1, pgx отказался
+# кодировать, и служба не поднималась на PostgreSQL вообще при зелёных тестах.
+cmd_test_pg() {
+    need go "нужен Go 1.26+"
+    DSN="${1:-${JHV_TEST_POSTGRES_DSN:-}}"
+    [ -n "$DSN" ] || die "укажите строку подключения:
+  ./run test-pg 'host=localhost port=5432 user=jhvirt password=… dbname=jhvirt_test sslmode=disable'
+либо URL postgres://…  (в URL пароль обязан быть percent-кодирован)
+
+Поднять базу для проверки:
+  docker run --rm -d --name jhvirt-pg -p 5432:5432 \\
+    -e POSTGRES_USER=jhvirt -e POSTGRES_PASSWORD=jhvirt -e POSTGRES_DB=jhvirt_test postgres:17-alpine"
+
+    step "тесты хранилища на PostgreSQL"
+    JHV_TEST_POSTGRES_DSN="$DSN" go test ./internal/store/ -count=1
 }
 
 cmd_check() {
@@ -450,6 +472,7 @@ case "$COMMAND" in
     dev)            cmd_dev ;;
     web)            cmd_web ;;
     test)           cmd_test "$@" ;;
+    test-pg)        cmd_test_pg "$@" ;;
     check)          cmd_check ;;
     fmt|format)     cmd_fmt ;;
     vet)            cmd_vet ;;

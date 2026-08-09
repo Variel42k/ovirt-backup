@@ -34,7 +34,7 @@ func (s *Store) AddDiskSamples(ctx context.Context, samples []model.DiskSample) 
 				sample.ReadBytesPerSec, sample.WriteBytesPerSec,
 				sample.ReadOpsPerSec, sample.WriteOpsPerSec,
 				sample.ReadLatencyUS, sample.WriteLatencyUS, sample.FlushLatencyUS,
-				sample.Errors, sample.ErrorsDelta, toMillis(sample.At)); err != nil {
+				sample.Errors, sample.ErrorsDelta, sample.At); err != nil {
 				return err
 			}
 		}
@@ -60,7 +60,7 @@ func (s *Store) AddMountSamples(ctx context.Context, samples []model.MountSample
 				sample.Healthy, sample.State, sample.Operations, sample.Retransmits,
 				sample.MajorTimeouts, sample.BadTransfers, sample.AvgRTTMS,
 				sample.AvgExecuteMS, sample.QueueMS, sample.BytesReadRate,
-				sample.BytesWriteRate, sample.Detail, toMillis(sample.At)); err != nil {
+				sample.BytesWriteRate, sample.Detail, sample.At); err != nil {
 				return err
 			}
 		}
@@ -102,7 +102,7 @@ func (s *Store) ListDiskSamples(ctx context.Context, f DiskSampleFilter) ([]*mod
 	}
 	if !f.Since.IsZero() {
 		query += ` AND at >= ?`
-		args = append(args, toMillis(f.Since))
+		args = append(args, f.Since)
 	}
 	limit := f.Limit
 	if limit <= 0 {
@@ -123,7 +123,7 @@ func (s *Store) ListDiskSamples(ctx context.Context, f DiskSampleFilter) ([]*mod
 	for rows.Next() {
 		var (
 			sample model.DiskSample
-			at     int64
+			at     time.Time
 		)
 		if err := rows.Scan(&sample.ID, &sample.ServerID, &sample.VMID, &sample.VMName,
 			&sample.Disk, &sample.ReadBytesPerSec, &sample.WriteBytesPerSec,
@@ -132,7 +132,7 @@ func (s *Store) ListDiskSamples(ctx context.Context, f DiskSampleFilter) ([]*mod
 			&sample.ErrorsDelta, &at); err != nil {
 			return nil, fmt.Errorf("scan disk sample: %w", err)
 		}
-		sample.At = fromMillis(at)
+		sample.At = utc(at)
 		out = append(out, &sample)
 	}
 	if err := rows.Err(); err != nil {
@@ -154,7 +154,7 @@ func (s *Store) ListMountSamples(ctx context.Context, serverID, target string,
 	}
 	if !since.IsZero() {
 		query += ` AND at >= ?`
-		args = append(args, toMillis(since))
+		args = append(args, since)
 	}
 	if limit <= 0 {
 		limit = 5000
@@ -173,7 +173,7 @@ func (s *Store) ListMountSamples(ctx context.Context, serverID, target string,
 		var (
 			sample model.MountSample
 			kind   string
-			at     int64
+			at     time.Time
 		)
 		if err := rows.Scan(&sample.ID, &sample.ServerID, &kind, &sample.Target,
 			&sample.Source, &sample.Healthy, &sample.State, &sample.Operations,
@@ -183,7 +183,7 @@ func (s *Store) ListMountSamples(ctx context.Context, serverID, target string,
 			return nil, fmt.Errorf("scan mount sample: %w", err)
 		}
 		sample.Kind = model.MountKind(kind)
-		sample.At = fromMillis(at)
+		sample.At = utc(at)
 		out = append(out, &sample)
 	}
 	if err := rows.Err(); err != nil {
@@ -217,7 +217,7 @@ func (s *Store) LatestMountSamples(ctx context.Context, serverID string) ([]*mod
 
 // PruneIOSamples drops observations older than the retention window.
 func (s *Store) PruneIOSamples(ctx context.Context, before time.Time) (int64, error) {
-	cutoff := toMillis(before)
+	cutoff := before
 	var total int64
 	for _, table := range []string{"disk_samples", "mount_samples"} {
 		res, err := s.db.Exec(ctx, `DELETE FROM `+table+` WHERE at < ?`, cutoff)

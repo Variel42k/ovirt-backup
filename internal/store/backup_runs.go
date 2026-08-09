@@ -42,8 +42,8 @@ func (s *Store) CreateBackupRun(ctx context.Context, r *model.BackupRun) error {
 		r.ParentRunID, r.ChainID, r.ChainIndex, r.StorageTargetID, r.RepoPath, r.EngineBackupID,
 		r.FromCheckpointID, r.ToCheckpointID, r.SnapshotID, r.DiskCount, r.LogicalBytes,
 		r.ReadBytes, r.StoredBytes, r.Progress, r.Encrypted, r.Compression, string(r.VerifyStatus),
-		toNullMillis(r.VerifiedAt), r.Error, toNullMillis(r.StartedAt), toNullMillis(r.EndedAt),
-		toNullMillis(r.ExpiresAt), r.Deleted, toMillis(r.CreatedAt), encodeSkipped(r.SkippedDisks))
+		r.VerifiedAt, r.Error, r.StartedAt, r.EndedAt,
+		r.ExpiresAt, r.Deleted, r.CreatedAt, encodeSkipped(r.SkippedDisks))
 	if err != nil {
 		return fmt.Errorf("insert backup run: %w", err)
 	}
@@ -62,8 +62,8 @@ func (s *Store) UpdateBackupRun(ctx context.Context, r *model.BackupRun) error {
 		string(r.Status), r.ParentRunID, r.ChainID, r.ChainIndex, r.StorageTargetID, r.RepoPath,
 		r.EngineBackupID, r.FromCheckpointID, r.ToCheckpointID, r.SnapshotID, r.DiskCount,
 		r.LogicalBytes, r.ReadBytes, r.StoredBytes, r.Progress, r.Encrypted, r.Compression,
-		string(r.VerifyStatus), toNullMillis(r.VerifiedAt), r.Error, toNullMillis(r.StartedAt),
-		toNullMillis(r.EndedAt), toNullMillis(r.ExpiresAt), r.Deleted,
+		string(r.VerifyStatus), r.VerifiedAt, r.Error, r.StartedAt,
+		r.EndedAt, r.ExpiresAt, r.Deleted,
 		encodeSkipped(r.SkippedDisks), r.ID)
 	if err != nil {
 		return fmt.Errorf("update backup run: %w", err)
@@ -164,10 +164,10 @@ func (s *Store) ListBackupRuns(ctx context.Context, f RunFilter) ([]*model.Backu
 		where = append(where, `type IN (`+strings.Join(ph, ",")+`)`)
 	}
 	if f.Since != nil {
-		add(`created_at >= ?`, toMillis(*f.Since))
+		add(`created_at >= ?`, *f.Since)
 	}
 	if f.Until != nil {
-		add(`created_at <= ?`, toMillis(*f.Until))
+		add(`created_at <= ?`, *f.Until)
 	}
 
 	query := `SELECT ` + runColumns + ` FROM backup_runs`
@@ -249,8 +249,8 @@ func scanRun(row rowScanner) (*model.BackupRun, error) {
 	var (
 		r                                         model.BackupRun
 		typ, status, verifyStatus                 string
-		verifiedAt, startedAt, endedAt, expiresAt sql.NullInt64
-		createdAt                                 int64
+		verifiedAt, startedAt, endedAt, expiresAt sql.NullTime
+		createdAt                                 time.Time
 		skipped                                   string
 	)
 	err := row.Scan(&r.ID, &r.JobID, &r.JobName, &r.ServerID, &r.VMID, &r.VMName, &typ, &status,
@@ -269,11 +269,11 @@ func scanRun(row rowScanner) (*model.BackupRun, error) {
 	r.Type = model.BackupType(typ)
 	r.Status = model.RunStatus(status)
 	r.VerifyStatus = model.RunStatus(verifyStatus)
-	r.VerifiedAt = fromNullMillis(verifiedAt)
-	r.StartedAt = fromNullMillis(startedAt)
-	r.EndedAt = fromNullMillis(endedAt)
-	r.ExpiresAt = fromNullMillis(expiresAt)
-	r.CreatedAt = fromMillis(createdAt)
+	r.VerifiedAt = nullTime(verifiedAt)
+	r.StartedAt = nullTime(startedAt)
+	r.EndedAt = nullTime(endedAt)
+	r.ExpiresAt = nullTime(expiresAt)
+	r.CreatedAt = utc(createdAt)
 	r.SkippedDisks = decodeSkipped(skipped)
 	return &r, nil
 }
@@ -361,7 +361,7 @@ func (s *Store) CreateVerifyRun(ctx context.Context, v *model.VerifyRun) error {
 	}
 	_, err := s.db.Exec(ctx, `INSERT INTO verify_runs (`+verifyColumns+`) VALUES (?,?,?,?,?,?,?,?,?,?)`,
 		v.ID, v.RunID, string(v.Mode), string(v.Status), v.Progress, v.Details, v.Error,
-		toNullMillis(v.StartedAt), toNullMillis(v.EndedAt), toMillis(v.CreatedAt))
+		v.StartedAt, v.EndedAt, v.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("insert verify run: %w", err)
 	}
@@ -372,8 +372,8 @@ func (s *Store) CreateVerifyRun(ctx context.Context, v *model.VerifyRun) error {
 func (s *Store) UpdateVerifyRun(ctx context.Context, v *model.VerifyRun) error {
 	_, err := s.db.Exec(ctx, `UPDATE verify_runs SET status=?, progress=?, details=?, error=?,
 		started_at=?, ended_at=? WHERE id=?`,
-		string(v.Status), v.Progress, v.Details, v.Error, toNullMillis(v.StartedAt),
-		toNullMillis(v.EndedAt), v.ID)
+		string(v.Status), v.Progress, v.Details, v.Error, v.StartedAt,
+		v.EndedAt, v.ID)
 	return err
 }
 
@@ -419,8 +419,8 @@ func scanVerify(row rowScanner) (*model.VerifyRun, error) {
 	var (
 		v                  model.VerifyRun
 		mode, status       string
-		startedAt, endedAt sql.NullInt64
-		createdAt          int64
+		startedAt, endedAt sql.NullTime
+		createdAt          time.Time
 	)
 	err := row.Scan(&v.ID, &v.RunID, &mode, &status, &v.Progress, &v.Details, &v.Error,
 		&startedAt, &endedAt, &createdAt)
@@ -432,9 +432,9 @@ func scanVerify(row rowScanner) (*model.VerifyRun, error) {
 	}
 	v.Mode = model.VerifyMode(mode)
 	v.Status = model.RunStatus(status)
-	v.StartedAt = fromNullMillis(startedAt)
-	v.EndedAt = fromNullMillis(endedAt)
-	v.CreatedAt = fromMillis(createdAt)
+	v.StartedAt = nullTime(startedAt)
+	v.EndedAt = nullTime(endedAt)
+	v.CreatedAt = utc(createdAt)
 	return &v, nil
 }
 
@@ -454,7 +454,7 @@ func (s *Store) CreateRestoreRun(ctx context.Context, r *model.RestoreRun) error
 		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		r.ID, r.RunID, string(r.Target), string(r.Status), encodeJSON(r.DiskIDs), r.OutputPath,
 		r.OutputFormat, r.TargetServerID, r.TargetDiskID, r.TargetDomainID, r.TargetVMID,
-		r.Progress, r.Error, toNullMillis(r.StartedAt), toNullMillis(r.EndedAt), toMillis(r.CreatedAt))
+		r.Progress, r.Error, r.StartedAt, r.EndedAt, r.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("insert restore run: %w", err)
 	}
@@ -466,7 +466,7 @@ func (s *Store) UpdateRestoreRun(ctx context.Context, r *model.RestoreRun) error
 	_, err := s.db.Exec(ctx, `UPDATE restore_runs SET status=?, output_path=?, target_disk_id=?,
 		progress=?, error=?, started_at=?, ended_at=? WHERE id=?`,
 		string(r.Status), r.OutputPath, r.TargetDiskID, r.Progress, r.Error,
-		toNullMillis(r.StartedAt), toNullMillis(r.EndedAt), r.ID)
+		r.StartedAt, r.EndedAt, r.ID)
 	return err
 }
 
@@ -512,8 +512,8 @@ func scanRestore(row rowScanner) (*model.RestoreRun, error) {
 		r                  model.RestoreRun
 		target, status     string
 		diskIDs            string
-		startedAt, endedAt sql.NullInt64
-		createdAt          int64
+		startedAt, endedAt sql.NullTime
+		createdAt          time.Time
 	)
 	err := row.Scan(&r.ID, &r.RunID, &target, &status, &diskIDs, &r.OutputPath, &r.OutputFormat,
 		&r.TargetServerID, &r.TargetDiskID, &r.TargetDomainID, &r.TargetVMID, &r.Progress,
@@ -527,8 +527,8 @@ func scanRestore(row rowScanner) (*model.RestoreRun, error) {
 	r.Target = model.RestoreTarget(target)
 	r.Status = model.RunStatus(status)
 	r.DiskIDs = decodeStrings(diskIDs)
-	r.StartedAt = fromNullMillis(startedAt)
-	r.EndedAt = fromNullMillis(endedAt)
-	r.CreatedAt = fromMillis(createdAt)
+	r.StartedAt = nullTime(startedAt)
+	r.EndedAt = nullTime(endedAt)
+	r.CreatedAt = utc(createdAt)
 	return &r, nil
 }

@@ -120,9 +120,12 @@ func (db *DB) Migrate(ctx context.Context) error {
 	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
 		version    INTEGER PRIMARY KEY,
 		name       TEXT NOT NULL,
-		applied_at BIGINT NOT NULL
+		applied_at TIMESTAMPTZ NOT NULL
 	)`); err != nil {
 		return fmt.Errorf("create schema_migrations: %w", err)
+	}
+	if err := db.upgradeMigrationsTable(ctx); err != nil {
+		return err
 	}
 
 	applied := map[int]bool{}
@@ -173,7 +176,7 @@ func (db *DB) Migrate(ctx context.Context) error {
 				return fmt.Errorf("apply %s: %w", name, err)
 			}
 			q := db.Rebind(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)`)
-			_, err := tx.ExecContext(ctx, q, version, name, time.Now().UnixMilli())
+			_, err := tx.ExecContext(ctx, q, version, name, time.Now().UTC())
 			return err
 		})
 		if err != nil {
@@ -193,4 +196,29 @@ func migrationVersion(name string) (int, error) {
 		return 0, fmt.Errorf("migration %q has non-numeric version: %w", name, err)
 	}
 	return v, nil
+}
+
+// upgradeMigrationsTable переводит applied_at на TIMESTAMPTZ в базах, где
+// таблица была создана прежней версией.
+//
+// Обычной миграцией это сделать нельзя: строку о применении каждой миграции
+// пишет сам применятель, и до собственной очереди 0007 таблица успела бы
+// принять шесть записей уже нового типа в колонку старого. Поэтому свою
+// таблицу применятель приводит в порядок сам, до того как что-то в неё пишет.
+func (db *DB) upgradeMigrationsTable(ctx context.Context) error {
+	var dataType string
+	err := db.QueryRowContext(ctx, `SELECT data_type FROM information_schema.columns
+		WHERE table_schema = current_schema() AND table_name = 'schema_migrations'
+		  AND column_name = 'applied_at'`).Scan(&dataType)
+	if err != nil {
+		return fmt.Errorf("тип schema_migrations.applied_at: %w", err)
+	}
+	if dataType != "bigint" {
+		return nil
+	}
+	if _, err := db.ExecContext(ctx, `ALTER TABLE schema_migrations
+		ALTER COLUMN applied_at TYPE TIMESTAMPTZ USING to_timestamp(applied_at / 1000.0)`); err != nil {
+		return fmt.Errorf("перевод schema_migrations.applied_at в TIMESTAMPTZ: %w", err)
+	}
+	return nil
 }

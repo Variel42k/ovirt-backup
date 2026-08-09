@@ -49,8 +49,8 @@ func (s *Store) CreateServer(ctx context.Context, srv *model.Server) error {
 		srv.ID, srv.Name, string(srv.Kind), srv.EngineURL, srv.Username, enc, srv.CACert,
 		srv.InsecureTLS, srv.Enabled, encodeJSON(srv.Tags), srv.Notes, string(srv.State),
 		srv.StateMessage, srv.EngineVersion, srv.ProductName, srv.APIVersion, srv.SupportsCBT,
-		srv.FailureCount, toNullMillis(srv.LastSeenAt), toNullMillis(srv.LastCheckedAt),
-		toMillis(srv.CreatedAt), toMillis(srv.UpdatedAt),
+		srv.FailureCount, srv.LastSeenAt, srv.LastCheckedAt,
+		srv.CreatedAt, srv.UpdatedAt,
 		srv.SSHHost, srv.SSHPort, sshKey, srv.SSHHostKey, srv.ScratchDir)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -97,7 +97,7 @@ func (s *Store) UpdateServer(ctx context.Context, srv *model.Server) error {
 		ssh_host=?, ssh_port=?, ssh_private_key_enc=?, ssh_host_key=?, scratch_dir=?
 		WHERE id=?`,
 		srv.Name, string(srv.Kind), srv.EngineURL, srv.Username, enc, srv.CACert, srv.InsecureTLS,
-		srv.Enabled, encodeJSON(srv.Tags), srv.Notes, toMillis(srv.UpdatedAt),
+		srv.Enabled, encodeJSON(srv.Tags), srv.Notes, srv.UpdatedAt,
 		srv.SSHHost, srv.SSHPort, sshKey, srv.SSHHostKey, srv.ScratchDir, srv.ID)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -115,8 +115,8 @@ func (s *Store) UpdateServerState(ctx context.Context, srv *model.Server) error 
 		supports_cbt=?, failure_count=?, last_seen_at=?, last_checked_at=?, updated_at=?
 		WHERE id=?`,
 		string(srv.State), srv.StateMessage, srv.EngineVersion, srv.ProductName, srv.APIVersion,
-		srv.SupportsCBT, srv.FailureCount, toNullMillis(srv.LastSeenAt), toNullMillis(srv.LastCheckedAt),
-		time.Now().UTC().UnixMilli(), srv.ID)
+		srv.SupportsCBT, srv.FailureCount, srv.LastSeenAt, srv.LastCheckedAt,
+		time.Now().UTC(), srv.ID)
 	if err != nil {
 		return fmt.Errorf("update server state: %w", err)
 	}
@@ -194,8 +194,8 @@ func (s *Store) scanServer(row rowScanner) (*model.Server, error) {
 		kind, state           string
 		tags                  string
 		enc, sshKeyEnc        string
-		lastSeen, lastChecked sql.NullInt64
-		createdAt, updatedAt  int64
+		lastSeen, lastChecked sql.NullTime
+		createdAt, updatedAt  time.Time
 	)
 	err := row.Scan(&srv.ID, &srv.Name, &kind, &srv.EngineURL, &srv.Username, &enc, &srv.CACert,
 		&srv.InsecureTLS, &srv.Enabled, &tags, &srv.Notes, &state, &srv.StateMessage,
@@ -225,10 +225,10 @@ func (s *Store) scanServer(row rowScanner) (*model.Server, error) {
 	srv.State = model.ConnState(state)
 	srv.Password = password
 	srv.Tags = decodeStrings(tags)
-	srv.LastSeenAt = fromNullMillis(lastSeen)
-	srv.LastCheckedAt = fromNullMillis(lastChecked)
-	srv.CreatedAt = fromMillis(createdAt)
-	srv.UpdatedAt = fromMillis(updatedAt)
+	srv.LastSeenAt = nullTime(lastSeen)
+	srv.LastCheckedAt = nullTime(lastChecked)
+	srv.CreatedAt = utc(createdAt)
+	srv.UpdatedAt = utc(updatedAt)
 	return &srv, nil
 }
 

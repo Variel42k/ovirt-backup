@@ -25,7 +25,7 @@ func (s *Store) CreateUser(ctx context.Context, u *model.User) error {
 
 	_, err := s.db.Exec(ctx, `INSERT INTO users (`+userColumns+`) VALUES (?,?,?,?,?,?,?,?)`,
 		u.ID, u.Username, u.PasswordHash, string(u.Role), u.Disabled,
-		toNullMillis(u.LastLoginAt), toMillis(u.CreatedAt), toMillis(u.UpdatedAt))
+		u.LastLoginAt, u.CreatedAt, u.UpdatedAt)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return fmt.Errorf("%w: пользователь %q", ErrConflict, u.Username)
@@ -38,7 +38,7 @@ func (s *Store) CreateUser(ctx context.Context, u *model.User) error {
 // UpdateUser changes role, disabled flag and — when non-empty — the password hash.
 func (s *Store) UpdateUser(ctx context.Context, u *model.User) error {
 	query := `UPDATE users SET role=?, disabled=?, updated_at=?`
-	args := []any{string(u.Role), u.Disabled, time.Now().UTC().UnixMilli()}
+	args := []any{string(u.Role), u.Disabled, time.Now().UTC()}
 	if u.PasswordHash != "" {
 		query += `, password_hash=?`
 		args = append(args, u.PasswordHash)
@@ -110,7 +110,7 @@ func (s *Store) CountUsers(ctx context.Context) (int, error) {
 // TouchUserLogin records a successful authentication.
 func (s *Store) TouchUserLogin(ctx context.Context, id string) error {
 	_, err := s.db.Exec(ctx, `UPDATE users SET last_login_at=? WHERE id=?`,
-		time.Now().UTC().UnixMilli(), id)
+		time.Now().UTC(), id)
 	return err
 }
 
@@ -118,8 +118,8 @@ func scanUser(row rowScanner) (*model.User, error) {
 	var (
 		u                    model.User
 		role                 string
-		lastLogin            sql.NullInt64
-		createdAt, updatedAt int64
+		lastLogin            sql.NullTime
+		createdAt, updatedAt time.Time
 	)
 	err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &role, &u.Disabled, &lastLogin,
 		&createdAt, &updatedAt)
@@ -130,9 +130,9 @@ func scanUser(row rowScanner) (*model.User, error) {
 		return nil, fmt.Errorf("scan user: %w", err)
 	}
 	u.Role = model.Role(role)
-	u.LastLoginAt = fromNullMillis(lastLogin)
-	u.CreatedAt = fromMillis(createdAt)
-	u.UpdatedAt = fromMillis(updatedAt)
+	u.LastLoginAt = nullTime(lastLogin)
+	u.CreatedAt = utc(createdAt)
+	u.UpdatedAt = utc(updatedAt)
 	return &u, nil
 }
 
@@ -143,8 +143,8 @@ func (s *Store) CreateSession(ctx context.Context, sess *model.Session) error {
 	}
 	_, err := s.db.Exec(ctx, `INSERT INTO sessions (token, user_id, user_agent, remote_ip,
 		expires_at, created_at) VALUES (?,?,?,?,?,?)`,
-		sess.Token, sess.UserID, sess.UserAgent, sess.RemoteIP, toMillis(sess.ExpiresAt),
-		toMillis(sess.CreatedAt))
+		sess.Token, sess.UserID, sess.UserAgent, sess.RemoteIP, sess.ExpiresAt,
+		sess.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("insert session: %w", err)
 	}
@@ -162,7 +162,7 @@ func (s *Store) GetSession(ctx context.Context, token string) (*model.Session, e
 		sess                 model.Session
 		role                 string
 		disabled             bool
-		expiresAt, createdAt int64
+		expiresAt, createdAt time.Time
 	)
 	err := row.Scan(&sess.Token, &sess.UserID, &sess.UserAgent, &sess.RemoteIP, &expiresAt,
 		&createdAt, &sess.Username, &role, &disabled)
@@ -174,8 +174,8 @@ func (s *Store) GetSession(ctx context.Context, token string) (*model.Session, e
 	}
 
 	sess.Role = model.Role(role)
-	sess.ExpiresAt = fromMillis(expiresAt)
-	sess.CreatedAt = fromMillis(createdAt)
+	sess.ExpiresAt = utc(expiresAt)
+	sess.CreatedAt = utc(createdAt)
 
 	if disabled {
 		return nil, ErrNotFound
@@ -208,7 +208,7 @@ func (s *Store) DeleteSession(ctx context.Context, token string) error {
 
 // PurgeExpiredSessions drops sessions past their expiry.
 func (s *Store) PurgeExpiredSessions(ctx context.Context) (int64, error) {
-	res, err := s.db.Exec(ctx, `DELETE FROM sessions WHERE expires_at < ?`, time.Now().UTC().UnixMilli())
+	res, err := s.db.Exec(ctx, `DELETE FROM sessions WHERE expires_at < ?`, time.Now().UTC())
 	if err != nil {
 		return 0, err
 	}

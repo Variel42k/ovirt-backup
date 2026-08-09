@@ -48,7 +48,7 @@ func (s *Store) OpenRemediationPeriod(ctx context.Context, dryRun bool, changedB
 
 	_, err := s.db.Exec(ctx, `INSERT INTO remediation_periods (`+periodColumns+
 		`) VALUES (?,?,?,?,?,?,?,?,?)`,
-		period.ID, dryRun, toMillis(now), nil, changedBy, note, "", "", toMillis(now))
+		period.ID, dryRun, now, nil, changedBy, note, "", "", now)
 	if err != nil {
 		return nil, fmt.Errorf("open remediation period: %w", err)
 	}
@@ -67,7 +67,7 @@ func (s *Store) CloseRemediationPeriod(ctx context.Context, id, archivePath stri
 	}
 	_, err := s.db.Exec(ctx,
 		`UPDATE remediation_periods SET ended_at=?, archive_path=?, summary=? WHERE id=? AND ended_at IS NULL`,
-		time.Now().UTC().UnixMilli(), archivePath, summary, id)
+		time.Now().UTC(), archivePath, summary, id)
 	if err != nil {
 		return fmt.Errorf("close remediation period: %w", err)
 	}
@@ -112,7 +112,7 @@ func (s *Store) RemediationsBetween(ctx context.Context, from time.Time, to *tim
 	}
 	rows, err := s.db.Query(ctx, `SELECT `+remediationColumns+
 		` FROM remediation_records WHERE created_at >= ? AND created_at <= ? ORDER BY created_at`,
-		toMillis(from), toMillis(until))
+		from, until)
 	if err != nil {
 		return nil, fmt.Errorf("list remediations in window: %w", err)
 	}
@@ -132,9 +132,9 @@ func (s *Store) RemediationsBetween(ctx context.Context, from time.Time, to *tim
 func scanRemediationPeriod(row rowScanner) (*model.RemediationPeriod, error) {
 	var (
 		p                   model.RemediationPeriod
-		endedAt             sql.NullInt64
+		endedAt             sql.NullTime
 		summary             string
-		startedAt, createdA int64
+		startedAt, createdA time.Time
 	)
 	err := row.Scan(&p.ID, &p.DryRun, &startedAt, &endedAt, &p.ChangedBy, &p.Note,
 		&p.ArchivePath, &summary, &createdA)
@@ -145,9 +145,9 @@ func scanRemediationPeriod(row rowScanner) (*model.RemediationPeriod, error) {
 		return nil, fmt.Errorf("scan remediation period: %w", err)
 	}
 
-	p.StartedAt = fromMillis(startedAt)
-	p.CreatedAt = fromMillis(createdA)
-	p.EndedAt = fromNullMillis(endedAt)
+	p.StartedAt = utc(startedAt)
+	p.CreatedAt = utc(createdA)
+	p.EndedAt = nullTime(endedAt)
 	if summary != "" {
 		var digest model.RemediationDigest
 		if json.Unmarshal([]byte(summary), &digest) == nil {

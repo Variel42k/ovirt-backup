@@ -42,9 +42,9 @@ func (s *Store) CreateStorageTarget(ctx context.Context, t *model.StorageTarget)
 		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		t.ID, t.Name, string(t.Kind), t.Enabled, t.BasePath, t.Endpoint, t.Region, t.Bucket,
 		t.Prefix, t.AccessKey, secretKey, t.UseSSL, t.PathStyle, t.StorageClass, t.Host, t.Port,
-		t.Username, password, privateKey, t.HostKey, t.RateLimit, toNullMillis(t.LastCheckAt),
-		t.LastCheckOK, t.LastCheckMsg, t.FreeBytes, t.UsedBytes, toMillis(t.CreatedAt),
-		toMillis(t.UpdatedAt))
+		t.Username, password, privateKey, t.HostKey, t.RateLimit, t.LastCheckAt,
+		t.LastCheckOK, t.LastCheckMsg, t.FreeBytes, t.UsedBytes, t.CreatedAt,
+		t.UpdatedAt)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return fmt.Errorf("%w: хранилище %q", ErrConflict, t.Name)
@@ -92,7 +92,7 @@ func (s *Store) UpdateStorageTarget(ctx context.Context, t *model.StorageTarget)
 		WHERE id=?`,
 		t.Name, string(t.Kind), t.Enabled, t.BasePath, t.Endpoint, t.Region, t.Bucket, t.Prefix,
 		t.AccessKey, secretKey, t.UseSSL, t.PathStyle, t.StorageClass, t.Host, t.Port, t.Username,
-		password, privateKey, t.HostKey, t.RateLimit, toMillis(t.UpdatedAt), t.ID)
+		password, privateKey, t.HostKey, t.RateLimit, t.UpdatedAt, t.ID)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return fmt.Errorf("%w: хранилище %q", ErrConflict, t.Name)
@@ -106,7 +106,7 @@ func (s *Store) UpdateStorageTarget(ctx context.Context, t *model.StorageTarget)
 func (s *Store) UpdateStorageTargetHealth(ctx context.Context, id string, ok bool, msg string, free, used int64) error {
 	_, err := s.db.Exec(ctx, `UPDATE storage_targets SET
 		last_check_at=?, last_check_ok=?, last_check_msg=?, free_bytes=?, used_bytes=? WHERE id=?`,
-		time.Now().UTC().UnixMilli(), ok, msg, free, used, id)
+		time.Now().UTC(), ok, msg, free, used, id)
 	return err
 }
 
@@ -186,8 +186,8 @@ func (s *Store) scanStorageTarget(row rowScanner) (*model.StorageTarget, error) 
 		t                               model.StorageTarget
 		kind                            string
 		secretKey, password, privateKey string
-		lastCheck                       sql.NullInt64
-		createdAt, updatedAt            int64
+		lastCheck                       sql.NullTime
+		createdAt, updatedAt            time.Time
 	)
 	err := row.Scan(&t.ID, &t.Name, &kind, &t.Enabled, &t.BasePath, &t.Endpoint, &t.Region,
 		&t.Bucket, &t.Prefix, &t.AccessKey, &secretKey, &t.UseSSL, &t.PathStyle, &t.StorageClass,
@@ -211,8 +211,8 @@ func (s *Store) scanStorageTarget(row rowScanner) (*model.StorageTarget, error) 
 	}
 
 	t.Kind = model.StorageKind(kind)
-	t.LastCheckAt = fromNullMillis(lastCheck)
-	t.CreatedAt = fromMillis(createdAt)
-	t.UpdatedAt = fromMillis(updatedAt)
+	t.LastCheckAt = nullTime(lastCheck)
+	t.CreatedAt = utc(createdAt)
+	t.UpdatedAt = utc(updatedAt)
 	return &t, nil
 }

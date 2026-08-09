@@ -44,8 +44,8 @@ func (s *Store) RaiseAlert(ctx context.Context, a *model.Alert) error {
 			state=CASE WHEN alerts.state='acked' THEN 'acked' ELSE 'firing' END,
 			resolved_at=NULL`,
 		a.ID, a.ServerID, string(a.Scope), a.ObjectID, a.ObjectName, a.Kind, string(a.Severity),
-		a.Message, a.Details, string(a.State), 1, toMillis(a.FirstSeen), toMillis(a.LastSeen),
-		toNullMillis(a.ResolvedAt), a.AckedBy, toNullMillis(a.AckedAt))
+		a.Message, a.Details, string(a.State), 1, a.FirstSeen, a.LastSeen,
+		a.ResolvedAt, a.AckedBy, a.AckedAt)
 	if err != nil {
 		return fmt.Errorf("raise alert: %w", err)
 	}
@@ -57,7 +57,7 @@ func (s *Store) RaiseAlert(ctx context.Context, a *model.Alert) error {
 func (s *Store) ResolveAlert(ctx context.Context, serverID string, scope model.Scope, objectID, kind string) error {
 	_, err := s.db.Exec(ctx, `UPDATE alerts SET state=?, resolved_at=?
 		WHERE server_id=? AND scope=? AND object_id=? AND kind=? AND state<>?`,
-		string(model.AlertResolved), time.Now().UTC().UnixMilli(),
+		string(model.AlertResolved), time.Now().UTC(),
 		serverID, string(scope), objectID, kind, string(model.AlertResolved))
 	if err != nil {
 		return fmt.Errorf("resolve alert: %w", err)
@@ -69,7 +69,7 @@ func (s *Store) ResolveAlert(ctx context.Context, serverID string, scope model.S
 // while the underlying problem is being worked on.
 func (s *Store) AckAlert(ctx context.Context, id, by string) error {
 	res, err := s.db.Exec(ctx, `UPDATE alerts SET state=?, acked_by=?, acked_at=? WHERE id=?`,
-		string(model.AlertAcked), by, time.Now().UTC().UnixMilli(), id)
+		string(model.AlertAcked), by, time.Now().UTC(), id)
 	if err != nil {
 		return fmt.Errorf("ack alert: %w", err)
 	}
@@ -140,8 +140,8 @@ func (s *Store) ListAlerts(ctx context.Context, f AlertFilter) ([]*model.Alert, 
 		var (
 			a                   model.Alert
 			scope, severity, st string
-			resolvedAt, ackedAt sql.NullInt64
-			firstSeen, lastSeen int64
+			resolvedAt, ackedAt sql.NullTime
+			firstSeen, lastSeen time.Time
 		)
 		if err := rows.Scan(&a.ID, &a.ServerID, &scope, &a.ObjectID, &a.ObjectName, &a.Kind,
 			&severity, &a.Message, &a.Details, &st, &a.Count, &firstSeen, &lastSeen,
@@ -151,10 +151,10 @@ func (s *Store) ListAlerts(ctx context.Context, f AlertFilter) ([]*model.Alert, 
 		a.Scope = model.Scope(scope)
 		a.Severity = model.Severity(severity)
 		a.State = model.AlertState(st)
-		a.FirstSeen = fromMillis(firstSeen)
-		a.LastSeen = fromMillis(lastSeen)
-		a.ResolvedAt = fromNullMillis(resolvedAt)
-		a.AckedAt = fromNullMillis(ackedAt)
+		a.FirstSeen = utc(firstSeen)
+		a.LastSeen = utc(lastSeen)
+		a.ResolvedAt = nullTime(resolvedAt)
+		a.AckedAt = nullTime(ackedAt)
 		out = append(out, &a)
 	}
 	return out, rows.Err()
@@ -179,7 +179,7 @@ func (s *Store) CountOpenAlerts(ctx context.Context, serverID string) (open int,
 // PurgeResolvedAlerts drops resolved alerts older than the cutoff.
 func (s *Store) PurgeResolvedAlerts(ctx context.Context, before time.Time) (int64, error) {
 	res, err := s.db.Exec(ctx, `DELETE FROM alerts WHERE state=? AND resolved_at IS NOT NULL AND resolved_at < ?`,
-		string(model.AlertResolved), toMillis(before))
+		string(model.AlertResolved), before)
 	if err != nil {
 		return 0, err
 	}
@@ -201,8 +201,8 @@ func (s *Store) RecordRemediation(ctx context.Context, r *model.RemediationRecor
 	_, err := s.db.Exec(ctx, `INSERT INTO remediation_records (`+remediationColumns+`)
 		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		r.ID, r.ServerID, string(r.Scope), r.ObjectID, r.ObjectName, string(r.Action), r.Reason,
-		string(r.Status), r.Attempt, r.Error, r.TriggeredBy, toMillis(r.CreatedAt),
-		toNullMillis(r.EndedAt))
+		string(r.Status), r.Attempt, r.Error, r.TriggeredBy, r.CreatedAt,
+		r.EndedAt)
 	if err != nil {
 		return fmt.Errorf("record remediation: %w", err)
 	}
@@ -212,7 +212,7 @@ func (s *Store) RecordRemediation(ctx context.Context, r *model.RemediationRecor
 // UpdateRemediation finalises a record once the action has been carried out.
 func (s *Store) UpdateRemediation(ctx context.Context, r *model.RemediationRecord) error {
 	_, err := s.db.Exec(ctx, `UPDATE remediation_records SET status=?, error=?, ended_at=? WHERE id=?`,
-		string(r.Status), r.Error, toNullMillis(r.EndedAt), r.ID)
+		string(r.Status), r.Error, r.EndedAt, r.ID)
 	return err
 }
 
@@ -225,7 +225,7 @@ func (s *Store) CountRecentRemediations(ctx context.Context, serverID, objectID 
 	err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM remediation_records
 		WHERE server_id=? AND object_id=? AND action=? AND created_at >= ?
 		  AND status IN (?, ?, ?, ?)`,
-		serverID, objectID, string(action), toMillis(since),
+		serverID, objectID, string(action), since,
 		string(model.RemRunning), string(model.RemSucceeded), string(model.RemFailed), string(model.RemDryRun)).Scan(&n)
 	if err != nil {
 		return 0, fmt.Errorf("count remediations: %w", err)
@@ -236,18 +236,18 @@ func (s *Store) CountRecentRemediations(ctx context.Context, serverID, objectID 
 // LastRemediationAt returns when an action was last attempted, for cooldown
 // enforcement. A zero time means never.
 func (s *Store) LastRemediationAt(ctx context.Context, serverID, objectID string, action model.RemediationAction) (time.Time, error) {
-	var ms sql.NullInt64
+	var last sql.NullTime
 	err := s.db.QueryRow(ctx, `SELECT MAX(created_at) FROM remediation_records
 		WHERE server_id=? AND object_id=? AND action=? AND status IN (?, ?, ?, ?)`,
 		serverID, objectID, string(action),
-		string(model.RemRunning), string(model.RemSucceeded), string(model.RemFailed), string(model.RemDryRun)).Scan(&ms)
+		string(model.RemRunning), string(model.RemSucceeded), string(model.RemFailed), string(model.RemDryRun)).Scan(&last)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("last remediation: %w", err)
 	}
-	if !ms.Valid {
+	if !last.Valid {
 		return time.Time{}, nil
 	}
-	return fromMillis(ms.Int64), nil
+	return utc(last.Time), nil
 }
 
 // ListRemediations returns the audit trail, newest first.
@@ -286,8 +286,8 @@ func scanRemediationRecord(row rowScanner) (*model.RemediationRecord, error) {
 	var (
 		r                 model.RemediationRecord
 		scope, action, st string
-		createdAt         int64
-		endedAt           sql.NullInt64
+		createdAt         time.Time
+		endedAt           sql.NullTime
 	)
 	if err := row.Scan(&r.ID, &r.ServerID, &scope, &r.ObjectID, &r.ObjectName, &action,
 		&r.Reason, &st, &r.Attempt, &r.Error, &r.TriggeredBy, &createdAt, &endedAt); err != nil {
@@ -299,8 +299,8 @@ func scanRemediationRecord(row rowScanner) (*model.RemediationRecord, error) {
 	r.Scope = model.Scope(scope)
 	r.Action = model.RemediationAction(action)
 	r.Status = model.RemediationStatus(st)
-	r.CreatedAt = fromMillis(createdAt)
-	r.EndedAt = fromNullMillis(endedAt)
+	r.CreatedAt = utc(createdAt)
+	r.EndedAt = nullTime(endedAt)
 	return &r, nil
 }
 
@@ -322,7 +322,7 @@ func (s *Store) AddHealthSamples(ctx context.Context, samples []model.HealthSamp
 			id := sample.At.UnixMicro()*100 + int64(i%100)
 			if _, err := tx.ExecContext(ctx, q, id, sample.ServerID, string(sample.Scope),
 				sample.ObjectID, sample.Status, sample.Healthy, sample.LatencyMS, sample.Detail,
-				toMillis(sample.At)); err != nil {
+				sample.At); err != nil {
 				return err
 			}
 		}
@@ -334,7 +334,7 @@ func (s *Store) AddHealthSamples(ctx context.Context, samples []model.HealthSamp
 func (s *Store) ListHealthSamples(ctx context.Context, serverID string, scope model.Scope, objectID string, since time.Time, limit int) ([]model.HealthSample, error) {
 	query := `SELECT id, server_id, scope, object_id, status, healthy, latency_ms, detail, at
 		FROM health_samples WHERE server_id=? AND scope=? AND at >= ?`
-	args := []any{serverID, string(scope), toMillis(since)}
+	args := []any{serverID, string(scope), since}
 	if objectID != "" {
 		query += ` AND object_id=?`
 		args = append(args, objectID)
@@ -356,14 +356,14 @@ func (s *Store) ListHealthSamples(ctx context.Context, serverID string, scope mo
 		var (
 			h  model.HealthSample
 			sc string
-			at int64
+			at time.Time
 		)
 		if err := rows.Scan(&h.ID, &h.ServerID, &sc, &h.ObjectID, &h.Status, &h.Healthy,
 			&h.LatencyMS, &h.Detail, &at); err != nil {
 			return nil, fmt.Errorf("scan health sample: %w", err)
 		}
 		h.Scope = model.Scope(sc)
-		h.At = fromMillis(at)
+		h.At = utc(at)
 		out = append(out, h)
 	}
 	return out, rows.Err()
@@ -371,7 +371,7 @@ func (s *Store) ListHealthSamples(ctx context.Context, serverID string, scope mo
 
 // PurgeHealthSamples drops observations older than the cutoff.
 func (s *Store) PurgeHealthSamples(ctx context.Context, before time.Time) (int64, error) {
-	res, err := s.db.Exec(ctx, `DELETE FROM health_samples WHERE at < ?`, toMillis(before))
+	res, err := s.db.Exec(ctx, `DELETE FROM health_samples WHERE at < ?`, before)
 	if err != nil {
 		return 0, err
 	}
@@ -388,7 +388,7 @@ func (s *Store) Audit(ctx context.Context, e model.AuditEntry) error {
 	_, err := s.db.Exec(ctx, `INSERT INTO audit_log (id, actor, action, scope, object_id, detail,
 		success, remote_ip, at) VALUES (?,?,?,?,?,?,?,?,?)`,
 		e.At.UnixMicro(), e.Actor, e.Action, string(e.Scope), e.ObjectID, e.Detail, e.Success,
-		e.RemoteIP, toMillis(e.At))
+		e.RemoteIP, e.At)
 	return err
 }
 
@@ -409,14 +409,14 @@ func (s *Store) ListAudit(ctx context.Context, limit int) ([]model.AuditEntry, e
 		var (
 			e  model.AuditEntry
 			sc string
-			at int64
+			at time.Time
 		)
 		if err := rows.Scan(&e.ID, &e.Actor, &e.Action, &sc, &e.ObjectID, &e.Detail, &e.Success,
 			&e.RemoteIP, &at); err != nil {
 			return nil, fmt.Errorf("scan audit: %w", err)
 		}
 		e.Scope = model.Scope(sc)
-		e.At = fromMillis(at)
+		e.At = utc(at)
 		out = append(out, e)
 	}
 	return out, rows.Err()

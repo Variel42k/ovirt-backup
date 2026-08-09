@@ -180,3 +180,36 @@ func Truncate(t *testing.T, db *sql.DB) {
 		t.Fatalf("очистка таблиц: %v", err)
 	}
 }
+
+// Extra заводит дополнительную пустую базу для тестов, которым нужна не та,
+// что общая для пакета: например для проверки обновления со старой схемы,
+// которая начинается с частично применённых миграций.
+func Extra(t *testing.T, suffix string) string {
+	t.Helper()
+
+	admin := os.Getenv(EnvDSN)
+	if admin == "" {
+		t.Fatalf("тесту нужна PostgreSQL, задайте %s (проще всего — ./run test)", EnvDSN)
+	}
+
+	name := databaseName() + "_" + unsafeChars.ReplaceAllString(strings.ToLower(suffix), "_")
+	if len(name) > 63 {
+		name = name[:63]
+	}
+
+	adminCfg, err := pgx.ParseConfig(admin)
+	if err != nil {
+		t.Fatalf("разбор %s: %v", EnvDSN, err)
+	}
+	db := stdlib.OpenDB(*adminCfg)
+	defer func() { _ = db.Close() }()
+
+	ctx := context.Background()
+	if _, err := db.ExecContext(ctx, `DROP DATABASE IF EXISTS "`+name+`" WITH (FORCE)`); err != nil {
+		t.Fatalf("удаление прежней базы %s: %v", name, err)
+	}
+	if _, err := db.ExecContext(ctx, `CREATE DATABASE "`+name+`"`); err != nil {
+		t.Fatalf("создание базы %s: %v", name, err)
+	}
+	return withDatabase(admin, name)
+}

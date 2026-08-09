@@ -38,8 +38,8 @@ func (s *Store) CreateBackupJob(ctx context.Context, j *model.BackupJob) error {
 		encodeJSON(j.ExcludeDiskIDs), string(j.Type), j.FullEvery, string(j.FallbackType),
 		j.Schedule, toSeconds(j.MaxDuration), encodeJSON(j.StorageTargetIDs),
 		encodeJSON(j.Retention), j.Quiesce, string(j.VerifyAfter), j.ExportQcow2, j.Encrypt,
-		j.Priority, j.Concurrency, toNullMillis(j.LastRunAt), string(j.LastStatus),
-		toNullMillis(j.NextRunAt), toMillis(j.CreatedAt), toMillis(j.UpdatedAt))
+		j.Priority, j.Concurrency, j.LastRunAt, string(j.LastStatus),
+		j.NextRunAt, j.CreatedAt, j.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("insert backup job: %w", err)
 	}
@@ -62,7 +62,7 @@ func (s *Store) UpdateBackupJob(ctx context.Context, j *model.BackupJob) error {
 		encodeJSON(j.Tags), encodeJSON(j.ExcludeVMIDs), encodeJSON(j.ExcludeDiskIDs),
 		string(j.Type), j.FullEvery, string(j.FallbackType), j.Schedule, toSeconds(j.MaxDuration),
 		encodeJSON(j.StorageTargetIDs), encodeJSON(j.Retention), j.Quiesce, string(j.VerifyAfter),
-		j.ExportQcow2, j.Encrypt, j.Priority, j.Concurrency, toMillis(j.UpdatedAt), j.ID)
+		j.ExportQcow2, j.Encrypt, j.Priority, j.Concurrency, j.UpdatedAt, j.ID)
 	if err != nil {
 		return fmt.Errorf("update backup job: %w", err)
 	}
@@ -77,7 +77,7 @@ func (s *Store) UpdateBackupJob(ctx context.Context, j *model.BackupJob) error {
 func (s *Store) SetJobSchedulingState(ctx context.Context, jobID string, lastRun *time.Time, status model.RunStatus, nextRun *time.Time) error {
 	_, err := s.db.Exec(ctx, `UPDATE backup_jobs SET last_run_at=?, last_status=?, next_run_at=?, updated_at=?
 		WHERE id=?`,
-		toNullMillis(lastRun), string(status), toNullMillis(nextRun), time.Now().UTC().UnixMilli(), jobID)
+		lastRun, string(status), nextRun, time.Now().UTC(), jobID)
 	return err
 }
 
@@ -133,8 +133,8 @@ func scanJob(row rowScanner) (*model.BackupJob, error) {
 		targets, retention                                string
 		typ, fallback, verifyAfter, lastStatus            string
 		maxDurationSec                                    int64
-		lastRun, nextRun                                  sql.NullInt64
-		createdAt, updatedAt                              int64
+		lastRun, nextRun                                  sql.NullTime
+		createdAt, updatedAt                              time.Time
 	)
 	err := row.Scan(&j.ID, &j.Name, &j.Enabled, &j.ServerID, &vmIDs, &j.VMNameRegex, &clusterIDs,
 		&tags, &excludeVMs, &excludeDisks, &typ, &j.FullEvery, &fallback, &j.Schedule,
@@ -160,9 +160,9 @@ func scanJob(row rowScanner) (*model.BackupJob, error) {
 	j.VerifyAfter = model.VerifyMode(verifyAfter)
 	j.LastStatus = model.RunStatus(lastStatus)
 	j.MaxDuration = fromSeconds(maxDurationSec)
-	j.LastRunAt = fromNullMillis(lastRun)
-	j.NextRunAt = fromNullMillis(nextRun)
-	j.CreatedAt = fromMillis(createdAt)
-	j.UpdatedAt = fromMillis(updatedAt)
+	j.LastRunAt = nullTime(lastRun)
+	j.NextRunAt = nullTime(nextRun)
+	j.CreatedAt = utc(createdAt)
+	j.UpdatedAt = utc(updatedAt)
 	return &j, nil
 }

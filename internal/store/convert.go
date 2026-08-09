@@ -6,44 +6,33 @@ import (
 	"time"
 )
 
-// The schema stores instants as Unix milliseconds and durations as seconds so
-// that SQLite and PostgreSQL agree on representation. These helpers are the
-// single place that conversion happens.
+// Моменты времени хранятся в TIMESTAMPTZ и передаются драйверу как time.Time —
+// конвертировать нечего. Длительности остаются целыми секундами: INTERVAL
+// потребовал бы собственного типа при сканировании ради значения, которое
+// всегда используется как time.Duration.
 
-func toMillis(t time.Time) int64 {
-	if t.IsZero() {
-		return 0
-	}
-	return t.UTC().UnixMilli()
-}
-
-func fromMillis(ms int64) time.Time {
-	if ms == 0 {
-		return time.Time{}
-	}
-	return time.UnixMilli(ms).UTC()
-}
-
-func toNullMillis(t *time.Time) sql.NullInt64 {
-	if t == nil || t.IsZero() {
-		return sql.NullInt64{}
-	}
-	return sql.NullInt64{Int64: t.UTC().UnixMilli(), Valid: true}
-}
-
-func fromNullMillis(v sql.NullInt64) *time.Time {
-	if !v.Valid || v.Int64 == 0 {
+// nullTime разворачивает NULL в отсутствующее время.
+func nullTime(v sql.NullTime) *time.Time {
+	if !v.Valid {
 		return nil
 	}
-	t := time.UnixMilli(v.Int64).UTC()
+	t := v.Time.UTC()
 	return &t
 }
+
+// utc приводит прочитанное время к UTC.
+//
+// TIMESTAMPTZ хранит момент, а не пояс, но драйвер отдаёт его в поясе
+// соединения. Без приведения одно и то же значение выглядело бы по-разному
+// в зависимости от того, где запущен процесс, и сравнения в тестах
+// разъезжались бы на смене летнего времени.
+func utc(t time.Time) time.Time { return t.UTC() }
 
 func toSeconds(d time.Duration) int64 { return int64(d / time.Second) }
 
 func fromSeconds(s int64) time.Duration { return time.Duration(s) * time.Second }
 
-// encodeJSON marshals v for a TEXT column, never returning an error: the values
+// encodeJSON marshals v for a JSON column, never returning an error: the values
 // involved are plain slices and structs, and a storage layer that can fail on
 // serialising a []string is worse than one that stores an empty list.
 func encodeJSON(v any) string {
@@ -54,7 +43,7 @@ func encodeJSON(v any) string {
 	return string(b)
 }
 
-// decodeJSON unmarshals a TEXT column, tolerating empty and legacy-null values.
+// decodeJSON unmarshals a JSON column, tolerating empty and legacy-null values.
 func decodeJSON(s string, dst any) {
 	if s == "" || s == "null" {
 		return

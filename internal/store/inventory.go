@@ -38,7 +38,7 @@ func (s *Store) SyncClusters(ctx context.Context, serverID string, items []*mode
 				data_center=excluded.data_center, sync_gen=excluded.sync_gen, seen_at=excluded.seen_at`)
 		for _, c := range items {
 			if _, err := tx.ExecContext(ctx, q, c.ID, serverID, c.Name, c.Description, c.CPUType,
-				c.DataCenter, gen, toMillis(at)); err != nil {
+				c.DataCenter, gen, at); err != nil {
 				return err
 			}
 		}
@@ -71,7 +71,7 @@ func (s *Store) SyncHosts(ctx context.Context, serverID string, items []*model.H
 		for _, h := range items {
 			if _, err := tx.ExecContext(ctx, q, h.ID, serverID, h.Name, h.Address, h.ClusterID,
 				h.ClusterName, h.Status, h.SPM, h.ActiveVMs, h.CPUCores, h.CPUSockets, h.MemoryBytes,
-				h.MemoryUsed, h.KSMEnabled, h.OSVersion, h.PowerMgmtOn, 0, gen, toMillis(at)); err != nil {
+				h.MemoryUsed, h.KSMEnabled, h.OSVersion, h.PowerMgmtOn, 0, gen, at); err != nil {
 				return err
 			}
 		}
@@ -112,7 +112,7 @@ func (s *Store) SyncVMs(ctx context.Context, serverID string, items []*model.VM)
 			if _, err := tx.ExecContext(ctx, q, v.ID, serverID, v.Name, v.Description, v.ClusterID,
 				v.ClusterName, v.HostID, v.HostName, v.Status, v.PauseStatus, v.MemoryBytes,
 				v.CPUCores, v.OSType, v.HAEnabled, v.GuestAgent, encodeJSON(v.IPAddresses),
-				v.DiskCount, string(desired), false, 0, gen, toMillis(at)); err != nil {
+				v.DiskCount, string(desired), false, 0, gen, at); err != nil {
 				return err
 			}
 		}
@@ -147,7 +147,7 @@ func (s *Store) SyncDisks(ctx context.Context, serverID string, items []*model.D
 			if _, err := tx.ExecContext(ctx, q, d.ID, serverID, d.Alias, d.Description,
 				encodeJSON(d.VMIDs), d.ProvisionedSize, d.ActualSize, d.Format, d.Sparse,
 				d.Shareable, d.Bootable, d.BackupMode, d.Status, d.StorageDomainID, d.StorageDomain,
-				d.StorageType, d.ContentType, gen, toMillis(at)); err != nil {
+				d.StorageType, d.ContentType, gen, at); err != nil {
 				return err
 			}
 		}
@@ -176,7 +176,7 @@ func (s *Store) SyncStorageDomains(ctx context.Context, serverID string, items [
 				seen_at=excluded.seen_at`)
 		for _, d := range items {
 			if _, err := tx.ExecContext(ctx, q, d.ID, serverID, d.Name, d.Type, d.Storage, d.Status,
-				d.Master, d.AvailableSize, d.UsedSize, d.CommittedSize, gen, toMillis(at)); err != nil {
+				d.Master, d.AvailableSize, d.UsedSize, d.CommittedSize, gen, at); err != nil {
 				return err
 			}
 		}
@@ -259,13 +259,13 @@ func (s *Store) ListHosts(ctx context.Context, serverID string) ([]*model.Host, 
 	var out []*model.Host
 	for rows.Next() {
 		var h model.Host
-		var seen int64
+		var seen time.Time
 		if err := rows.Scan(&h.ID, &h.ServerID, &h.Name, &h.Address, &h.ClusterID, &h.ClusterName,
 			&h.Status, &h.SPM, &h.ActiveVMs, &h.CPUCores, &h.CPUSockets, &h.MemoryBytes,
 			&h.MemoryUsed, &h.KSMEnabled, &h.OSVersion, &h.PowerMgmtOn, &h.FailureCount, &seen); err != nil {
 			return nil, fmt.Errorf("scan host: %w", err)
 		}
-		h.SeenAt = fromMillis(seen)
+		h.SeenAt = utc(seen)
 		out = append(out, &h)
 	}
 	return out, rows.Err()
@@ -314,7 +314,7 @@ func scanVM(row rowScanner) (*model.VM, error) {
 		vm      model.VM
 		ips     string
 		desired string
-		seen    int64
+		seen    time.Time
 	)
 	err := row.Scan(&vm.ID, &vm.ServerID, &vm.Name, &vm.Description, &vm.ClusterID, &vm.ClusterName,
 		&vm.HostID, &vm.HostName, &vm.Status, &vm.PauseStatus, &vm.MemoryBytes, &vm.CPUCores,
@@ -328,7 +328,7 @@ func scanVM(row rowScanner) (*model.VM, error) {
 	}
 	vm.IPAddresses = decodeStrings(ips)
 	vm.DesiredState = model.VMDesiredState(desired)
-	vm.SeenAt = fromMillis(seen)
+	vm.SeenAt = utc(seen)
 	return &vm, nil
 }
 
@@ -391,7 +391,7 @@ func scanDisk(row rowScanner) (*model.Disk, error) {
 	var (
 		d     model.Disk
 		vmIDs string
-		seen  int64
+		seen  time.Time
 	)
 	err := row.Scan(&d.ID, &d.ServerID, &d.Alias, &d.Description, &vmIDs, &d.ProvisionedSize,
 		&d.ActualSize, &d.Format, &d.Sparse, &d.Shareable, &d.Bootable, &d.BackupMode, &d.Status,
@@ -403,7 +403,7 @@ func scanDisk(row rowScanner) (*model.Disk, error) {
 		return nil, fmt.Errorf("scan disk: %w", err)
 	}
 	d.VMIDs = decodeStrings(vmIDs)
-	d.SeenAt = fromMillis(seen)
+	d.SeenAt = utc(seen)
 	return &d, nil
 }
 
@@ -427,12 +427,12 @@ func (s *Store) ListStorageDomains(ctx context.Context, serverID string) ([]*mod
 	var out []*model.StorageDomain
 	for rows.Next() {
 		var d model.StorageDomain
-		var seen int64
+		var seen time.Time
 		if err := rows.Scan(&d.ID, &d.ServerID, &d.Name, &d.Type, &d.Storage, &d.Status, &d.Master,
 			&d.AvailableSize, &d.UsedSize, &d.CommittedSize, &seen); err != nil {
 			return nil, fmt.Errorf("scan storage domain: %w", err)
 		}
-		d.SeenAt = fromMillis(seen)
+		d.SeenAt = utc(seen)
 		out = append(out, &d)
 	}
 	return out, rows.Err()
@@ -457,12 +457,12 @@ func (s *Store) ListClusters(ctx context.Context, serverID string) ([]*model.Clu
 	var out []*model.Cluster
 	for rows.Next() {
 		var c model.Cluster
-		var seen int64
+		var seen time.Time
 		if err := rows.Scan(&c.ID, &c.ServerID, &c.Name, &c.Description, &c.CPUType, &c.DataCenter,
 			&seen); err != nil {
 			return nil, fmt.Errorf("scan cluster: %w", err)
 		}
-		c.SeenAt = fromMillis(seen)
+		c.SeenAt = utc(seen)
 		out = append(out, &c)
 	}
 	return out, rows.Err()

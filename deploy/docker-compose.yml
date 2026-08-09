@@ -34,11 +34,21 @@ services:
       # http://localhost означало бы куку без Secure в боевой установке за
       # обратным прокси — ровно там, где она нужнее всего.
       JHV_SERVER_EXTERNAL_URL: "${JHV_EXTERNAL_URL:?задайте в deploy/.env, например https://virt.example.org}"
-      # Подключение одной строкой. Имя хоста postgres — это имя службы ниже.
-      # Форма host=… принимается наравне с URL и удобнее, когда в пароле есть
-      # / + @: в URL их пришлось бы percent-кодировать, а openssl rand -base64
-      # выдаёт как раз такие символы.
-      JHV_DATABASE_URL: "${JHV_DATABASE_URL:-host=postgres port=5432 user=${POSTGRES_USER:?задайте в deploy/.env} password=${POSTGRES_PASSWORD:?задайте в deploy/.env, сгенерируйте openssl rand -base64 24} dbname=${POSTGRES_DB:?задайте в deploy/.env} sslmode=disable}"
+      # Подключение к базе задаётся раздельными переменными, а не собранной
+      # здесь строкой: сборка требовала вложенной подстановки вида
+      # ${A:-…${B:?…}…}, которую понимает docker compose, но не всякая его
+      # замена — а на RHEL это обычно podman. Раздельные переменные читает
+      # любая реализация, и пароль в них не нуждается в экранировании.
+      #
+      # Имя хоста postgres — это имя службы ниже.
+      JHV_DATABASE_POSTGRES_HOST: "postgres"
+      JHV_DATABASE_POSTGRES_PORT: "5432"
+      JHV_DATABASE_POSTGRES_USER: "${POSTGRES_USER:?задайте в deploy/.env}"
+      JHV_DATABASE_POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?задайте в deploy/.env, сгенерируйте openssl rand -base64 24}"
+      JHV_DATABASE_POSTGRES_DATABASE: "${POSTGRES_DB:?задайте в deploy/.env}"
+      JHV_DATABASE_POSTGRES_SSLMODE: "disable"
+      # Внешняя база вместо поднятой рядом: если задан, перекрывает всё выше.
+      JHV_DATABASE_URL: "${JHV_DATABASE_URL:-}"
       JHV_SECRETS_KEY_FILE: "/app/data/secret.key"
       JHV_BACKUP_TEMP_DIR: "/app/data/tmp"
       # Каталоги, куда разрешено восстанавливать образы. Путь приходит от

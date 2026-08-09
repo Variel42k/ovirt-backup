@@ -168,6 +168,13 @@ cd deploy && docker compose logs justhpc-virt-manager | grep -A6 "УЧЁТНАЯ
 cd deploy && docker compose run --rm justhpc-virt-manager -reset-password admin
 ```
 
+> **На RHEL, Alma и Rocky `docker` — это обычно podman без провайдера
+> compose,** и команда выше упадёт с «looking up compose provider failed».
+> Это типичный хост под oVirt, поэтому случай разобран отдельно:
+> [DEPLOY.md, п. 2.10](docs/DEPLOY.md#210-rhel-alma-rocky-там-podman-а-не-docker).
+> Короткий ответ: там проще ставить бинарём под systemd — контейнеры не нужны
+> вовсе.
+
 Полная процедура с TLS, сохранностью ключа шифрования и приёмочным прогоном —
 **[DEPLOY.md](docs/DEPLOY.md)**.
 

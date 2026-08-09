@@ -241,9 +241,74 @@ JHV_LOG_FILE=/app/logs/jhvirt.log
 
 ---
 
+## 2.10. RHEL, Alma, Rocky: там podman, а не Docker
+
+На RHEL-семействе — а это и есть типичный хост под oVirt и РЕД Виртуализацию —
+`docker` обычно оказывается podman в режиме эмуляции, причём **без провайдера
+compose**. Выглядит это так:
+
+```
+Emulate Docker CLI using podman.
+Error: looking up compose provider failed
+        * exec: "docker-compose": executable file not found in $PATH
+        * exec: "podman-compose": executable file not found in $PATH
+```
+
+Сам podman установлен и работает — не хватает только того, что читает
+`docker-compose.yml`. Три пути, по убыванию уместности на RHEL.
+
+### Без контейнеров вообще — п. 3
+
+**Для RHEL это самый короткий путь.** Один файл `.run`, системный PostgreSQL из
+репозитория дистрибутива, служба под systemd. Ни podman, ни compose не нужны:
+
+```bash
+dnf install -y postgresql-server && postgresql-setup --initdb && systemctl enable --now postgresql
+```
+
+Дальше — [п. 3](#3-бинарь-и-systemd). Компоновка та же, что и в контейнере, а
+обновление и откат делает тот же `.run`.
+
+### Плагин docker compose к podman
+
+Тот самый бинарь, для которого написан наш файл, — его podman подхватывает
+как провайдера:
+
+```bash
+mkdir -p /usr/local/lib/docker/cli-plugins
+```
+
+```bash
+curl -sSL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64 -o /usr/local/lib/docker/cli-plugins/docker-compose && chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+```
+
+Понадобится сокет podman, если он ещё не поднят:
+
+```bash
+systemctl enable --now podman.socket
+```
+
+### podman-compose
+
+```bash
+dnf install -y podman-compose
+```
+
+Отдельная реализация на Python, а не тот же бинарь. Наш файл писался под неё
+осознанно: вложенных подстановок вида `${A:-…${B:?…}…}` в нём нет, параметры
+базы передаются раздельными переменными именно поэтому. Но `depends_on` с
+`condition: service_healthy` поддерживается не во всех версиях — если служба
+стартует раньше базы, она перезапустится и поднимется со второй попытки,
+`restart: unless-stopped` это закрывает.
+
+Проверить, что вариант рабочий, стоит до боевой установки: у нас он не
+проверялся, в отличие от Docker Compose и пути через systemd.
+
+---
+
 ## 3. Бинарь и systemd
 
-Когда Docker не вариант.
+Когда Docker не вариант — и на RHEL это обычная ситуация, см. п. 2.10.
 
 ### 3.1. Соберите комплект
 

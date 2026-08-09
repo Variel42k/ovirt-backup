@@ -298,15 +298,27 @@ Error: looking up compose provider failed
 dnf install -y podman-compose
 ```
 
-Дальше всё как обычно, только команда другая:
+Дальше всё как обычно, только команда запуска другая:
 
 ```bash
-cd deploy && cp .env.example .env && chmod 600 .env
+cd deploy && ./setup-env.sh
 ```
 
 ```bash
 podman-compose up -d
 ```
+
+`setup-env.sh` готовит `.env`: генерирует пароль базы, спрашивает внешний адрес
+и ставит права `0600`. Копировать `.env.example` руками недостаточно — пароль
+в нём пуст, а пустое значение compose считает таким же отсутствующим, как
+незаданное, и отказывается запускаться. В podman-compose этот отказ выглядит
+как трейсбек Python, в конце которого:
+
+```
+RuntimeError: задайте в deploy/.env, сгенерируйте openssl rand -base64 24
+```
+
+Это не сбой podman, а незаполненный пароль.
 
 Если привычнее `docker compose`, podman умеет быть его провайдером — поставьте
 плагин и включите сокет:

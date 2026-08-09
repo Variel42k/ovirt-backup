@@ -177,11 +177,45 @@ cmd_test_db() {
     esac
 }
 
+# Кэши Go для контейнерных прогонов.
+#
+# Именованные тома, а не каталоги на хосте: под Windows проброс каталога идёт
+# через слой трансляции, и запись сотен тысяч мелких файлов в него медленнее
+# самой сборки. Без кэшей каждый прогон заново скачивал зависимости и
+# компилировал всё с нуля — около двух минут на команду, которую после этого
+# перестают запускать.
+RACE_MOD_CACHE="jhvirt-gomod"
+RACE_BUILD_CACHE="jhvirt-gobuild"
+
+# Образ должен совпадать по версии Go с go.mod: детектор гонок собирает проект
+# заново, и расхождение версий проявилось бы как «локально проходит, а в
+# контейнере нет».
+RACE_IMAGE="golang:1.26"
+
+# host_to_container переписывает адрес базы так, чтобы он был виден изнутри
+# контейнера: localhost там указывает на сам контейнер.
+#
+# Обе формы строки подключения: libpq (host=…) и URL (…@localhost:5432/…).
+# Первой хватило бы — её печатает ./run test-db, — но JHV_TEST_POSTGRES_DSN
+# задаёт человек и вполне может дать URL, а молчаливый отказ подключиться
+# изнутри контейнера объяснить потом трудно.
+host_to_container() {
+    printf '%s' "$1" |
+        sed -e 's/host=localhost/host=host.docker.internal/g' \
+            -e 's/host=127[.]0[.]0[.]1/host=host.docker.internal/g' \
+            -e 's/@localhost:/@host.docker.internal:/g' \
+            -e 's/@127[.]0[.]0[.]1:/@host.docker.internal:/g'
+}
+
 # Детектор гонок в контейнере.
 #
-# Ему нужен cgo и компилятор C, которых на машине разработчика под Windows
-# обычно нет. Образ golang их приносит с собой, поэтому прогон доступен всем,
-# а не только тем, кто настроил toolchain.
+# Ему нужны CGO_ENABLED=1 и компилятор C, которых на машине разработчика под
+# Windows обычно нет. Образ golang приносит их с собой, поэтому прогон доступен
+# всем, а не только тем, кто настроил toolchain.
+#
+# Аргументы docker собираются через set --, а не пишутся одной строкой с
+# переносами: перенос строки в этом файле переживает не всякий способ его
+# правки, и однажды уже схлопнулся в неразборчивую строку на сто символов.
 cmd_race() {
     need docker "нужен Docker: детектору гонок нужен компилятор C"
 
@@ -191,12 +225,17 @@ cmd_race() {
         DSN="$(start_test_pg)" || die "не удалось поднять базу"
         say "    $TEST_PG_NAME на порту $TEST_PG_PORT"
     fi
-    # Внутри контейнера localhost — это он сам, поэтому база доступна через
-    # host-gateway, а не через localhost из строки подключения снаружи.
-    DSN_IN="$(printf '%s' "$DSN" | sed 's/host=localhost/host=host.docker.internal/')"
 
-    step "тесты с детектором гонок (в контейнере)"
-    docker run --rm         -v "$(pwd -W 2>/dev/null || pwd):/src" -w /src         -e JHV_TEST_POSTGRES_DSN="$DSN_IN"         --add-host=host.docker.internal:host-gateway         golang:1.26 go test -race -count=1 ./...
+    set -- docker run --rm
+    set -- "$@" -v "$(pwd -W 2>/dev/null || pwd):/src" -w /src
+    set -- "$@" -v "$RACE_MOD_CACHE:/go/pkg/mod"
+    set -- "$@" -v "$RACE_BUILD_CACHE:/root/.cache/go-build"
+    set -- "$@" -e "JHV_TEST_POSTGRES_DSN=$(host_to_container "$DSN")"
+    set -- "$@" --add-host=host.docker.internal:host-gateway
+    set -- "$@" "$RACE_IMAGE" go test -race -count=1 ./...
+
+    step "тесты с детектором гонок ($RACE_IMAGE)"
+    "$@"
 }
 
 cmd_check() {
@@ -246,6 +285,14 @@ cmd_clean_all() {
     cmd_clean
     rm -rf web/node_modules
     say "удалено также: web/node_modules"
+
+    # Тома с кэшами Go для ./run race и база для тестов: без этой уборки они
+    # остаются в docker навсегда, а найти их потом можно только зная имена.
+    if command -v docker >/dev/null 2>&1; then
+        docker volume rm "$RACE_MOD_CACHE" "$RACE_BUILD_CACHE" >/dev/null 2>&1 || true
+        docker rm -f "$TEST_PG_NAME" >/dev/null 2>&1 || true
+        say "удалено также: тома кэшей Go и контейнер тестовой базы"
+    fi
 }
 
 cmd_build() {

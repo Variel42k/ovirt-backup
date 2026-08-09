@@ -18,7 +18,10 @@
 
 set -eu
 
-cd "$(dirname "$0")"
+# Абсолютный путь берётся до смены каталога: после cd относительный $0 уже не
+# разрешается, и --help переставал работать при запуске как deploy/setup-env.sh.
+SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+cd "$(dirname "$SELF")"
 
 die() { printf 'ошибка: %s\n' "$*" >&2; exit 1; }
 say() { printf '%s\n' "$*"; }
@@ -28,7 +31,7 @@ EXTERNAL=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --force) FORCE=1; shift ;;
-        -h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,20p' "$SELF" | sed 's/^# \{0,1\}//'; exit 0 ;;
         -*) die "неизвестный ключ: $1" ;;
         *) EXTERNAL="$1"; shift ;;
     esac

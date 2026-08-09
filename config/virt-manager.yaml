@@ -3,7 +3,7 @@
 # Любой параметр переопределяется переменной окружения с префиксом JHV_,
 # где точки в пути ключа заменены на подчёркивания. Примеры:
 #   JHV_SERVER_PORT=9443
-#   JHV_DATABASE_DRIVER=postgres
+#   JHV_DATABASE_URL=postgres://…
 #   JHV_DATABASE_POSTGRES_PASSWORD=secret
 #   JHV_MONITOR_REMEDIATION_DRY_RUN=false
 
@@ -36,21 +36,17 @@ auth:
   # Статические токены для интеграций: заголовок `Authorization: Bearer <token>`.
   api_tokens: []
 
+# СУБД — PostgreSQL, другой сервис не знает.
 database:
-  # Самый простой способ: одна строка задаёт и СУБД, и подключение.
+  # Подключение одной строкой, в любой из двух форм:
   #   url: "postgres://jhvirt:пароль@localhost:5432/jhvirt?sslmode=require"
-  #   url: "sqlite:///var/lib/jhvirt/jhvirt.db"
-  # Задана — driver и блоки sqlite/postgres ниже не используются. Так драйвер
-  # и параметры подключения не могут разойтись.
+  #   url: "host=localhost port=5432 user=jhvirt password=пароль dbname=jhvirt sslmode=require"
+  # Вторая удобнее, когда в пароле есть / + @ или не-ASCII: в URL их пришлось
+  # бы percent-кодировать. Задана — блок postgres ниже не используется.
   url: ""
 
-  # Раздельный способ (работает как раньше, если url пуст).
-  # sqlite | postgres
-  driver: "sqlite"
   run_migrations_on_startup: true
-  sqlite:
-    path: "./data/jhvirt.db"
-    busy_timeout: 10s
+  # Раздельный способ, если url пуст.
   postgres:
     host: "localhost"
     port: 5432

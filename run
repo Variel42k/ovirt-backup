@@ -369,6 +369,7 @@ cmd_build() {
     # на сервере не нужны ни Go, ни Node, ни исходники.
     cp deploy/docker-compose.yml "$OUT/compose/"
     cp deploy/.env.example "$OUT/compose/"
+    cp deploy/setup-env.sh "$OUT/compose/"
     # Dockerfile кладётся в корень комплекта, а не в compose/, чтобы пути
     # сборки совпадали с репозиторием: из compose/ контекст «..» — это корень
     # комплекта, ровно как из deploy/ это корень репозитория. Иначе
@@ -394,8 +395,10 @@ cmd_build() {
     step "упаковка"
     (
         cd dist
-        tar cf "$NAME.tar" --exclude="$NAME/bin" --exclude="$NAME/install.sh" "$NAME"
-        tar rf "$NAME.tar" --mode=0755 "$NAME/bin" "$NAME/install.sh"
+        # Одной строкой намеренно: перенос строки здесь уже дважды не переживал
+        # правку файла и превращался в аргумент tar с именем «n».
+        tar cf "$NAME.tar" --exclude="$NAME/bin" --exclude="$NAME/install.sh" --exclude="$NAME/compose/setup-env.sh" "$NAME"
+        tar rf "$NAME.tar" --mode=0755 "$NAME/bin" "$NAME/install.sh" "$NAME/compose/setup-env.sh"
         rm -f "$NAME.tar.gz"
         gzip -9 "$NAME.tar"
     )

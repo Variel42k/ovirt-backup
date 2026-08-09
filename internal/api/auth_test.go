@@ -2,37 +2,19 @@ package api
 
 import (
 	"context"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
 
-	"adveng/jh_virt/internal/config"
 	"adveng/jh_virt/internal/model"
-	"adveng/jh_virt/internal/secret"
 	"adveng/jh_virt/internal/store"
+	"adveng/jh_virt/internal/store/storetest"
 )
 
 func testStore(t *testing.T) *store.Store {
 	t.Helper()
-	dir := t.TempDir()
-	db, err := store.Open(context.Background(), config.DatabaseConfig{
-		Driver: "sqlite",
-		SQLite: config.SQLiteConfig{Path: filepath.Join(dir, "test.db"), BusyTimeout: 5 * time.Second},
-	})
-	if err != nil {
-		t.Fatalf("открытие базы: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	if err := db.Migrate(context.Background()); err != nil {
-		t.Fatalf("миграции: %v", err)
-	}
-	cipher, err := secret.NewFromConfig(config.SecretsConfig{KeyFile: filepath.Join(dir, "key")})
-	if err != nil {
-		t.Fatalf("ключ: %v", err)
-	}
-	return store.New(db, cipher)
+	return storetest.New(t)
 }
 
 // The password printed at first start must be the one that logs in. It sounds

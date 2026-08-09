@@ -37,6 +37,14 @@ auth:
   api_tokens: []
 
 database:
+  # Самый простой способ: одна строка задаёт и СУБД, и подключение.
+  #   url: "postgres://jhvirt:пароль@localhost:5432/jhvirt?sslmode=require"
+  #   url: "sqlite:///var/lib/jhvirt/jhvirt.db"
+  # Задана — driver и блоки sqlite/postgres ниже не используются. Так драйвер
+  # и параметры подключения не могут разойтись.
+  url: ""
+
+  # Раздельный способ (работает как раньше, если url пуст).
   # sqlite | postgres
   driver: "sqlite"
   run_migrations_on_startup: true

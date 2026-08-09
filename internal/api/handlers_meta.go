@@ -108,7 +108,7 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 	resp.Capabilities.Encryption = true
 	resp.Capabilities.Compression = s.cfg.Backup.Compression
 	resp.Capabilities.ChunkSize = s.cfg.Backup.ChunkSize
-	resp.Capabilities.DatabaseType = s.cfg.Database.Driver
+	resp.Capabilities.DatabaseType = "postgres"
 	resp.Capabilities.SchedulerTZ = s.cfg.Scheduler.Timezone
 	resp.Capabilities.RemediationOn = s.cfg.Monitor.Remediation.Enabled
 	// Живое значение, а не настройка: режим переключается на ходу, и

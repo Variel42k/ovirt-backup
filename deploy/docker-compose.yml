@@ -1,11 +1,17 @@
 # Развёртывание justhpc-virt-manager в Docker.
 #
-#   docker compose up -d                       — только сервис (SQLite, локальные бэкапы)
-#   docker compose --profile s3 up -d          — плюс MinIO для проверки сценариев с S3
-#   JHV_DB_DRIVER=postgres docker compose --profile postgres up -d   — на PostgreSQL
+#   docker compose up -d                 — сервис на SQLite, локальные копии
+#   docker compose --profile s3 up -d    — плюс MinIO для проверки сценариев с S3
 #
-# Профиль поднимает базу, но выбор СУБД делает JHV_DB_DRIVER: без него сервис
-# останется на SQLite, а поднятый PostgreSQL будет простаивать.
+# На PostgreSQL — профиль поднимает базу, JHV_DATABASE_URL переключает на неё
+# сервис. Обе строки в deploy/.env:
+#
+#   POSTGRES_PASSWORD=…
+#   JHV_DATABASE_URL=postgres://jhvirt:…@postgres:5432/jhvirt?sslmode=disable
+#
+#   docker compose --profile postgres up -d
+#
+# Куда подключились — видно в журнале при старте, отдельным полем «подключение».
 #
 # Пароль первого администратора выводится в журнал при первом запуске:
 #   docker compose logs justhpc-virt-manager | grep -i "УЧЁТНАЯ ЗАПИСЬ"
@@ -27,15 +33,16 @@ services:
       JHV_SERVER_ADDR: "0.0.0.0"
       JHV_SERVER_PORT: "8080"
       JHV_SERVER_EXTERNAL_URL: "${JHV_EXTERNAL_URL:-http://localhost:8080}"
-      JHV_DATABASE_DRIVER: "${JHV_DB_DRIVER:-sqlite}"
-      JHV_DATABASE_SQLITE_PATH: "/app/data/jhvirt.db"
-      # Читаются только при JHV_DB_DRIVER=postgres; имя хоста — имя сервиса ниже.
-      JHV_DATABASE_POSTGRES_HOST: "${POSTGRES_HOST:-postgres}"
-      JHV_DATABASE_POSTGRES_PORT: "${POSTGRES_PORT:-5432}"
-      JHV_DATABASE_POSTGRES_USER: "${POSTGRES_USER:-jhvirt}"
-      JHV_DATABASE_POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-jhvirt}"
-      JHV_DATABASE_POSTGRES_DATABASE: "${POSTGRES_DB:-jhvirt}"
-      JHV_DATABASE_POSTGRES_SSLMODE: "${POSTGRES_SSLMODE:-disable}"
+      # СУБД задаётся одной строкой: она же выбирает драйвер. Раньше драйвер и
+      # параметры подключения жили в разных переменных и могли разойтись —
+      # забыть про driver значило тихо остаться на SQLite при поднятом
+      # PostgreSQL. Здесь такого состояния нет.
+      #
+      #   sqlite:///app/data/jhvirt.db                       (по умолчанию)
+      #   postgres://jhvirt:пароль@postgres:5432/jhvirt?sslmode=disable
+      #
+      # Имя хоста postgres — это имя службы ниже.
+      JHV_DATABASE_URL: "${JHV_DATABASE_URL:-sqlite:///app/data/jhvirt.db}"
       JHV_SECRETS_KEY_FILE: "/app/data/secret.key"
       JHV_BACKUP_TEMP_DIR: "/app/data/tmp"
       # Каталоги, куда разрешено восстанавливать образы. Путь приходит от

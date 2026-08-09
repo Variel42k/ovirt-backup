@@ -48,8 +48,8 @@ justhpc-virt-manager — команды разработки и сборки
   ./run dev             запустить сервер (:8080) с конфигурацией по умолчанию
   ./run web             запустить интерфейс в режиме разработки (:9000)
 
-  ./run test [-race]    тесты Go (SQLite)
-  ./run test-pg [dsn]   те же тесты хранилища против PostgreSQL
+  ./run test [-race]    тесты Go (базу для них поднимает сам)
+  ./run test-db …       start|stop|status временной базы для тестов
   ./run check           формат, go vet, тесты, проверка типов интерфейса
   ./run fmt             отформатировать код
 
@@ -93,8 +93,56 @@ cmd_vet() {
     say "замечаний нет"
 }
 
+# Имя и порт временной базы для тестов. Порт нестандартный: 5432 на машине
+# разработчика обычно уже занят своей PostgreSQL, и тесты не должны ни
+# конфликтовать с ней, ни тем более в неё писать.
+TEST_PG_NAME="jhvirt-test-pg"
+TEST_PG_PORT="${JHV_TEST_PG_PORT:-55432}"
+
+# Поднимает временную PostgreSQL для тестов хранилища и печатает строку
+# подключения. Контейнер переиспользуется между прогонами: ждать старта базы
+# каждый раз — минус несколько секунд на каждый запуск тестов.
+start_test_pg() {
+    if ! command -v docker >/dev/null 2>&1; then
+        return 1
+    fi
+    if ! docker inspect "$TEST_PG_NAME" >/dev/null 2>&1; then
+        docker run -d --name "$TEST_PG_NAME" \
+            -p "$TEST_PG_PORT:5432" \
+            -e POSTGRES_USER=jhvirt -e POSTGRES_PASSWORD=jhvirt -e POSTGRES_DB=jhvirt_test \
+            postgres:17-alpine >/dev/null 2>&1 || return 1
+    elif [ "$(docker inspect -f '{{.State.Running}}' "$TEST_PG_NAME" 2>/dev/null)" != "true" ]; then
+        docker start "$TEST_PG_NAME" >/dev/null 2>&1 || return 1
+    fi
+
+    i=0
+    while [ "$i" -lt 30 ]; do
+        if docker exec "$TEST_PG_NAME" pg_isready -U jhvirt -q >/dev/null 2>&1; then
+            printf 'host=localhost port=%s user=jhvirt password=jhvirt dbname=jhvirt_test sslmode=disable\n' "$TEST_PG_PORT"
+            return 0
+        fi
+        i=$((i + 1))
+        sleep 1
+    done
+    return 1
+}
+
 cmd_test() {
     need go "нужен Go 1.26+"
+
+    # Тестам хранилища нужна настоящая PostgreSQL: подменять её на что-то
+    # попроще значит проверять не то, что работает в бою.
+    if [ -z "${JHV_TEST_POSTGRES_DSN:-}" ]; then
+        step "временная база для тестов"
+        if DSN="$(start_test_pg)"; then
+            export JHV_TEST_POSTGRES_DSN="$DSN"
+            say "    $TEST_PG_NAME на порту $TEST_PG_PORT (остановить: ./run test-db stop)"
+        else
+            say "    не удалось поднять — тесты хранилища будут пропущены с ошибкой"
+            say "    задайте JHV_TEST_POSTGRES_DSN вручную, если база есть"
+        fi
+    fi
+
     if [ "${1:-}" = "-race" ]; then
         step "тесты с детектором гонок"
         # -race — единственное место, где нужен cgo: детектор реализован в
@@ -107,25 +155,25 @@ cmd_test() {
     fi
 }
 
-# Тот же набор тестов хранилища, но против PostgreSQL.
-#
-# Схема написана на пересечении диалектов, а проверялась только на SQLite —
-# и он прощает то, чего PostgreSQL не прощает. Так в схему попала колонка
-# INTEGER, в которую код писал bool: SQLite молча писал 0/1, pgx отказался
-# кодировать, и служба не поднималась на PostgreSQL вообще при зелёных тестах.
-cmd_test_pg() {
-    need go "нужен Go 1.26+"
-    DSN="${1:-${JHV_TEST_POSTGRES_DSN:-}}"
-    [ -n "$DSN" ] || die "укажите строку подключения:
-  ./run test-pg 'host=localhost port=5432 user=jhvirt password=… dbname=jhvirt_test sslmode=disable'
-либо URL postgres://…  (в URL пароль обязан быть percent-кодирован)
-
-Поднять базу для проверки:
-  docker run --rm -d --name jhvirt-pg -p 5432:5432 \\
-    -e POSTGRES_USER=jhvirt -e POSTGRES_PASSWORD=jhvirt -e POSTGRES_DB=jhvirt_test postgres:17-alpine"
-
-    step "тесты хранилища на PostgreSQL"
-    JHV_TEST_POSTGRES_DSN="$DSN" go test ./internal/store/ -count=1
+# Управление временной базой: она живёт между прогонами, и её должно быть чем
+# убрать, не вспоминая имя контейнера.
+cmd_test_db() {
+    case "${1:-status}" in
+        start)
+            DSN="$(start_test_pg)" || die "не удалось поднять базу (нужен docker)"
+            say "$DSN"
+            ;;
+        stop)
+            docker rm -f "$TEST_PG_NAME" >/dev/null 2>&1 || true
+            say "временная база остановлена и удалена"
+            ;;
+        status)
+            if docker inspect -f '{{.State.Status}}' "$TEST_PG_NAME" 2>/dev/null; then :; else
+                say "не запущена"
+            fi
+            ;;
+        *) die "./run test-db start|stop|status" ;;
+    esac
 }
 
 cmd_check() {
@@ -472,7 +520,7 @@ case "$COMMAND" in
     dev)            cmd_dev ;;
     web)            cmd_web ;;
     test)           cmd_test "$@" ;;
-    test-pg)        cmd_test_pg "$@" ;;
+    test-db)        cmd_test_db "$@" ;;
     check)          cmd_check ;;
     fmt|format)     cmd_fmt ;;
     vet)            cmd_vet ;;

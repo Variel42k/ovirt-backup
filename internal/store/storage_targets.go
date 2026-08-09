@@ -163,8 +163,7 @@ func (s *Store) CountRunsOnTarget(ctx context.Context, targetID string) (int, er
 // destination of a nightly job, and deleting it would turn that job into a
 // scheduled failure at two in the morning. The check is done in Go rather than
 // SQL because the target list is a JSON array in a TEXT column — matching it
-// with LIKE would differ between SQLite and PostgreSQL and would match a target
-// whose id is a prefix of another.
+// with LIKE would also match a target whose id is a prefix of another.
 func (s *Store) JobsOnTarget(ctx context.Context, targetID string) ([]string, error) {
 	jobs, err := s.ListBackupJobs(ctx, "")
 	if err != nil {

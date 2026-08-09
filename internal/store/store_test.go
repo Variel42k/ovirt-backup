@@ -2,177 +2,47 @@ package store
 
 import (
 	"context"
-	"net/url"
-	"os"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"testing"
 	"time"
 
 	"adveng/jh_virt/internal/config"
 	"adveng/jh_virt/internal/model"
 	"adveng/jh_virt/internal/secret"
+	"adveng/jh_virt/internal/testdb"
 )
 
 // newTestStore opens a throwaway database with the full schema applied.
 //
-// По умолчанию — SQLite во временном каталоге: тесты не должны требовать
-// внешних служб. Если задан JHV_TEST_POSTGRES_DSN, тот же набор тестов идёт
-// против PostgreSQL.
+// Нужна настоящая PostgreSQL. Подставлять вместо неё что-то попроще было бы
+// самообманом: именно так и появился дефект, из-за которого служба не
+// поднималась на PostgreSQL при полностью зелёных тестах — схема проверялась
+// на SQLite, а он типизирован динамически и прощает то, чего PostgreSQL не
+// прощает.
 //
-// Эта развилка появилась не из любви к симметрии. Схема написана на пересечении
-// диалектов, но проверялась только на SQLite, а он типизирован динамически и
-// прощает то, чего PostgreSQL не прощает: колонка dry_run была объявлена
-// INTEGER, код передавал в неё Go-шный bool, SQLite молча писал 0/1, а pgx
-// отказывался кодировать true в int4 — и служба не поднималась на PostgreSQL
-// вообще. Тесты на SQLite были зелёные. Прогон того же набора против
-// PostgreSQL — единственное, что ловит такие расхождения до боевой установки.
+// База берётся из JHV_TEST_POSTGRES_DSN; ./run test поднимает временную сам.
 func newTestStore(t *testing.T) *Store {
 	t.Helper()
-	dir := t.TempDir()
 
-	cfg := config.DatabaseConfig{
-		Driver: "sqlite",
-		SQLite: config.SQLiteConfig{Path: filepath.Join(dir, "test.db"), BusyTimeout: 5 * time.Second},
-	}
-	if dsn := os.Getenv("JHV_TEST_POSTGRES_DSN"); dsn != "" {
-		cfg = postgresTestConfig(t, dsn)
-	}
-
-	db, err := Open(context.Background(), cfg)
+	ctx := context.Background()
+	db, err := Open(ctx, testdb.Config(t))
 	if err != nil {
-		t.Fatalf("open: %v", err)
+		t.Fatalf("открытие базы: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
 
-	if err := db.Migrate(context.Background()); err != nil {
-		t.Fatalf("migrate: %v", err)
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatalf("миграции: %v", err)
 	}
-	if cfg.Driver == "postgres" {
-		truncateAll(t, db)
-	}
+	testdb.Truncate(t, db.DB)
 
-	cipher, err := secret.NewFromConfig(config.SecretsConfig{KeyFile: filepath.Join(dir, "key")})
+	cipher, err := secret.NewFromConfig(config.SecretsConfig{
+		KeyFile: filepath.Join(t.TempDir(), "key"),
+	})
 	if err != nil {
-		t.Fatalf("cipher: %v", err)
+		t.Fatalf("ключ шифрования: %v", err)
 	}
 	return New(db, cipher)
-}
-
-// postgresTestConfig разбирает JHV_TEST_POSTGRES_DSN в двух видах:
-//
-//	postgres://пользователь:пароль@хост:5432/база?sslmode=disable
-//	host=хост port=5432 user=пользователь password=пароль dbname=база sslmode=disable
-//
-// Второй вид принимается не для симметрии: в форме URL пароль обязан быть
-// percent-кодирован, и обычный боевой пароль с @ или / разбирается с ошибкой
-// «invalid userinfo», по которой непонятно, что делать. Форма key=value
-// экранирования не требует, и это тот же вид, который строит PostgresConfig.DSN.
-func postgresTestConfig(t *testing.T, dsn string) config.DatabaseConfig {
-	t.Helper()
-
-	if !strings.Contains(dsn, "://") {
-		return postgresConfigFromKeyValue(t, dsn)
-	}
-
-	u, err := url.Parse(dsn)
-	if err != nil {
-		t.Fatalf("JHV_TEST_POSTGRES_DSN разобрать не удалось: %v\n"+
-			"Если в пароле есть @ / : — используйте форму "+
-			"host=… port=… user=… password=… dbname=… sslmode=disable", err)
-	}
-	port := 5432
-	if p := u.Port(); p != "" {
-		if n, err := strconv.Atoi(p); err == nil {
-			port = n
-		}
-	}
-	password, _ := u.User.Password()
-	sslmode := u.Query().Get("sslmode")
-	if sslmode == "" {
-		sslmode = "disable"
-	}
-	return config.DatabaseConfig{
-		Driver: "postgres",
-		Postgres: config.PostgresConfig{
-			Host:     u.Hostname(),
-			Port:     port,
-			User:     u.User.Username(),
-			Password: password,
-			Database: strings.TrimPrefix(u.Path, "/"),
-			SSLMode:  sslmode,
-			MaxConns: 5,
-		},
-	}
-}
-
-// postgresConfigFromKeyValue разбирает libpq-строку «ключ=значение через пробел».
-func postgresConfigFromKeyValue(t *testing.T, dsn string) config.DatabaseConfig {
-	t.Helper()
-
-	pg := config.PostgresConfig{Port: 5432, SSLMode: "disable", MaxConns: 5}
-	for _, field := range strings.Fields(dsn) {
-		key, value, ok := strings.Cut(field, "=")
-		if !ok {
-			t.Fatalf("JHV_TEST_POSTGRES_DSN: не разобрать %q, ожидается ключ=значение", field)
-		}
-		switch key {
-		case "host":
-			pg.Host = value
-		case "port":
-			n, err := strconv.Atoi(value)
-			if err != nil {
-				t.Fatalf("JHV_TEST_POSTGRES_DSN: порт %q — не число", value)
-			}
-			pg.Port = n
-		case "user":
-			pg.User = value
-		case "password":
-			pg.Password = value
-		case "dbname":
-			pg.Database = value
-		case "sslmode":
-			pg.SSLMode = value
-		default:
-			t.Fatalf("JHV_TEST_POSTGRES_DSN: неизвестный ключ %q", key)
-		}
-	}
-	return config.DatabaseConfig{Driver: "postgres", Postgres: pg}
-}
-
-// truncateAll очищает базу между тестами.
-//
-// SQLite получает свой файл на каждый тест, PostgreSQL — один на всех, поэтому
-// изоляцию нужно обеспечить явно. Таблица schema_migrations не трогается: её
-// очистка заставила бы миграции применяться заново к уже существующим
-// таблицам.
-func truncateAll(t *testing.T, db *DB) {
-	t.Helper()
-	ctx := context.Background()
-
-	rows, err := db.QueryContext(ctx, `SELECT tablename FROM pg_tables
-		WHERE schemaname='public' AND tablename <> 'schema_migrations'`)
-	if err != nil {
-		t.Fatalf("список таблиц: %v", err)
-	}
-	var tables []string
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			_ = rows.Close()
-			t.Fatalf("чтение имени таблицы: %v", err)
-		}
-		tables = append(tables, name)
-	}
-	_ = rows.Close()
-	if len(tables) == 0 {
-		return
-	}
-	if _, err := db.ExecContext(ctx,
-		`TRUNCATE TABLE `+strings.Join(tables, ", ")+` RESTART IDENTITY CASCADE`); err != nil {
-		t.Fatalf("очистка таблиц: %v", err)
-	}
 }
 
 func TestMigrateIsIdempotent(t *testing.T) {

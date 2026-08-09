@@ -13,16 +13,14 @@ import (
 	"adveng/jh_virt/internal/model"
 	"adveng/jh_virt/internal/secret"
 	"adveng/jh_virt/internal/store"
+	"adveng/jh_virt/internal/testdb"
 )
 
 func testRemediator(t *testing.T) (*Remediator, *store.Store, string) {
 	t.Helper()
 	dir := t.TempDir()
 
-	db, err := store.Open(context.Background(), config.DatabaseConfig{
-		Driver: "sqlite",
-		SQLite: config.SQLiteConfig{Path: filepath.Join(dir, "test.db"), BusyTimeout: 5 * time.Second},
-	})
+	db, err := store.Open(context.Background(), testdb.Config(t))
 	if err != nil {
 		t.Fatalf("открытие базы: %v", err)
 	}
@@ -30,6 +28,7 @@ func testRemediator(t *testing.T) (*Remediator, *store.Store, string) {
 	if err := db.Migrate(context.Background()); err != nil {
 		t.Fatalf("миграции: %v", err)
 	}
+	testdb.Truncate(t, db.DB)
 	cipher, err := secret.NewFromConfig(config.SecretsConfig{KeyFile: filepath.Join(dir, "key")})
 	if err != nil {
 		t.Fatalf("ключ: %v", err)

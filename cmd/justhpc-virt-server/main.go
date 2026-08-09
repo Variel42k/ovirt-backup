@@ -10,8 +10,11 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
+
+	"github.com/rs/zerolog"
 
 	"adveng/jh_virt/internal/api"
 	"adveng/jh_virt/internal/backup"
@@ -90,12 +93,16 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	warnLeftoverSQLite(cfg, log)
+
 	db, err := store.Open(ctx, cfg.Database)
 	if err != nil {
 		return fmt.Errorf("подключение к базе данных: %w", err)
 	}
 	defer db.Close()
-	log.Info().Str("СУБД", cfg.Database.Driver).Msg("база данных подключена")
+	log.Info().
+		Str("подключение", cfg.Database.Target()).
+		Msg("база данных подключена")
 
 	if cfg.Database.RunMigrationsOnStartup {
 		if err := db.Migrate(ctx); err != nil {
@@ -267,4 +274,30 @@ func printCredentials(username, password, title string) {
 		"  Запишите пароль: он больше не будет показан.\n"+
 		"  Забыли — задайте новый: justhpc-virt-server -reset-password %s\n%s\n\n",
 		rule, title, username, password, username, rule)
+}
+
+// warnLeftoverSQLite сообщает, что в каталоге данных остался файл базы от
+// прежних версий.
+//
+// До перехода на PostgreSQL сервис умел работать с SQLite, и у обновившихся
+// установок файл остаётся лежать. Он больше не читается, но выглядит как
+// действующая база: без этой строки «а где мои подключения» превращается в
+// поиск вслепую.
+//
+// Предупреждение, а не отказ: файл может быть намеренно оставлен до тех пор,
+// пока оператор не убедится, что всё перенесено.
+func warnLeftoverSQLite(cfg *config.Config, log zerolog.Logger) {
+	dir := filepath.Dir(cfg.Secrets.KeyFile)
+	if dir == "" || dir == "." {
+		return
+	}
+	path := filepath.Join(dir, "jhvirt.db")
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() || info.Size() == 0 {
+		return
+	}
+	log.Warn().
+		Str("файл", path).
+		Msg("остался файл базы SQLite от прежней версии — он не используется, " +
+			"сервис работает только с PostgreSQL; подключения и задания в нём не видны")
 }

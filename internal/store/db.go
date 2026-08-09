@@ -1,9 +1,13 @@
 // Package store provides persistence for the service.
 //
-// The schema is written on the intersection of the SQLite and PostgreSQL
-// dialects, so one set of migrations and one set of repositories serve both
-// engines. The only dialect-specific piece is the placeholder style, handled by
-// DB.Rebind.
+// СУБД одна — PostgreSQL. Раньше поддерживались две, и схема была написана на
+// пересечении диалектов; от этого остались BIGINT-миллисекунды вместо
+// TIMESTAMPTZ и JSON в TEXT вместо JSONB, которые постепенно переводятся на
+// родные типы миграциями.
+//
+// Запросы пишутся с `?`, а DB.Rebind превращает их в $1, $2… Переписывать сто
+// с лишним мест ради смены стиля плейсхолдеров — churn с риском опечатки и без
+// выигрыша, поэтому Rebind остался.
 package store
 
 import (
@@ -11,8 +15,6 @@ import (
 	"database/sql"
 	"embed"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,7 +22,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
-	_ "modernc.org/sqlite"
 
 	"adveng/jh_virt/internal/config"
 )
@@ -28,64 +29,14 @@ import (
 //go:embed migrations/*.sql
 var migrationFS embed.FS
 
-// Dialect identifies the SQL flavour in use.
-type Dialect string
-
-const (
-	DialectSQLite   Dialect = "sqlite"
-	DialectPostgres Dialect = "postgres"
-)
-
-// DB wraps *sql.DB with the dialect it was opened against.
+// DB wraps *sql.DB.
 type DB struct {
 	*sql.DB
-	dialect Dialect
 }
-
-// Dialect returns the flavour this handle talks.
-func (db *DB) Dialect() Dialect { return db.dialect }
 
 // Open connects to the configured database and prepares it for use.
 func Open(ctx context.Context, cfg config.DatabaseConfig) (*DB, error) {
-	switch cfg.Driver {
-	case "sqlite":
-		return openSQLite(ctx, cfg.SQLite)
-	case "postgres":
-		return openPostgres(ctx, cfg.Postgres)
-	default:
-		return nil, fmt.Errorf("unsupported database driver %q", cfg.Driver)
-	}
-}
-
-func openSQLite(ctx context.Context, cfg config.SQLiteConfig) (*DB, error) {
-	if dir := filepath.Dir(cfg.Path); dir != "" && dir != "." {
-		if err := os.MkdirAll(dir, 0o750); err != nil {
-			return nil, fmt.Errorf("create sqlite dir: %w", err)
-		}
-	}
-	busyMS := int(cfg.BusyTimeout / time.Millisecond)
-	if busyMS <= 0 {
-		busyMS = 10000
-	}
-	// WAL keeps the monitor's writes from blocking the API's reads; the busy
-	// timeout absorbs the remaining short writer contention.
-	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(%d)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(1)",
-		cfg.Path, busyMS)
-
-	sqlDB, err := sql.Open("sqlite", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("open sqlite: %w", err)
-	}
-	// SQLite tolerates exactly one writer; more connections only add contention.
-	sqlDB.SetMaxOpenConns(1)
-	sqlDB.SetMaxIdleConns(1)
-	sqlDB.SetConnMaxLifetime(0)
-
-	if err := sqlDB.PingContext(ctx); err != nil {
-		_ = sqlDB.Close()
-		return nil, fmt.Errorf("ping sqlite: %w", err)
-	}
-	return &DB{DB: sqlDB, dialect: DialectSQLite}, nil
+	return openPostgres(ctx, cfg.Postgres)
 }
 
 func openPostgres(ctx context.Context, cfg config.PostgresConfig) (*DB, error) {
@@ -106,15 +57,12 @@ func openPostgres(ctx context.Context, cfg config.PostgresConfig) (*DB, error) {
 		_ = sqlDB.Close()
 		return nil, fmt.Errorf("ping postgres: %w", err)
 	}
-	return &DB{DB: sqlDB, dialect: DialectPostgres}, nil
+	return &DB{DB: sqlDB}, nil
 }
 
 // Rebind converts a query written with `?` placeholders into the dialect's
-// native form. PostgreSQL wants $1, $2, ...; SQLite takes `?` as written.
+// native form: PostgreSQL wants $1, $2, ...
 func (db *DB) Rebind(query string) string {
-	if db.dialect != DialectPostgres {
-		return query
-	}
 	var b strings.Builder
 	b.Grow(len(query) + 8)
 	n := 0

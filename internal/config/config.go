@@ -57,19 +57,167 @@ type AuthConfig struct {
 	APITokens         []string      `mapstructure:"api_tokens"`
 }
 
+// DatabaseConfig описывает подключение к PostgreSQL.
+//
+// СУБД одна. Раньше поддерживались две, и выбор задавался отдельным полем
+// driver — оно же было источником самой частой ошибки настройки: указать
+// параметры PostgreSQL и забыть про driver значило тихо остаться на SQLite,
+// причём служба поднималась и выглядела исправной. Одного варианта такого
+// состояния не создаёт.
 type DatabaseConfig struct {
-	Driver                 string         `mapstructure:"driver"`
+	// URL — подключение одной строкой, в любой из двух форм:
+	//
+	//	postgres://пользователь:пароль@хост:5432/база?sslmode=require
+	//	host=хост port=5432 user=… password=… dbname=… sslmode=require
+	//
+	// Пусто — берутся поля из блока postgres ниже.
+	URL string `mapstructure:"url"`
+
 	RunMigrationsOnStartup bool           `mapstructure:"run_migrations_on_startup"`
-	SQLite                 SQLiteConfig   `mapstructure:"sqlite"`
 	Postgres               PostgresConfig `mapstructure:"postgres"`
 }
 
-type SQLiteConfig struct {
-	Path        string        `mapstructure:"path"`
-	BusyTimeout time.Duration `mapstructure:"busy_timeout"`
+// applyURL раскладывает database.url в driver и параметры подключения.
+//
+// Вызывается до Validate, поэтому дальше весь код работает с уже разобранной
+// конфигурацией и о существовании url не знает.
+func (d *DatabaseConfig) applyURL() error {
+	raw := strings.TrimSpace(d.URL)
+	if raw == "" {
+		return nil
+	}
+
+	switch {
+	case strings.HasPrefix(raw, "postgres://"), strings.HasPrefix(raw, "postgresql://"):
+		// Строку не разбираем на части: pgx понимает и URL, и форму
+		// «ключ=значение», а своя реализация разбора — это повторение чужой
+		// работы вместе с её краевыми случаями (кодирование пароля, IPv6,
+		// список хостов).
+		d.Postgres.URL = raw
+
+	case looksLikeKeywordDSN(raw):
+		// Форма «host=… password=…» принимается наравне с URL и существует
+		// ради паролей. В URL пароль обязан быть percent-кодирован, а
+		// openssl rand -base64 выдаёт / и +, которые ломают разбор адреса —
+		// то есть привычный генератор пароля даёт строку, непригодную для URL.
+		// Здесь экранировать не нужно ничего.
+		d.Postgres.URL = raw
+
+	case strings.HasPrefix(raw, "sqlite:"):
+		return fmt.Errorf("database.url: SQLite больше не поддерживается (%q).\n"+
+			"Сервис работает только с PostgreSQL — см. docs/DEPLOY.md.\n"+
+			"Существующая база SQLite не конвертируется автоматически: заведите "+
+			"подключения и задания заново. Сами копии при этом не теряются — они "+
+			"лежат в хранилище и читаются утилитой jvbackup без базы", raw)
+
+	default:
+		return fmt.Errorf("database.url: не распознан формат %q. Ожидается одно из:\n"+
+			"  postgres://пользователь:пароль@хост:5432/база?sslmode=require\n"+
+			"  host=хост port=5432 user=пользователь password=пароль dbname=база sslmode=require\n"+
+			"Форма host=… удобнее, когда в пароле есть / + @ или не-ASCII: "+
+			"в URL их пришлось бы percent-кодировать", raw)
+	}
+	return nil
+}
+
+// DatabaseFromDSN собирает конфигурацию подключения из одной строки.
+//
+// Тот же разбор, что и у database.url, но доступный снаружи: им пользуются
+// тесты, которым нужна база из JHV_TEST_POSTGRES_DSN. Повторять разбор в
+// каждом тестовом пакете значило бы завести несколько слегка разных
+// реализаций одного и того же.
+func DatabaseFromDSN(dsn string) (DatabaseConfig, error) {
+	d := DatabaseConfig{URL: dsn, RunMigrationsOnStartup: true}
+	if err := d.applyURL(); err != nil {
+		return DatabaseConfig{}, err
+	}
+	d.Postgres.MaxConns = 5
+	return d, nil
+}
+
+// looksLikeKeywordDSN распознаёт libpq-строку «ключ=значение через пробел».
+//
+// Признак — наличие host= или dbname= в начале одного из полей. Проверять
+// просто по '=' нельзя: так под определение попал бы любой мусор со знаком
+// равенства, и вместо внятного «не распознан формат» пользователь получил бы
+// ошибку из недр драйвера.
+func looksLikeKeywordDSN(raw string) bool {
+	for _, field := range strings.Fields(raw) {
+		switch {
+		case strings.HasPrefix(field, "host="),
+			strings.HasPrefix(field, "dbname="),
+			strings.HasPrefix(field, "postgres="):
+			return true
+		}
+	}
+	return false
+}
+
+// Target описывает подключение для журнала — без пароля.
+//
+// Печатать при старте, куда именно подключились, нужно потому, что ошибка в
+// выборе СУБД не падает: сервис молча уходит на другую базу и выглядит как
+// потерявший данные. Одна строка в журнале превращает это в очевидное.
+func (d DatabaseConfig) Target() string {
+	if d.Postgres.URL != "" {
+		return redactDSN(d.Postgres.URL)
+	}
+	return fmt.Sprintf("%s@%s:%d/%s",
+		d.Postgres.User, d.Postgres.Host, d.Postgres.Port, d.Postgres.Database)
+}
+
+// redactDSN прячет пароль в строке подключения любой из принимаемых форм.
+func redactDSN(raw string) string {
+	if strings.Contains(raw, "://") {
+		return redactURL(raw)
+	}
+	// Форма «ключ=значение»: гасим только password, остальное полезно видеть.
+	fields := strings.Fields(raw)
+	for i, field := range fields {
+		if strings.HasPrefix(field, "password=") {
+			fields[i] = "password=…"
+		}
+	}
+	return strings.Join(fields, " ")
+}
+
+// redactURL прячет пароль в строке подключения.
+//
+// Замена делается по строке, а не через url.Parse: разбор спотыкается на
+// паролях, которые не были percent-кодированы, и тогда пришлось бы либо
+// печатать строку с паролем, либо не печатать ничего. Первое недопустимо,
+// второе бесполезно — а нужен как раз адрес, чтобы увидеть, куда подключились.
+func redactURL(raw string) string {
+	const sep = "://"
+	i := strings.Index(raw, sep)
+	if i < 0 {
+		return raw
+	}
+	scheme, rest := raw[:i+len(sep)], raw[i+len(sep):]
+
+	// Пользовательская часть — до последней @ в пределах адреса, то есть до
+	// первого / после схемы: пароль сам может содержать @.
+	authorityEnd := strings.IndexByte(rest, '/')
+	if authorityEnd < 0 {
+		authorityEnd = len(rest)
+	}
+	at := strings.LastIndex(rest[:authorityEnd], "@")
+	if at < 0 {
+		return raw // без учётных данных прятать нечего
+	}
+
+	userinfo, tail := rest[:at], rest[at:]
+	if colon := strings.IndexByte(userinfo, ':'); colon >= 0 {
+		userinfo = userinfo[:colon] + ":…"
+	}
+	return scheme + userinfo + tail
 }
 
 type PostgresConfig struct {
+	// URL — строка подключения целиком. Заполняется из database.url, но может
+	// быть задана и напрямую. Если непуста, поля ниже не используются.
+	URL string `mapstructure:"url"`
+
 	Host     string `mapstructure:"host"`
 	Port     int    `mapstructure:"port"`
 	User     string `mapstructure:"user"`
@@ -79,8 +227,15 @@ type PostgresConfig struct {
 	MaxConns int32  `mapstructure:"max_conns"`
 }
 
-// DSN renders a libpq-style connection string for pgx.
+// DSN renders a connection string for pgx.
+//
+// pgx понимает обе формы, поэтому готовый URL отдаётся как есть: разбирать
+// его на части, чтобы тут же собрать обратно, значило бы завести собственный
+// разбор URL со всеми его краевыми случаями.
 func (p PostgresConfig) DSN() string {
+	if p.URL != "" {
+		return p.URL
+	}
 	return fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
 		p.Host, p.Port, p.User, p.Password, p.Database, p.SSLMode)
 }
@@ -205,6 +360,11 @@ func Load(path string) (*Config, error) {
 	if err := v.Unmarshal(&cfg); err != nil {
 		return nil, fmt.Errorf("decode config: %w", err)
 	}
+	// До Validate: url задаёт driver, и проверять драйвер имеет смысл уже
+	// после того, как он окончательно определён.
+	if err := cfg.Database.applyURL(); err != nil {
+		return nil, err
+	}
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
@@ -213,10 +373,9 @@ func Load(path string) (*Config, error) {
 
 // Validate rejects combinations that would fail later in a confusing way.
 func (c *Config) Validate() error {
-	switch c.Database.Driver {
-	case "sqlite", "postgres":
-	default:
-		return fmt.Errorf("database.driver must be sqlite or postgres, got %q", c.Database.Driver)
+	if c.Database.Postgres.URL == "" && c.Database.Postgres.Host == "" {
+		return fmt.Errorf("не задано подключение к базе: укажите database.url " +
+			"(или JHV_DATABASE_URL) либо блок database.postgres")
 	}
 	switch c.Backup.Compression {
 	case "none", "zstd":
@@ -273,10 +432,12 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("auth.bootstrap_password", "")
 	v.SetDefault("auth.api_tokens", []string{})
 
-	v.SetDefault("database.driver", "sqlite")
+	// Пустое значение по умолчанию нужно, чтобы ключ существовал: привязка
+	// переменных окружения идёт по списку известных ключей, и без этой строки
+	// JHV_DATABASE_URL просто не читался бы.
+	v.SetDefault("database.url", "")
+	v.SetDefault("database.postgres.url", "")
 	v.SetDefault("database.run_migrations_on_startup", true)
-	v.SetDefault("database.sqlite.path", "./data/jhvirt.db")
-	v.SetDefault("database.sqlite.busy_timeout", "10s")
 	v.SetDefault("database.postgres.host", "localhost")
 	v.SetDefault("database.postgres.port", 5432)
 	v.SetDefault("database.postgres.user", "jhvirt")

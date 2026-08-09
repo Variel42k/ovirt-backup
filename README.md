@@ -137,13 +137,20 @@
 
 ---
 
-## Быстрый старт
+## Развёртывание
 
-> Этот раздел — чтобы посмотреть: без TLS, всё локально.
-> Для установки, на которую собираются полагаться, — **[DEPLOY.md](docs/DEPLOY.md)**:
-> PostgreSQL, TLS, сохранность ключа шифрования и приёмочный прогон.
+Вариант один — боевой. Ознакомительного с готовыми паролями нет намеренно:
+конфигурация «пока так, потом заменим» остаётся в бою чаще, чем заменяется, а
+по журналу неотличима от настоящей.
 
 ### Docker
+
+```bash
+cd deploy && cp .env.example .env && chmod 600 .env
+```
+
+Заполните `.env` — обязательные переменные без значений по умолчанию, и без
+них compose откажется запускаться, назвав, чего не хватает.
 
 ```bash
 cd deploy && docker compose up -d --build
@@ -161,13 +168,8 @@ cd deploy && docker compose logs justhpc-virt-manager | grep -A6 "УЧЁТНАЯ
 cd deploy && docker compose run --rm justhpc-virt-manager -reset-password admin
 ```
 
-Интерфейс: <http://localhost:8080>
-
-С MinIO для проверки сценариев с S3:
-
-```bash
-cd deploy && docker compose --profile s3 up -d --build
-```
+Полная процедура с TLS, сохранностью ключа шифрования и приёмочным прогоном —
+**[DEPLOY.md](docs/DEPLOY.md)**.
 
 ### Бинарь
 

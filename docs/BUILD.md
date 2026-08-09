@@ -249,7 +249,7 @@ ssh server 'sudo sh /tmp/jhvirt-1.0.0-linux-amd64.run'
 Alpine содержит только результат. Внутри `qemu-img` — он нужен для экспорта в
 qcow2 и режима проверки `qemu`; без него работает всё остальное.
 
-Полный стек с PostgreSQL и MinIO — в [DEPLOY.md](DEPLOY.md#2-docker--рекомендуемый-путь).
+Готовый стек с базой — в [DEPLOY.md](DEPLOY.md#2-docker--рекомендуемый-путь).
 
 ---
 

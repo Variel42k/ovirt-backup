@@ -72,6 +72,29 @@ has_dockerc()   { have docker-compose; }
 has_podmanc()   { have podman-compose; }
 has_systemd()   { have systemctl && [ -d /run/systemd/system ]; }
 
+# Имя проекта: от него зависят имена томов. Берётся из .env, если он есть, —
+# иначе то же значение, что скрипт туда пишет.
+project_name() {
+    if [ -f "$COMPOSE_DIR/.env" ]; then
+        v="$(grep -m1 '^COMPOSE_PROJECT_NAME=' "$COMPOSE_DIR/.env" 2>/dev/null | cut -d= -f2-)"
+        [ -n "$v" ] && { printf '%s' "$v"; return; }
+    fi
+    printf 'jhvirt'
+}
+
+# Работа с томами идёт тем же движком, что и запуск: тома docker и podman —
+# разные хранилища, и спрашивать не у того значит не найти существующий.
+volume_engine() {
+    case "$MODE" in
+        podman) printf 'podman' ;;
+        *)      printf 'docker' ;;
+    esac
+}
+
+volume_exists() {
+    "$(volume_engine)" volume inspect "$1" >/dev/null 2>&1
+}
+
 # Команда запуска для выбранного способа.
 runner() {
     case "$1" in
@@ -224,6 +247,28 @@ install_containers() {
     if [ -f "$WORK/.env" ]; then
         say "    $WORK/.env уже есть, оставлен как был"
     else
+        # Пароль базы задаётся один раз — при создании тома. Если том с прошлой
+        # установки уцелел, а .env исчез, сгенерированный пароль базе не
+        # подойдёт: она примет только тот, с которым была создана. Служба тогда
+        # уходит в цикл перезапуска с «password authentication failed», и связь
+        # с пропавшим .env совсем не очевидна.
+        VOL="$(project_name)_postgres-data"
+        VOLRM="$(volume_engine) volume rm"
+        if volume_exists "$VOL"; then
+            die "том базы $VOL остался с прошлой установки, а $WORK/.env — нет.
+
+PostgreSQL хранит пароль внутри тома и новый не примет: служба будет
+перезапускаться с «password authentication failed».
+
+Одно из двух:
+  • верните прежний .env — в нём пароль, который база ждёт;
+  • либо удалите том вместе с данными и поставьте заново:
+      $VOLRM $VOL
+
+Во втором случае теряются подключения, задания и история. Сами копии лежат в
+хранилище и не пострадают, но сервис о них забудет."
+        fi
+
         ask_url
         # Пароль базы генерируется: внутренний секрет, человеком был бы придуман
         # хуже. Шестнадцатеричный — годится и в форме URL, где / и + пришлось бы
@@ -267,14 +312,29 @@ install_containers() {
     # shellcheck disable=SC2086
     (cd "$WORK" && $RUN up -d --build) || die "запуск не удался; смотрите вывод выше"
 
+    # Ждём именно строку готовности, а не факт запуска процесса: между «служба
+    # стартовала» и «интерфейс отвечает» проходят миграции и создание учётной
+    # записи. Ожидание по первой строке уже приводило к «ГОТОВО» с недоступным
+    # интерфейсом и ненайденным паролем.
     step "жду готовности"
+    READY=0
     i=0
-    while [ "$i" -lt 60 ]; do
-        if (cd "$WORK" && $RUN logs justhpc-virt-manager 2>/dev/null | grep -q "СОЗДАНА УЧЁТНАЯ ЗАПИСЬ\|сервер запущен\|justhpc-virt-server запускается"); then
+    while [ "$i" -lt 90 ]; do
+        if (cd "$WORK" && $RUN logs justhpc-virt-manager 2>/dev/null |
+                grep -q "веб-интерфейс и API доступны"); then
+            READY=1
             break
+        fi
+        # Если контейнер успел упасть, ждать дальше бессмысленно.
+        if (cd "$WORK" && $RUN logs justhpc-virt-manager 2>/dev/null |
+                grep -q "критическая ошибка"); then
+            say ""
+            (cd "$WORK" && $RUN logs justhpc-virt-manager 2>/dev/null | tail -5)
+            die "служба не поднялась — причина выше"
         fi
         i=$((i+1)); sleep 2
     done
+    [ "$READY" -eq 1 ] || say "    за 3 минуты строка готовности не появилась — смотрите журнал"
 
     # Пароль администратора печатается службой один раз. Достать его из журнала
     # здесь же — иначе оператору пришлось бы вспоминать команду grep, а второго

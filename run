@@ -111,7 +111,7 @@ start_test_pg() {
         docker run -d --name "$TEST_PG_NAME" \
             -p "$TEST_PG_PORT:5432" \
             -e POSTGRES_USER=jhvirt -e POSTGRES_PASSWORD=jhvirt -e POSTGRES_DB=jhvirt_test \
-            postgres:17-alpine >/dev/null 2>&1 || return 1
+            docker.io/library/postgres:17-alpine >/dev/null 2>&1 || return 1
     elif [ "$(docker inspect -f '{{.State.Running}}' "$TEST_PG_NAME" 2>/dev/null)" != "true" ]; then
         docker start "$TEST_PG_NAME" >/dev/null 2>&1 || return 1
     fi
@@ -190,7 +190,7 @@ RACE_BUILD_CACHE="jhvirt-gobuild"
 # Образ должен совпадать по версии Go с go.mod: детектор гонок собирает проект
 # заново, и расхождение версий проявилось бы как «локально проходит, а в
 # контейнере нет».
-RACE_IMAGE="golang:1.26"
+RACE_IMAGE="docker.io/library/golang:1.26"
 
 # host_to_container переписывает адрес базы так, чтобы он был виден изнутри
 # контейнера: localhost там указывает на сам контейнер.

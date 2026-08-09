@@ -1,5 +1,11 @@
+# Имена образов указаны полностью, с docker.io/library. Короткие podman не
+# разрешает: без записи в short-names он отвечает «did not resolve to an alias
+# and no unqualified-search registries are defined», причём на середине сборки —
+# node у него в алиасах есть, а golang уже нет. Docker полные имена принимает
+# так же, как короткие.
+
 # Сборка веб-интерфейса.
-FROM node:22-alpine AS web
+FROM docker.io/library/node:22-alpine AS web
 WORKDIR /build/web
 COPY web/package.json web/package-lock.json* ./
 RUN npm ci --no-audit --no-fund || npm install --no-audit --no-fund
@@ -8,7 +14,7 @@ RUN npm run build:fast
 
 # Сборка бинаря. CGO не нужен ни для чего, поэтому образ получается
 # статическим и не тянет за собой libc сборочного дистрибутива.
-FROM golang:1.26-alpine AS build
+FROM docker.io/library/golang:1.26-alpine AS build
 WORKDIR /build
 RUN apk add --no-cache git
 COPY go.mod go.sum ./
@@ -20,7 +26,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
         -ldflags "-s -w -X main.version=${VERSION}" \
         -o /out/justhpc-virt-server ./cmd/justhpc-virt-server
 
-FROM alpine:3.21
+FROM docker.io/library/alpine:3.21
 # qemu-img нужен только для экспорта восстановленных образов в qcow2 и для
 # режима проверки «qemu-img check»; всё остальное работает без него.
 RUN apk add --no-cache ca-certificates tzdata qemu-img && \

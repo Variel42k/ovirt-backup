@@ -95,6 +95,16 @@ volume_exists() {
     "$(volume_engine)" volume inspect "$1" >/dev/null 2>&1
 }
 
+# Случайная строка в шестнадцатеричном виде: годится и в URL, и в .env, где нет
+# кавычек и спецсимволы вышли бы боком.
+gen_secret() {
+    if have openssl; then
+        openssl rand -hex "$1"
+    else
+        head -c "$1" /dev/urandom | od -An -tx1 | tr -d '[:space:]'
+    fi
+}
+
 # Команда запуска для выбранного способа.
 runner() {
     case "$1" in
@@ -273,12 +283,18 @@ PostgreSQL хранит пароль внутри тома и новый не п
         # Пароль базы генерируется: внутренний секрет, человеком был бы придуман
         # хуже. Шестнадцатеричный — годится и в форме URL, где / и + пришлось бы
         # кодировать.
-        if have openssl; then
-            PGPASS="$(openssl rand -hex 24)"
-        else
-            PGPASS="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-        fi
+        PGPASS="$(gen_secret 24)"
         [ -n "$PGPASS" ] || die "не удалось сгенерировать пароль базы"
+
+        # Пароль администратора задаём сами, а не вылавливаем потом из журнала:
+        # формат вывода у docker compose, docker-compose и podman-compose разный,
+        # и разбор строки оказался самым хрупким местом установки — под podman
+        # пароль просто не находился. Заданный заранее мы знаем точно.
+        #
+        # Из .env он стирается сразу после запуска: учётная запись уже создана,
+        # и держать пароль в файле дольше незачем.
+        ADMPASS="$(gen_secret 18)"
+        [ -n "$ADMPASS" ] || die "не удалось сгенерировать пароль администратора"
 
         umask 077
         {
@@ -288,7 +304,7 @@ PostgreSQL хранит пароль внутри тома и новый не п
             printf 'POSTGRES_DB=jhvirt\n'
             printf 'JHV_EXTERNAL_URL=%s\n' "$URL"
             printf 'JHV_PORT=8080\n'
-            printf 'JHV_ADMIN_PASSWORD=\n'
+            printf 'JHV_ADMIN_PASSWORD=%s\n' "$ADMPASS"
             printf 'JHV_BACKUP_DIR=%s\n' "$BACKUPS"
             printf 'JHV_RESTORE_DIR=%s\n' "$RESTORES"
             printf 'JHV_LOG_FILE=/app/logs/jhvirt.log\n'
@@ -336,25 +352,27 @@ PostgreSQL хранит пароль внутри тома и новый не п
     done
     [ "$READY" -eq 1 ] || say "    за 3 минуты строка готовности не появилась — смотрите журнал"
 
-    # Пароль администратора печатается службой один раз. Достать его из журнала
-    # здесь же — иначе оператору пришлось бы вспоминать команду grep, а второго
-    # шанса увидеть пароль не будет.
-    PW="$(cd "$WORK" && $RUN logs justhpc-virt-manager 2>/dev/null |
-          grep -m1 -E 'пароль:' | sed 's/.*пароль:[[:space:]]*//' | tr -d '\r ')"
+    # Пароль администратора: если .env создавали мы, он известен точно. Если
+    # .env был раньше — учётная запись уже существует, и показывать нечего.
+    if [ -n "${ADMPASS:-}" ]; then
+        # Стираем из файла: служба учётную запись создала, дальше он там лишний.
+        sed -i 's|^JHV_ADMIN_PASSWORD=.*|JHV_ADMIN_PASSWORD=|' "$WORK/.env" 2>/dev/null || true
+    fi
 
     say ""
     say "════════════════════════════════════════════════════════════"
     say "  ГОТОВО"
     say ""
     say "  интерфейс:     $URL"
-    if [ -n "$PW" ]; then
+    if [ -n "${ADMPASS:-}" ]; then
         say "  пользователь:  admin"
-        say "  пароль:        $PW"
+        say "  пароль:        $ADMPASS"
         say ""
-        say "  Пароль показан один раз — запишите его."
+        say "  Запишите пароль — больше он нигде не хранится."
     else
-        say "  пароль администратора:"
-        say "    cd $WORK && $RUN logs justhpc-virt-manager | grep -A6 'УЧЁТНАЯ ЗАПИСЬ'"
+        say "  учётная запись уже была создана прежде; пароль не менялся."
+        say "  Забыли — задайте новый:"
+        say "    cd $WORK && $RUN run --rm justhpc-virt-manager -reset-password admin"
     fi
     say "════════════════════════════════════════════════════════════"
     say ""

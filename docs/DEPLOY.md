@@ -109,6 +109,7 @@ git clone <репозиторий> /opt/jhvirt/src && cd /opt/jhvirt/src/deploy
 |---|---|
 | `--mode docker\|docker-compose\|podman\|systemd` | без диалога, для автоматизации |
 | `--url https://virt.example.org` | внешний адрес без вопроса |
+| `--port 18080` | порт наружу, если 8080 уже занят |
 | `--no-start` | подготовить `.env`, но не запускать |
 | `--uninstall` | остановить и снять; данные и тома остаются |
 | `PREFIX=/srv/jhvirt` | другой каталог при установке из комплекта |

@@ -14,6 +14,7 @@
 #   ./install.sh --mode podman         podman-compose
 #   ./install.sh --mode systemd        бинарь службой, PostgreSQL отдельно
 #   ./install.sh --url https://host    внешний адрес без вопроса
+#   ./install.sh --port 18080          порт наружу, если 8080 занят
 #   ./install.sh --no-start            подготовить, но не запускать
 #   ./install.sh --uninstall           остановить и снять, данные оставить
 
@@ -27,7 +28,7 @@ PREFIX="${PREFIX:-/opt/jhvirt}"
 USER_NAME="${USER_NAME:-jhvirt}"
 UNIT="/etc/systemd/system/jhvirt.service"
 
-MODE=""; URL=""; START=1
+MODE=""; URL=""; START=1; PORT=8080
 
 die() { printf '\nошибка: %s\n' "$*" >&2; exit 1; }
 say() { printf '%s\n' "$*"; }
@@ -40,6 +41,8 @@ while [ $# -gt 0 ]; do
         --mode=*) MODE="${1#--mode=}"; shift ;;
         --url) URL="${2:-}"; shift 2 ;;
         --url=*) URL="${1#--url=}"; shift ;;
+        --port) PORT="${2:-}"; shift 2 ;;
+        --port=*) PORT="${1#--port=}"; shift ;;
         --no-start) START=0; shift ;;
         --uninstall) MODE=uninstall; shift ;;
         # Справка — это шапка файла: два описания разъезжаются, одно нет.
@@ -198,6 +201,12 @@ if [ "$BUNDLE" -eq 1 ] || [ "$MODE" = systemd ]; then
     [ "$(id -u)" -eq 0 ] || die "нужны права root: sudo $SELF"
 fi
 
+# Проверяется здесь, а не при разборе ключей: ошибку в номере порта compose
+# сообщает уже на запуске контейнера, когда образ собран и время потрачено.
+case "$PORT" in
+    ''|*[!0-9]*) die "порт должен быть числом: --port 18080" ;;
+esac
+
 case "$MODE" in
     docker)         has_docker  || die "docker compose недоступен" ;;
     docker-compose) has_dockerc || die "docker-compose не найден" ;;
@@ -310,7 +319,7 @@ PostgreSQL хранит пароль внутри тома и новый не п
             printf 'POSTGRES_PASSWORD=%s\n' "$PGPASS"
             printf 'POSTGRES_DB=jhvirt\n'
             printf 'JHV_EXTERNAL_URL=%s\n' "$URL"
-            printf 'JHV_PORT=8080\n'
+            printf 'JHV_PORT=%s\n' "$PORT"
             printf 'JHV_ADMIN_PASSWORD=%s\n' "$ADMPASS"
             printf 'JHV_BACKUP_DIR=%s\n' "$BACKUPS"
             printf 'JHV_RESTORE_DIR=%s\n' "$RESTORES"

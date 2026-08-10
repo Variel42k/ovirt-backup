@@ -340,6 +340,8 @@ jvbackup restore -repo /backup -run <id> -out /var/tmp -format qcow2
   резервирование самого сервиса и восстановление.
 - [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) — где находятся YAML, env,
   unit, ключ и данные для Docker и systemd.
+- [`docs/DNS.md`](docs/DNS.md) — DNS движков и гипервизоров, корпоративный
+  `.local`, постоянная настройка Netplan/NetworkManager и Docker override.
 - [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) — ошибки установки и
   запуска, авторизация/cookie, PostgreSQL, Docker, systemd, oVirt и KVM.
 - [`docs/API.md`](docs/API.md) — REST API.

@@ -5,6 +5,7 @@ import { api, notifyError, notifyOk } from '@/api/client'
 import { ago, bytes, dateTime, runStatus, statusColor, vmStatus } from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
+import BackupOptionsPicker from '@/components/BackupOptionsPicker.vue'
 import BackupTypeHelpCard from '@/components/BackupTypeHelpCard.vue'
 import HelpButton from '@/components/HelpButton.vue'
 import type { BackupOption, BackupRun, Disk, Recommendation, SchedulePreset, VM } from '@/api/types'
@@ -225,53 +226,13 @@ onMounted(load)
           </q-card-section>
           <q-separator />
 
-          <q-card-section class="row q-col-gutter-sm">
-            <div v-for="option in recommendation?.options ?? []" :key="option.type" class="col-12 col-md-6">
-              <q-card
-                flat
-                bordered
-                class="full-height cursor-pointer"
-                :class="{
-                  'jhv-option--recommended': option.recommended,
-                  'jhv-option--blocked': !option.available,
-                  'bg-blue-1': selectedType === option.type,
-                }"
-                @click="pick(option)"
-              >
-                <q-card-section class="q-pb-xs">
-                  <div class="row items-center">
-                    <q-radio
-                      :model-value="selectedType"
-                      :val="option.type"
-                      :disable="!option.available"
-                      dense
-                      @update:model-value="pick(option)"
-                    />
-                    <div class="text-subtitle2 q-ml-xs">{{ option.title }}</div>
-                    <q-space />
-                    <q-badge v-if="option.recommended" color="primary">рекомендуется</q-badge>
-                  </div>
-                </q-card-section>
-
-                <q-card-section class="q-pt-none">
-                  <div v-if="option.blocker" class="jhv-reason text-negative jhv-wrap">
-                    Недоступно: {{ option.blocker }}
-                  </div>
-                  <div v-else class="jhv-reason jhv-wrap">{{ option.rationale }}</div>
-
-                  <div class="jhv-reason q-mt-xs jhv-wrap">{{ option.impact }}</div>
-
-                  <div class="q-mt-sm text-caption">
-                    <q-icon name="save" size="14px" /> ~{{ bytes(option.estimated_bytes) }}
-                    <q-icon name="schedule" size="14px" class="q-ml-md" /> ~{{ option.estimated_duration }}
-                  </div>
-
-                  <div v-if="option.prerequisites?.length" class="jhv-reason q-mt-xs text-warning jhv-wrap">
-                    Требуется: {{ option.prerequisites.join('; ') }}
-                  </div>
-                </q-card-section>
-              </q-card>
-            </div>
+          <q-card-section>
+            <BackupOptionsPicker
+              v-model="selectedType"
+              :options="recommendation?.options ?? []"
+              :loading="loading && !recommendation"
+              @select="pick"
+            />
           </q-card-section>
 
           <q-separator />

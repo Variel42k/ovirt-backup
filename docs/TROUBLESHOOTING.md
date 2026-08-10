@@ -498,6 +498,31 @@ TLS завершается на прокси, но прокси и прилож�
 
 ## 7. Подключение к oVirt и KVM
 
+### `lookup ... on 127.0.0.11:53: server misbehaving`
+
+`127.0.0.11` — встроенный DNS Docker. Он пересылает запросы DNS-серверам
+host-системы, поэтому сначала сравните результат на двух уровнях:
+
+```bash
+# На Docker-host.
+getent ahostsv4 dengine.example.local
+resolvectl query dengine.example.local
+
+# В контейнере приложения.
+cd <каталог-compose>
+docker compose exec -T justhpc-virt-manager \
+  getent ahostsv4 dengine.example.local
+```
+
+Если host тоже не разрешает имя, исправляйте host DNS. Для корпоративного
+`.local` обычно требуется unicast DNS route-domain в `systemd-resolved`.
+Постоянная настройка Ubuntu/Netplan и RHEL/NetworkManager, Docker-only
+override и готовый пример для тестового сервера описаны в
+[DNS.md](DNS.md).
+
+Не заменяйте DNS-имя движка IP-адресом без отдельной проверки: это может
+нарушить TLS и абсолютные URL SSO.
+
 ### oVirt: `engine_auth`
 
 Движок отверг учётные данные. Проверьте имя в полном формате, например

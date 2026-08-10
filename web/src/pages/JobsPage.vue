@@ -5,9 +5,9 @@ import { api, notifyError, notifyOk } from '@/api/client'
 import { dateTime, runStatus, statusColor } from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
-import BackupTypeHelpCard from '@/components/BackupTypeHelpCard.vue'
+import BackupOptionsPicker from '@/components/BackupOptionsPicker.vue'
 import HelpButton from '@/components/HelpButton.vue'
-import type { BackupJob, VM } from '@/api/types'
+import type { BackupJob, BackupOption, Recommendation, VM } from '@/api/types'
 
 const $q = useQuasar()
 const app = useAppStore()
@@ -18,6 +18,12 @@ const loading = ref(false)
 const dialog = ref(false)
 const editing = ref<BackupJob | null>(null)
 const vmsOfServer = ref<VM[]>([])
+const backupOptions = ref<BackupOption[]>([])
+const backupOptionsLoading = ref(false)
+const backupOptionsError = ref('')
+let vmLoadSequence = 0
+let optionLoadSequence = 0
+let preserveUnavailableType = false
 
 const emptyForm = () => ({
   name: '',
@@ -25,7 +31,7 @@ const emptyForm = () => ({
   server_id: '',
   vm_ids: [] as string[],
   exclude_vm_ids: [] as string[],
-  type: 'incremental',
+  type: '',
   full_every: 7,
   fallback_type: 'snapshot',
   schedule: '0 1 * * *',
@@ -62,7 +68,47 @@ const schedulePresets = [
 ]
 
 const needsFullEvery = computed(() => ['incremental', 'differential'].includes(form.value.type))
+const usesCBT = computed(() => ['full', 'incremental', 'differential'].includes(form.value.type))
 const bootHosts = computed(() => app.servers.filter((s) => s.kind === 'kvm' && s.enabled))
+const selectedVMs = computed(() => {
+  const excluded = new Set(form.value.exclude_vm_ids)
+  if (!form.value.vm_ids.length) return vmsOfServer.value.filter((vm) => !excluded.has(vm.id))
+  const selected = new Set(form.value.vm_ids)
+  return vmsOfServer.value.filter((vm) => selected.has(vm.id) && !excluded.has(vm.id))
+})
+const selectedBackupOption = computed(() =>
+  backupOptions.value.find((option) => option.type === form.value.type),
+)
+
+function aggregateOptions(entries: Array<{ vm: VM; recommendation: Recommendation }>): BackupOption[] {
+  if (entries.length === 1) return entries[0].recommendation.options
+
+  const optionTypes = entries[0]?.recommendation.options.map((option) => option.type) ?? []
+  return optionTypes.map((type) => {
+    const variants = entries.map(({ vm, recommendation }) => ({
+      vm,
+      option: recommendation.options.find((option) => option.type === type),
+    }))
+    const first = variants[0].option!
+    const blocked = variants.filter(({ option }) => !option?.available)
+    const prerequisites = Array.from(new Set(variants.flatMap(({ option }) => option?.prerequisites ?? [])))
+    const blockedDetails = blocked
+      .slice(0, 3)
+      .map(({ vm, option }) => `${vm.name}: ${option?.blocker ?? 'вариант не поддерживается'}`)
+    if (blocked.length > 3) blockedDetails.push(`ещё ВМ: ${blocked.length - 3}`)
+
+    return {
+      ...first,
+      available: blocked.length === 0,
+      recommended: blocked.length === 0 && variants.every(({ option }) => option?.recommended),
+      rationale: blocked.length === 0 ? `Доступно для всех выбранных ВМ (${entries.length}).` : '',
+      blocker: blocked.length ? blockedDetails.join('; ') : undefined,
+      estimated_bytes: variants.reduce((total, { option }) => total + (option?.estimated_bytes ?? 0), 0),
+      estimated_duration: `для ${entries.length} ВМ`,
+      prerequisites,
+    }
+  })
+}
 
 async function load() {
   loading.value = true
@@ -76,19 +122,92 @@ async function load() {
 }
 
 async function loadVMs() {
+  const sequence = ++vmLoadSequence
+  const serverID = form.value.server_id
+  ++optionLoadSequence
+  backupOptions.value = []
+  backupOptionsError.value = ''
   if (!form.value.server_id) {
     vmsOfServer.value = []
+    backupOptionsLoading.value = false
     return
   }
   try {
-    vmsOfServer.value = await api.listVMs(form.value.server_id)
+    const vms = await api.listVMs(serverID)
+    if (sequence !== vmLoadSequence || serverID !== form.value.server_id) return
+    vmsOfServer.value = vms
+    await loadBackupOptions()
   } catch {
+    if (sequence !== vmLoadSequence) return
     vmsOfServer.value = []
+    backupOptionsLoading.value = false
+    backupOptionsError.value = 'Не удалось загрузить ВМ и проверить доступные типы бэкапа.'
   }
+}
+
+async function loadBackupOptions() {
+  const sequence = ++optionLoadSequence
+  const serverID = form.value.server_id
+  const vms = [...selectedVMs.value]
+  const storageID = form.value.storage_target_ids[0] || undefined
+
+  backupOptions.value = []
+  backupOptionsError.value = ''
+  if (!serverID || !vms.length) {
+    backupOptionsLoading.value = false
+    return
+  }
+
+  backupOptionsLoading.value = true
+  try {
+    const entries: Array<{ vm: VM; recommendation: Recommendation }> = new Array(vms.length)
+    let next = 0
+    const workers = Array.from({ length: Math.min(6, vms.length) }, async () => {
+      while (next < vms.length) {
+        const index = next++
+        const vm = vms[index]
+        entries[index] = { vm, recommendation: await api.backupOptions(serverID, vm.id, storageID) }
+      }
+    })
+    await Promise.all(workers)
+    if (sequence !== optionLoadSequence || serverID !== form.value.server_id) return
+
+    backupOptions.value = aggregateOptions(entries)
+    const current = backupOptions.value.find((option) => option.type === form.value.type)
+    if (!form.value.type || (!current?.available && !preserveUnavailableType)) {
+      const replacement = backupOptions.value.find((option) => option.recommended) ??
+        backupOptions.value.find((option) => option.available)
+      form.value.type = replacement?.type ?? ''
+      if (replacement?.suggested_verify) form.value.verify_after = replacement.suggested_verify
+    }
+    preserveUnavailableType = false
+  } catch {
+    if (sequence !== optionLoadSequence) return
+    backupOptions.value = []
+    backupOptionsError.value = 'Не удалось проверить доступность типов бэкапа. Повторите проверку.'
+    preserveUnavailableType = false
+  } finally {
+    if (sequence === optionLoadSequence) backupOptionsLoading.value = false
+  }
+}
+
+function pickBackupOption(option: BackupOption) {
+  form.value.type = option.type
+  if (option.suggested_verify) form.value.verify_after = option.suggested_verify
+}
+
+function changeServer(serverID: string) {
+  if (serverID === form.value.server_id) return
+  form.value.server_id = serverID
+  form.value.vm_ids = []
+  form.value.exclude_vm_ids = []
+  const source = app.servers.find((server) => server.id === serverID)
+  form.value.verify_options.boot_host_id = source?.kind === 'kvm' ? source.id : ''
 }
 
 function openCreate() {
   editing.value = null
+  preserveUnavailableType = false
   form.value = emptyForm()
   form.value.server_id = app.servers[0]?.id ?? ''
   const source = app.servers.find((s) => s.id === form.value.server_id)
@@ -100,6 +219,7 @@ function openCreate() {
 
 function openEdit(job: BackupJob) {
   editing.value = job
+  preserveUnavailableType = true
   form.value = {
     ...emptyForm(),
     ...job,
@@ -114,6 +234,18 @@ function openEdit(job: BackupJob) {
 }
 
 async function save() {
+  if (backupOptionsLoading.value) {
+    notifyError('Дождитесь проверки доступных типов бэкапа')
+    return
+  }
+  if (!form.value.type) {
+    notifyError('Выберите доступный тип бэкапа')
+    return
+  }
+  if (selectedBackupOption.value && !selectedBackupOption.value.available) {
+    notifyError(`Тип «${selectedBackupOption.value.title}» недоступен для выбранных ВМ`)
+    return
+  }
   try {
     if (editing.value) {
       await api.updateJob(editing.value.id, form.value)
@@ -186,6 +318,8 @@ watch(() => form.value.server_id, (serverID) => {
     form.value.verify_options.boot_host_id = source?.kind === 'kvm' ? source.id : ''
   }
 })
+watch(() => [...form.value.vm_ids], () => void loadBackupOptions())
+watch(() => form.value.storage_target_ids[0] ?? '', () => void loadBackupOptions())
 onMounted(async () => {
   await app.bootstrap()
   await load()
@@ -316,13 +450,14 @@ const columns = [
             </div>
             <div class="col-12 col-sm-6">
               <q-select
-                v-model="form.server_id"
+                :model-value="form.server_id"
                 :options="app.servers.map((s) => ({ label: s.name, value: s.id }))"
                 emit-value
                 map-options
                 label="Сервер"
                 outlined
                 dense
+                @update:model-value="changeServer"
               />
             </div>
           </div>
@@ -346,19 +481,33 @@ const columns = [
             <HelpButton article="hot-backup" label="Останавливается ли ВМ" />
           </div>
 
-          <div class="row q-col-gutter-md">
-            <div class="col-12 col-sm-4">
-              <q-select
-                v-model="form.type"
-                :options="(app.meta?.backup_types ?? []).map((t) => ({ label: t.title, value: t.value }))"
-                emit-value
-                map-options
-                label="Тип бэкапа"
-                outlined
-                dense
-              />
-            </div>
-            <div class="col-6 col-sm-4">
+          <div class="text-caption text-grey-7">
+            <template v-if="form.vm_ids.length">
+              Доступность проверяется для выбранных ВМ: {{ selectedVMs.length }}.
+            </template>
+            <template v-else>
+              Доступность проверяется для всех ВМ сервера: {{ selectedVMs.length }}.
+            </template>
+          </div>
+
+          <q-banner v-if="backupOptionsError" dense class="bg-orange-1">
+            <template #avatar><q-icon name="warning" color="warning" /></template>
+            {{ backupOptionsError }}
+            <template #action>
+              <q-btn flat dense icon="refresh" label="Повторить" @click="loadBackupOptions" />
+            </template>
+          </q-banner>
+
+          <BackupOptionsPicker
+            v-model="form.type"
+            :options="backupOptions"
+            :loading="backupOptionsLoading"
+            empty-text="На выбранном сервере нет ВМ, для которых можно проверить варианты бэкапа."
+            @select="pickBackupOption"
+          />
+
+          <div v-if="form.type" class="row q-col-gutter-md">
+            <div class="col-12 col-sm-6">
               <q-input
                 v-model.number="form.full_every"
                 type="number"
@@ -371,16 +520,15 @@ const columns = [
                 <template #append><HelpButton article="chains" label="Цепочки" /></template>
               </q-input>
             </div>
-            <div class="col-6 col-sm-4">
+            <div v-if="usesCBT" class="col-12 col-sm-6">
               <q-select
                 v-model="form.fallback_type"
                 :options="[
                   { label: 'Полный через снапшот', value: 'snapshot' },
-                  { label: 'Полный (CBT)', value: 'full' },
                 ]"
                 emit-value
                 map-options
-                label="Если CBT недоступен"
+                label="Если CBT станет недоступен"
                 outlined
                 dense
               >
@@ -388,9 +536,6 @@ const columns = [
               </q-select>
             </div>
           </div>
-
-          <!-- Выбранная стратегия объясняется там же, где выбирается. -->
-          <BackupTypeHelpCard :type="form.type" />
 
           <div class="row q-col-gutter-md">
             <div class="col-12 col-sm-7">

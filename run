@@ -374,7 +374,7 @@ cmd_build() {
     # compose-файл пришлось бы править при упаковке, а расходящиеся копии
     # одного файла рано или поздно разъезжаются.
     cp deploy/Dockerfile.bundle "$OUT/Dockerfile"
-    for doc in DEPLOY CONFIGURATION OPERATIONS TROUBLESHOOTING BUILD API ARCHITECTURE BACKUP-FORMAT DISK-ARCHITECTURE; do
+    for doc in DEPLOY CONFIGURATION DNS OPERATIONS TROUBLESHOOTING BUILD API ARCHITECTURE BACKUP-FORMAT DISK-ARCHITECTURE; do
         [ -f "docs/$doc.md" ] && cp "docs/$doc.md" "$OUT/docs/"
     done
     # В репозитории README ссылается на docs/X.md. Внутри комплекта он сам уже

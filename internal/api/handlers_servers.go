@@ -343,7 +343,7 @@ func libvirtHint(err error) string {
 	case containsAny(text, "libvirt-sock", "permission denied", "connection refused"):
 		return "Сокет libvirt недоступен: проверьте, что libvirtd запущен и пользователь состоит в группе libvirt."
 	case containsAny(text, "no such host", "lookup"):
-		return "Имя хоста не разрешается в адрес. Проверьте DNS или укажите IP."
+		return "Имя KVM-хоста не разрешается. Проверьте DNS на сервере приложения и внутри контейнера; для корпоративного домена .local настройте unicast DNS route-domain."
 	case containsAny(text, "knownhosts", "host key"):
 		return "Ключ хоста не совпал с ожидаемым. Проверьте значение поля «ключ хоста»."
 	case containsAny(text, "i/o timeout", "deadline"):
@@ -362,7 +362,7 @@ func probeHint(err error) string {
 	case containsAny(err.Error(), "certificate", "x509", "tls"):
 		return "Сертификат движка не проверяется. Нажмите «Получить CA-сертификат» или включите режим без проверки TLS."
 	case containsAny(err.Error(), "no such host", "lookup"):
-		return "Имя движка не разрешается в адрес. Проверьте DNS или укажите IP."
+		return "Имя движка не разрешается. Проверьте DNS на сервере приложения и внутри контейнера. Для корпоративного домена .local настройте unicast DNS route-domain; замена имени на IP может нарушить TLS."
 	case containsAny(err.Error(), "connection refused", "timeout", "deadline"):
 		return "Движок не отвечает на этом адресе и порту. Проверьте доступность по сети и что служба ovirt-engine запущена."
 	default:

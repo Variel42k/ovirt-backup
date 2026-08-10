@@ -289,11 +289,13 @@ func (c *Client) ListVMDisks(ctx context.Context, vmID string) ([]Disk, error) {
 				return nil, fmt.Errorf("диск %s ВМ %s: %w", att.ID, vmID, err)
 			}
 			d.Bootable = att.Bootable
+			d.Interface = att.Interface
 			out = append(out, *d)
 			continue
 		}
 		disk := *att.Disk
 		disk.Bootable = att.Bootable
+		disk.Interface = att.Interface
 		out = append(out, disk)
 	}
 	return out, nil

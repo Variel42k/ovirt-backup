@@ -10,6 +10,7 @@ package dispatch
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -225,6 +226,17 @@ func (d *Dispatcher) executeLibvirt(ctx context.Context, srv *model.Server, req 
 		return d.failRun(ctx, run, err)
 	}
 
+	if result.DomainXML != "" {
+		key := repo.LibvirtConfigKey(run.RepoPath)
+		n, putErr := backend.Put(execCtx, key, strings.NewReader(result.DomainXML), int64(len(result.DomainXML)))
+		if putErr != nil {
+			log.Warn().Err(putErr).Msg("не удалось сохранить исходный XML домена (данные дисков сохранены)")
+		} else {
+			result.ConfigKey = key
+			run.StoredBytes += n
+		}
+	}
+
 	for _, m := range result.Manifests {
 		if err := d.store.UpsertBackupDisk(ctx, &model.BackupDisk{
 			RunID:        run.ID,
@@ -299,6 +311,11 @@ func (d *Dispatcher) writeRunManifest(ctx context.Context, backend repo.Backend,
 		Encrypted:        run.Encrypted,
 		LogicalBytes:     run.ReadBytes,
 		StoredBytes:      run.StoredBytes,
+		VMProfile:        result.Profile,
+		ConfigKey:        result.ConfigKey,
+	}
+	if result.ConfigKey != "" {
+		doc.ConfigFormat = "libvirt-domain-xml"
 	}
 	for _, m := range result.Manifests {
 		doc.Disks = append(doc.Disks, backup.RunManifestDisk{
@@ -307,6 +324,9 @@ func (d *Dispatcher) writeRunManifest(ctx context.Context, backend repo.Backend,
 			Index:       m.Index,
 			VirtualSize: m.VirtualSize,
 			Bootable:    m.Bootable,
+			Target:      m.Target,
+			Bus:         m.Bus,
+			BootOrder:   m.BootOrder,
 			ManifestKey: repo.DiskManifestKey(run.RepoPath, m.Index, m.DiskID),
 			DataKey:     m.DataKey,
 			ChunkCount:  m.ChunkCount(),

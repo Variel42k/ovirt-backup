@@ -97,10 +97,11 @@ type RunRequest struct {
 	StorageTargetID string
 	ExcludeDiskIDs  []string
 
-	Quiesce     bool
-	Encrypt     bool
-	VerifyAfter model.VerifyMode
-	Retention   model.RetentionPolicy
+	Quiesce       bool
+	Encrypt       bool
+	VerifyAfter   model.VerifyMode
+	VerifyOptions model.VerifyOptions
+	Retention     model.RetentionPolicy
 
 	// OVAHostID и OVADirectory нужны только для типа ova.
 	OVAHostID    string
@@ -235,13 +236,15 @@ func (e *Engine) Execute(ctx context.Context, req RunRequest) (*model.BackupRun,
 	}
 
 	var manifests []*DiskManifest
+	var vmConfig []byte
 	switch run.Type {
 	case model.BackupFull, model.BackupIncremental, model.BackupDifferential:
 		manifests, err = e.runCBT(execCtx, client, backend, srv, vm, run, req, disks, plan)
 	case model.BackupSnapshot:
 		manifests, err = e.runSnapshot(execCtx, client, backend, srv, vm, run, req, disks)
 	case model.BackupConfig:
-		err = e.runConfigOnly(execCtx, client, backend, vm, run)
+		run.DiskCount = 0
+		vmConfig, err = e.storeVMConfig(execCtx, client, backend, vm.ID, run)
 	case model.BackupOVA:
 		err = e.runOVA(execCtx, client, vm, run, req)
 	default:
@@ -254,12 +257,12 @@ func (e *Engine) Execute(ctx context.Context, req RunRequest) (*model.BackupRun,
 	// The VM configuration is stored with every run: restoring a disk image is
 	// only half the job if nobody remembers how many NICs the machine had.
 	if run.Type != model.BackupConfig && run.Type != model.BackupOVA {
-		if err := e.storeVMConfig(execCtx, client, backend, vm.ID, run); err != nil {
+		if vmConfig, err = e.storeVMConfig(execCtx, client, backend, vm.ID, run); err != nil {
 			log.Warn().Err(err).Msg("не удалось сохранить конфигурацию ВМ (данные дисков сохранены)")
 		}
 	}
 
-	if err := e.writeRunManifest(execCtx, backend, srv, vm, run, manifests); err != nil {
+	if err := e.writeRunManifest(execCtx, backend, srv, vm, run, manifests, vmConfig); err != nil {
 		return e.failRun(ctx, run, fmt.Errorf("запись манифеста запуска: %w", err))
 	}
 
@@ -766,6 +769,9 @@ func (e *Engine) copyOneDisk(ctx context.Context, client *ovirt.Client, backend 
 		Alias:            disk.AliasOrName(),
 		Index:            index,
 		Bootable:         disk.Bootable.Bool(),
+		Target:           DiskTarget(disk.Interface, index),
+		Bus:              NormaliseDiskBus(disk.Interface),
+		BootOrder:        bootOrder(disk.Bootable.Bool()),
 		VirtualSize:      disk.ProvisionedSize.Int64(),
 		DiskFormat:       disk.Format,
 		FromCheckpointID: run.FromCheckpointID,
@@ -876,27 +882,20 @@ func (e *Engine) copyOneDisk(ctx context.Context, client *ovirt.Client, backend 
 	return final, result.LogicalBytes, final.StoredBytes, nil
 }
 
-// runConfigOnly stores just the VM description. It takes seconds and protects
-// against the "somebody deleted the VM object" failure, not against data loss.
-func (e *Engine) runConfigOnly(ctx context.Context, client *ovirt.Client, backend repo.Backend,
-	vm *model.VM, run *model.BackupRun) error {
-	run.DiskCount = 0
-	return e.storeVMConfig(ctx, client, backend, vm.ID, run)
-}
-
 func (e *Engine) storeVMConfig(ctx context.Context, client *ovirt.Client, backend repo.Backend,
-	vmID string, run *model.BackupRun) error {
+	vmID string, run *model.BackupRun) ([]byte, error) {
 	cfg, err := client.VMConfiguration(ctx, vmID)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	raw := []byte(cfg)
 	key := repo.VMConfigKey(run.RepoPath)
-	n, err := backend.Put(ctx, key, bytesReader([]byte(cfg)), int64(len(cfg)))
+	n, err := backend.Put(ctx, key, bytesReader(raw), int64(len(raw)))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	run.StoredBytes += n
-	return nil
+	return raw, nil
 }
 
 // runOVA asks the engine to export the VM as an OVA onto a host's filesystem.
@@ -923,7 +922,7 @@ func (e *Engine) runOVA(ctx context.Context, client *ovirt.Client, vm *model.VM,
 // repository is what makes a backup self-describing: the repository can be
 // read back even if this service's database is lost.
 func (e *Engine) writeRunManifest(ctx context.Context, backend repo.Backend, srv *model.Server,
-	vm *model.VM, run *model.BackupRun, manifests []*DiskManifest) error {
+	vm *model.VM, run *model.BackupRun, manifests []*DiskManifest, vmConfig []byte) error {
 	if run.Type == model.BackupOVA {
 		return nil
 	}
@@ -952,6 +951,11 @@ func (e *Engine) writeRunManifest(ctx context.Context, backend repo.Backend, srv
 		Encrypted:        run.Encrypted,
 		LogicalBytes:     run.ReadBytes,
 		StoredBytes:      run.StoredBytes,
+		VMProfile:        ProfileFromOVirtConfig(vmConfig, vm, manifests),
+	}
+	if len(vmConfig) > 0 {
+		doc.ConfigKey = repo.VMConfigKey(run.RepoPath)
+		doc.ConfigFormat = "ovirt-vm-json"
 	}
 	for _, m := range manifests {
 		doc.Disks = append(doc.Disks, RunManifestDisk{
@@ -960,6 +964,9 @@ func (e *Engine) writeRunManifest(ctx context.Context, backend repo.Backend, srv
 			Index:       m.Index,
 			VirtualSize: m.VirtualSize,
 			Bootable:    m.Bootable,
+			Target:      m.Target,
+			Bus:         m.Bus,
+			BootOrder:   m.BootOrder,
 			ManifestKey: repo.DiskManifestKey(run.RepoPath, m.Index, m.DiskID),
 			DataKey:     m.DataKey,
 			ChunkCount:  m.ChunkCount(),

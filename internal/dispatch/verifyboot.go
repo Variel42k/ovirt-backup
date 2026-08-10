@@ -39,20 +39,18 @@ func (d *Dispatcher) verifyBoot(ctx context.Context, req backup.ExternalVerifyRe
 	if err != nil {
 		return err
 	}
-	diskID, manifest, err := selectBootDisk(set, opts.DiskID)
+	profile, legacy, err := bootProfile(set)
+	if err != nil {
+		return err
+	}
+	plans, err := d.planBootDisks(set, opts.DiskID, host.ScratchDir, req.Record.ID, profile)
 	if err != nil {
 		return err
 	}
 
 	log := d.log.With().
 		Str("verify", req.Record.ID).Str("backup", set.Leaf.ID).
-		Str("хост", host.Name).Str("диск", manifest.Alias).Logger()
-
-	reader, err := d.Engine.ReaderFor(set, diskID)
-	if err != nil {
-		return err
-	}
-	defer reader.Close()
+		Str("хост", host.Name).Int("дисков", len(plans)).Logger()
 
 	conn, err := d.libvirt.ForServer(ctx, host)
 	if err != nil {
@@ -65,37 +63,40 @@ func (d *Dispatcher) verifyBoot(ctx context.Context, req backup.ExternalVerifyRe
 	}
 	driver := kvm.NewDriver(conn, kvm.Config{ScratchDir: scratch}, d.cipher, log)
 
-	// The sparse write means only the chunks that hold data occupy space, so
-	// that — not the disk's logical size — is what has to fit.
-	needed := int64(reader.PresentChunks()) * reader.ChunkSize()
-	dr := backup.DiskReport{DiskID: diskID, Alias: manifest.Alias, OK: true}
-
 	if avail, err := driver.AvailableBytes(ctx, scratch); err != nil {
 		log.Warn().Err(err).Msg("не удалось узнать свободное место на гипервизоре")
-	} else if avail < needed {
+	} else if avail < totalNeeded(plans) {
 		return fmt.Errorf(
-			"на %s в каталоге %s свободно %s, а для образа нужно около %s — "+
+			"на %s в каталоге %s свободно %s, а для %d образов нужно около %s — "+
 				"освободите место или укажите другой каталог в настройках подключения",
-			host.Name, scratch, humanBytes(avail), humanBytes(needed))
+			host.Name, scratch, humanBytes(avail), len(plans), humanBytes(totalNeeded(plans)))
 	}
 
-	remote := path.Join(scratch, fmt.Sprintf("jhv-verify-%s.raw", req.Record.ID))
 	compress := driver.RemoteHasGzip(ctx)
 	if !compress {
-		log.Info().Msg("на гипервизоре нет gzip — образ передаётся без сжатия")
+		log.Info().Msg("на гипервизоре нет gzip — образы передаются без сжатия")
 	}
 
-	uploaded, err := d.uploadImage(ctx, driver, reader, remote, compress, req, needed)
-	if err != nil {
-		driver.RemoveRemote(context.WithoutCancel(ctx), remote)
-		return err
+	var uploaded int64
+	for i := range plans {
+		plan := &plans[i]
+		n, uploadErr := d.uploadImage(ctx, driver, plan.Reader, plan.RemotePath,
+			compress, req, uploaded, totalLogical(plans))
+		plan.Reader.Close()
+		plan.Reader = nil
+		if uploadErr != nil {
+			d.removePlannedImages(driver, plans)
+			return fmt.Errorf("передача диска %s: %w", plan.Manifest.Alias, uploadErr)
+		}
+		uploaded += n
+		plan.Report.BytesChecked = n
+		report.Disks = append(report.Disks, plan.Report)
 	}
-	dr.BytesChecked = uploaded
 
 	timeout := time.Duration(opts.TimeoutSec) * time.Second
 	result, err := driver.RunBootTest(ctx, kvm.BootTest{
-		RemoteImage:   remote,
-		Format:        "raw",
+		Disks:         bootTestDisks(plans),
+		Profile:       profile,
 		MemoryMiB:     opts.MemoryMiB,
 		VCPUs:         opts.VCPUs,
 		Timeout:       timeout,
@@ -103,26 +104,39 @@ func (d *Dispatcher) verifyBoot(ctx context.Context, req backup.ExternalVerifyRe
 		Name:          set.Leaf.VMName,
 	}, log)
 	if err != nil {
+		if !opts.KeepOnFailure {
+			d.removePlannedImages(driver, plans)
+		}
 		// The domain never started: that is a failed verification, not a
 		// broken request, so it goes into the report.
-		dr.OK = false
-		dr.Problems = append(dr.Problems, err.Error())
-		report.Disks = append(report.Disks, dr)
+		for i := range report.Disks {
+			report.Disks[i].OK = false
+			report.Disks[i].Problems = append(report.Disks[i].Problems, err.Error())
+		}
 		report.Problems = append(report.Problems, err.Error())
 		report.Summary = "проверочную ВМ не удалось запустить"
 		report.Boot = &backup.BootReport{Host: host.Name, Notes: []string{err.Error()}}
 		return nil
 	}
 
-	dr.OK = result.Passed()
-	if !dr.OK {
-		dr.Problems = append(dr.Problems, result.Summary())
+	for i := range report.Disks {
+		report.Disks[i].OK = result.Passed()
+		if !result.Passed() {
+			report.Disks[i].Problems = append(report.Disks[i].Problems, result.Summary())
+		}
+		report.Disks[i].Problems = append(report.Disks[i].Problems, result.Notes...)
+	}
+	if !result.Passed() {
 		report.Problems = append(report.Problems, result.Summary())
 	}
-	dr.Problems = append(dr.Problems, result.Notes...)
-	report.Disks = append(report.Disks, dr)
-	report.Summary = fmt.Sprintf("%s (хост %s, образ %s)",
-		result.Summary(), host.Name, humanBytes(uploaded))
+	notes := append([]string{}, result.Notes...)
+	if legacy {
+		notes = append(notes, "у старого бэкапа нет профиля VM: использован совместимый профиль по данным дисков")
+	}
+	notes = append(notes, fmt.Sprintf("профиль %s/%s, %s; подключено дисков: %d",
+		profile.Architecture, profile.Machine, profile.Firmware, len(plans)))
+	report.Summary = fmt.Sprintf("%s (хост %s, %d дисков, %s)",
+		result.Summary(), host.Name, len(plans), humanBytes(uploaded))
 	report.Boot = &backup.BootReport{
 		Host:         host.Name,
 		DomainName:   result.DomainName,
@@ -132,9 +146,177 @@ func (d *Dispatcher) verifyBoot(ctx context.Context, req backup.ExternalVerifyRe
 		GuestOS:      result.GuestOS,
 		Hostname:     result.Hostname,
 		ImageBytes:   uploaded,
-		Notes:        result.Notes,
+		Notes:        notes,
 	}
 	return nil
+}
+
+type bootDiskPlan struct {
+	DiskID     string
+	Manifest   *backup.DiskManifest
+	Reader     *backup.ChainReader
+	RemotePath string
+	Target     string
+	Bus        string
+	BootOrder  int
+	Needed     int64
+	Logical    int64
+	Report     backup.DiskReport
+}
+
+func bootProfile(set *backup.ChainSet) (*backup.VMProfile, bool, error) {
+	if set.RunManifestError != nil {
+		return nil, false, fmt.Errorf("чтение профиля VM из run.json: %w", set.RunManifestError)
+	}
+	if set.RunManifest != nil && set.RunManifest.VMProfile != nil {
+		copyProfile := *set.RunManifest.VMProfile
+		if copyProfile.Version > backup.VMProfileVersion {
+			return nil, false, fmt.Errorf("профиль VM версии %d создан более новой версией программы",
+				copyProfile.Version)
+		}
+		copyProfile.Disks = append([]backup.VMProfileDisk(nil), copyProfile.Disks...)
+		return &copyProfile, false, nil
+	}
+	return &backup.VMProfile{
+		Version: backup.VMProfileVersion, Source: "legacy", Architecture: "x86_64",
+		Machine: "pc", Firmware: "bios", ClockOffset: "utc",
+	}, true, nil
+}
+
+func (d *Dispatcher) planBootDisks(set *backup.ChainSet, requested, scratch, verifyID string,
+	profile *backup.VMProfile) ([]bootDiskPlan, error) {
+
+	ids := append([]string(nil), set.DiskOrder...)
+	if requested != "" {
+		if _, ok := set.Manifests[requested]; !ok {
+			return nil, fmt.Errorf("диска %s нет в этом бэкапе", requested)
+		}
+		ids = []string{requested}
+	}
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("в бэкапе нет дисков")
+	}
+	if scratch == "" {
+		scratch = "/var/lib/libvirt/qemu"
+	}
+
+	profileByID := make(map[string]backup.VMProfileDisk, len(profile.Disks))
+	for _, disk := range profile.Disks {
+		profileByID[disk.DiskID] = disk
+	}
+	usedTargets := map[string]bool{}
+	usedBootOrders := map[int]bool{}
+	hasBoot := false
+	plans := make([]bootDiskPlan, 0, len(ids))
+	for i, diskID := range ids {
+		chain := set.Manifests[diskID]
+		if len(chain) == 0 {
+			return nil, fmt.Errorf("для диска %s нет манифеста", diskID)
+		}
+		manifest := chain[len(chain)-1]
+		reader, err := d.Engine.ReaderFor(set, diskID)
+		if err != nil {
+			for j := range plans {
+				plans[j].Reader.Close()
+			}
+			return nil, err
+		}
+
+		attachment := profileByID[diskID]
+		bus := backup.NormaliseDiskBus(firstValue(attachment.Bus, manifest.Bus))
+		target := firstValue(attachment.Target, manifest.Target)
+		if target == "" || usedTargets[target] {
+			target = uniqueDiskTarget(bus, i, usedTargets)
+		}
+		usedTargets[target] = true
+		order := attachment.BootOrder
+		if order == 0 {
+			order = manifest.BootOrder
+		}
+		if order == 0 && manifest.Bootable {
+			order = 1
+		}
+		if requested != "" {
+			order = 1
+		}
+		if order > 0 {
+			for usedBootOrders[order] {
+				order++
+			}
+			usedBootOrders[order] = true
+			hasBoot = true
+		}
+
+		plans = append(plans, bootDiskPlan{
+			DiskID: diskID, Manifest: manifest, Reader: reader,
+			RemotePath: path.Join(scratch, fmt.Sprintf("jhv-verify-%s-%02d.raw", verifyID, i)),
+			Target:     target, Bus: bus, BootOrder: order,
+			Needed:  int64(reader.PresentChunks()) * reader.ChunkSize(),
+			Logical: manifest.VirtualSize,
+			Report:  backup.DiskReport{DiskID: diskID, Alias: manifest.Alias, OK: true},
+		})
+	}
+	if !hasBoot {
+		plans[0].BootOrder = 1
+	}
+	return plans, nil
+}
+
+func firstValue(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func uniqueDiskTarget(bus string, index int, used map[string]bool) string {
+	for ; ; index++ {
+		candidate := backup.DiskTarget(bus, index)
+		if !used[candidate] {
+			return candidate
+		}
+	}
+}
+
+func totalNeeded(plans []bootDiskPlan) int64 {
+	var total int64
+	for _, plan := range plans {
+		total += plan.Needed
+	}
+	return total
+}
+
+func totalLogical(plans []bootDiskPlan) int64 {
+	var total int64
+	for _, plan := range plans {
+		total += plan.Logical
+	}
+	return total
+}
+
+func bootTestDisks(plans []bootDiskPlan) []kvm.BootDisk {
+	out := make([]kvm.BootDisk, 0, len(plans))
+	for _, plan := range plans {
+		out = append(out, kvm.BootDisk{
+			RemoteImage: plan.RemotePath, Format: "raw", Target: plan.Target,
+			Bus: plan.Bus, BootOrder: plan.BootOrder,
+		})
+	}
+	return out
+}
+
+func (d *Dispatcher) removePlannedImages(driver *kvm.Driver, plans []bootDiskPlan) {
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	for i := range plans {
+		if plans[i].Reader != nil {
+			plans[i].Reader.Close()
+			plans[i].Reader = nil
+		}
+		driver.RemoveRemote(cleanupCtx, plans[i].RemotePath)
+	}
 }
 
 // uploadImage assembles the chain and streams it to the hypervisor.
@@ -143,20 +325,21 @@ func (d *Dispatcher) verifyBoot(ctx context.Context, req backup.ExternalVerifyRe
 // is staged on the backup server, which is the only way a terabyte disk can be
 // verified on a machine with tens of gigabytes free.
 func (d *Dispatcher) uploadImage(ctx context.Context, driver *kvm.Driver, reader *backup.ChainReader,
-	remote string, compress bool, req backup.ExternalVerifyRequest, dataBytes int64) (int64, error) {
+	remote string, compress bool, req backup.ExternalVerifyRequest, progressBase, progressTotal int64) (int64, error) {
 
 	pr, pw := io.Pipe()
 	var written int64
 	lastReport := time.Now()
 
 	progress := func(done int64) {
-		if dataBytes <= 0 || time.Since(lastReport) < 3*time.Second {
+		if progressTotal <= 0 || time.Since(lastReport) < 3*time.Second {
 			return
 		}
 		lastReport = time.Now()
 		// Upload occupies the first 80% of the bar; the boot itself is the
 		// rest and has no measurable progress of its own.
-		d.Engine.UpdateProgress(ctx, req.Record, int(done*80/max64(dataBytes, 1)))
+		d.Engine.UpdateProgress(ctx, req.Record,
+			int((progressBase+done)*80/max64(progressTotal, 1)))
 	}
 
 	go func() {
@@ -258,47 +441,6 @@ func (d *Dispatcher) resolveBootHost(ctx context.Context, ownServerID, requested
 		return nil, fmt.Errorf("подключение %q отключено", host.Name)
 	}
 	return host, nil
-}
-
-// selectBootDisk chooses which disk of the backup to boot.
-//
-// Booting the wrong disk of a multi-disk VM produces a confident "не
-// загрузилась" about a data volume that was never bootable, so an ambiguous
-// case is refused rather than guessed.
-func selectBootDisk(set *backup.ChainSet, requested string) (string, *backup.DiskManifest, error) {
-	latest := func(diskID string) *backup.DiskManifest {
-		chain := set.Manifests[diskID]
-		if len(chain) == 0 {
-			return nil
-		}
-		return chain[len(chain)-1]
-	}
-
-	if requested != "" {
-		m := latest(requested)
-		if m == nil {
-			return "", nil, fmt.Errorf("диска %s нет в этом бэкапе", requested)
-		}
-		return requested, m, nil
-	}
-
-	for _, diskID := range set.DiskOrder {
-		if m := latest(diskID); m != nil && m.Bootable {
-			return diskID, m, nil
-		}
-	}
-	if len(set.DiskOrder) == 1 {
-		diskID := set.DiskOrder[0]
-		if m := latest(diskID); m != nil {
-			return diskID, m, nil
-		}
-	}
-	if len(set.DiskOrder) == 0 {
-		return "", nil, fmt.Errorf("в бэкапе нет дисков")
-	}
-	return "", nil, fmt.Errorf(
-		"ни один из %d дисков не помечен загрузочным — укажите диск для пробного запуска явно",
-		len(set.DiskOrder))
 }
 
 func max64(a, b int64) int64 {

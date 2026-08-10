@@ -106,7 +106,7 @@ jhvirt-1.0.0-linux-amd64/
 ├── systemd/jhvirt.service      юнит
 ├── compose/                    docker-compose.yml и .env.example
 ├── Dockerfile                  образ из готового бинаря, без Go и Node
-├── docs/                       DEPLOY, OPERATIONS, README
+├── docs/                       вся документация проекта
 ├── install.sh                  установка и обновление
 └── VERSION
 ```
@@ -130,23 +130,27 @@ ssh server 'sudo sh /tmp/jhvirt-1.0.0-linux-amd64.run'
 Через `sh` — потому что бит исполнения не переживает файловую систему Windows.
 Если собирали на Linux, `sudo ./jhvirt-1.0.0-linux-amd64.run` тоже работает.
 
-Установщик спросит, каким способом ставить, и покажет только доступные на этой
-машине:
+Установщик поддерживает Docker Compose v2, старый `docker-compose` v1 и
+нативную службу systemd:
 
 ```
-Как устанавливать?
+Чем запускать?
 
-  1) docker compose  — сервис и PostgreSQL в контейнерах
-  2) podman-compose  — то же на podman (обычный путь на RHEL)
-  3) systemd         — бинарь службой, PostgreSQL отдельно
+  1) docker compose   — сервис и PostgreSQL в контейнерах
+  2) docker-compose   — то же через Compose v1
+  3) systemd          — нативная служба и локальная PostgreSQL
+  4) удалить          — снять приложение, сохранив конфигурацию и данные
 ```
+
+Перед интерактивным удалением установщик запрашивает отдельное подтверждение.
 
 | Команда | Что делает |
 |---|---|
 | `sudo sh ./jhvirt-*.run` | выбор способа диалогом |
-| `sudo sh ./jhvirt-*.run --mode docker` | без диалога: docker compose |
-| `sudo sh ./jhvirt-*.run --mode podman` | без диалога: podman-compose |
-| `sudo sh ./jhvirt-*.run --mode systemd` | без диалога: бинарь и systemd |
+| `sudo sh ./jhvirt-*.run --mode docker --url http://host:8080` | без диалога: Docker Compose v2 |
+| `sudo sh ./jhvirt-*.run --mode docker-compose --url http://host:8080` | без диалога: Compose v1 |
+| `sudo sh ./jhvirt-*.run --mode systemd --url http://host:8080` | локальная PostgreSQL и systemd |
+| `sudo sh ./jhvirt-*.run --mode systemd --url … --database-url-file /root/jhvirt.dsn` | systemd с внешней PostgreSQL |
 | `sudo PREFIX=/srv/jhvirt sh ./jhvirt-*.run` | другой каталог |
 | `sudo sh ./jhvirt-*.run --uninstall` | удалить службу, сохранив данные |
 | `sh ./jhvirt-*.run --extract [каталог]` | только распаковать, ничего не ставить |
@@ -156,15 +160,20 @@ ssh server 'sudo sh /tmp/jhvirt-1.0.0-linux-amd64.run'
 `--extract` нужен, когда установку выполняет не этот скрипт: свой Ansible,
 образ, каталог без systemd.
 
-Установщик создаёт системного пользователя `jhvirt`, раскладывает файлы,
-ставит юнит и делает `daemon-reload`. Дальше — вручную, и это намеренно:
-службу он не запускает, конфигурацию не заполняет, TLS не выпускает.
-Установщик, который принимает такие решения молча, хуже, чем несколько лишних
-команд.
+В unattended-режиме `--url` обязателен: от его схемы зависит флаг `Secure` у
+сессионной cookie. Для systemd установщик на Ubuntu/Debian или RHEL/Alma/Rocky
+ставит PostgreSQL, создаёт локальную роль и базу, формирует env и unit,
+проверяет конфигурацию, запускает службу и ждёт readiness. TLS он не выпускает.
+
+Внешняя DSN передаётся через файл `0600`, чтобы пароль не попадал в историю
+команд. Локальная база работает через Unix socket и peer-аутентификацию без
+пароля в env.
 
 Каталог `data` получает права `0700`: в нём лежит ключ шифрования секретов.
 
-Дальнейшие шаги — в [DEPLOY.md](DEPLOY.md): конфигурация, TLS, чек-лист.
+Дальнейшие шаги — в [DEPLOY.md](DEPLOY.md): пошаговая установка, проверка
+авторизации, TLS и production-чек-лист. Ошибки установщика разбираются в
+[TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
 ### Что проверяется до распаковки
 
@@ -269,11 +278,15 @@ ssh server 'sudo sh /tmp/jhvirt-1.0.0-linux-amd64.run'
 Alpine содержит только результат. Внутри `qemu-img` — он нужен для экспорта в
 qcow2 и режима проверки `qemu`; без него работает всё остальное.
 
-Готовый стек с базой — в [DEPLOY.md](DEPLOY.md#2-docker--рекомендуемый-путь).
+Готовый стек с базой — в
+[пошаговой Docker-инструкции](DEPLOY.md#4-установка-docker-compose).
 
 ---
 
 ## Если что-то не собирается
+
+Ошибки уже собранного установщика, Docker, systemd и PostgreSQL вынесены в
+[TROUBLESHOOTING.md](TROUBLESHOOTING.md). Ниже только ошибки этапа сборки.
 
 | Сообщение | Причина |
 |---|---|

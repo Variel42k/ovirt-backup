@@ -11,10 +11,10 @@
 #   ./install.sh                       выбор диалогом
 #   ./install.sh --mode docker         docker compose
 #   ./install.sh --mode docker-compose docker-compose (старый, через дефис)
-#   ./install.sh --mode podman         podman-compose
-#   ./install.sh --mode systemd        бинарь службой, PostgreSQL отдельно
-#   ./install.sh --url https://host    внешний адрес без вопроса
+#   ./install.sh --mode systemd        бинарь, PostgreSQL и служба systemd
+#   ./install.sh --url https://host    внешний адрес (обязателен без диалога)
 #   ./install.sh --port 18080          порт наружу, если 8080 занят
+#   ./install.sh --database-url-file /root/jhvirt.dsn  внешняя PostgreSQL
 #   ./install.sh --no-start            подготовить, но не запускать
 #   ./install.sh --uninstall           остановить и снять, данные оставить
 
@@ -28,7 +28,7 @@ PREFIX="${PREFIX:-/opt/jhvirt}"
 USER_NAME="${USER_NAME:-jhvirt}"
 UNIT="/etc/systemd/system/jhvirt.service"
 
-MODE=""; URL=""; START=1; PORT=8080
+MODE=""; URL=""; DATABASE_URL_FILE=""; START=1; PORT=8080
 
 die() { printf '\nошибка: %s\n' "$*" >&2; exit 1; }
 say() { printf '%s\n' "$*"; }
@@ -37,12 +37,14 @@ have() { command -v "$1" >/dev/null 2>&1; }
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --mode) MODE="${2:-}"; shift 2 ;;
+        --mode) [ $# -ge 2 ] || die "--mode требует значение"; MODE="$2"; shift 2 ;;
         --mode=*) MODE="${1#--mode=}"; shift ;;
-        --url) URL="${2:-}"; shift 2 ;;
+        --url) [ $# -ge 2 ] || die "--url требует значение"; URL="$2"; shift 2 ;;
         --url=*) URL="${1#--url=}"; shift ;;
-        --port) PORT="${2:-}"; shift 2 ;;
+        --port) [ $# -ge 2 ] || die "--port требует значение"; PORT="$2"; shift 2 ;;
         --port=*) PORT="${1#--port=}"; shift ;;
+        --database-url-file) [ $# -ge 2 ] || die "--database-url-file требует путь"; DATABASE_URL_FILE="$2"; shift 2 ;;
+        --database-url-file=*) DATABASE_URL_FILE="${1#--database-url-file=}"; shift ;;
         --no-start) START=0; shift ;;
         --uninstall) MODE=uninstall; shift ;;
         # Справка — это шапка файла: два описания разъезжаются, одно нет.
@@ -67,12 +69,16 @@ fi
 
 # --- Что доступно -----------------------------------------------------------
 #
-# Проверяется способность выполнить, а не наличие команды: docker на RHEL часто
-# оказывается podman в режиме эмуляции, и compose у него может отсутствовать.
+# Проверяется настоящий Docker, а не только имя команды: пакет podman-docker
+# ставит совместимый CLI с тем же именем. Этот путь намеренно не поддерживается.
+is_real_docker() {
+    have docker || return 1
+    docker --version 2>&1 | grep -qi podman && return 1
+    docker info >/dev/null 2>&1 || return 1
+}
 
-has_docker()    { have docker && docker compose version >/dev/null 2>&1; }
-has_dockerc()   { have docker-compose; }
-has_podmanc()   { have podman-compose; }
+has_docker()    { is_real_docker && docker compose version >/dev/null 2>&1; }
+has_dockerc()   { is_real_docker && have docker-compose; }
 has_systemd()   { have systemctl && [ -d /run/systemd/system ]; }
 
 # Имя проекта: от него зависят имена томов. Берётся из .env, если он есть, —
@@ -85,17 +91,8 @@ project_name() {
     printf 'jhvirt'
 }
 
-# Работа с томами идёт тем же движком, что и запуск: тома docker и podman —
-# разные хранилища, и спрашивать не у того значит не найти существующий.
-volume_engine() {
-    case "$MODE" in
-        podman) printf 'podman' ;;
-        *)      printf 'docker' ;;
-    esac
-}
-
 volume_exists() {
-    "$(volume_engine)" volume inspect "$1" >/dev/null 2>&1
+    docker volume inspect "$1" >/dev/null 2>&1
 }
 
 # Случайная строка в шестнадцатеричном виде: годится и в URL, и в .env, где нет
@@ -108,22 +105,57 @@ gen_secret() {
     fi
 }
 
+set_plain_env() {
+    KEY="$1"; VALUE="$2"; FILE="$3"; TMP="$FILE.tmp.$$"
+    grep -v "^${KEY}=" "$FILE" > "$TMP" || true
+    printf '%s=%s\n' "$KEY" "$VALUE" >> "$TMP"
+    chmod 600 "$TMP"
+    mv "$TMP" "$FILE"
+}
+
 # Команда запуска для выбранного способа.
 runner() {
     case "$1" in
         docker)         printf 'docker compose' ;;
         docker-compose) printf 'docker-compose' ;;
-        podman)         printf 'podman-compose' ;;
     esac
 }
 
+validate_install_identity() {
+    case "$PREFIX" in
+        /*) ;;
+        *) die "PREFIX должен быть абсолютным путём: PREFIX=/opt/jhvirt" ;;
+    esac
+    case "$PREFIX" in
+        /|/usr|/opt|/srv|/var|/home)
+            die "PREFIX не может указывать на системный каталог целиком: $PREFIX" ;;
+        */|*/../*|*/..|*/./*|*/.)
+            die "PREFIX должен быть нормализованным путём без /./, /../ и завершающего /: $PREFIX" ;;
+        *[!A-Za-z0-9_./-]*)
+            die "PREFIX содержит неподдерживаемые символы: $PREFIX" ;;
+    esac
+    if [ -d "$PREFIX" ]; then
+        RESOLVED_PREFIX="$(cd "$PREFIX" && pwd -P)"
+        case "$RESOLVED_PREFIX" in
+            /|/usr|/opt|/srv|/var|/home)
+                die "PREFIX разрешается в системный каталог целиком: $RESOLVED_PREFIX" ;;
+        esac
+    fi
+    case "$USER_NAME" in
+        ''|-*|*[!A-Za-z0-9_-]*) die "USER_NAME должен начинаться не с '-' и содержать только A-Z, a-z, 0-9, _ и -: $USER_NAME" ;;
+    esac
+}
+
+validate_install_identity
+
 # --- Удаление ---------------------------------------------------------------
 
-if [ "$MODE" = uninstall ]; then
+uninstall() {
+    [ "$(id -u)" -eq 0 ] || die "для удаления нужны права root: sudo $SELF --uninstall"
     for dir in "$PREFIX/compose" "$COMPOSE_DIR"; do
         [ -f "$dir/.env" ] || continue
         step "остановка контейнеров"
-        for cmd in "docker compose" docker-compose podman-compose; do
+        for cmd in "docker compose" docker-compose; do
             # shellcheck disable=SC2086
             (cd "$dir" && $cmd down >/dev/null 2>&1) && break || true
         done
@@ -134,6 +166,8 @@ if [ "$MODE" = uninstall ]; then
         rm -f "$UNIT"
         systemctl daemon-reload >/dev/null 2>&1 || true
     fi
+    rm -rf "${PREFIX:?}/bin" "${PREFIX:?}/web" "${PREFIX:?}/docs"
+    rm -f "$PREFIX/VERSION"
     say ""
     say "Снято. Данные намеренно оставлены:"
     if [ -d "$PREFIX" ]; then
@@ -147,26 +181,20 @@ if [ "$MODE" = uninstall ]; then
     say "когда копии больше не нужны."
     [ -d "$PREFIX" ] && say "Удалить установку целиком: rm -rf $PREFIX && userdel $USER_NAME"
     exit 0
-fi
+}
 
 # --- Выбор ------------------------------------------------------------------
 
 choose() {
-    i=0; a=""; b=""; c=""; d=""
+    i=0; a=""; b=""; d=""; u=""
     has_docker   && { i=$((i+1)); a=$i; }
     has_dockerc  && { i=$((i+1)); b=$i; }
-    has_podmanc  && { i=$((i+1)); c=$i; }
     has_systemd  && { i=$((i+1)); d=$i; }
-
-    [ "$i" -gt 0 ] || die "нечем запускать. Поставьте одно из:
-  dnf install -y podman-compose        (обычный путь на RHEL)
-  плагин docker compose                (docker compose version)
-  docker-compose                       (старый, через дефис)
-  либо ставьте службой systemd — тогда нужен systemd и PostgreSQL"
+    i=$((i+1)); u=$i
 
     if [ ! -t 0 ]; then
         die "нет терминала — укажите способ ключом:
-  ./install.sh --mode docker|docker-compose|podman|systemd"
+  ./install.sh --mode docker|docker-compose|systemd --url http://host:8080"
     fi
 
     say ""
@@ -174,10 +202,10 @@ choose() {
     say ""
     [ -n "$a" ] && say "  $a) docker compose   — сервис и PostgreSQL в контейнерах"
     [ -n "$b" ] && say "  $b) docker-compose   — то же, старой командой через дефис"
-    [ -n "$c" ] && say "  $c) podman-compose   — то же на podman"
-    [ -n "$d" ] && say "  $d) systemd          — бинарь службой, PostgreSQL отдельно"
+    [ -n "$d" ] && say "  $d) systemd          — нативная служба и локальная PostgreSQL"
+    say "  $u) удалить          — снять приложение, сохранив конфигурацию и данные"
     say ""
-    say "Показано только то, что есть на этой машине."
+    say "Для установки показаны только доступные на этой машине способы."
     say ""
     while :; do
         printf 'Номер [1]: '
@@ -185,13 +213,21 @@ choose() {
         [ -n "$n" ] || n=1
         [ -n "$a" ] && [ "$n" = "$a" ] && { MODE=docker; return; }
         [ -n "$b" ] && [ "$n" = "$b" ] && { MODE=docker-compose; return; }
-        [ -n "$c" ] && [ "$n" = "$c" ] && { MODE=podman; return; }
         [ -n "$d" ] && [ "$n" = "$d" ] && { MODE=systemd; return; }
+        if [ "$n" = "$u" ]; then
+            printf 'Снять приложение, сохранив конфигурацию, ключи и базу? [y/N]: '
+            read -r answer || answer=""
+            case "$answer" in
+                y|Y|yes|YES|да|Да|ДА) MODE=uninstall; return ;;
+                *) say "Удаление отменено."; continue ;;
+            esac
+        fi
         say "Нет такого варианта."
     done
 }
 
 [ -n "$MODE" ] || choose
+[ "$MODE" != uninstall ] || uninstall
 
 # Права root нужны там, где скрипт трогает систему: раскладывает комплект в
 # /opt, заводит пользователя, ставит юнит. Запуск контейнеров из каталога
@@ -206,45 +242,95 @@ fi
 case "$PORT" in
     ''|*[!0-9]*) die "порт должен быть числом: --port 18080" ;;
 esac
+[ "$PORT" -ge 1 ] 2>/dev/null && [ "$PORT" -le 65535 ] 2>/dev/null ||
+    die "порт должен быть в диапазоне 1..65535: --port 18080"
 
 case "$MODE" in
     docker)         has_docker  || die "docker compose недоступен" ;;
     docker-compose) has_dockerc || die "docker-compose не найден" ;;
-    podman)         has_podmanc || die "podman-compose не найден: dnf install -y podman-compose"
-                    # podman собирает образ в формате OCI, а в спецификации OCI
-                    # поля healthcheck нет: строку HEALTHCHECK из Dockerfile
-                    # buildah отбрасывает и предупреждает об этом при каждой
-                    # сборке. Формат docker это поле хранит — образ получается
-                    # такой же, как у docker build, и проверка живости остаётся
-                    # внутри него, а не только в compose-файле.
-                    export BUILDAH_FORMAT=docker ;;
+    podman)         die "Podman больше не поддерживается; используйте Docker Compose или systemd" ;;
     systemd)        has_systemd || die "systemd не найден" ;;
     *) die "неизвестный способ: $MODE" ;;
 esac
 
+[ -z "$DATABASE_URL_FILE" ] || [ "$MODE" = systemd ] ||
+    die "--database-url-file применим только к --mode systemd"
+if [ -n "$DATABASE_URL_FILE" ]; then
+    [ -f "$DATABASE_URL_FILE" ] && [ -r "$DATABASE_URL_FILE" ] ||
+        die "файл строки подключения недоступен: $DATABASE_URL_FILE"
+    DB_FILE_MODE="$(stat -c '%a' "$DATABASE_URL_FILE" 2>/dev/null || true)"
+    [ "$DB_FILE_MODE" = 600 ] ||
+        die "$DATABASE_URL_FILE должен иметь права 0600 (сейчас ${DB_FILE_MODE:-неизвестно})"
+fi
+
 # --- Внешний адрес ----------------------------------------------------------
 #
-# Спрашивается, а не подставляется молча: из него выводится флаг Secure у куки
-# сессии, и localhost по умолчанию означал бы куку без Secure за прокси.
+# Из URL выводится флаг Secure у сессионной cookie. Поэтому без терминала URL
+# обязателен: предположение https при фактическом HTTP делает вход нерабочим.
+
+validate_url() {
+    case "$URL" in
+        http://*|https://*) ;;
+        *) die "адрес должен начинаться с http:// или https://: $URL" ;;
+    esac
+    AUTHORITY="${URL#*://}"
+    [ -n "$AUTHORITY" ] || die "в адресе не указан хост: $URL"
+    case "$AUTHORITY" in
+        */*|*\?*|*\#*|*[[:space:]]*)
+            die "укажите только схему, хост и порт без пути: $URL" ;;
+        :*|*:|*@*)
+            die "в адресе неверно указан хост или порт: $URL" ;;
+    esac
+}
 
 ask_url() {
-    [ -n "$URL" ] && return
-    guess="https://$(hostname -f 2>/dev/null || hostname):8080"
-    if [ -t 0 ]; then
+    if [ -z "$URL" ]; then
+        [ -t 0 ] || die "без диалога внешний адрес обязателен: --url http://host:$PORT"
+        HOST="$(hostname -I 2>/dev/null | awk '{print $1}')"
+        [ -n "$HOST" ] || HOST="$(hostname -f 2>/dev/null || hostname)"
+        GUESS="http://$HOST:$PORT"
         say ""
         say "Адрес, по которому интерфейс открывают в браузере."
-        say "https включает флаг Secure у куки сессии — даже если TLS"
-        say "терминирует обратный прокси, а сервис слушает http."
-        printf 'Адрес [%s]: ' "$guess"
+        say "Указывайте https только если TLS уже настроен здесь или на прокси:"
+        say "от схемы зависит флаг Secure у сессионной cookie."
+        printf 'Адрес [%s]: ' "$GUESS"
         read -r URL || URL=""
+        [ -n "$URL" ] || URL="$GUESS"
     fi
-    [ -n "$URL" ] || URL="$guess"
+    validate_url
+}
+
+ask_url
+
+http_ok() {
+    if have curl; then
+        curl -fsS --max-time 5 "$1" >/dev/null 2>&1
+    elif have wget; then
+        wget -qO- -T 5 "$1" >/dev/null 2>&1
+    else
+        return 1
+    fi
+}
+
+wait_ready() {
+    READY_URL="$1"
+    i=0
+    while [ "$i" -lt 90 ]; do
+        http_ok "$READY_URL" && return 0
+        i=$((i+1))
+        sleep 2
+    done
+    return 1
 }
 
 # --- Контейнеры -------------------------------------------------------------
 
 install_containers() {
     RUN="$(runner "$MODE")"
+
+    if [ "$START" -eq 1 ] && ! have curl && ! have wget; then
+        die "для проверки готовности нужен curl или wget"
+    fi
 
     if [ "$BUNDLE" -eq 1 ]; then
         step "раскладка в $PREFIX"
@@ -253,7 +339,7 @@ install_containers() {
             useradd --system --home-dir "$PREFIX" --shell /sbin/nologin "$USER_NAME"
         mkdir -p "$PREFIX/compose" "$PREFIX/config" "$PREFIX/data" "$PREFIX/logs" \
                  "$PREFIX/docs" "$PREFIX/backups" "$PREFIX/restores"
-        rm -rf "$PREFIX/bin" "$PREFIX/web"
+        rm -rf "${PREFIX:?}/bin" "${PREFIX:?}/web"
         # Образ собирается из bin/ и web/dist рядом с Dockerfile, поэтому весь
         # комплект копируется целиком.
         cp -r "$HERE/bin" "$HERE/web" "$PREFIX/"
@@ -271,7 +357,9 @@ install_containers() {
     fi
 
     if [ -f "$WORK/.env" ]; then
-        say "    $WORK/.env уже есть, оставлен как был"
+        say "    $WORK/.env уже есть; пароль базы и пользовательские настройки сохранены"
+        set_plain_env JHV_EXTERNAL_URL "$URL" "$WORK/.env"
+        set_plain_env JHV_PORT "$PORT" "$WORK/.env"
     else
         # Пароль базы задаётся один раз — при создании тома. Если том с прошлой
         # установки уцелел, а .env исчез, сгенерированный пароль базе не
@@ -279,7 +367,7 @@ install_containers() {
         # уходит в цикл перезапуска с «password authentication failed», и связь
         # с пропавшим .env совсем не очевидна.
         VOL="$(project_name)_postgres-data"
-        VOLRM="$(volume_engine) volume rm"
+        VOLRM="docker volume rm"
         if volume_exists "$VOL"; then
             die "том базы $VOL остался с прошлой установки, а $WORK/.env — нет.
 
@@ -295,7 +383,6 @@ PostgreSQL хранит пароль внутри тома и новый не п
 хранилище и не пострадают, но сервис о них забудет."
         fi
 
-        ask_url
         # Пароль базы генерируется: внутренний секрет, человеком был бы придуман
         # хуже. Шестнадцатеричный — годится и в форме URL, где / и + пришлось бы
         # кодировать.
@@ -303,9 +390,8 @@ PostgreSQL хранит пароль внутри тома и новый не п
         [ -n "$PGPASS" ] || die "не удалось сгенерировать пароль базы"
 
         # Пароль администратора задаём сами, а не вылавливаем потом из журнала:
-        # формат вывода у docker compose, docker-compose и podman-compose разный,
-        # и разбор строки оказался самым хрупким местом установки — под podman
-        # пароль просто не находился. Заданный заранее мы знаем точно.
+        # формат вывода у docker compose и docker-compose разный, поэтому пароль
+        # задаётся до старта, а не извлекается из журнала.
         #
         # Из .env он стирается сразу после запуска: учётная запись уже создана,
         # и держать пароль в файле дольше незачем.
@@ -344,29 +430,13 @@ PostgreSQL хранит пароль внутри тома и новый не п
     # shellcheck disable=SC2086
     (cd "$WORK" && $RUN up -d --build) || die "запуск не удался; смотрите вывод выше"
 
-    # Ждём именно строку готовности, а не факт запуска процесса: между «служба
-    # стартовала» и «интерфейс отвечает» проходят миграции и создание учётной
-    # записи. Ожидание по первой строке уже приводило к «ГОТОВО» с недоступным
-    # интерфейсом и ненайденным паролем.
     step "жду готовности"
-    READY=0
-    i=0
-    while [ "$i" -lt 90 ]; do
-        if (cd "$WORK" && $RUN logs justhpc-virt-manager 2>/dev/null |
-                grep -q "веб-интерфейс и API доступны"); then
-            READY=1
-            break
-        fi
-        # Если контейнер успел упасть, ждать дальше бессмысленно.
-        if (cd "$WORK" && $RUN logs justhpc-virt-manager 2>/dev/null |
-                grep -q "критическая ошибка"); then
-            say ""
-            (cd "$WORK" && $RUN logs justhpc-virt-manager 2>/dev/null | tail -5)
-            die "служба не поднялась — причина выше"
-        fi
-        i=$((i+1)); sleep 2
-    done
-    [ "$READY" -eq 1 ] || say "    за 3 минуты строка готовности не появилась — смотрите журнал"
+    if ! wait_ready "http://127.0.0.1:$PORT/readyz"; then
+        say ""
+        # shellcheck disable=SC2086
+        (cd "$WORK" && $RUN logs --tail 30 justhpc-virt-manager 2>/dev/null) || true
+        die "за 3 минуты сервис не стал готов — последние строки журнала выше"
+    fi
 
     # Пароль администратора: если .env создавали мы, он известен точно. Если
     # .env был раньше — учётная запись уже существует, и показывать нечего.
@@ -393,7 +463,7 @@ PostgreSQL хранит пароль внутри тома и новый не п
     say "════════════════════════════════════════════════════════════"
     say ""
     say "Дальше:"
-    say "  • TLS не настроен — поставьте обратный прокси перед портом 8080."
+    say "  • TLS не настроен — при необходимости поставьте обратный прокси перед портом $PORT."
     say "  • Скопируйте ключ шифрования отдельно от базы и не туда, где копии:"
     say "      cd $WORK && $RUN cp justhpc-virt-manager:/app/data/secret.key ./secret.key.backup"
     say "  • Чек-лист перед боем: docs/DEPLOY.md"
@@ -402,14 +472,181 @@ PostgreSQL хранит пароль внутри тома и новый не п
 
 # --- Служба systemd ---------------------------------------------------------
 
+env_value() {
+    # EnvironmentFile понимает двойные кавычки. Экранируем только то, что
+    # имеет внутри них специальный смысл; значение передаётся аргументом, а не
+    # исполняется оболочкой.
+    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+set_env() {
+    KEY="$1"; VALUE="$2"; FILE="$3"; TMP="$FILE.tmp.$$"
+    ENCODED="$(env_value "$VALUE")"
+    if [ -f "$FILE" ] &&
+            [ "$(grep -c "^${KEY}=" "$FILE" || true)" -eq 1 ] &&
+            grep -Fqx "${KEY}=\"${ENCODED}\"" "$FILE"; then
+        chown "$USER_NAME:$USER_NAME" "$FILE"
+        chmod 600 "$FILE"
+        return
+    fi
+    if [ -f "$FILE" ]; then
+        grep -v "^${KEY}=" "$FILE" > "$TMP" || true
+    else
+        : > "$TMP"
+    fi
+    printf '%s="%s"\n' "$KEY" "$ENCODED" >> "$TMP"
+    install -o "$USER_NAME" -g "$USER_NAME" -m 0600 "$TMP" "$FILE"
+    rm -f "$TMP"
+}
+
+install_postgres_packages() {
+    if have apt-get; then
+        step "установка PostgreSQL (apt)"
+        DEBIAN_FRONTEND=noninteractive apt-get update
+        DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql curl
+        PG_FAMILY=debian
+    elif have dnf; then
+        step "установка PostgreSQL (dnf)"
+        dnf install -y postgresql-server
+        PG_FAMILY=rhel
+    else
+        die "поддерживаются Ubuntu/Debian (apt) и RHEL/Alma/Rocky (dnf)"
+    fi
+}
+
+detect_postgres_family() {
+    [ -r /etc/os-release ] || die "не найден /etc/os-release для проверки платформы"
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    OS_FAMILY=" ${ID:-} ${ID_LIKE:-} "
+    case "$OS_FAMILY" in
+        *" ubuntu "*|*" debian "*)
+            have apt-get || die "для Ubuntu/Debian нужен пакетный менеджер apt"
+            PG_FAMILY=debian
+            ;;
+        *" rhel "*|*" rocky "*|*" almalinux "*|*" centos "*)
+            have dnf || die "для RHEL/Alma/Rocky нужен пакетный менеджер dnf"
+            PG_FAMILY=rhel
+            ;;
+        *)
+            die "неподдерживаемая платформа ${PRETTY_NAME:-${ID:-неизвестная}}; нужны Ubuntu/Debian или RHEL/Alma/Rocky"
+            ;;
+    esac
+}
+
+ensure_http_client() {
+    if have curl || have wget; then
+        return 0
+    fi
+    detect_postgres_family
+    step "установка curl для проверки готовности"
+    if [ "$PG_FAMILY" = debian ]; then
+        DEBIAN_FRONTEND=noninteractive apt-get update
+        DEBIAN_FRONTEND=noninteractive apt-get install -y curl
+    else
+        dnf install -y curl
+    fi
+}
+
+prepare_local_postgres() {
+    detect_postgres_family
+    if ! have psql || ! id postgres >/dev/null 2>&1; then
+        install_postgres_packages
+    elif ! have curl && ! have wget; then
+        if [ "$PG_FAMILY" = debian ]; then
+            DEBIAN_FRONTEND=noninteractive apt-get install -y curl
+        else
+            dnf install -y curl
+        fi
+    fi
+
+    have runuser || die "не найдена команда runuser (пакет util-linux)"
+
+    if [ "$PG_FAMILY" = rhel ] && [ ! -s /var/lib/pgsql/data/PG_VERSION ]; then
+        have postgresql-setup || die "не найдена postgresql-setup после установки PostgreSQL"
+        step "инициализация PostgreSQL"
+        postgresql-setup --initdb
+    fi
+
+    step "запуск PostgreSQL"
+    systemctl enable --now postgresql
+
+    i=0
+    while [ "$i" -lt 60 ]; do
+        if runuser -u postgres -- psql -d postgres -Atc 'select 1' >/dev/null 2>&1; then
+            break
+        fi
+        i=$((i+1)); sleep 1
+    done
+    [ "$i" -lt 60 ] || die "PostgreSQL не стала готова за минуту"
+
+    if ! runuser -u postgres -- psql -d postgres -Atc \
+            "select 1 from pg_roles where rolname='$USER_NAME'" | grep -q 1; then
+        runuser -u postgres -- createuser "$USER_NAME"
+    fi
+    runuser -u postgres -- psql -d postgres -v ON_ERROR_STOP=1 \
+        -c "alter role \"$USER_NAME\" login" >/dev/null
+
+    if ! runuser -u postgres -- psql -d postgres -Atc \
+            "select 1 from pg_database where datname='jhvirt'" | grep -q 1; then
+        runuser -u postgres -- createdb -O "$USER_NAME" jhvirt
+    fi
+    runuser -u postgres -- psql -d postgres -v ON_ERROR_STOP=1 \
+        -c "alter database jhvirt owner to \"$USER_NAME\"" >/dev/null
+
+    # Проверяем именно тот путь, которым пойдёт служба: системный пользователь
+    # jhvirt через Unix socket и peer-аутентификацию, без пароля в файле.
+    runuser -u "$USER_NAME" -- psql -d jhvirt -Atc 'select 1' >/dev/null ||
+        die "локальная база не принимает пользователя $USER_NAME через Unix socket"
+
+    DATABASE_URL="user=$USER_NAME dbname=jhvirt sslmode=disable"
+}
+
+read_external_database_url() {
+    LINES="$(awk 'END {print NR}' "$DATABASE_URL_FILE")"
+    [ "$LINES" -eq 1 ] || die "$DATABASE_URL_FILE должен содержать ровно одну строку DSN"
+    DATABASE_URL="$(sed -n '1p' "$DATABASE_URL_FILE")"
+    [ -n "$DATABASE_URL" ] || die "строка подключения в $DATABASE_URL_FILE пуста"
+}
+
+local_database_needs_admin() {
+    TABLE="$(runuser -u postgres -- psql -d jhvirt -Atc \
+        "select to_regclass('public.users') is not null" 2>/dev/null || true)"
+    if [ "$TABLE" != t ]; then
+        return 0
+    fi
+    USERS="$(runuser -u postgres -- psql -d jhvirt -Atc \
+        'select count(*) from users' 2>/dev/null || printf '1')"
+    [ "$USERS" = 0 ]
+}
+
+check_installed_config() {
+    CHECK_UNIT="jhvirt-config-check-$$"
+    systemd-run --quiet --wait --pipe --collect \
+        --unit="$CHECK_UNIT" --uid="$USER_NAME" --gid="$USER_NAME" \
+        --working-directory="$PREFIX" \
+        --property="EnvironmentFile=$PREFIX/config/jhvirt.env" \
+        "$PREFIX/bin/justhpc-virt-server" \
+        -config "$PREFIX/config/virt-manager.yaml" -check-config
+}
+
 install_systemd() {
     [ "$BUNDLE" -eq 1 ] || die "установка службой возможна только из комплекта .run
 Из репозитория соберите его: ./run build --target linux/amd64"
 
     [ -f "$HERE/bin/justhpc-virt-server" ] || die "в комплекте нет bin/justhpc-virt-server"
+    [ -f "$HERE/web/dist/index.html" ] || die "в комплекте нет web/dist/index.html"
+    [ -f "$HERE/config/virt-manager.yaml" ] || die "в комплекте нет конфигурации"
+    [ -f "$HERE/systemd/jhvirt.service" ] || die "в комплекте нет unit systemd"
+    have systemd-run || die "не найдена команда systemd-run"
+
+    detect_postgres_family
+    [ "$START" -eq 0 ] || ensure_http_client
 
     UPGRADE=0
-    [ -x "$PREFIX/bin/justhpc-virt-server" ] && UPGRADE=1
+    # Бинарь мог остаться от прерванной первой установки; наличие unit
+    # подтверждает, что это обновление завершённой установки.
+    [ -x "$PREFIX/bin/justhpc-virt-server" ] && [ -f "$UNIT" ] && UPGRADE=1
 
     if [ "$UPGRADE" -eq 1 ]; then
         # -version печатает «justhpc-virt-server 1.0.0»; нужна только версия.
@@ -425,13 +662,11 @@ install_systemd() {
         useradd --system --home-dir "$PREFIX" --shell /sbin/nologin "$USER_NAME"
     mkdir -p "$PREFIX/bin" "$PREFIX/web" "$PREFIX/config" "$PREFIX/data" "$PREFIX/logs" "$PREFIX/docs"
 
-    # Службу останавливаем перед заменой бинаря: подменить файл под работающим
-    # процессом Linux позволяет, но применилось бы это только после перезапуска.
-    RESTART=0
+    WAS_ACTIVE=0
     if [ "$UPGRADE" -eq 1 ] && systemctl is-active --quiet jhvirt 2>/dev/null; then
         say "    останавливаю службу на время замены"
         systemctl stop jhvirt
-        RESTART=1
+        WAS_ACTIVE=1
     fi
 
     install -m 0755 "$HERE/bin/justhpc-virt-server" "$PREFIX/bin/"
@@ -449,49 +684,104 @@ install_systemd() {
         install -m 0640 "$HERE/config/virt-manager.yaml" "$PREFIX/config/"
     fi
 
-    install -m 0644 "$HERE/systemd/jhvirt.service" "$UNIT"
-    systemctl daemon-reload
-
     chown -R "$USER_NAME:$USER_NAME" "$PREFIX"
     chmod 700 "$PREFIX/data"
     chmod 750 "$PREFIX/logs"
 
-    if [ "$RESTART" -eq 1 ]; then
-        systemctl start jhvirt
-        say ""
-        say "==> обновлено и запущено. Проверьте: systemctl status jhvirt"
-        return
-    fi
-    if [ "$UPGRADE" -eq 1 ]; then
-        say ""
-        say "==> обновлено. Запустите: systemctl start jhvirt"
-        return
+    ENV_FILE="$PREFIX/config/jhvirt.env"
+    ENV_EXISTED=0
+    [ -f "$ENV_FILE" ] && ENV_EXISTED=1
+
+    DATABASE_URL=""
+    if [ -n "$DATABASE_URL_FILE" ]; then
+        step "подключение внешней PostgreSQL"
+        read_external_database_url
+        set_env JHV_DATABASE_URL "$DATABASE_URL" "$ENV_FILE"
+    elif [ "$ENV_EXISTED" -eq 0 ]; then
+        prepare_local_postgres
+        set_env JHV_DATABASE_URL "$DATABASE_URL" "$ENV_FILE"
+    else
+        say "    подключение к базе сохранено из $ENV_FILE"
     fi
 
-    ask_url
+    set_env JHV_SERVER_EXTERNAL_URL "$URL" "$ENV_FILE"
+    set_env JHV_SERVER_PORT "$PORT" "$ENV_FILE"
+
+    ADMPASS=""
+    if [ "$START" -eq 1 ] && [ "$ENV_EXISTED" -eq 0 ] &&
+            [ -z "$DATABASE_URL_FILE" ] && local_database_needs_admin; then
+        ADMPASS="$(gen_secret 18)"
+        [ -n "$ADMPASS" ] || die "не удалось сгенерировать пароль администратора"
+        set_env JHV_AUTH_BOOTSTRAP_PASSWORD "$ADMPASS" "$ENV_FILE"
+    elif [ "$ENV_EXISTED" -eq 0 ]; then
+        set_env JHV_AUTH_BOOTSTRAP_PASSWORD "" "$ENV_FILE"
+    fi
+
+    sed -e "s|@PREFIX@|$PREFIX|g" -e "s|@USER_NAME@|$USER_NAME|g" \
+        "$HERE/systemd/jhvirt.service" > "$UNIT.tmp"
+    install -m 0644 "$UNIT.tmp" "$UNIT"
+    rm -f "$UNIT.tmp"
+    systemctl daemon-reload
+
+    step "проверка конфигурации"
+    check_installed_config || die "установленная конфигурация не прошла проверку"
+
+    SHOULD_START=0
+    if [ "$START" -eq 1 ]; then
+        if [ "$UPGRADE" -eq 0 ] || [ "$WAS_ACTIVE" -eq 1 ]; then
+            SHOULD_START=1
+        fi
+    fi
+
+    if [ "$SHOULD_START" -eq 1 ]; then
+        step "запуск службы"
+        if [ "$UPGRADE" -eq 0 ]; then
+            systemctl enable --now jhvirt
+        else
+            systemctl start jhvirt
+        fi
+        step "жду готовности"
+        if ! wait_ready "http://127.0.0.1:$PORT/readyz"; then
+            journalctl -u jhvirt -n 40 --no-pager || true
+            die "за 3 минуты служба не стала готова — последние строки журнала выше"
+        fi
+        if [ -n "$ADMPASS" ]; then
+            set_env JHV_AUTH_BOOTSTRAP_PASSWORD "" "$ENV_FILE"
+        fi
+    fi
+
     say ""
     say "════════════════════════════════════════════════════════════"
-    say "  УСТАНОВЛЕНО в $PREFIX"
+    if [ "$SHOULD_START" -eq 1 ]; then
+        say "  ГОТОВО"
+    else
+        say "  УСТАНОВЛЕНО, НО НЕ ЗАПУЩЕНО"
+    fi
     say ""
-    say "  Осталось три шага — служба без базы не стартует."
+    say "  каталог:        $PREFIX"
+    say "  интерфейс:      $URL"
+    if [ -n "$ADMPASS" ]; then
+        say "  пользователь:   admin"
+        say "  пароль:         $ADMPASS"
+        say ""
+        say "  Запишите пароль — после первого успешного старта он удаляется из env."
+    else
+        say "  учётные записи сохранены; пароль администратора не менялся."
+    fi
     say "════════════════════════════════════════════════════════════"
     say ""
-    say "1. PostgreSQL:"
-    say "     dnf install -y postgresql-server && postgresql-setup --initdb"
-    say "     systemctl enable --now postgresql"
-    say "     sudo -u postgres psql -c \"CREATE USER jhvirt WITH PASSWORD 'пароль';\" \\"
-    say "                         -c \"CREATE DATABASE jhvirt OWNER jhvirt;\""
-    say ""
-    say "2. $PREFIX/config/jhvirt.env (права 0600 — юнит читают все):"
-    say "     JHV_DATABASE_URL=host=localhost port=5432 user=jhvirt password=пароль dbname=jhvirt sslmode=disable"
-    say "     JHV_SERVER_EXTERNAL_URL=$URL"
-    say ""
-    say "3. Запуск и пароль администратора:"
-    say "     systemctl enable --now jhvirt"
-    say "     journalctl -u jhvirt -n 50 | grep -A6 'УЧЁТНАЯ ЗАПИСЬ'"
+    if [ "$SHOULD_START" -eq 0 ]; then
+        if [ "$UPGRADE" -eq 1 ]; then
+            say "Служба до обновления была остановлена и осталась остановленной."
+        else
+            say "Запуск: systemctl enable --now jhvirt"
+        fi
+    fi
+    say "Журнал: journalctl -u jhvirt -f"
+    say "Ключ шифрования: $PREFIX/data/secret.key — сохраните его отдельно от базы."
 }
 
 case "$MODE" in
-    docker|docker-compose|podman) install_containers ;;
-    systemd)                      install_systemd ;;
+    docker|docker-compose) install_containers ;;
+    systemd)               install_systemd ;;
 esac

@@ -13,7 +13,8 @@ jhvirt/
         └── 2026/08/03/
             └── <uuid-запуска>/
                 ├── run.json                       — метаданные запуска
-                ├── vm-config.json                 — конфигурация ВМ на момент копии
+                ├── vm-config.json                 — конфигурация oVirt ВМ на момент копии
+                ├── vm-config.xml                  — исходный XML домена KVM (вместо JSON)
                 ├── disk-00-<disk-id>.manifest     — карта чанков (zstd + JSON)
                 ├── disk-00-<disk-id>.data         — данные
                 ├── disk-01-<disk-id>.manifest
@@ -44,10 +45,20 @@ jhvirt/
   "created_at": "2026-08-03T01:00:00Z", "ended_at": "2026-08-03T01:07:12Z",
   "compression": "zstd", "encrypted": false,
   "logical_bytes": 3221225472, "stored_bytes": 811597824,
+  "config_key": "…/vm-config.xml", "config_format": "libvirt-domain-xml",
+  "vm_profile": {
+    "version": 1, "source": "libvirt", "architecture": "x86_64",
+    "machine": "q35", "firmware": "efi", "secure_boot": true,
+    "clock_offset": "utc", "memory_mib": 8192, "vcpus": 4,
+    "disks": [
+      { "disk_id": "vda", "target": "vda", "bus": "virtio", "boot_order": 1 }
+    ]
+  },
   "disks": [
     {
       "disk_id": "…", "alias": "db-01_Disk1", "disk_index": 0,
       "virtual_size": 107374182400, "bootable": true,
+      "target": "vda", "bus": "virtio", "boot_order": 1,
       "manifest_key": "…/disk-00-….manifest",
       "data_key": "…/disk-00-….data",
       "chunk_count": 193, "stored_bytes": 402653184,
@@ -154,6 +165,14 @@ with open('restored.raw', 'wb') as out:
 `version` в манифесте — версия формата. Читатель отказывается разбирать манифест
 с версией новее той, что знает, вместо того чтобы догадываться. Поле `format`
 отсекает чужие файлы, случайно оказавшиеся в каталоге.
+
+`vm_profile.version` версионируется отдельно. Поля профиля добавлены совместимо:
+старые копии без него по-прежнему восстанавливаются, а boot-проверка использует
+ограниченный совместимый профиль. Для точного многодискового запуска снимите
+новую полную точку после обновления.
+
+Ошибки отсутствующего родителя, повреждённой цепочки и аварийное чтение без
+базы описаны в [TROUBLESHOOTING.md](TROUBLESHOOTING.md#10-восстановление).
 
 ## Шифрование
 

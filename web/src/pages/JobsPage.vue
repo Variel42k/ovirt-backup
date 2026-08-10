@@ -34,6 +34,14 @@ const emptyForm = () => ({
   retention: { keep_last: 3, keep_hourly: 0, keep_daily: 7, keep_weekly: 4, keep_monthly: 6, keep_yearly: 0, max_age: 0 },
   quiesce: true,
   verify_after: 'chain',
+  verify_options: {
+    boot_host_id: '',
+    disk_id: '',
+    memory_mib: 0,
+    vcpus: 0,
+    timeout_sec: 300,
+    keep_on_failure: false,
+  },
   export_qcow2: false,
   encrypt: false,
   priority: 0,
@@ -54,6 +62,7 @@ const schedulePresets = [
 ]
 
 const needsFullEvery = computed(() => ['incremental', 'differential'].includes(form.value.type))
+const bootHosts = computed(() => app.servers.filter((s) => s.kind === 'kvm' && s.enabled))
 
 async function load() {
   loading.value = true
@@ -82,6 +91,8 @@ function openCreate() {
   editing.value = null
   form.value = emptyForm()
   form.value.server_id = app.servers[0]?.id ?? ''
+  const source = app.servers.find((s) => s.id === form.value.server_id)
+  form.value.verify_options.boot_host_id = source?.kind === 'kvm' ? source.id : ''
   form.value.storage_target_ids = app.enabledStorages[0] ? [app.enabledStorages[0].id] : []
   void loadVMs()
   dialog.value = true
@@ -96,6 +107,7 @@ function openEdit(job: BackupJob) {
     exclude_vm_ids: job.exclude_vm_ids ?? [],
     max_duration_minutes: job.max_duration ? Math.round(job.max_duration / 60_000_000_000) : 0,
     verify_after: job.verify_after ?? '',
+    verify_options: { ...emptyForm().verify_options, ...(job.verify_options ?? {}) },
   }
   void loadVMs()
   dialog.value = true
@@ -167,7 +179,13 @@ async function preview(job: BackupJob) {
   }
 }
 
-watch(() => form.value.server_id, loadVMs)
+watch(() => form.value.server_id, (serverID) => {
+  void loadVMs()
+  if (!form.value.verify_options.boot_host_id) {
+    const source = app.servers.find((s) => s.id === serverID)
+    form.value.verify_options.boot_host_id = source?.kind === 'kvm' ? source.id : ''
+  }
+})
 onMounted(async () => {
   await app.bootstrap()
   await load()
@@ -477,12 +495,58 @@ const columns = [
               <q-toggle v-model="form.encrypt" label="Шифрование" />
             </div>
           </div>
+
+          <template v-if="form.verify_after === 'boot'">
+            <q-banner v-if="!bootHosts.length" dense class="bg-orange-1">
+              <template #avatar><q-icon name="warning" color="warning" /></template>
+              Нет включённого подключения типа KVM. Добавьте KVM-хост, на котором можно
+              безопасно запускать восстановленные образы.
+            </q-banner>
+            <template v-else>
+              <q-select
+                v-model="form.verify_options.boot_host_id"
+                :options="bootHosts.map((s) => ({ label: s.name, value: s.id }))"
+                emit-value
+                map-options
+                label="KVM-хост для проверки образа"
+                hint="Для oVirt требуется отдельный KVM-хост; для KVM по умолчанию выбран исходный"
+                outlined
+                dense
+              />
+              <div class="row q-col-gutter-sm">
+                <div class="col-12 col-sm-4">
+                  <q-input v-model.number="form.verify_options.memory_mib" type="number" min="0" max="1048576" label="Память, МиБ" hint="0 — как у исходной ВМ" outlined dense />
+                </div>
+                <div class="col-6 col-sm-4">
+                  <q-input v-model.number="form.verify_options.vcpus" type="number" min="0" max="1024" label="vCPU" hint="0 — как у исходной ВМ" outlined dense />
+                </div>
+                <div class="col-6 col-sm-4">
+                  <q-input v-model.number="form.verify_options.timeout_sec" type="number" min="1" max="86400" label="Ожидание агента, с" outlined dense />
+                </div>
+              </div>
+              <q-toggle
+                v-model="form.verify_options.keep_on_failure"
+                label="Оставлять неудачную ВМ и образ для диагностики"
+              />
+              <q-banner dense class="bg-blue-1">
+                <template #avatar><q-icon name="lan" color="primary" /></template>
+                Проверочная ВМ запускается со всеми дисками, но без сетевых интерфейсов. При включённом сохранении
+                неудачных проверок ВМ и образ нужно удалить с KVM-хоста вручную.
+              </q-banner>
+            </template>
+          </template>
         </q-card-section>
 
         <q-separator />
         <q-card-actions align="right">
           <q-btn flat label="Отмена" v-close-popup />
-          <q-btn color="primary" unelevated label="Сохранить" @click="save" />
+          <q-btn
+            color="primary"
+            unelevated
+            label="Сохранить"
+            :disable="form.verify_after === 'boot' && !form.verify_options.boot_host_id"
+            @click="save"
+          />
         </q-card-actions>
       </q-card>
     </q-dialog>

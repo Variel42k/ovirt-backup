@@ -303,6 +303,7 @@ func (s *Scheduler) TriggerJob(ctx context.Context, jobID, triggeredBy string) (
 				Quiesce:         job.Quiesce,
 				Encrypt:         job.Encrypt,
 				VerifyAfter:     job.VerifyAfter,
+				VerifyOptions:   job.VerifyOptions,
 				Retention:       job.Retention,
 				TriggeredBy:     triggeredBy,
 			}
@@ -426,11 +427,7 @@ func (s *Scheduler) executeOne(ctx context.Context, req backup.RunRequest, job *
 	_ = s.store.ResolveAlert(ctx, run.ServerID, model.ScopeVM, run.VMID, model.AlertBackupFailed)
 
 	if req.VerifyAfter != "" && run.Status != model.RunFailed {
-		// No options: a scheduled boot test runs on the hypervisor the backup
-		// came from, which only works when that is a libvirt connection. For an
-		// oVirt backup the verifier says so instead of picking a host nobody
-		// asked for.
-		if _, err := s.engine.Verify(ctx, run.ID, req.VerifyAfter, model.VerifyOptions{}); err != nil {
+		if _, err := s.engine.Verify(ctx, run.ID, req.VerifyAfter, req.VerifyOptions); err != nil {
 			s.log.Warn().Err(err).Str("run", run.ID).Msg("проверка после бэкапа не пройдена")
 			s.raiseVerifyAlert(ctx, run, err)
 		}

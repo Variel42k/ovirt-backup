@@ -107,8 +107,8 @@ const verifyForm = ref({
   mode: 'manifest',
   boot_host_id: '',
   disk_id: '',
-  memory_mib: 2048,
-  vcpus: 2,
+  memory_mib: 0,
+  vcpus: 0,
   timeout_sec: 300,
   keep_on_failure: false,
 })
@@ -799,7 +799,7 @@ const columns = [
               <q-select
                 v-model="verifyForm.disk_id"
                 :options="[
-                  { label: 'Загрузочный диск', value: '' },
+                  { label: 'Все диски ВМ (рекомендуется)', value: '' },
                   ...verifyDisks.map((d) => ({
                     label: d.alias + (d.bootable ? ' (загрузочный)' : ''),
                     value: d.disk_id,
@@ -807,17 +807,18 @@ const columns = [
                 ]"
                 emit-value
                 map-options
-                label="Диск"
+                label="Набор дисков"
+                hint="Один диск выбирайте только для диагностики; обычная проверка восстанавливает всю ВМ"
                 outlined
                 dense
               />
 
               <div class="row q-col-gutter-sm">
                 <div class="col-4">
-                  <q-input v-model.number="verifyForm.memory_mib" type="number" label="Память, МиБ" outlined dense />
+                  <q-input v-model.number="verifyForm.memory_mib" type="number" min="0" label="Память, МиБ" hint="0 — как у исходной ВМ" outlined dense />
                 </div>
                 <div class="col-4">
-                  <q-input v-model.number="verifyForm.vcpus" type="number" label="vCPU" outlined dense />
+                  <q-input v-model.number="verifyForm.vcpus" type="number" min="0" label="vCPU" hint="0 — как у исходной ВМ" outlined dense />
                 </div>
                 <div class="col-4">
                   <q-input v-model.number="verifyForm.timeout_sec" type="number" label="Ожидание, с" outlined dense />
@@ -833,7 +834,7 @@ const columns = [
                 <template #avatar><q-icon name="info" color="primary" /></template>
                 ВМ создаётся <b>без сетевых интерфейсов</b> и удаляется вместе с образом после
                 проверки: копия боевой системы не должна попасть в сеть, которую считает своей.
-                Образ передаётся на гипервизор целиком (по сети — сжатым, на диске — разреженным),
+                Все диски передаются на гипервизор целиком (по сети — сжатыми, на диске — разреженными),
                 а вывод «загрузилась» даёт только гостевой агент: без него проверка честно скажет,
                 что ВМ стартовала, но подтвердить загрузку нечем.
               </q-banner>

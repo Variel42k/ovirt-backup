@@ -221,7 +221,7 @@ const (
 	// подтверждают точность копии, а не осмысленность её содержимого.
 	VerifyStructure VerifyMode = "structure"
 
-	// VerifyBoot — пробный запуск восстановленного образа в изолированной ВМ
+	// VerifyBoot — пробный запуск восстановленной многодисковой ВМ
 	// без сети с ожиданием отклика гостевого агента. Самое сильное
 	// доказательство и самое дорогое.
 	VerifyBoot VerifyMode = "boot"
@@ -285,6 +285,22 @@ type VerifyOptions struct {
 	KeepOnFailure bool `json:"keep_on_failure,omitempty"`
 }
 
+// Validate rejects values which would make a boot verification meaningless or
+// could exhaust a hypervisor because of a typo. Zero keeps the verifier's
+// documented default.
+func (o VerifyOptions) Validate() error {
+	if o.MemoryMiB < 0 || o.MemoryMiB > 1<<20 {
+		return fmt.Errorf("память проверочной ВМ должна быть от 1 до 1048576 МиБ или 0 для значения по умолчанию")
+	}
+	if o.VCPUs < 0 || o.VCPUs > 1024 {
+		return fmt.Errorf("число vCPU проверочной ВМ должно быть от 1 до 1024 или 0 для значения по умолчанию")
+	}
+	if o.TimeoutSec < 0 || o.TimeoutSec > 24*60*60 {
+		return fmt.Errorf("ожидание проверочной ВМ должно быть от 1 до 86400 секунд или 0 для значения по умолчанию")
+	}
+	return nil
+}
+
 // BackupJob is a reusable definition: what to back up, how, where and when.
 type BackupJob struct {
 	ID       string `json:"id"`
@@ -323,6 +339,10 @@ type BackupJob struct {
 
 	// Проверка сразу после успешного бэкапа. Пусто — не проверять.
 	VerifyAfter VerifyMode `json:"verify_after,omitempty"`
+	// VerifyOptions задаёт KVM-хост и ресурсы для VerifyBoot. Для остальных
+	// режимов сохраняется, но не используется: оператор может временно сменить
+	// глубину проверки и не потерять настроенный хост.
+	VerifyOptions VerifyOptions `json:"verify_options,omitempty"`
 	// Экспортировать копию в qcow2 через qemu-img (если он доступен).
 	ExportQcow2 bool `json:"export_qcow2"`
 	// Шифровать данные в хранилище (AES-256-GCM на чанк).

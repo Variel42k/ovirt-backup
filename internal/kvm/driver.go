@@ -133,6 +133,12 @@ type Result struct {
 	Note string
 	// SkippedDisks перечисляет диски, не попавшие в копию, с причиной.
 	SkippedDisks map[string]string
+
+	// DomainXML is the complete source description kept as a recovery
+	// artefact. Profile is the sanitised subset safe to replay for a test.
+	DomainXML string
+	Profile   *backup.VMProfile
+	ConfigKey string
 }
 
 // Plan is the resolved strategy for a request.
@@ -369,6 +375,8 @@ func (d *Driver) Backup(ctx context.Context, req Request) (*Result, error) {
 
 	manifests, stats, err := d.copyDisks(ctx, req, plan, socketPath, info, log)
 	result.Manifests = manifests
+	result.DomainXML = info.XML
+	result.Profile = profileForDomain(info, manifests)
 	result.ReadBytes = stats.read
 	result.StoredBytes = stats.stored
 	result.SourceChecked = stats.checked

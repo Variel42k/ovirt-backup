@@ -348,9 +348,8 @@ cmd_build() {
     fi
     [ -f web/dist/index.html ] || die "нет web/dist/index.html — интерфейс не собран"
 
-    # CGO_ENABLED=0 не оптимизация, а требование: драйвер SQLite здесь на чистом
-    # Go, и без cgo бинарь статический — работает в любом дистрибутиве
-    # независимо от версии libc.
+    # CGO_ENABLED=0 не оптимизация, а требование: бинарь должен быть статическим
+    # и работать в любом поддерживаемом дистрибутиве независимо от версии libc.
     step "бинари"
     LDFLAGS="-s -w -X main.version=$VERSION"
     for c in justhpc-virt-server jvbackup; do
@@ -375,10 +374,13 @@ cmd_build() {
     # compose-файл пришлось бы править при упаковке, а расходящиеся копии
     # одного файла рано или поздно разъезжаются.
     cp deploy/Dockerfile.bundle "$OUT/Dockerfile"
-    for doc in DEPLOY OPERATIONS BUILD; do
+    for doc in DEPLOY OPERATIONS TROUBLESHOOTING BUILD API ARCHITECTURE BACKUP-FORMAT DISK-ARCHITECTURE; do
         [ -f "docs/$doc.md" ] && cp "docs/$doc.md" "$OUT/docs/"
     done
-    cp README.md "$OUT/docs/"
+    # В репозитории README ссылается на docs/X.md. Внутри комплекта он сам уже
+    # находится в docs/, поэтому префикс убирается, чтобы ссылки не вели в
+    # несуществующий docs/docs/.
+    sed 's|](docs/|](|g' README.md > "$OUT/docs/README.md"
     printf '%s\n' "$VERSION" > "$OUT/VERSION"
 
     say ""

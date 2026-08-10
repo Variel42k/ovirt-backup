@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/rs/zerolog"
+
 	"adveng/jh_virt/internal/backup"
 	"adveng/jh_virt/internal/config"
 	"adveng/jh_virt/internal/model"
@@ -155,62 +157,40 @@ func TestWriteImageMergesChain(t *testing.T) {
 	}
 }
 
-func chainSet(disks ...*backup.DiskManifest) *backup.ChainSet {
+func TestPlanBootDisksRestoresWholeVM(t *testing.T) {
+	backend := testBackend(t)
+	root := writeChunks(t, backend, "runs/a/root.data", map[int64][]byte{0: fill(0x11)})
+	root.DiskID, root.Alias, root.Target, root.Bus, root.Bootable = "root", "root", "sda", "scsi", true
+	data := writeChunks(t, backend, "runs/a/data.data", map[int64][]byte{1: fill(0x22)})
+	data.DiskID, data.Alias, data.Target, data.Bus = "data", "data", "sdb", "scsi"
+
 	set := &backup.ChainSet{
-		Leaf:      &model.BackupRun{ID: "run-1", VMName: "vm"},
-		Manifests: map[string][]*backup.DiskManifest{},
+		Leaf: &model.BackupRun{ID: "run-1", VMName: "db"}, Backend: backend,
+		DiskOrder: []string{"root", "data"},
+		Manifests: map[string][]*backup.DiskManifest{
+			"root": {root}, "data": {data},
+		},
 	}
-	for _, m := range disks {
-		set.DiskOrder = append(set.DiskOrder, m.DiskID)
-		set.Manifests[m.DiskID] = []*backup.DiskManifest{m}
-	}
-	return set
-}
+	engine := backup.NewEngine(nil, nil, config.BackupConfig{}, testCipher(t), zerolog.Nop())
+	dispatcher := &Dispatcher{Engine: engine}
+	profile := &backup.VMProfile{Disks: []backup.VMProfileDisk{
+		{DiskID: "root", Target: "sda", Bus: "scsi", BootOrder: 1},
+		{DiskID: "data", Target: "sdb", Bus: "scsi"},
+	}}
 
-func TestSelectBootDiskPrefersBootable(t *testing.T) {
-	set := chainSet(
-		&backup.DiskManifest{DiskID: "vm:vdb", Alias: "data"},
-		&backup.DiskManifest{DiskID: "vm:vda", Alias: "root", Bootable: true},
-	)
-
-	id, m, err := selectBootDisk(set, "")
+	plans, err := dispatcher.planBootDisks(set, "", "/scratch", "verify", profile)
 	if err != nil {
-		t.Fatalf("выбор диска: %v", err)
+		t.Fatal(err)
 	}
-	if id != "vm:vda" || m.Alias != "root" {
-		t.Fatalf("выбран %s (%s), ожидался загрузочный vm:vda", id, m.Alias)
+	defer func() {
+		for i := range plans {
+			plans[i].Reader.Close()
+		}
+	}()
+	if len(plans) != 2 || plans[0].Target != "sda" || plans[1].Target != "sdb" {
+		t.Fatalf("подготовлен не полный набор дисков: %#v", plans)
 	}
-}
-
-func TestSelectBootDiskTakesTheOnlyDisk(t *testing.T) {
-	set := chainSet(&backup.DiskManifest{DiskID: "vm:vda", Alias: "root"})
-
-	id, _, err := selectBootDisk(set, "")
-	if err != nil {
-		t.Fatalf("единственный диск должен подойти без пометки bootable: %v", err)
-	}
-	if id != "vm:vda" {
-		t.Fatalf("выбран %s", id)
-	}
-}
-
-// Guessing here would produce a confident "не загрузилась" about a data volume
-// that was never bootable in the first place.
-func TestSelectBootDiskRefusesToGuess(t *testing.T) {
-	set := chainSet(
-		&backup.DiskManifest{DiskID: "vm:vdb", Alias: "data"},
-		&backup.DiskManifest{DiskID: "vm:vdc", Alias: "logs"},
-	)
-
-	if _, _, err := selectBootDisk(set, ""); err == nil {
-		t.Fatal("выбор из нескольких незагрузочных дисков должен быть отклонён")
-	}
-}
-
-func TestSelectBootDiskRejectsUnknownDisk(t *testing.T) {
-	set := chainSet(&backup.DiskManifest{DiskID: "vm:vda", Bootable: true})
-
-	if _, _, err := selectBootDisk(set, "vm:missing"); err == nil {
-		t.Fatal("несуществующий диск должен быть отклонён")
+	if plans[0].BootOrder != 1 || plans[1].BootOrder != 0 {
+		t.Fatalf("порядок загрузки неверен: %#v", plans)
 	}
 }

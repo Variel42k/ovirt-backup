@@ -1,8 +1,5 @@
-# Имена образов указаны полностью, с docker.io/library. Короткие podman не
-# разрешает: без записи в short-names он отвечает «did not resolve to an alias
-# and no unqualified-search registries are defined», причём на середине сборки —
-# node у него в алиасах есть, а golang уже нет. Docker полные имена принимает
-# так же, как короткие.
+# Полные имена базовых образов делают источник зависимостей явным и одинаковым
+# для локальной и серверной сборки Docker.
 
 # Сборка веб-интерфейса.
 FROM docker.io/library/node:22-alpine AS web

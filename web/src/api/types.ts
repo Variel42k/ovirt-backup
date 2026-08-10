@@ -155,6 +155,7 @@ export interface BackupJob {
   retention: RetentionPolicy
   quiesce: boolean
   verify_after?: string
+  verify_options?: BootVerifyOptions
   export_qcow2: boolean
   encrypt: boolean
   priority: number

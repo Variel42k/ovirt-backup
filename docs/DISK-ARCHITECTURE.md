@@ -255,6 +255,10 @@ copy-before-write. Забытый бэкап — это scratch, растущи�
 
 ## Источники
 
+Диагностика случаев «инкремент стал полным», недоступного checkpoint/NBD и
+ошибок реального запуска на KVM находится в
+[TROUBLESHOOTING.md](TROUBLESHOOTING.md#8-бэкапы-и-инкременты).
+
 - [libvirt: Backup XML format](https://libvirt.org/formatbackup.html)
 - [libvirt: Internals of incremental backup handling in qemu](https://www.libvirt.org/kbase/internals/incremental-backup.html)
 - [Overview of libvirt incremental backup API (pull mode)](https://lists.libvirt.org/archives/list/devel@lists.libvirt.org/message/ZM7V4G5HJJNVJIUZ55N7CGVALSVLGSGE/)

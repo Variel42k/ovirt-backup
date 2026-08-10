@@ -26,6 +26,14 @@ const selectedType = ref<string>('')
 const quiesce = ref(false)
 const encrypt = ref(false)
 const verifyAfter = ref<string>('')
+const verifyOptions = ref({
+  boot_host_id: '',
+  disk_id: '',
+  memory_mib: 0,
+  vcpus: 0,
+  timeout_sec: 300,
+  keep_on_failure: false,
+})
 const starting = ref(false)
 
 /** Все диски ВМ не умеют CBT: инкременты невозможны, но полная копия — да. */
@@ -35,6 +43,7 @@ const allDisksRaw = computed(
 )
 
 const assessment = computed(() => recommendation.value?.assessment)
+const bootHosts = computed(() => app.servers.filter((s) => s.kind === 'kvm' && s.enabled))
 
 async function load() {
   loading.value = true
@@ -70,6 +79,10 @@ async function loadRecommendation() {
       verifyAfter.value = recommended.suggested_verify
     }
     quiesce.value = recommendation.value.assessment.guest_agent
+    if (!verifyOptions.value.boot_host_id) {
+      const source = app.servers.find((s) => s.id === props.serverId)
+      verifyOptions.value.boot_host_id = source?.kind === 'kvm' ? source.id : ''
+    }
   } catch (err) {
     notifyError(err, 'Не удалось получить варианты бэкапа')
   }
@@ -96,6 +109,7 @@ async function startBackup() {
       quiesce: quiesce.value,
       encrypt: encrypt.value,
       verify_after: verifyAfter.value || undefined,
+      verify_options: verifyAfter.value === 'boot' ? verifyOptions.value : undefined,
     })
     notifyOk('Бэкап поставлен в очередь')
     window.setTimeout(load, 3000)
@@ -298,6 +312,43 @@ onMounted(load)
             </div>
           </q-card-section>
 
+          <q-card-section v-if="verifyAfter === 'boot'" class="q-pt-none">
+            <q-banner v-if="!bootHosts.length" dense class="bg-orange-1">
+              <template #avatar><q-icon name="warning" color="warning" /></template>
+              Для запуска образа нужно добавить включённое подключение типа KVM.
+            </q-banner>
+            <div v-else class="q-gutter-sm">
+              <q-select
+                v-model="verifyOptions.boot_host_id"
+                :options="bootHosts.map((s) => ({ label: s.name, value: s.id }))"
+                emit-value
+                map-options
+                label="KVM-хост для проверки образа"
+                outlined
+                dense
+              />
+              <div class="row q-col-gutter-sm">
+                <div class="col-12 col-sm-4">
+                  <q-input v-model.number="verifyOptions.memory_mib" type="number" min="0" max="1048576" label="Память, МиБ" hint="0 — как у исходной ВМ" outlined dense />
+                </div>
+                <div class="col-6 col-sm-4">
+                  <q-input v-model.number="verifyOptions.vcpus" type="number" min="0" max="1024" label="vCPU" hint="0 — как у исходной ВМ" outlined dense />
+                </div>
+                <div class="col-6 col-sm-4">
+                  <q-input v-model.number="verifyOptions.timeout_sec" type="number" min="1" max="86400" label="Ожидание агента, с" outlined dense />
+                </div>
+              </div>
+              <q-toggle
+                v-model="verifyOptions.keep_on_failure"
+                label="Оставить неудачную ВМ и образ для диагностики"
+              />
+              <q-banner dense class="bg-blue-1">
+                <template #avatar><q-icon name="lan" color="primary" /></template>
+                Проверочная ВМ запускается со всеми дисками, без сетевых интерфейсов и удаляется после проверки.
+              </q-banner>
+            </div>
+          </q-card-section>
+
           <q-separator />
           <q-card-section>
             <BackupTypeHelpCard :type="selectedType" />
@@ -311,7 +362,7 @@ onMounted(load)
               icon="play_arrow"
               label="Запустить бэкап сейчас"
               :loading="starting"
-              :disable="!selectedType || !selectedStorage"
+              :disable="!selectedType || !selectedStorage || (verifyAfter === 'boot' && !verifyOptions.boot_host_id)"
               @click="startBackup"
             />
           </q-card-actions>

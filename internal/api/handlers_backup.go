@@ -37,10 +37,11 @@ type jobPayload struct {
 	StorageTargetIDs []string              `json:"storage_target_ids"`
 	Retention        model.RetentionPolicy `json:"retention"`
 
-	Quiesce     bool   `json:"quiesce"`
-	VerifyAfter string `json:"verify_after"`
-	ExportQcow2 bool   `json:"export_qcow2"`
-	Encrypt     bool   `json:"encrypt"`
+	Quiesce       bool                `json:"quiesce"`
+	VerifyAfter   string              `json:"verify_after"`
+	VerifyOptions model.VerifyOptions `json:"verify_options"`
+	ExportQcow2   bool                `json:"export_qcow2"`
+	Encrypt       bool                `json:"encrypt"`
 
 	Priority    int `json:"priority"`
 	Concurrency int `json:"concurrency"`
@@ -63,6 +64,7 @@ func (p jobPayload) apply(dst *model.BackupJob) {
 	dst.Retention = p.Retention
 	dst.Quiesce = p.Quiesce
 	dst.VerifyAfter = model.VerifyMode(p.VerifyAfter)
+	dst.VerifyOptions = p.VerifyOptions
 	dst.ExportQcow2 = p.ExportQcow2
 	dst.Encrypt = p.Encrypt
 	dst.Priority = p.Priority
@@ -97,15 +99,13 @@ func (s *Server) validateJob(ctx context.Context, job *model.BackupJob) error {
 		}
 	}
 	if job.VerifyAfter != "" {
-		known := false
-		for _, mode := range model.AllVerifyModes() {
-			if job.VerifyAfter == mode {
-				known = true
-				break
-			}
-		}
-		if !known {
+		if !knownVerifyMode(job.VerifyAfter) {
 			return badRequest("неизвестный режим проверки: %q", job.VerifyAfter)
+		}
+		if job.VerifyAfter.NeedsHypervisor() {
+			if err := s.validateBootOptions(ctx, job.ServerID, job.Type, &job.VerifyOptions); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -271,13 +271,14 @@ func (s *Server) handlePreviewJob(w http.ResponseWriter, r *http.Request) {
 
 // adHocRequest starts one backup outside any job.
 type adHocRequest struct {
-	ServerID        string `json:"server_id"`
-	VMID            string `json:"vm_id"`
-	Type            string `json:"type"`
-	StorageTargetID string `json:"storage_target_id"`
-	Quiesce         bool   `json:"quiesce"`
-	Encrypt         bool   `json:"encrypt"`
-	VerifyAfter     string `json:"verify_after"`
+	ServerID        string              `json:"server_id"`
+	VMID            string              `json:"vm_id"`
+	Type            string              `json:"type"`
+	StorageTargetID string              `json:"storage_target_id"`
+	Quiesce         bool                `json:"quiesce"`
+	Encrypt         bool                `json:"encrypt"`
+	VerifyAfter     string              `json:"verify_after"`
+	VerifyOptions   model.VerifyOptions `json:"verify_options"`
 	// RetainDays ставит срок годности разовой копии; 0 — хранить бессрочно.
 	RetainDays   int      `json:"retain_days"`
 	ExcludeDisks []string `json:"exclude_disk_ids"`
@@ -298,6 +299,19 @@ func (s *Server) handleAdHocBackup(w http.ResponseWriter, r *http.Request) {
 	if req.Type == "" {
 		req.Type = string(model.BackupFull)
 	}
+	verifyMode := model.VerifyMode(req.VerifyAfter)
+	if verifyMode != "" {
+		if !knownVerifyMode(verifyMode) {
+			s.writeError(w, r, badRequest("неизвестный режим проверки: %q", verifyMode))
+			return
+		}
+		if verifyMode.NeedsHypervisor() {
+			if err := s.validateBootOptions(r.Context(), req.ServerID, model.BackupType(req.Type), &req.VerifyOptions); err != nil {
+				s.writeError(w, r, err)
+				return
+			}
+		}
+	}
 
 	actor := "api"
 	if p := principalFrom(r.Context()); p != nil {
@@ -313,7 +327,8 @@ func (s *Server) handleAdHocBackup(w http.ResponseWriter, r *http.Request) {
 		ExcludeDiskIDs:  req.ExcludeDisks,
 		Quiesce:         req.Quiesce,
 		Encrypt:         req.Encrypt,
-		VerifyAfter:     model.VerifyMode(req.VerifyAfter),
+		VerifyAfter:     verifyMode,
+		VerifyOptions:   req.VerifyOptions,
 		OVAHostID:       req.OVAHostID,
 		OVADirectory:    req.OVADirectory,
 		TriggeredBy:     actor,
@@ -439,6 +454,10 @@ func (s *Server) handleVerifyRun(w http.ResponseWriter, r *http.Request) {
 	if mode == "" {
 		mode = model.VerifyManifest
 	}
+	if !knownVerifyMode(mode) {
+		s.writeError(w, r, badRequest("неизвестный режим проверки: %q", mode))
+		return
+	}
 	opts := model.VerifyOptions{
 		BootHostID:    req.BootHostID,
 		DiskID:        req.DiskID,
@@ -452,7 +471,12 @@ func (s *Server) handleVerifyRun(w http.ResponseWriter, r *http.Request) {
 	// request now is better than reporting the failure ten minutes later,
 	// after the image has already been streamed to the hypervisor.
 	if mode.NeedsHypervisor() {
-		if err := s.checkBootHost(r.Context(), id, &opts); err != nil {
+		run, err := s.store.GetBackupRun(r.Context(), id)
+		if err != nil {
+			s.writeError(w, r, err)
+			return
+		}
+		if err := s.validateBootOptions(r.Context(), run.ServerID, run.Type, &opts); err != nil {
 			s.writeError(w, r, err)
 			return
 		}
@@ -489,20 +513,32 @@ func (s *Server) handleVerifyRun(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// checkBootHost resolves and validates the hypervisor a boot test will run on,
-// filling opts.BootHostID when the operator did not name one.
+func knownVerifyMode(want model.VerifyMode) bool {
+	for _, mode := range model.AllVerifyModes() {
+		if want == mode {
+			return true
+		}
+	}
+	return false
+}
+
+// validateBootOptions resolves and validates the hypervisor a boot test will
+// run on, filling opts.BootHostID when the operator did not name one.
 //
 // The default only applies when the backup itself came from a libvirt host:
 // then "boot it back where it came from" is what the operator means. For an
 // oVirt backup there is no such answer — the engine cannot start a foreign
 // image — so the request is refused with the list of hosts that would work.
-func (s *Server) checkBootHost(ctx context.Context, runID string, opts *model.VerifyOptions) error {
+func (s *Server) validateBootOptions(ctx context.Context, sourceServerID string, backupType model.BackupType, opts *model.VerifyOptions) error {
+	if backupType == model.BackupConfig || backupType == model.BackupOVA {
+		return badRequest("пробный запуск недоступен для типа бэкапа %q: он не содержит восстанавливаемого образа диска", backupType)
+	}
+	if err := opts.Validate(); err != nil {
+		return badRequest("параметры пробного запуска: %v", err)
+	}
+
 	if opts.BootHostID == "" {
-		run, err := s.store.GetBackupRun(ctx, runID)
-		if err != nil {
-			return err
-		}
-		own, err := s.store.GetServer(ctx, run.ServerID)
+		own, err := s.store.GetServer(ctx, sourceServerID)
 		if err != nil {
 			return err
 		}

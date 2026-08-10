@@ -153,6 +153,28 @@ func TestMemoryUnitNormalisation(t *testing.T) {
 	}
 }
 
+func TestParseDomainBootProfile(t *testing.T) {
+	raw := `<domain type='kvm'>
+	  <name>uefi</name><memory unit='MiB'>6144</memory><vcpu>6</vcpu>
+	  <os firmware='efi'><type arch='x86_64' machine='pc-q35-8.2'>hvm</type>
+	    <firmware><feature enabled='yes' name='secure-boot'/></firmware>
+	  </os><clock offset='localtime'/><devices>
+	  <disk type='file' device='disk'><driver type='qcow2'/><source file='/a'/>
+	    <target dev='sda' bus='scsi'/><boot order='1'/></disk>
+	  </devices></domain>`
+	dom, err := ParseDomainXML(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dom.Architecture != "x86_64" || dom.Machine != "pc-q35-8.2" ||
+		dom.Firmware != "efi" || !dom.SecureBoot || dom.ClockOffset != "localtime" {
+		t.Fatalf("профиль домена разобран неверно: %#v", dom)
+	}
+	if len(dom.Disks) != 1 || dom.Disks[0].Bus != "scsi" || dom.Disks[0].BootOrder != 1 {
+		t.Fatalf("диск разобран неверно: %#v", dom.Disks)
+	}
+}
+
 func TestCheckpointXML(t *testing.T) {
 	spec := CheckpointSpec{
 		Name:        "jhv-abc123",

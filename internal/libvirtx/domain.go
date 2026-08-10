@@ -77,6 +77,9 @@ type Disk struct {
 	// идентификатором диска во всех вызовах Backup API.
 	Target string
 	Bus    string
+	// BootOrder is the per-device libvirt boot priority. Zero means that the
+	// domain relies on the legacy <os><boot dev='hd'/> order.
+	BootOrder int
 	// Device: disk | cdrom | floppy | lun
 	Device string
 	// Format: qcow2 | raw | ... из <driver type='...'>
@@ -139,12 +142,19 @@ func (d Disk) SkipReason() string {
 
 // Domain is the inventory view of one virtual machine.
 type Domain struct {
-	Name      string
-	UUID      string
-	State     State
-	MemoryKiB int64
-	VCPUs     int
-	Disks     []Disk
+	Name         string
+	UUID         string
+	State        State
+	MemoryKiB    int64
+	VCPUs        int
+	Architecture string
+	Machine      string
+	// Firmware is "bios" or "efi". SecureBoot is recorded separately so a
+	// verification can request matching firmware on another host.
+	Firmware    string
+	SecureBoot  bool
+	ClockOffset string
+	Disks       []Disk
 	// GuestAgent — объявлен ли канал qemu-guest-agent. Это необходимое, но не
 	// достаточное условие: агент может быть не установлен внутри гостя.
 	GuestAgent bool
@@ -189,7 +199,28 @@ type domainXML struct {
 		Unit  string `xml:"unit,attr"`
 		Value int64  `xml:",chardata"`
 	} `xml:"memory"`
-	VCPU    int `xml:"vcpu"`
+	VCPU int `xml:"vcpu"`
+	OS   struct {
+		Firmware string `xml:"firmware,attr"`
+		Type     struct {
+			Arch    string `xml:"arch,attr"`
+			Machine string `xml:"machine,attr"`
+		} `xml:"type"`
+		Loader struct {
+			Secure string `xml:"secure,attr"`
+			Value  string `xml:",chardata"`
+		} `xml:"loader"`
+		FirmwareFeatures []struct {
+			Name    string `xml:"name,attr"`
+			Enabled string `xml:"enabled,attr"`
+		} `xml:"firmware>feature"`
+		Boot []struct {
+			Dev string `xml:"dev,attr"`
+		} `xml:"boot"`
+	} `xml:"os"`
+	Clock struct {
+		Offset string `xml:"offset,attr"`
+	} `xml:"clock"`
 	Devices struct {
 		Disks []struct {
 			Type   string `xml:"type,attr"`
@@ -208,6 +239,9 @@ type domainXML struct {
 				Dev string `xml:"dev,attr"`
 				Bus string `xml:"bus,attr"`
 			} `xml:"target"`
+			Boot struct {
+				Order int `xml:"order,attr"`
+			} `xml:"boot"`
 			ReadOnly  *struct{} `xml:"readonly"`
 			Shareable *struct{} `xml:"shareable"`
 			Transient *struct{} `xml:"transient"`
@@ -230,11 +264,27 @@ func ParseDomainXML(raw string) (*Domain, error) {
 	}
 
 	d := &Domain{
-		Name:      doc.Name,
-		UUID:      doc.UUID,
-		VCPUs:     doc.VCPU,
-		MemoryKiB: normaliseMemoryKiB(doc.Memory.Value, doc.Memory.Unit),
-		XML:       raw,
+		Name:         doc.Name,
+		UUID:         doc.UUID,
+		VCPUs:        doc.VCPU,
+		MemoryKiB:    normaliseMemoryKiB(doc.Memory.Value, doc.Memory.Unit),
+		Architecture: doc.OS.Type.Arch,
+		Machine:      doc.OS.Type.Machine,
+		ClockOffset:  doc.Clock.Offset,
+		XML:          raw,
+	}
+	if d.Architecture == "" {
+		d.Architecture = "x86_64"
+	}
+	d.Firmware = "bios"
+	if strings.EqualFold(doc.OS.Firmware, "efi") || strings.TrimSpace(doc.OS.Loader.Value) != "" {
+		d.Firmware = "efi"
+	}
+	d.SecureBoot = strings.EqualFold(doc.OS.Loader.Secure, "yes")
+	for _, feature := range doc.OS.FirmwareFeatures {
+		if feature.Name == "secure-boot" && strings.EqualFold(feature.Enabled, "yes") {
+			d.SecureBoot = true
+		}
 	}
 
 	for _, disk := range doc.Devices.Disks {
@@ -252,6 +302,7 @@ func ParseDomainXML(raw string) (*Domain, error) {
 		d.Disks = append(d.Disks, Disk{
 			Target:    disk.Target.Dev,
 			Bus:       disk.Target.Bus,
+			BootOrder: disk.Boot.Order,
 			Device:    disk.Device,
 			Format:    disk.Driver.Type,
 			Source:    source,
@@ -260,6 +311,24 @@ func ParseDomainXML(raw string) (*Domain, error) {
 			Shareable: disk.Shareable != nil,
 			Transient: disk.Transient != nil,
 		})
+	}
+
+	// Domains using the legacy OS-level boot order do not mark an individual
+	// disk. In that case libvirt boots the first hard disk in device order.
+	hdBoot := false
+	for _, boot := range doc.OS.Boot {
+		if boot.Dev == "hd" {
+			hdBoot = true
+			break
+		}
+	}
+	if hdBoot {
+		for i := range d.Disks {
+			if d.Disks[i].BackupCandidate() {
+				d.Disks[i].BootOrder = 1
+				break
+			}
+		}
 	}
 
 	for _, ch := range doc.Devices.Channels {

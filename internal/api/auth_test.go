@@ -2,11 +2,17 @@ package api
 
 import (
 	"context"
+	"net/http"
+	"net/http/cookiejar"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/rs/zerolog"
 	"golang.org/x/crypto/bcrypt"
 
+	"adveng/jh_virt/internal/config"
 	"adveng/jh_virt/internal/model"
 	"adveng/jh_virt/internal/store"
 	"adveng/jh_virt/internal/store/storetest"
@@ -154,6 +160,84 @@ func TestSecureCookieFollowsHowTheBrowserReachesTheService(t *testing.T) {
 
 			if got := s.secureCookies(); got != tc.want {
 				t.Errorf("Secure=%v, ожидалось %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// Проверка одного secureCookies недостаточна: регрессия на стенде выглядела
+// как успешный POST /login, после которого браузер не отправлял cookie на
+// /auth/me. Здесь проходит весь HTTP-контракт с настоящим cookie jar.
+func TestLoginCookieSurvivesTheNextRequest(t *testing.T) {
+	const password = "correct-horse-battery"
+
+	for _, tc := range []struct {
+		name       string
+		external   string
+		tls        bool
+		wantSecure bool
+	}{
+		{"HTTP", "http://virt.internal:8080", false, false},
+		{"HTTPS", "https://virt.example.org", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := testStore(t)
+			if _, err := EnsureBootstrapUser(context.Background(), st, "admin", password); err != nil {
+				t.Fatalf("создание учётной записи: %v", err)
+			}
+
+			cfg := config.Config{}
+			cfg.Auth.Enabled = true
+			cfg.Auth.SessionTTL = time.Hour
+			cfg.Server.ExternalURL = tc.external
+
+			srv := New(Deps{Config: cfg, Store: st, Logger: zerolog.Nop()})
+			var ts *httptest.Server
+			if tc.tls {
+				ts = httptest.NewTLSServer(srv.Handler())
+			} else {
+				ts = httptest.NewServer(srv.Handler())
+			}
+			defer ts.Close()
+
+			jar, err := cookiejar.New(nil)
+			if err != nil {
+				t.Fatalf("cookie jar: %v", err)
+			}
+			client := ts.Client()
+			client.Jar = jar
+
+			resp, err := client.Post(ts.URL+"/api/v1/auth/login", "application/json",
+				strings.NewReader(`{"username":"admin","password":"`+password+`"}`))
+			if err != nil {
+				t.Fatalf("login: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("login status = %d, ожидался 200", resp.StatusCode)
+			}
+
+			var session *http.Cookie
+			for _, cookie := range resp.Cookies() {
+				if cookie.Name == sessionCookie {
+					session = cookie
+					break
+				}
+			}
+			if session == nil {
+				t.Fatal("ответ login не установил сессионную cookie")
+			}
+			if session.Secure != tc.wantSecure {
+				t.Errorf("Secure = %v, ожидалось %v", session.Secure, tc.wantSecure)
+			}
+
+			me, err := client.Get(ts.URL + "/api/v1/auth/me")
+			if err != nil {
+				t.Fatalf("me: %v", err)
+			}
+			defer me.Body.Close()
+			if me.StatusCode != http.StatusOK {
+				t.Fatalf("сессия не пережила login: /auth/me вернул %d", me.StatusCode)
 			}
 		})
 	}

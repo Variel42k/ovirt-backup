@@ -21,8 +21,13 @@ type ChainSet struct {
 	Manifests map[string][]*DiskManifest
 	// DiskOrder сохраняет порядок подключения дисков к ВМ.
 	DiskOrder []string
-	Target    *model.StorageTarget
-	Backend   repo.Backend
+	// RunManifest carries the portable VM profile for a real boot test. It is
+	// optional so backups created before profiles were introduced remain
+	// restorable.
+	RunManifest      *RunManifest
+	RunManifestError error
+	Target           *model.StorageTarget
+	Backend          repo.Backend
 }
 
 // Close releases the repository connection.
@@ -114,6 +119,11 @@ func (e *Engine) LoadChain(ctx context.Context, runID string) (*ChainSet, error)
 		Manifests: map[string][]*DiskManifest{},
 		Target:    target,
 		Backend:   backend,
+	}
+	if doc, manifestErr := ReadRunManifest(ctx, backend, repo.RunManifestKey(leaf.RepoPath)); manifestErr == nil {
+		set.RunManifest = doc
+	} else {
+		set.RunManifestError = manifestErr
 	}
 
 	// Only disks present in the leaf are restorable: a disk detached before

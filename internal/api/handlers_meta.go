@@ -72,7 +72,7 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 		model.VerifyRestore:   "Собирает образ во временный файл тем же кодом, что и настоящее восстановление.",
 		model.VerifyQemu:      "Собирает qcow2 и прогоняет qemu-img check.",
 		model.VerifySource:    "Сверяет сохранённое с тем, что отдаёт гипервизор. Для KVM выполняется в момент бэкапа, пока точка ещё открыта.",
-		model.VerifyBoot:      "Запускает восстановленный образ в изолированной ВМ без сети и ждёт отклика гостевого агента. Самое сильное доказательство.",
+		model.VerifyBoot:      "Собирает все диски и запускает их в изолированной ВМ без сети с ожиданием гостевого агента. Самое сильное доказательство.",
 	}
 	for _, m := range model.AllVerifyModes() {
 		resp.VerifyModes = append(resp.VerifyModes, optionDescriptor{

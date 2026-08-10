@@ -88,6 +88,11 @@ type DiskManifest struct {
 	Alias    string `json:"alias"`
 	Index    int    `json:"disk_index"`
 	Bootable bool   `json:"bootable"`
+	// Target and Bus preserve how the guest saw this disk. DiskID is an oVirt
+	// UUID there, so it cannot double as a libvirt target name.
+	Target    string `json:"target,omitempty"`
+	Bus       string `json:"bus,omitempty"`
+	BootOrder int    `json:"boot_order,omitempty"`
 	// VirtualSize — логический размер диска; определяет длину образа при
 	// восстановлении.
 	VirtualSize int64  `json:"virtual_size"`
@@ -189,6 +194,13 @@ type RunManifest struct {
 	LogicalBytes int64 `json:"logical_bytes"`
 	StoredBytes  int64 `json:"stored_bytes"`
 
+	// VMProfile is the safe, portable subset used for an isolated boot test.
+	// ConfigKey points at the complete source description kept for recovery
+	// and audit; source paths and network devices are never replayed directly.
+	VMProfile    *VMProfile `json:"vm_profile,omitempty"`
+	ConfigKey    string     `json:"config_key,omitempty"`
+	ConfigFormat string     `json:"config_format,omitempty"`
+
 	Disks []RunManifestDisk `json:"disks"`
 }
 
@@ -199,11 +211,38 @@ type RunManifestDisk struct {
 	Index       int    `json:"disk_index"`
 	VirtualSize int64  `json:"virtual_size"`
 	Bootable    bool   `json:"bootable"`
+	Target      string `json:"target,omitempty"`
+	Bus         string `json:"bus,omitempty"`
+	BootOrder   int    `json:"boot_order,omitempty"`
 	ManifestKey string `json:"manifest_key"`
 	DataKey     string `json:"data_key"`
 	ChunkCount  int    `json:"chunk_count"`
 	StoredBytes int64  `json:"stored_bytes"`
 	DataSHA256  string `json:"data_sha256"`
+}
+
+// VMProfile is a host-independent domain description. It deliberately omits
+// network interfaces, host devices, source paths, UUIDs and NVRAM paths: a
+// verification must boot the copied disks without touching production state.
+type VMProfile struct {
+	Version      int             `json:"version"`
+	Source       string          `json:"source"`
+	Architecture string          `json:"architecture"`
+	Machine      string          `json:"machine,omitempty"`
+	Firmware     string          `json:"firmware"`
+	SecureBoot   bool            `json:"secure_boot,omitempty"`
+	ClockOffset  string          `json:"clock_offset,omitempty"`
+	MemoryMiB    int             `json:"memory_mib,omitempty"`
+	VCPUs        int             `json:"vcpus,omitempty"`
+	Disks        []VMProfileDisk `json:"disks"`
+}
+
+// VMProfileDisk maps a stored disk id to its guest-visible attachment.
+type VMProfileDisk struct {
+	DiskID    string `json:"disk_id"`
+	Target    string `json:"target"`
+	Bus       string `json:"bus"`
+	BootOrder int    `json:"boot_order,omitempty"`
 }
 
 // zstdMagic is the frame header of a zstd stream, used to tell a compressed

@@ -7,6 +7,12 @@
 Сессионная cookie после `POST /auth/login` либо статический токен из
 `auth.api_tokens` в заголовке `Authorization: Bearer <token>`.
 
+Cookie называется `jhvirt_session`, имеет `HttpOnly`, `SameSite=Lax`, путь `/`
+и срок из `auth.session_ttl`. Флаг `Secure` включается, если собственный TLS
+приложения активен или `server.external_url` начинается с `https://`.
+`X-Forwarded-Proto` сам по себе этот выбор не меняет: внешний URL является
+явным production-контрактом оператора.
+
 ```bash
 curl -c cookies.txt -X POST http://localhost:8080/api/v1/auth/login \
   -H 'Content-Type: application/json' \
@@ -14,6 +20,12 @@ curl -c cookies.txt -X POST http://localhost:8080/api/v1/auth/login \
 
 curl -b cookies.txt http://localhost:8080/api/v1/dashboard
 ```
+
+Для проверки входа всегда выполняйте второй запрос. Login `200` ещё не
+доказывает, что браузер вернёт cookie. Если приложение настроено на HTTPS, но
+страница открыта по HTTP, Secure-cookie будет отброшена и `/auth/me` ответит
+`401`. Пошаговое исправление:
+[TROUBLESHOOTING.md](TROUBLESHOOTING.md#пароль-принят-но-снова-появляется-форма-входа).
 
 Роли: `admin` (всё), `operator` (управление ВМ и бэкапами), `viewer` (чтение).
 
@@ -129,7 +141,12 @@ curl -b cookies.txt http://localhost:8080/api/v1/dashboard
   "storage_target_ids": ["…"],
   "retention": { "keep_last": 3, "keep_daily": 7, "keep_weekly": 4, "keep_monthly": 6 },
   "quiesce": true,
-  "verify_after": "chain",
+  "verify_after": "boot",
+  "verify_options": {
+    "boot_host_id": "…",             // включённое подключение типа kvm
+    "memory_mib": 0, "vcpus": 0,   // 0 — ресурсы исходной ВМ
+    "timeout_sec": 300, "keep_on_failure": false
+  },
   "encrypt": false
 }
 ```
@@ -150,7 +167,9 @@ curl -b cookies.txt http://localhost:8080/api/v1/dashboard
 ```jsonc
 // POST /backups
 { "server_id": "…", "vm_id": "…", "type": "full",
-  "storage_target_id": "…", "quiesce": true, "verify_after": "manifest",
+  "storage_target_id": "…", "quiesce": true, "verify_after": "boot",
+  "verify_options": { "boot_host_id": "…", "memory_mib": 0,
+    "vcpus": 0, "timeout_sec": 300 },
   "retain_days": 30 }
 
 // POST /backups/{id}/verify — quick и chain отвечают сразу, остальные в фоне
@@ -159,10 +178,11 @@ curl -b cookies.txt http://localhost:8080/api/v1/dashboard
 // Режим boot поднимает ВМ, поэтому просит хост: подключение типа kvm.
 // Пусто — берётся хост, с которого снят бэкап, и это работает только если он
 // сам типа kvm; для oVirt-бэкапа запрос отклоняется со списком подходящих.
-// disk_id пусто — загрузочный диск; если загрузочного нет и дисков несколько,
-// запрос отклоняется, а не угадывает.
+// disk_id пусто — восстановить и подключить все диски с сохранёнными шинами и
+// порядком загрузки. Конкретный disk_id запускает только один диск и нужен для
+// диагностики, а не для обычной приёмочной проверки.
 { "mode": "boot", "boot_host_id": "…", "disk_id": "",
-  "memory_mib": 2048, "vcpus": 2, "timeout_sec": 300, "keep_on_failure": false }
+  "memory_mib": 0, "vcpus": 0, "timeout_sec": 300, "keep_on_failure": false }
 
 // POST /backups/{id}/restore
 // output_dir должен лежать внутри одного из backup.restore_dirs или внутри

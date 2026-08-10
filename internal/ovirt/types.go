@@ -318,6 +318,10 @@ type Disk struct {
 	Sparse          Bool   `json:"sparse"`
 	Shareable       Bool   `json:"shareable"`
 	Bootable        Bool   `json:"bootable"`
+	// Interface comes from the VM attachment (virtio, virtio_scsi, ide,
+	// sata). It is needed to reconnect a restored image with the same guest
+	// driver during a boot verification.
+	Interface string `json:"-"`
 	// backup: none | incremental — включает changed block tracking.
 	Backup         string `json:"backup"`
 	Status         string `json:"status"`

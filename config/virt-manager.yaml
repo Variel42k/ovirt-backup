@@ -10,7 +10,8 @@
 server:
   addr: "0.0.0.0"
   port: 8080
-  # Базовый URL, по которому SPA обращается к API (используется для CORS и ссылок в уведомлениях).
+  # Внешний URL браузера. Используется для CORS, ссылок в уведомлениях и флага
+  # Secure у сессионной cookie: https включает Secure, http выключает.
   external_url: "http://localhost:8080"
   read_timeout: 30s
   write_timeout: 0s # 0 — без ограничения: скачивание/восстановление образов длится долго
@@ -136,6 +137,6 @@ backup:
 
 scheduler:
   enabled: true
-  timezone: "Europe/Moscow"
+  timezone: "Asia/Yekaterinburg"
   # Задания, которые запустились бы в момент простоя сервиса, будут выполнены при старте.
   catch_up_missed: true

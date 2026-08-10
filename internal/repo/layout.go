@@ -52,6 +52,11 @@ func RunManifestKey(runPrefix string) string { return runPrefix + "run.json" }
 // VMConfigKey is the stored VM configuration.
 func VMConfigKey(runPrefix string) string { return runPrefix + "vm-config.json" }
 
+// LibvirtConfigKey is the source domain XML stored with a KVM backup. The
+// verifier uses the portable profile in run.json; the original XML remains an
+// audit and disaster-recovery artefact.
+func LibvirtConfigKey(runPrefix string) string { return runPrefix + "vm-config.xml" }
+
 // DiskManifestKey is the extent map and chunk digests of one disk.
 func DiskManifestKey(runPrefix string, index int, diskID string) string {
 	return fmt.Sprintf("%sdisk-%02d-%s.manifest", runPrefix, index, Segment(diskID))

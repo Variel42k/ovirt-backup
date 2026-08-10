@@ -49,7 +49,7 @@ func ScanRepository(ctx context.Context, backend repo.Backend, prefix string) ([
 		}
 		runPrefix := strings.TrimSuffix(obj.Key, "run.json")
 
-		manifest, err := readRunManifest(ctx, backend, obj.Key)
+		manifest, err := ReadRunManifest(ctx, backend, obj.Key)
 		if err != nil {
 			// One unreadable manifest must not hide the rest of the archive.
 			continue
@@ -63,7 +63,8 @@ func ScanRepository(ctx context.Context, backend repo.Backend, prefix string) ([
 	return runs, nil
 }
 
-func readRunManifest(ctx context.Context, backend repo.Backend, key string) (*RunManifest, error) {
+// ReadRunManifest loads the self-describing run document from a repository.
+func ReadRunManifest(ctx context.Context, backend repo.Backend, key string) (*RunManifest, error) {
 	rc, err := backend.Get(ctx, key)
 	if err != nil {
 		return nil, err
@@ -76,6 +77,9 @@ func readRunManifest(ctx context.Context, backend repo.Backend, key string) (*Ru
 	}
 	if doc.Format != FormatName {
 		return nil, fmt.Errorf("чужой формат манифеста в %s: %q", key, doc.Format)
+	}
+	if doc.Version > FormatVersion {
+		return nil, fmt.Errorf("манифест запуска версии %d новее поддерживаемой %d", doc.Version, FormatVersion)
 	}
 	return &doc, nil
 }

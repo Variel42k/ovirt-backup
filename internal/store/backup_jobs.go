@@ -14,7 +14,7 @@ import (
 
 const jobColumns = `id, name, enabled, server_id, vm_ids, vm_name_regex, cluster_ids, tags,
 	exclude_vm_ids, exclude_disk_ids, type, full_every, fallback_type, schedule, max_duration_sec,
-	storage_target_ids, retention, quiesce, verify_after, export_qcow2, encrypt, priority,
+	storage_target_ids, retention, quiesce, verify_after, verify_options, export_qcow2, encrypt, priority,
 	concurrency, last_run_at, last_status, next_run_at, created_at, updated_at`
 
 // CreateBackupJob stores a new job definition.
@@ -32,12 +32,13 @@ func (s *Store) CreateBackupJob(ctx context.Context, j *model.BackupJob) error {
 	}
 
 	_, err := s.db.Exec(ctx, `INSERT INTO backup_jobs (`+jobColumns+`)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		j.ID, j.Name, j.Enabled, j.ServerID, encodeJSON(j.VMIDs), j.VMNameRegex,
 		encodeJSON(j.ClusterIDs), encodeJSON(j.Tags), encodeJSON(j.ExcludeVMIDs),
 		encodeJSON(j.ExcludeDiskIDs), string(j.Type), j.FullEvery, string(j.FallbackType),
 		j.Schedule, toSeconds(j.MaxDuration), encodeJSON(j.StorageTargetIDs),
-		encodeJSON(j.Retention), j.Quiesce, string(j.VerifyAfter), j.ExportQcow2, j.Encrypt,
+		encodeJSON(j.Retention), j.Quiesce, string(j.VerifyAfter), encodeJSON(j.VerifyOptions),
+		j.ExportQcow2, j.Encrypt,
 		j.Priority, j.Concurrency, j.LastRunAt, string(j.LastStatus),
 		j.NextRunAt, j.CreatedAt, j.UpdatedAt)
 	if err != nil {
@@ -57,11 +58,11 @@ func (s *Store) UpdateBackupJob(ctx context.Context, j *model.BackupJob) error {
 		name=?, enabled=?, server_id=?, vm_ids=?, vm_name_regex=?, cluster_ids=?, tags=?,
 		exclude_vm_ids=?, exclude_disk_ids=?, type=?, full_every=?, fallback_type=?, schedule=?,
 		max_duration_sec=?, storage_target_ids=?, retention=?, quiesce=?, verify_after=?,
-		export_qcow2=?, encrypt=?, priority=?, concurrency=?, updated_at=? WHERE id=?`,
+		verify_options=?, export_qcow2=?, encrypt=?, priority=?, concurrency=?, updated_at=? WHERE id=?`,
 		j.Name, j.Enabled, j.ServerID, encodeJSON(j.VMIDs), j.VMNameRegex, encodeJSON(j.ClusterIDs),
 		encodeJSON(j.Tags), encodeJSON(j.ExcludeVMIDs), encodeJSON(j.ExcludeDiskIDs),
 		string(j.Type), j.FullEvery, string(j.FallbackType), j.Schedule, toSeconds(j.MaxDuration),
-		encodeJSON(j.StorageTargetIDs), encodeJSON(j.Retention), j.Quiesce, string(j.VerifyAfter),
+		encodeJSON(j.StorageTargetIDs), encodeJSON(j.Retention), j.Quiesce, string(j.VerifyAfter), encodeJSON(j.VerifyOptions),
 		j.ExportQcow2, j.Encrypt, j.Priority, j.Concurrency, j.UpdatedAt, j.ID)
 	if err != nil {
 		return fmt.Errorf("update backup job: %w", err)
@@ -130,7 +131,7 @@ func scanJob(row rowScanner) (*model.BackupJob, error) {
 	var (
 		j                                                 model.BackupJob
 		vmIDs, clusterIDs, tags, excludeVMs, excludeDisks string
-		targets, retention                                string
+		targets, retention, verifyOptions                 string
 		typ, fallback, verifyAfter, lastStatus            string
 		maxDurationSec                                    int64
 		lastRun, nextRun                                  sql.NullTime
@@ -138,7 +139,7 @@ func scanJob(row rowScanner) (*model.BackupJob, error) {
 	)
 	err := row.Scan(&j.ID, &j.Name, &j.Enabled, &j.ServerID, &vmIDs, &j.VMNameRegex, &clusterIDs,
 		&tags, &excludeVMs, &excludeDisks, &typ, &j.FullEvery, &fallback, &j.Schedule,
-		&maxDurationSec, &targets, &retention, &j.Quiesce, &verifyAfter, &j.ExportQcow2,
+		&maxDurationSec, &targets, &retention, &j.Quiesce, &verifyAfter, &verifyOptions, &j.ExportQcow2,
 		&j.Encrypt, &j.Priority, &j.Concurrency, &lastRun, &lastStatus, &nextRun,
 		&createdAt, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -155,6 +156,7 @@ func scanJob(row rowScanner) (*model.BackupJob, error) {
 	j.ExcludeDiskIDs = decodeStrings(excludeDisks)
 	j.StorageTargetIDs = decodeStrings(targets)
 	decodeJSON(retention, &j.Retention)
+	decodeJSON(verifyOptions, &j.VerifyOptions)
 	j.Type = model.BackupType(typ)
 	j.FallbackType = model.BackupType(fallback)
 	j.VerifyAfter = model.VerifyMode(verifyAfter)

@@ -374,7 +374,7 @@ cmd_build() {
     # compose-файл пришлось бы править при упаковке, а расходящиеся копии
     # одного файла рано или поздно разъезжаются.
     cp deploy/Dockerfile.bundle "$OUT/Dockerfile"
-    for doc in DEPLOY OPERATIONS TROUBLESHOOTING BUILD API ARCHITECTURE BACKUP-FORMAT DISK-ARCHITECTURE; do
+    for doc in DEPLOY CONFIGURATION OPERATIONS TROUBLESHOOTING BUILD API ARCHITECTURE BACKUP-FORMAT DISK-ARCHITECTURE; do
         [ -f "docs/$doc.md" ] && cp "docs/$doc.md" "$OUT/docs/"
     done
     # В репозитории README ссылается на docs/X.md. Внутри комплекта он сам уже
@@ -448,7 +448,8 @@ make_installer() {
 # Временный каталог удаляется в любом случае, включая прерывание.
 #
 #   sudo sh ./@NAME@.run                установить или обновить
-#   sudo sh ./@NAME@.run --uninstall    удалить службу, сохранив данные
+#   sudo sh ./@NAME@.run --uninstall    выбрать цель удаления
+#   sudo sh ./@NAME@.run --uninstall=systemd|docker|all
 #   sh ./@NAME@.run --extract [каталог] только распаковать, не устанавливать
 #   sh ./@NAME@.run --check             проверить целостность файла
 #   sh ./@NAME@.run --version
@@ -514,7 +515,8 @@ usage() {
 justhpc-virt-manager $VERSION ($PLATFORM) — установщик в одном файле.
 
   sudo sh ./$NAME.run                установить или обновить
-  sudo sh ./$NAME.run --uninstall    удалить службу, сохранив данные
+  sudo sh ./$NAME.run --uninstall    выбрать цель удаления
+  sudo sh ./$NAME.run --uninstall=systemd|docker|all
   sh ./$NAME.run --extract [каталог] только распаковать, не устанавливать
   sh ./$NAME.run --check             проверить целостность файла
   sh ./$NAME.run --version

@@ -139,10 +139,11 @@ ssh server 'sudo sh /tmp/jhvirt-1.0.0-linux-amd64.run'
   1) docker compose   — сервис и PostgreSQL в контейнерах
   2) docker-compose   — то же через Compose v1
   3) systemd          — нативная служба и локальная PostgreSQL
-  4) удалить          — снять приложение, сохранив конфигурацию и данные
+  4) удалить          — выбрать Docker Compose, systemd или оба варианта
 ```
 
-Перед интерактивным удалением установщик запрашивает отдельное подтверждение.
+После выбора удаления установщик показывает отдельное меню целей и запрашивает
+подтверждение.
 
 | Команда | Что делает |
 |---|---|
@@ -152,7 +153,10 @@ ssh server 'sudo sh /tmp/jhvirt-1.0.0-linux-amd64.run'
 | `sudo sh ./jhvirt-*.run --mode systemd --url http://host:8080` | локальная PostgreSQL и systemd |
 | `sudo sh ./jhvirt-*.run --mode systemd --url … --database-url-file /root/jhvirt.dsn` | systemd с внешней PostgreSQL |
 | `sudo PREFIX=/srv/jhvirt sh ./jhvirt-*.run` | другой каталог |
-| `sudo sh ./jhvirt-*.run --uninstall` | удалить службу, сохранив данные |
+| `sudo sh ./jhvirt-*.run --uninstall` | интерактивно выбрать цель; без терминала снять оба варианта |
+| `sudo sh ./jhvirt-*.run --uninstall=docker` | снять только Compose-контейнеры и сеть |
+| `sudo sh ./jhvirt-*.run --uninstall=systemd` | снять только `jhvirt.service` |
+| `sudo sh ./jhvirt-*.run --uninstall=all` | снять Docker Compose и systemd |
 | `sh ./jhvirt-*.run --extract [каталог]` | только распаковать, ничего не ставить |
 | `sh ./jhvirt-*.run --check` | проверить целостность файла |
 | `sh ./jhvirt-*.run --version` | версия и платформа без распаковки |

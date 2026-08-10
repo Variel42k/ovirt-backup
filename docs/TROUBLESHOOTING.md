@@ -12,6 +12,8 @@
 | systemd | `/opt/jhvirt` | `/opt/jhvirt/config/jhvirt.env`, `/opt/jhvirt/config/virt-manager.yaml` |
 
 При другом `PREFIX` замените `/opt/jhvirt` фактическим путём.
+Полная карта конфигурации и данных находится в
+[CONFIGURATION.md](CONFIGURATION.md).
 
 ## 1. Универсальная последовательность проверки
 
@@ -230,11 +232,25 @@ cd deploy
 
 ### Порт уже занят
 
-```bash
-sudo ss -ltnp | grep ':8080 '
+Симптом Docker:
+
+```text
+failed to bind host port 0.0.0.0:8080/tcp: address already in use
 ```
 
-Освободите порт или выберите другой:
+Актуальный установщик проверяет host-порт до сборки образа. В интерактивном
+режиме он предложит свободный порт; при запуске с ключами завершится сразу и
+покажет пример команды с другим портом.
+
+Найдите владельца порта:
+
+```bash
+docker ps --filter publish=8080
+sudo ss -ltnp 'sport = :8080'
+```
+
+Остановите обнаруженный ненужный сервис либо повторите установку на другом
+порту. Уже созданные `.env`, PostgreSQL-том и ключ не удаляйте:
 
 ```bash
 ./install.sh --mode docker \

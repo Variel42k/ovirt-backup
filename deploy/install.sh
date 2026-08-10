@@ -16,7 +16,10 @@
 #   ./install.sh --port 18080          порт наружу, если 8080 занят
 #   ./install.sh --database-url-file /root/jhvirt.dsn  внешняя PostgreSQL
 #   ./install.sh --no-start            подготовить, но не запускать
-#   ./install.sh --uninstall           остановить и снять, данные оставить
+#   ./install.sh --uninstall           выбрать, что удалить (с терминалом)
+#   ./install.sh --uninstall=systemd   снять только systemd-службу
+#   ./install.sh --uninstall=docker    снять только контейнеры
+#   ./install.sh --uninstall=all       снять оба варианта, данные оставить
 
 set -eu
 
@@ -28,7 +31,7 @@ PREFIX="${PREFIX:-/opt/jhvirt}"
 USER_NAME="${USER_NAME:-jhvirt}"
 UNIT="/etc/systemd/system/jhvirt.service"
 
-MODE=""; URL=""; DATABASE_URL_FILE=""; START=1; PORT=8080
+MODE=""; URL=""; DATABASE_URL_FILE=""; UNINSTALL_TARGET=""; START=1; PORT=8080
 
 die() { printf '\nошибка: %s\n' "$*" >&2; exit 1; }
 say() { printf '%s\n' "$*"; }
@@ -46,6 +49,7 @@ while [ $# -gt 0 ]; do
         --database-url-file) [ $# -ge 2 ] || die "--database-url-file требует путь"; DATABASE_URL_FILE="$2"; shift 2 ;;
         --database-url-file=*) DATABASE_URL_FILE="${1#--database-url-file=}"; shift ;;
         --no-start) START=0; shift ;;
+        --uninstall=*) MODE=uninstall; UNINSTALL_TARGET="${1#--uninstall=}"; shift ;;
         --uninstall) MODE=uninstall; shift ;;
         # Справка — это шапка файла: два описания разъезжаются, одно нет.
         # Границей служит первая строка не-комментарий, а не номер строки:
@@ -150,36 +154,144 @@ validate_install_identity
 
 # --- Удаление ---------------------------------------------------------------
 
-uninstall() {
-    [ "$(id -u)" -eq 0 ] || die "для удаления нужны права root: sudo $SELF --uninstall"
-    for dir in "$PREFIX/compose" "$COMPOSE_DIR"; do
-        [ -f "$dir/.env" ] || continue
-        step "остановка контейнеров"
-        for cmd in "docker compose" docker-compose; do
-            # shellcheck disable=SC2086
-            (cd "$dir" && $cmd down >/dev/null 2>&1) && break || true
-        done
-    done
-    if has_systemd; then
-        step "остановка службы"
-        systemctl disable --now jhvirt >/dev/null 2>&1 || true
-        rm -f "$UNIT"
-        systemctl daemon-reload >/dev/null 2>&1 || true
+docker_bundle_present() {
+    [ -f "$PREFIX/compose/.env" ]
+}
+
+systemd_install_present() {
+    [ -f "$UNIT" ] && return 0
+    if have systemctl; then
+        systemctl list-unit-files jhvirt.service --no-legend 2>/dev/null |
+            grep -q '^jhvirt\.service' && return 0
     fi
+    return 1
+}
+
+uninstall_containers() {
+    UNINSTALL_DOCKER_FOUND=0
+    UNINSTALL_LAST_DIR=""
+    for dir in "$PREFIX/compose" "$COMPOSE_DIR"; do
+        [ "$dir" = "$UNINSTALL_LAST_DIR" ] && continue
+        UNINSTALL_LAST_DIR="$dir"
+        [ -f "$dir/.env" ] || continue
+        UNINSTALL_DOCKER_FOUND=1
+        step "остановка контейнеров из $dir"
+        if have docker && (cd "$dir" && docker compose down >/dev/null 2>&1); then
+            continue
+        fi
+        if have docker-compose && (cd "$dir" && docker-compose down >/dev/null 2>&1); then
+            continue
+        fi
+        UNINSTALL_ERRORS=1
+        say "    предупреждение: compose-стек из $dir не удалось остановить"
+    done
+    [ "$UNINSTALL_DOCKER_FOUND" -eq 1 ] ||
+        say "    контейнерная установка с .env не найдена"
+}
+
+uninstall_systemd() {
+    if systemd_install_present; then
+        step "остановка и удаление jhvirt.service"
+        if have systemctl; then
+            systemctl disable --now jhvirt >/dev/null 2>&1 || true
+        fi
+        rm -f "$UNIT"
+        if have systemctl; then
+            systemctl daemon-reload >/dev/null 2>&1 || true
+            systemctl reset-failed jhvirt >/dev/null 2>&1 || true
+        fi
+    else
+        say "    systemd-служба jhvirt.service не найдена"
+    fi
+}
+
+remove_application_files() {
     rm -rf "${PREFIX:?}/bin" "${PREFIX:?}/web" "${PREFIX:?}/docs"
     rm -f "$PREFIX/VERSION"
+}
+
+choose_uninstall() {
     say ""
-    say "Снято. Данные намеренно оставлены:"
+    say "Что удалить?"
+    say ""
+    say "  1) Docker Compose       — остановить и удалить контейнеры и сеть"
+    say "  2) systemd              — остановить и удалить jhvirt.service"
+    say "  3) Docker и systemd     — снять оба варианта"
+    say "  4) назад"
+    say ""
+    while :; do
+        printf 'Номер [1]: '
+        read -r UNINSTALL_CHOICE || UNINSTALL_CHOICE=""
+        [ -n "$UNINSTALL_CHOICE" ] || UNINSTALL_CHOICE=1
+        case "$UNINSTALL_CHOICE" in
+            1) UNINSTALL_TARGET=docker; UNINSTALL_LABEL="Docker Compose" ;;
+            2) UNINSTALL_TARGET=systemd; UNINSTALL_LABEL="systemd-службу" ;;
+            3) UNINSTALL_TARGET=all; UNINSTALL_LABEL="Docker Compose и systemd-службу" ;;
+            4) say "Удаление отменено."; return 1 ;;
+            *) say "Нет такого варианта."; continue ;;
+        esac
+        printf 'Удалить %s, сохранив конфигурацию, ключи и данные? [y/N]: ' "$UNINSTALL_LABEL"
+        read -r UNINSTALL_CONFIRM || UNINSTALL_CONFIRM=""
+        case "$UNINSTALL_CONFIRM" in
+            y|Y|yes|YES|да|Да|ДА) return 0 ;;
+            *) say "Удаление отменено."; return 1 ;;
+        esac
+    done
+}
+
+uninstall() {
+    [ "$(id -u)" -eq 0 ] || die "для удаления нужны права root: sudo $SELF --uninstall"
+    case "$UNINSTALL_TARGET" in
+        docker|systemd|all) ;;
+        *) die "неизвестная цель удаления: $UNINSTALL_TARGET (docker, systemd или all)" ;;
+    esac
+
+    UNINSTALL_ERRORS=0
+    case "$UNINSTALL_TARGET" in
+        docker)
+            uninstall_containers
+            # Бинарники нужны systemd-службе, если оба варианта установлены в
+            # одном PREFIX. Контейнерный bundle можно убрать только без неё.
+            if docker_bundle_present && ! systemd_install_present; then
+                remove_application_files
+            fi
+            UNINSTALL_SUMMARY="Docker Compose"
+            ;;
+        systemd)
+            uninstall_systemd
+            # Docker bundle собирает образ из этих же bin/ и web/.
+            docker_bundle_present || remove_application_files
+            UNINSTALL_SUMMARY="systemd"
+            ;;
+        all)
+            uninstall_containers
+            uninstall_systemd
+            remove_application_files
+            UNINSTALL_SUMMARY="Docker Compose и systemd"
+            ;;
+    esac
+
+    say ""
+    say "Снято: $UNINSTALL_SUMMARY. Данные намеренно оставлены:"
+    if [ "$UNINSTALL_TARGET" = docker ] || [ "$UNINSTALL_TARGET" = all ]; then
+        say "  контейнерные тома — ключ, база и данные приложения"
+    fi
+    if [ "$UNINSTALL_TARGET" = systemd ] || [ "$UNINSTALL_TARGET" = all ]; then
+        say "  PostgreSQL и база jhvirt не удалялись"
+    fi
     if [ -d "$PREFIX" ]; then
         say "  $PREFIX/data   — ключ шифрования секретов"
         say "  $PREFIX/config — конфигурация"
     fi
-    say "  тома контейнеров — ключ, база и копии внутри них"
-    say ""
-    say "Посмотреть тома:  docker volume ls | grep jhvirt"
-    say "Без secret.key копии не расшифровать — снесите тома только тогда,"
-    say "когда копии больше не нужны."
-    [ -d "$PREFIX" ] && say "Удалить установку целиком: rm -rf $PREFIX && userdel $USER_NAME"
+    if [ "$UNINSTALL_TARGET" = docker ] || [ "$UNINSTALL_TARGET" = all ]; then
+        say ""
+        say "Посмотреть тома:  docker volume ls | grep jhvirt"
+        say "Без secret.key копии не расшифровать — удаляйте тома только после"
+        say "отдельной резервной копии."
+    fi
+    [ -d "$PREFIX" ] && say "Удалить сохранённые данные вручную: rm -rf $PREFIX && userdel $USER_NAME"
+    [ "$UNINSTALL_ERRORS" -eq 0 ] ||
+        die "удаление завершено не полностью; исправьте предупреждения выше"
     exit 0
 }
 
@@ -203,7 +315,7 @@ choose() {
     [ -n "$a" ] && say "  $a) docker compose   — сервис и PostgreSQL в контейнерах"
     [ -n "$b" ] && say "  $b) docker-compose   — то же, старой командой через дефис"
     [ -n "$d" ] && say "  $d) systemd          — нативная служба и локальная PostgreSQL"
-    say "  $u) удалить          — снять приложение, сохранив конфигурацию и данные"
+    say "  $u) удалить          — выбрать Docker Compose, systemd или оба варианта"
     say ""
     say "Для установки показаны только доступные на этой машине способы."
     say ""
@@ -214,20 +326,23 @@ choose() {
         [ -n "$a" ] && [ "$n" = "$a" ] && { MODE=docker; return; }
         [ -n "$b" ] && [ "$n" = "$b" ] && { MODE=docker-compose; return; }
         [ -n "$d" ] && [ "$n" = "$d" ] && { MODE=systemd; return; }
-        if [ "$n" = "$u" ]; then
-            printf 'Снять приложение, сохранив конфигурацию, ключи и базу? [y/N]: '
-            read -r answer || answer=""
-            case "$answer" in
-                y|Y|yes|YES|да|Да|ДА) MODE=uninstall; return ;;
-                *) say "Удаление отменено."; continue ;;
-            esac
-        fi
+        [ "$n" = "$u" ] && { MODE=uninstall; return; }
         say "Нет такого варианта."
     done
 }
 
 [ -n "$MODE" ] || choose
-[ "$MODE" != uninstall ] || uninstall
+if [ "$MODE" = uninstall ]; then
+    if [ -z "$UNINSTALL_TARGET" ]; then
+        if [ -t 0 ]; then
+            choose_uninstall || exit 0
+        else
+            # Сохраняем поведение прежнего unattended --uninstall.
+            UNINSTALL_TARGET=all
+        fi
+    fi
+    uninstall
+fi
 
 # Права root нужны там, где скрипт трогает систему: раскладывает комплект в
 # /opt, заводит пользователя, ставит юнит. Запуск контейнеров из каталога
@@ -237,13 +352,15 @@ if [ "$BUNDLE" -eq 1 ] || [ "$MODE" = systemd ]; then
     [ "$(id -u)" -eq 0 ] || die "нужны права root: sudo $SELF"
 fi
 
-# Проверяется здесь, а не при разборе ключей: ошибку в номере порта compose
-# сообщает уже на запуске контейнера, когда образ собран и время потрачено.
-case "$PORT" in
-    ''|*[!0-9]*) die "порт должен быть числом: --port 18080" ;;
-esac
-[ "$PORT" -ge 1 ] 2>/dev/null && [ "$PORT" -le 65535 ] 2>/dev/null ||
-    die "порт должен быть в диапазоне 1..65535: --port 18080"
+validate_port() {
+    case "$1" in
+        ''|*[!0-9]*) die "порт должен быть числом: --port 18080" ;;
+    esac
+    [ "$1" -ge 1 ] 2>/dev/null && [ "$1" -le 65535 ] 2>/dev/null ||
+        die "порт должен быть в диапазоне 1..65535: --port 18080"
+}
+
+validate_port "$PORT"
 
 case "$MODE" in
     docker)         has_docker  || die "docker compose недоступен" ;;
@@ -300,6 +417,112 @@ ask_url() {
     validate_url
 }
 
+# Docker сообщает о занятом host-порте только после сборки образа. Проверяем
+# раньше. /proc ловит обычные процессы, docker ps — публикации через iptables,
+# которые не всегда видны как слушающий socket.
+host_port_listening() {
+    CHECK_PORT_HEX="$(printf '%04X' "$1")"
+    CHECK_PROC_FILES=""
+    [ -r /proc/net/tcp ] && CHECK_PROC_FILES="/proc/net/tcp"
+    [ -r /proc/net/tcp6 ] && CHECK_PROC_FILES="$CHECK_PROC_FILES /proc/net/tcp6"
+    if [ -n "$CHECK_PROC_FILES" ]; then
+        # shellcheck disable=SC2086
+        awk -v suffix=":$CHECK_PORT_HEX" '
+            FNR > 1 && substr($2, length($2) - 4) == suffix && $4 == "0A" {
+                found = 1
+            }
+            END { exit(found ? 0 : 1) }
+        ' $CHECK_PROC_FILES
+        return
+    fi
+    if have ss; then
+        ss -H -ltn 2>/dev/null |
+            awk -v suffix=":$1" 'substr($4, length($4) - length(suffix) + 1) == suffix { found = 1 } END { exit(found ? 0 : 1) }'
+        return
+    fi
+    if have netstat; then
+        netstat -ltn 2>/dev/null |
+            awk -v suffix=":$1" 'substr($4, length($4) - length(suffix) + 1) == suffix { found = 1 } END { exit(found ? 0 : 1) }'
+        return
+    fi
+    return 1
+}
+
+compose_check_dir() {
+    if [ "$BUNDLE" -eq 1 ] && [ -f "$PREFIX/compose/docker-compose.yml" ]; then
+        printf '%s' "$PREFIX/compose"
+    else
+        printf '%s' "$COMPOSE_DIR"
+    fi
+}
+
+compose_container_ids() {
+    CHECK_COMPOSE_DIR="$(compose_check_dir)"
+    [ -f "$CHECK_COMPOSE_DIR/docker-compose.yml" ] || return 0
+    CHECK_RUN="$(runner "$MODE")"
+    # shellcheck disable=SC2086
+    (cd "$CHECK_COMPOSE_DIR" && $CHECK_RUN ps -q justhpc-virt-manager 2>/dev/null) || true
+}
+
+container_port_in_use() {
+    CHECK_PUBLISHED="$(docker ps --no-trunc --filter "publish=$1" --format '{{.ID}}' 2>/dev/null || true)"
+    if [ -n "$CHECK_PUBLISHED" ]; then
+        CHECK_OWN=" $(compose_container_ids | tr '\n' ' ')"
+        for CHECK_ID in $CHECK_PUBLISHED; do
+            case "$CHECK_OWN" in
+                *" $CHECK_ID "*) ;;
+                *) return 0 ;;
+            esac
+        done
+        # Порт опубликован только текущим compose-проектом. Во время обновления
+        # compose сам остановит старый контейнер перед запуском нового.
+        return 1
+    fi
+    host_port_listening "$1"
+}
+
+suggest_container_port() {
+    CHECK_CANDIDATE=18080
+    while [ "$CHECK_CANDIDATE" -le 18179 ]; do
+        if ! container_port_in_use "$CHECK_CANDIDATE"; then
+            printf '%s' "$CHECK_CANDIDATE"
+            return 0
+        fi
+        CHECK_CANDIDATE=$((CHECK_CANDIDATE+1))
+    done
+    return 1
+}
+
+ensure_container_port() {
+    while container_port_in_use "$PORT"; do
+        CHECK_SUGGESTED="$(suggest_container_port || true)"
+        [ -n "$CHECK_SUGGESTED" ] || CHECK_SUGGESTED=18080
+        if [ -n "$URL" ] || [ ! -t 0 ]; then
+            die "порт $PORT уже занят другим процессом или контейнером.
+
+Посмотрите владельца:
+  docker ps --filter publish=$PORT
+  sudo ss -ltnp 'sport = :$PORT'
+
+Повторите установку с другим портом:
+  $SELF --mode $MODE --url http://host:$CHECK_SUGGESTED --port $CHECK_SUGGESTED"
+        fi
+        say ""
+        say "Порт $PORT уже занят другим процессом или контейнером."
+        printf 'Другой порт [%s]: ' "$CHECK_SUGGESTED"
+        read -r CHECK_SELECTED || CHECK_SELECTED=""
+        [ -n "$CHECK_SELECTED" ] || CHECK_SELECTED="$CHECK_SUGGESTED"
+        validate_port "$CHECK_SELECTED"
+        PORT="$CHECK_SELECTED"
+    done
+}
+
+case "$MODE" in
+    docker|docker-compose)
+        [ "$START" -eq 0 ] || ensure_container_port
+        ;;
+esac
+
 ask_url
 
 http_ok() {
@@ -344,7 +567,12 @@ install_containers() {
         # комплект копируется целиком.
         cp -r "$HERE/bin" "$HERE/web" "$PREFIX/"
         cp "$HERE/Dockerfile" "$PREFIX/Dockerfile"
-        cp "$HERE/config/virt-manager.yaml" "$PREFIX/config/"
+        if [ -f "$PREFIX/config/virt-manager.yaml" ]; then
+            cp "$HERE/config/virt-manager.yaml" "$PREFIX/config/virt-manager.yaml.new"
+            say "    конфигурация сохранена; новая версия рядом: virt-manager.yaml.new"
+        else
+            cp "$HERE/config/virt-manager.yaml" "$PREFIX/config/"
+        fi
         cp "$HERE/compose/docker-compose.yml" "$HERE/compose/.env.example" "$PREFIX/compose/"
         [ -d "$HERE/docs" ] && cp -r "$HERE/docs/." "$PREFIX/docs/"
         [ -f "$HERE/VERSION" ] && cp "$HERE/VERSION" "$PREFIX/"

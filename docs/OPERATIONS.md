@@ -5,6 +5,9 @@ Docker, systemd, PostgreSQL, авторизации, oVirt и KVM находит
 [TROUBLESHOOTING.md](TROUBLESHOOTING.md). Здесь описаны регулярные операции
 после успешного развёртывания.
 
+Пути файлов настройки, приоритет YAML и `JHV_*`, а также сохранность при
+обновлении и удалении описаны в [CONFIGURATION.md](CONFIGURATION.md).
+
 ## Проверка живости
 
 ```bash
@@ -207,7 +210,7 @@ iSCSI, `DomainBlockStatsFlags` libvirt для дисков.
 |---|---|
 | `data/secret.key` | без него не расшифровать пароли подключений и зашифрованные бэкапы |
 | База PostgreSQL | каталог копий, задания, история, учётные записи |
-| `config/virt-manager.yaml` | настройки |
+| YAML и `.env`/`jhvirt.env` | настройки и секреты; точные пути зависят от режима и перечислены в [CONFIGURATION.md](CONFIGURATION.md) |
 
 Снимок базы снимается на живой службе, останавливать её не нужно:
 

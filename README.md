@@ -195,9 +195,11 @@ sudo sh ./jhvirt-<версия>-linux-amd64.run \
 внешней базы передайте `--database-url-file /root/jhvirt.dsn`; файл должен
 содержать одну DSN-строку и иметь права `0600`.
 
-Пункт «удалить» в интерактивном меню запрашивает подтверждение и снимает
-приложение. Для автоматизации то же делает `--uninstall`; PostgreSQL, база,
-конфигурация, ключ шифрования и контейнерные тома сохраняются.
+Пункт «удалить» в интерактивном меню предлагает снять Docker Compose,
+systemd-службу или оба варианта и запрашивает подтверждение. Для автоматизации
+используйте `--uninstall=docker`, `--uninstall=systemd` или
+`--uninstall=all`; PostgreSQL, база, конфигурация, ключ шифрования и
+контейнерные тома сохраняются.
 
 Нужны Go 1.26+ и Node 20+. Компилятор C и `make` не требуются, поэтому собрать
 Linux-бинарь можно и из-под Windows. Подробности — [docs/BUILD.md](docs/BUILD.md).
@@ -238,8 +240,13 @@ Makefile есть и делегирует сюда же.
 
 ## Конфигурация
 
-Файл `config/virt-manager.yaml`. Любой параметр переопределяется переменной
-окружения `JHV_<ПУТЬ_КЛЮЧА_ЧЕРЕЗ_ПОДЧЁРКИВАНИЯ>`:
+Точные пути для Docker из репозитория, Docker из `.run` и systemd, порядок
+применения настроек и правила их сохранения описаны в
+**[CONFIGURATION.md](docs/CONFIGURATION.md)**.
+
+Основной файл в исходниках — `config/virt-manager.yaml`. Любой параметр
+переопределяется переменной окружения
+`JHV_<ПУТЬ_КЛЮЧА_ЧЕРЕЗ_ПОДЧЁРКИВАНИЯ>`:
 
 ```bash
 JHV_SERVER_PORT=9443
@@ -331,6 +338,8 @@ jvbackup restore -repo /backup -run <id> -out /var/tmp -format qcow2
   архива без этого сервиса.
 - [`docs/OPERATIONS.md`](docs/OPERATIONS.md) — эксплуатация, наблюдение,
   резервирование самого сервиса и восстановление.
+- [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) — где находятся YAML, env,
+  unit, ключ и данные для Docker и systemd.
 - [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) — ошибки установки и
   запуска, авторизация/cookie, PostgreSQL, Docker, systemd, oVirt и KVM.
 - [`docs/API.md`](docs/API.md) — REST API.

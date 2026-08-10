@@ -277,12 +277,29 @@ mkdir -p /usr/local/lib/docker/cli-plugins && curl -sSL https://github.com/docke
 systemctl enable --now podman.socket
 ```
 
-**Что проверено, а что нет.** Файл разбирается всеми тремя реализациями — это
-проверено на podman-compose 1.4.1 из Fedora и docker-compose 1.29.2. Полный
-запуск со сборкой образа прогонялся только на Docker Compose v2. Если под
-podman что-то себя поведёт иначе, вероятнее всего это `depends_on` с
-`condition`: при его игнорировании сервис стартует раньше базы, падает и
-поднимается со второй попытки — `restart: unless-stopped` это закрывает.
+**Формат образа.** podman собирает в формате OCI, а в спецификации OCI поля
+healthcheck нет: строку `HEALTHCHECK` из Dockerfile buildah отбрасывает и
+пишет об этом при каждой сборке —
+
+```
+HEALTHCHECK is not supported for OCI image format and will be ignored. Must use `docker` format
+```
+
+Установщик поэтому в режиме podman выставляет `BUILDAH_FORMAT=docker`: образ
+получается такой же, как у `docker build`, и проверка живости остаётся внутри
+него. Если пересобираете руками, мимо `install.sh`, переменную задайте сами:
+
+```bash
+BUILDAH_FORMAT=docker podman-compose up -d --build
+```
+
+Без неё ничего не сломается — проверка живости описана и в `docker-compose.yml`,
+а её podman-compose применяет всегда. Потеряется только та, что внутри образа:
+она нужна тем, кто запускает контейнер напрямую, `podman run`, без compose.
+
+**Что проверено.** Полная установка со сборкой образа прогонялась на Docker
+Compose v2 и на podman-compose 1.4.1 (Fedora): в обоих случаях сервис
+поднимается и интерфейс отвечает. Файл разбирается и docker-compose 1.29.2.
 
 Контейнеры не обязательны вовсе: на RHEL короче поставить бинарём под systemd
 и взять PostgreSQL из репозитория дистрибутива — см. п. 3.

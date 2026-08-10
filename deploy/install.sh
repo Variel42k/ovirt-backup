@@ -201,7 +201,14 @@ fi
 case "$MODE" in
     docker)         has_docker  || die "docker compose недоступен" ;;
     docker-compose) has_dockerc || die "docker-compose не найден" ;;
-    podman)         has_podmanc || die "podman-compose не найден: dnf install -y podman-compose" ;;
+    podman)         has_podmanc || die "podman-compose не найден: dnf install -y podman-compose"
+                    # podman собирает образ в формате OCI, а в спецификации OCI
+                    # поля healthcheck нет: строку HEALTHCHECK из Dockerfile
+                    # buildah отбрасывает и предупреждает об этом при каждой
+                    # сборке. Формат docker это поле хранит — образ получается
+                    # такой же, как у docker build, и проверка живости остаётся
+                    # внутри него, а не только в compose-файле.
+                    export BUILDAH_FORMAT=docker ;;
     systemd)        has_systemd || die "systemd не найден" ;;
     *) die "неизвестный способ: $MODE" ;;
 esac

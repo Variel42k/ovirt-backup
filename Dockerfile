@@ -21,7 +21,7 @@ ARG VERSION=dev
 RUN CGO_ENABLED=0 GOOS=linux go build \
         -trimpath \
         -ldflags "-s -w -X main.version=${VERSION}" \
-        -o /out/justhpc-virt-server ./cmd/justhpc-virt-server
+        -o /out/ovirt-backup-server ./cmd/ovirt-backup-server
 
 FROM docker.io/library/alpine:3.21
 # qemu-img нужен только для экспорта восстановленных образов в qcow2 и для
@@ -31,9 +31,9 @@ RUN apk add --no-cache ca-certificates tzdata qemu-img && \
     adduser -u 10001 -G jhvirt -h /app -D jhvirt
 
 WORKDIR /app
-COPY --from=build /out/justhpc-virt-server /app/justhpc-virt-server
+COPY --from=build /out/ovirt-backup-server /app/ovirt-backup-server
 COPY --from=web /build/web/dist /app/web/dist
-COPY config/virt-manager.yaml /app/config/virt-manager.yaml
+COPY config/ovirt-backup.yaml /app/config/ovirt-backup.yaml
 
 # Ключ шифрования секретов и временные файлы восстановления; при локальном
 # хранилище — сами копии. База живёт снаружи, в PostgreSQL.
@@ -46,5 +46,5 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD wget -qO- http://127.0.0.1:8080/healthz || exit 1
 
-ENTRYPOINT ["/app/justhpc-virt-server"]
-CMD ["-config", "/app/config/virt-manager.yaml"]
+ENTRYPOINT ["/app/ovirt-backup-server"]
+CMD ["-config", "/app/config/ovirt-backup.yaml"]

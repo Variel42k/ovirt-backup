@@ -123,17 +123,17 @@ Docker Compose или systemd.
 ./run build --target linux/arm64
 ```
 
-Получится `dist/jhvirt-<версия>-linux-<архитектура>.run`. Проверка до переноса:
+Получится `dist/ovirt-backup-<версия>-linux-<архитектура>.run`. Проверка до переноса:
 
 ```bash
-sh dist/jhvirt-*.run --check
-sh dist/jhvirt-*.run --version
+sh dist/ovirt-backup-*.run --check
+sh dist/ovirt-backup-*.run --version
 ```
 
 Передайте один файл на сервер:
 
 ```bash
-scp dist/jhvirt-*.run user@virt-server:/tmp/
+scp dist/ovirt-backup-*.run user@virt-server:/tmp/
 ```
 
 `.run` содержит оба бинаря, собранную SPA, конфигурацию, Compose-файл,
@@ -193,7 +193,7 @@ docker-compose version
 раскладывается в `/opt/jhvirt`:
 
 ```bash
-sudo sh /tmp/jhvirt-*.run --mode docker \
+sudo sh /tmp/ovirt-backup-*.run --mode docker \
   --url http://10.20.30.40:8080 \
   --port 8080
 ```
@@ -225,7 +225,7 @@ sudo sh /tmp/jhvirt-*.run --mode docker \
 
 ```bash
 docker compose ps
-docker compose logs --tail 100 justhpc-virt-manager
+docker compose logs --tail 100 ovirt-backup
 curl -fsS http://127.0.0.1:8080/healthz
 curl -fsS http://127.0.0.1:8080/readyz
 ```
@@ -247,7 +247,7 @@ curl -fsS http://127.0.0.1:8080/readyz
 ### Шаг 1. Запустите установщик
 
 ```bash
-sudo sh /tmp/jhvirt-*-linux-amd64.run \
+sudo sh /tmp/ovirt-backup-*-linux-amd64.run \
   --mode systemd \
   --url http://10.20.30.40:8080 \
   --port 8080
@@ -257,7 +257,7 @@ sudo sh /tmp/jhvirt-*-linux-amd64.run \
 `sh`:
 
 ```bash
-sudo PREFIX=/srv/jhvirt sh /tmp/jhvirt-*.run \
+sudo PREFIX=/srv/jhvirt sh /tmp/ovirt-backup-*.run \
   --mode systemd --url http://10.20.30.40:8080 --port 8080
 ```
 
@@ -317,7 +317,7 @@ sudo sh -c 'printf "%s\n" \
 Установите приложение:
 
 ```bash
-sudo sh /tmp/jhvirt-*.run \
+sudo sh /tmp/ovirt-backup-*.run \
   --mode systemd \
   --url https://virt.example.org \
   --port 8080 \
@@ -402,12 +402,12 @@ server {
 ./install.sh --mode docker --url https://virt.example.org --port 8080
 
 # systemd
-sudo sh /tmp/jhvirt-*.run --mode systemd \
+sudo sh /tmp/ovirt-backup-*.run --mode systemd \
   --url https://virt.example.org --port 8080
 ```
 
 Для systemd можно включить TLS непосредственно в
-`config/virt-manager.yaml`, но внешний URL всё равно должен начинаться с
+`config/ovirt-backup.yaml`, но внешний URL всё равно должен начинаться с
 `https://`:
 
 ```yaml
@@ -436,7 +436,7 @@ server:
 
 Каталог должен быть разрешён одновременно в двух местах.
 
-В `/opt/jhvirt/config/virt-manager.yaml`:
+В `/opt/jhvirt/config/ovirt-backup.yaml`:
 
 ```yaml
 backup:
@@ -525,13 +525,19 @@ Systemd:
 ```bash
 sudo -u postgres pg_dump jhvirt \
   | sudo tee /srv/backups/jhvirt-db-$(date +%F-%H%M).sql >/dev/null
-sudo sh /tmp/jhvirt-<новая-версия>.run \
+sudo sh /tmp/ovirt-backup-<новая-версия>.run \
   --mode systemd --url https://virt.example.org --port 8080
 ```
 
 При обновлении сохраняются env, текущая конфигурация, ключ, база и данные.
-Новый образец конфигурации кладётся рядом как `virt-manager.yaml.new`.
+Новый образец конфигурации кладётся рядом как `ovirt-backup.yaml.new`.
 Служба перезапускается только если до обновления была активна.
+
+Установщик распознаёт бинарник и Compose-сервис предыдущего выпуска. При
+обновлении конфигурация переносится в `ovirt-backup.yaml`, новый контейнер
+получает имя сервиса `ovirt-backup`, а прежний контейнер удаляется как orphan.
+Значения существующего `.env`, включая `COMPOSE_PROJECT_NAME`, сохраняются,
+поэтому именованные тома и база остаются прежними.
 
 После обновления повторите `/readyz`, вход, `/auth/me` и одну дешёвую проверку
 цепочки.
@@ -545,9 +551,9 @@ sudo sh /tmp/jhvirt-<новая-версия>.run \
 Для автоматизации:
 
 ```bash
-sudo sh /tmp/jhvirt-*.run --uninstall=docker
-sudo sh /tmp/jhvirt-*.run --uninstall=systemd
-sudo sh /tmp/jhvirt-*.run --uninstall=all
+sudo sh /tmp/ovirt-backup-*.run --uninstall=docker
+sudo sh /tmp/ovirt-backup-*.run --uninstall=systemd
+sudo sh /tmp/ovirt-backup-*.run --uninstall=all
 ```
 
 Из репозитория:
@@ -567,7 +573,7 @@ sudo ./install.sh --uninstall=all
 Во всех режимах намеренно сохраняются:
 
 - PostgreSQL и её данные;
-- `config/virt-manager.yaml` и `jhvirt.env`;
+- `config/ovirt-backup.yaml` и `jhvirt.env`;
 - `data/secret.key`;
 - контейнерные тома;
 - хранилище резервных копий и восстановленные образы.
@@ -583,13 +589,13 @@ sudo ./install.sh --uninstall=all
 - том `jhvirt-data` с `secret.key`;
 - том `postgres-data` или логический `pg_dump`;
 - рабочий `.env` с правами `0600`;
-- изменённый `config/virt-manager.yaml`;
+- изменённый `config/ovirt-backup.yaml`;
 - внешние каталоги/NFS/S3 с копиями ВМ.
 
 Получить ключ из контейнера:
 
 ```bash
-docker compose cp justhpc-virt-manager:/app/data/secret.key \
+docker compose cp ovirt-backup:/app/data/secret.key \
   /root/jhvirt-secret.key.backup
 chmod 600 /root/jhvirt-secret.key.backup
 ```
@@ -597,7 +603,7 @@ chmod 600 /root/jhvirt-secret.key.backup
 ### Systemd
 
 - `/opt/jhvirt/data/secret.key`;
-- `/opt/jhvirt/config/virt-manager.yaml`;
+- `/opt/jhvirt/config/ovirt-backup.yaml`;
 - `/opt/jhvirt/config/jhvirt.env`;
 - логический дамп PostgreSQL;
 - внешние хранилища копий.

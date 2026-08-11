@@ -26,7 +26,7 @@ resolvectl query dengine.example.local
 
 ```bash
 cd <каталог-compose>
-docker compose exec -T justhpc-virt-manager \
+docker compose exec -T ovirt-backup \
   getent ahostsv4 dengine.example.local
 ```
 
@@ -194,7 +194,7 @@ resolvectl query dengine.pish.example.local
 
 ```yaml
 services:
-  justhpc-virt-manager:
+  ovirt-backup:
     dns:
       - 10.0.0.53
       - 10.0.0.54
@@ -204,8 +204,8 @@ Compose v1 и v2 автоматически читают этот файл пр�
 каталога. Пересоздайте приложение:
 
 ```bash
-docker compose up -d --force-recreate justhpc-virt-manager
-docker compose exec -T justhpc-virt-manager \
+docker compose up -d --force-recreate ovirt-backup
+docker compose exec -T ovirt-backup \
   getent ahostsv4 dengine.example.local
 ```
 
@@ -217,7 +217,7 @@ DNS-проверка подтверждает только получение IP
 же окружения, где работает приложение:
 
 ```bash
-docker compose exec -T justhpc-virt-manager \
+docker compose exec -T ovirt-backup \
   wget -S --spider --no-check-certificate --timeout=10 \
   https://dengine.example.local/ovirt-engine/sso/oauth/token
 ```
@@ -263,8 +263,8 @@ sudo netplan get ethernets.enp6s0.nameservers
 resolvectl domain enp6s0
 resolvectl query dengine.pish.advengineering.local
 
-cd /home/user/justhpc-virt-manager/deploy
-sudo docker compose exec -T justhpc-virt-manager \
+cd /home/user/ovirt-backup/deploy
+sudo docker compose exec -T ovirt-backup \
   getent ahostsv4 dengine.pish.advengineering.local
 ```
 

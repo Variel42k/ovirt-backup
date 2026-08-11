@@ -104,7 +104,7 @@ const probePrefix = ".jhvirt/health-probe-"
 // fails with a confusing permission error from the underlying rename.
 func runCheck(ctx context.Context, b Backend) error {
 	probeKey := probePrefix + uuid.NewString()
-	payload := []byte("justhpc-virt-manager health probe " + time.Now().UTC().Format(time.RFC3339Nano))
+	payload := []byte("ovirt-backup health probe " + time.Now().UTC().Format(time.RFC3339Nano))
 
 	if _, err := b.Put(ctx, probeKey, bytesReader(payload), int64(len(payload))); err != nil {
 		return err

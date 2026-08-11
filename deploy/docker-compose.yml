@@ -1,4 +1,4 @@
-# Боевое развёртывание justhpc-virt-manager.
+# Боевое развёртывание ovirt-backup.
 #
 #   ./install.sh   — подготовит .env и запустит; спросит, чем именно
 #
@@ -24,13 +24,13 @@ version: "2.4"
 # Имя проекта задаётся через COMPOSE_PROJECT_NAME в .env: верхнеуровневый ключ
 # name понимает Compose v2, но docker-compose v1 отказывается разбирать.
 services:
-  justhpc-virt-manager:
+  ovirt-backup:
     build:
       context: ..
       dockerfile: Dockerfile
       args:
         VERSION: ${VERSION:-dev}
-    image: justhpc-virt-manager:${VERSION:-dev}
+    image: ovirt-backup:${VERSION:-dev}
     restart: unless-stopped
     ports:
       - "${JHV_PORT:-8080}:8080"

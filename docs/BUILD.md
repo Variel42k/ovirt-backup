@@ -9,7 +9,7 @@
 ```
 
 ```
-готово: dist/jhvirt-1.0.0-linux-amd64.run (14M)
+готово: dist/ovirt-backup-1.0.0-linux-amd64.run (14M)
 ```
 
 Внутри — два статических бинаря, веб-интерфейс, конфигурация, юнит systemd и
@@ -88,7 +88,7 @@
 
 ## Что получается
 
-Один файл `dist/jhvirt-1.0.0-linux-amd64.run` — обычный `/bin/sh`-скрипт, к
+Один файл `dist/ovirt-backup-1.0.0-linux-amd64.run` — обычный `/bin/sh`-скрипт, к
 которому приклеен `tar.gz`. Скрипт находит начало архива по строке-метке,
 сверяет вшитую контрольную сумму, распаковывает во временный каталог и
 запускает оттуда установщик. Временный каталог удаляется всегда, включая
@@ -97,12 +97,12 @@
 Внутри архива:
 
 ```
-jhvirt-1.0.0-linux-amd64/
+ovirt-backup-1.0.0-linux-amd64/
 ├── bin/
-│   ├── justhpc-virt-server     сервис с веб-интерфейсом
+│   ├── ovirt-backup-server     сервис с веб-интерфейсом
 │   └── jvbackup                автономный CLI: бэкап, проверка, восстановление
 ├── web/dist/                   собранный интерфейс
-├── config/virt-manager.yaml    конфигурация по умолчанию
+├── config/ovirt-backup.yaml    конфигурация по умолчанию
 ├── systemd/jhvirt.service      юнит
 ├── compose/                    docker-compose.yml и .env.example
 ├── Dockerfile                  образ из готового бинаря, без Go и Node
@@ -123,12 +123,12 @@ Dockerfile в комплекте не собирает проект: бинар�
 ## Установка
 
 ```bash
-scp dist/jhvirt-1.0.0-linux-amd64.run server:/tmp/
-ssh server 'sudo sh /tmp/jhvirt-1.0.0-linux-amd64.run'
+scp dist/ovirt-backup-1.0.0-linux-amd64.run server:/tmp/
+ssh server 'sudo sh /tmp/ovirt-backup-1.0.0-linux-amd64.run'
 ```
 
 Через `sh` — потому что бит исполнения не переживает файловую систему Windows.
-Если собирали на Linux, `sudo ./jhvirt-1.0.0-linux-amd64.run` тоже работает.
+Если собирали на Linux, `sudo ./ovirt-backup-1.0.0-linux-amd64.run` тоже работает.
 
 Установщик поддерживает Docker Compose v2, старый `docker-compose` v1 и
 нативную службу systemd:
@@ -147,19 +147,19 @@ ssh server 'sudo sh /tmp/jhvirt-1.0.0-linux-amd64.run'
 
 | Команда | Что делает |
 |---|---|
-| `sudo sh ./jhvirt-*.run` | выбор способа диалогом |
-| `sudo sh ./jhvirt-*.run --mode docker --url http://host:8080` | без диалога: Docker Compose v2 |
-| `sudo sh ./jhvirt-*.run --mode docker-compose --url http://host:8080` | без диалога: Compose v1 |
-| `sudo sh ./jhvirt-*.run --mode systemd --url http://host:8080` | локальная PostgreSQL и systemd |
-| `sudo sh ./jhvirt-*.run --mode systemd --url … --database-url-file /root/jhvirt.dsn` | systemd с внешней PostgreSQL |
-| `sudo PREFIX=/srv/jhvirt sh ./jhvirt-*.run` | другой каталог |
-| `sudo sh ./jhvirt-*.run --uninstall` | интерактивно выбрать цель; без терминала снять оба варианта |
-| `sudo sh ./jhvirt-*.run --uninstall=docker` | снять только Compose-контейнеры и сеть |
-| `sudo sh ./jhvirt-*.run --uninstall=systemd` | снять только `jhvirt.service` |
-| `sudo sh ./jhvirt-*.run --uninstall=all` | снять Docker Compose и systemd |
-| `sh ./jhvirt-*.run --extract [каталог]` | только распаковать, ничего не ставить |
-| `sh ./jhvirt-*.run --check` | проверить целостность файла |
-| `sh ./jhvirt-*.run --version` | версия и платформа без распаковки |
+| `sudo sh ./ovirt-backup-*.run` | выбор способа диалогом |
+| `sudo sh ./ovirt-backup-*.run --mode docker --url http://host:8080` | без диалога: Docker Compose v2 |
+| `sudo sh ./ovirt-backup-*.run --mode docker-compose --url http://host:8080` | без диалога: Compose v1 |
+| `sudo sh ./ovirt-backup-*.run --mode systemd --url http://host:8080` | локальная PostgreSQL и systemd |
+| `sudo sh ./ovirt-backup-*.run --mode systemd --url … --database-url-file /root/jhvirt.dsn` | systemd с внешней PostgreSQL |
+| `sudo PREFIX=/srv/jhvirt sh ./ovirt-backup-*.run` | другой каталог |
+| `sudo sh ./ovirt-backup-*.run --uninstall` | интерактивно выбрать цель; без терминала снять оба варианта |
+| `sudo sh ./ovirt-backup-*.run --uninstall=docker` | снять только Compose-контейнеры и сеть |
+| `sudo sh ./ovirt-backup-*.run --uninstall=systemd` | снять только `jhvirt.service` |
+| `sudo sh ./ovirt-backup-*.run --uninstall=all` | снять Docker Compose и systemd |
+| `sh ./ovirt-backup-*.run --extract [каталог]` | только распаковать, ничего не ставить |
+| `sh ./ovirt-backup-*.run --check` | проверить целостность файла |
+| `sh ./ovirt-backup-*.run --version` | версия и платформа без распаковки |
 
 `--extract` нужен, когда установку выполняет не этот скрипт: свой Ansible,
 образ, каталог без systemd.
@@ -196,7 +196,7 @@ ssh server 'sudo sh /tmp/jhvirt-1.0.0-linux-amd64.run'
 ```
 ==> обновление: 1.0.0 -> 1.1.0
     останавливаю службу на время замены
-    конфигурация сохранена; новая версия рядом: virt-manager.yaml.new
+    конфигурация сохранена; новая версия рядом: ovirt-backup.yaml.new
 ==> служба обновлена и запущена
 ```
 

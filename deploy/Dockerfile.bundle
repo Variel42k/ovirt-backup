@@ -17,9 +17,9 @@ RUN apk add --no-cache ca-certificates tzdata qemu-img && \
     adduser -u 10001 -G jhvirt -h /app -D jhvirt
 
 WORKDIR /app
-COPY bin/justhpc-virt-server /app/justhpc-virt-server
+COPY bin/ovirt-backup-server /app/ovirt-backup-server
 COPY web/dist /app/web/dist
-COPY config/virt-manager.yaml /app/config/virt-manager.yaml
+COPY config/ovirt-backup.yaml /app/config/ovirt-backup.yaml
 
 # Ключ шифрования секретов и временные файлы восстановления; при локальном
 # хранилище — сами копии. База живёт снаружи, в PostgreSQL.
@@ -33,5 +33,5 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD wget -qO- http://127.0.0.1:8080/healthz || exit 1
 
-ENTRYPOINT ["/app/justhpc-virt-server"]
-CMD ["-config", "/app/config/virt-manager.yaml"]
+ENTRYPOINT ["/app/ovirt-backup-server"]
+CMD ["-config", "/app/config/ovirt-backup.yaml"]

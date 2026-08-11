@@ -229,7 +229,7 @@ func buildCheckpoint(name, runID string, plan *Plan) *libvirtx.CheckpointSpec {
 	}
 	spec := &libvirtx.CheckpointSpec{
 		Name:        name,
-		Description: fmt.Sprintf("justhpc-virt-manager %s (%s)", runID, plan.Type),
+		Description: fmt.Sprintf("ovirt-backup %s (%s)", runID, plan.Type),
 	}
 	for _, disk := range plan.Disks {
 		spec.Disks = append(spec.Disks, libvirtx.CheckpointDisk{

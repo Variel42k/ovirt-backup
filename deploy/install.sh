@@ -1,5 +1,5 @@
 #!/bin/sh
-# Установка justhpc-virt-manager. Один скрипт на всё.
+# Установка ovirt-backup. Один скрипт на всё.
 #
 # Спрашивает, чем запускать, готовит конфигурацию, запускает и печатает пароль
 # администратора. Больше делать ничего не нужно.
@@ -30,6 +30,12 @@ HERE="$(dirname "$SELF")"
 PREFIX="${PREFIX:-/opt/jhvirt}"
 USER_NAME="${USER_NAME:-jhvirt}"
 UNIT="/etc/systemd/system/jhvirt.service"
+SERVER_BINARY="ovirt-backup-server"
+LEGACY_SERVER_BINARY="justhpc-virt-server"
+COMPOSE_SERVICE="ovirt-backup"
+LEGACY_COMPOSE_SERVICE="justhpc-virt-manager"
+CONFIG_NAME="ovirt-backup.yaml"
+LEGACY_CONFIG_NAME="virt-manager.yaml"
 
 MODE=""; URL=""; DATABASE_URL_FILE=""; UNINSTALL_TARGET=""; START=1; PORT=8080
 
@@ -92,7 +98,7 @@ project_name() {
         v="$(grep -m1 '^COMPOSE_PROJECT_NAME=' "$COMPOSE_DIR/.env" 2>/dev/null | cut -d= -f2-)"
         [ -n "$v" ] && { printf '%s' "$v"; return; }
     fi
-    printf 'jhvirt'
+    printf 'ovirt-backup'
 }
 
 volume_exists() {
@@ -115,6 +121,25 @@ set_plain_env() {
     printf '%s=%s\n' "$KEY" "$VALUE" >> "$TMP"
     chmod 600 "$TMP"
     mv "$TMP" "$FILE"
+}
+
+install_bundle_config() {
+    SAMPLE="$HERE/config/$CONFIG_NAME"
+    DEST="$PREFIX/config/$CONFIG_NAME"
+    LEGACY="$PREFIX/config/$LEGACY_CONFIG_NAME"
+
+    [ -f "$SAMPLE" ] || die "в комплекте нет config/$CONFIG_NAME"
+    if [ -f "$DEST" ]; then
+        cp "$SAMPLE" "$DEST.new"
+        say "    конфигурация сохранена; новая версия рядом: $CONFIG_NAME.new"
+    elif [ -f "$LEGACY" ]; then
+        cp -p "$LEGACY" "$DEST"
+        cp "$SAMPLE" "$DEST.new"
+        say "    конфигурация перенесена из $LEGACY_CONFIG_NAME в $CONFIG_NAME"
+        say "    новый образец рядом: $CONFIG_NAME.new"
+    else
+        install -m 0640 "$SAMPLE" "$DEST"
+    fi
 }
 
 # Команда запуска для выбранного способа.
@@ -461,7 +486,12 @@ compose_container_ids() {
     [ -f "$CHECK_COMPOSE_DIR/docker-compose.yml" ] || return 0
     CHECK_RUN="$(runner "$MODE")"
     # shellcheck disable=SC2086
-    (cd "$CHECK_COMPOSE_DIR" && $CHECK_RUN ps -q justhpc-virt-manager 2>/dev/null) || true
+    (
+        cd "$CHECK_COMPOSE_DIR"
+        $CHECK_RUN ps -q "$COMPOSE_SERVICE" 2>/dev/null || true
+        # Старое имя нужно только для обновления уже развёрнутого Compose.
+        $CHECK_RUN ps -q "$LEGACY_COMPOSE_SERVICE" 2>/dev/null || true
+    )
 }
 
 container_port_in_use() {
@@ -567,12 +597,7 @@ install_containers() {
         # комплект копируется целиком.
         cp -r "$HERE/bin" "$HERE/web" "$PREFIX/"
         cp "$HERE/Dockerfile" "$PREFIX/Dockerfile"
-        if [ -f "$PREFIX/config/virt-manager.yaml" ]; then
-            cp "$HERE/config/virt-manager.yaml" "$PREFIX/config/virt-manager.yaml.new"
-            say "    конфигурация сохранена; новая версия рядом: virt-manager.yaml.new"
-        else
-            cp "$HERE/config/virt-manager.yaml" "$PREFIX/config/"
-        fi
+        install_bundle_config
         cp "$HERE/compose/docker-compose.yml" "$HERE/compose/.env.example" "$PREFIX/compose/"
         [ -d "$HERE/docs" ] && cp -r "$HERE/docs/." "$PREFIX/docs/"
         [ -f "$HERE/VERSION" ] && cp "$HERE/VERSION" "$PREFIX/"
@@ -594,9 +619,18 @@ install_containers() {
         # подойдёт: она примет только тот, с которым была создана. Служба тогда
         # уходит в цикл перезапуска с «password authentication failed», и связь
         # с пропавшим .env совсем не очевидна.
-        VOL="$(project_name)_postgres-data"
+        VOL=""
+        for CANDIDATE in \
+                "$(project_name)_postgres-data" \
+                "jhvirt_postgres-data" \
+                "${LEGACY_COMPOSE_SERVICE}_postgres-data"; do
+            if volume_exists "$CANDIDATE"; then
+                VOL="$CANDIDATE"
+                break
+            fi
+        done
         VOLRM="docker volume rm"
-        if volume_exists "$VOL"; then
+        if [ -n "$VOL" ]; then
             die "том базы $VOL остался с прошлой установки, а $WORK/.env — нет.
 
 PostgreSQL хранит пароль внутри тома и новый не примет: служба будет
@@ -628,7 +662,7 @@ PostgreSQL хранит пароль внутри тома и новый не п
 
         umask 077
         {
-            printf 'COMPOSE_PROJECT_NAME=jhvirt\n'
+            printf 'COMPOSE_PROJECT_NAME=ovirt-backup\n'
             printf 'POSTGRES_USER=jhvirt\n'
             printf 'POSTGRES_PASSWORD=%s\n' "$PGPASS"
             printf 'POSTGRES_DB=jhvirt\n'
@@ -656,13 +690,13 @@ PostgreSQL хранит пароль внутри тома и новый не п
 
     step "сборка образа и запуск (в первый раз это несколько минут)"
     # shellcheck disable=SC2086
-    (cd "$WORK" && $RUN up -d --build) || die "запуск не удался; смотрите вывод выше"
+    (cd "$WORK" && $RUN up -d --build --remove-orphans) || die "запуск не удался; смотрите вывод выше"
 
     step "жду готовности"
     if ! wait_ready "http://127.0.0.1:$PORT/readyz"; then
         say ""
         # shellcheck disable=SC2086
-        (cd "$WORK" && $RUN logs --tail 30 justhpc-virt-manager 2>/dev/null) || true
+        (cd "$WORK" && $RUN logs --tail 30 "$COMPOSE_SERVICE" 2>/dev/null) || true
         die "за 3 минуты сервис не стал готов — последние строки журнала выше"
     fi
 
@@ -686,16 +720,16 @@ PostgreSQL хранит пароль внутри тома и новый не п
     else
         say "  учётная запись уже была создана прежде; пароль не менялся."
         say "  Забыли — задайте новый:"
-        say "    cd $WORK && $RUN run --rm justhpc-virt-manager -reset-password admin"
+        say "    cd $WORK && $RUN run --rm $COMPOSE_SERVICE -reset-password admin"
     fi
     say "════════════════════════════════════════════════════════════"
     say ""
     say "Дальше:"
     say "  • TLS не настроен — при необходимости поставьте обратный прокси перед портом $PORT."
     say "  • Скопируйте ключ шифрования отдельно от базы и не туда, где копии:"
-    say "      cd $WORK && $RUN cp justhpc-virt-manager:/app/data/secret.key ./secret.key.backup"
+    say "      cd $WORK && $RUN cp $COMPOSE_SERVICE:/app/data/secret.key ./secret.key.backup"
     say "  • Чек-лист перед боем: docs/DEPLOY.md"
-    say "  • Забыли пароль: cd $WORK && $RUN run --rm justhpc-virt-manager -reset-password admin"
+    say "  • Забыли пароль: cd $WORK && $RUN run --rm $COMPOSE_SERVICE -reset-password admin"
 }
 
 # --- Служба systemd ---------------------------------------------------------
@@ -854,17 +888,17 @@ check_installed_config() {
         --unit="$CHECK_UNIT" --uid="$USER_NAME" --gid="$USER_NAME" \
         --working-directory="$PREFIX" \
         --property="EnvironmentFile=$PREFIX/config/jhvirt.env" \
-        "$PREFIX/bin/justhpc-virt-server" \
-        -config "$PREFIX/config/virt-manager.yaml" -check-config
+        "$PREFIX/bin/$SERVER_BINARY" \
+        -config "$PREFIX/config/$CONFIG_NAME" -check-config
 }
 
 install_systemd() {
     [ "$BUNDLE" -eq 1 ] || die "установка службой возможна только из комплекта .run
 Из репозитория соберите его: ./run build --target linux/amd64"
 
-    [ -f "$HERE/bin/justhpc-virt-server" ] || die "в комплекте нет bin/justhpc-virt-server"
+    [ -f "$HERE/bin/$SERVER_BINARY" ] || die "в комплекте нет bin/$SERVER_BINARY"
     [ -f "$HERE/web/dist/index.html" ] || die "в комплекте нет web/dist/index.html"
-    [ -f "$HERE/config/virt-manager.yaml" ] || die "в комплекте нет конфигурации"
+    [ -f "$HERE/config/$CONFIG_NAME" ] || die "в комплекте нет конфигурации"
     [ -f "$HERE/systemd/jhvirt.service" ] || die "в комплекте нет unit systemd"
     have systemd-run || die "не найдена команда systemd-run"
 
@@ -874,12 +908,18 @@ install_systemd() {
     UPGRADE=0
     # Бинарь мог остаться от прерванной первой установки; наличие unit
     # подтверждает, что это обновление завершённой установки.
-    [ -x "$PREFIX/bin/justhpc-virt-server" ] && [ -f "$UNIT" ] && UPGRADE=1
+    INSTALLED_BINARY=""
+    if [ -x "$PREFIX/bin/$SERVER_BINARY" ]; then
+        INSTALLED_BINARY="$PREFIX/bin/$SERVER_BINARY"
+    elif [ -x "$PREFIX/bin/$LEGACY_SERVER_BINARY" ]; then
+        INSTALLED_BINARY="$PREFIX/bin/$LEGACY_SERVER_BINARY"
+    fi
+    [ -n "$INSTALLED_BINARY" ] && [ -f "$UNIT" ] && UPGRADE=1
 
     if [ "$UPGRADE" -eq 1 ]; then
-        # -version печатает «justhpc-virt-server 1.0.0»; нужна только версия.
-        OLD="$("$PREFIX/bin/justhpc-virt-server" -version 2>/dev/null | awk '{print $NF}' || true)"
-        NEW="$("$HERE/bin/justhpc-virt-server" -version 2>/dev/null | awk '{print $NF}' || true)"
+        # -version печатает «<имя бинаря> 1.0.0»; нужна только версия.
+        OLD="$("$INSTALLED_BINARY" -version 2>/dev/null | awk '{print $NF}' || true)"
+        NEW="$("$HERE/bin/$SERVER_BINARY" -version 2>/dev/null | awk '{print $NF}' || true)"
         step "обновление: ${OLD:-?} -> ${NEW:-?}"
     else
         step "установка службой systemd в $PREFIX"
@@ -897,7 +937,7 @@ install_systemd() {
         WAS_ACTIVE=1
     fi
 
-    install -m 0755 "$HERE/bin/justhpc-virt-server" "$PREFIX/bin/"
+    install -m 0755 "$HERE/bin/$SERVER_BINARY" "$PREFIX/bin/"
     [ -f "$HERE/bin/jvbackup" ] && install -m 0755 "$HERE/bin/jvbackup" "$PREFIX/bin/"
     rm -rf "$PREFIX/web/dist"
     cp -r "$HERE/web/dist" "$PREFIX/web/dist"
@@ -905,12 +945,7 @@ install_systemd() {
     [ -f "$HERE/VERSION" ] && cp "$HERE/VERSION" "$PREFIX/"
 
     # Конфигурацию не трогаем: в ней уже могут быть правки оператора.
-    if [ -f "$PREFIX/config/virt-manager.yaml" ]; then
-        cp "$HERE/config/virt-manager.yaml" "$PREFIX/config/virt-manager.yaml.new"
-        say "    конфигурация сохранена; новая версия рядом: virt-manager.yaml.new"
-    else
-        install -m 0640 "$HERE/config/virt-manager.yaml" "$PREFIX/config/"
-    fi
+    install_bundle_config
 
     chown -R "$USER_NAME:$USER_NAME" "$PREFIX"
     chmod 700 "$PREFIX/data"
@@ -953,6 +988,7 @@ install_systemd() {
 
     step "проверка конфигурации"
     check_installed_config || die "установленная конфигурация не прошла проверку"
+    rm -f "$PREFIX/bin/$LEGACY_SERVER_BINARY"
 
     SHOULD_START=0
     if [ "$START" -eq 1 ]; then

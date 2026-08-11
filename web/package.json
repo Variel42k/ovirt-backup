@@ -1,9 +1,9 @@
 {
-  "name": "justhpc-virt-manager-web",
+  "name": "ovirt-backup-web",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Веб-интерфейс justhpc-virt-manager",
+  "description": "Веб-интерфейс ovirt-backup",
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",

@@ -42,7 +42,7 @@ version() {
 
 cmd_help() {
     cat <<'EOF'
-justhpc-virt-manager — команды разработки и сборки
+ovirt-backup — команды разработки и сборки
 
   ./run build [ключи]   собрать комплект для переноса на сервер
   ./run dev             запустить сервер (:8080) с конфигурацией по умолчанию
@@ -70,10 +70,10 @@ justhpc-virt-manager — команды разработки и сборки
   ./run check
   ./run test -race
 
-build даёт один файл dist/jhvirt-<версия>-<ос>-<арх>.run: скрипт с архивом
+build даёт один файл dist/ovirt-backup-<версия>-<ос>-<арх>.run: скрипт с архивом
 внутри. Копируется на сервер и запускается — распаковка и установка внутри.
 
-  scp dist/jhvirt-*.run server:/tmp/ && ssh server 'sudo sh /tmp/jhvirt-*.run'
+  scp dist/ovirt-backup-*.run server:/tmp/ && ssh server 'sudo sh /tmp/ovirt-backup-*.run'
 EOF
 }
 
@@ -256,7 +256,7 @@ cmd_check() {
 cmd_dev() {
     need go "нужен Go 1.26+"
     step "сервер на :8080 (Ctrl+C — остановить)"
-    go run ./cmd/justhpc-virt-server -config config/virt-manager.yaml
+    go run ./cmd/ovirt-backup-server -config config/ovirt-backup.yaml
 }
 
 cmd_web() {
@@ -269,9 +269,9 @@ cmd_web() {
 cmd_docker() {
     need docker "нужен Docker"
     V="$(version)"
-    step "сборка образа justhpc-virt-manager:$V"
-    docker build --build-arg "VERSION=$V" -t "justhpc-virt-manager:$V" .
-    say "готово: justhpc-virt-manager:$V"
+    step "сборка образа ovirt-backup:$V"
+    docker build --build-arg "VERSION=$V" -t "ovirt-backup:$V" .
+    say "готово: ovirt-backup:$V"
 }
 
 cmd_clean() {
@@ -330,7 +330,7 @@ cmd_build() {
     say "цель:    $GOOS/$GOARCH"
 
     SUFFIX=""; [ "$GOOS" = "windows" ] && SUFFIX=".exe"
-    NAME="jhvirt-$VERSION-$GOOS-$GOARCH"
+    NAME="ovirt-backup-$VERSION-$GOOS-$GOARCH"
     OUT="$ROOT/dist/$NAME"
     rm -rf "$OUT"
     mkdir -p "$OUT/bin" "$OUT/config" "$OUT/web" "$OUT/systemd" "$OUT/compose" "$OUT/docs"
@@ -352,14 +352,14 @@ cmd_build() {
     # и работать в любом поддерживаемом дистрибутиве независимо от версии libc.
     step "бинари"
     LDFLAGS="-s -w -X main.version=$VERSION"
-    for c in justhpc-virt-server jvbackup; do
+    for c in ovirt-backup-server jvbackup; do
         CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" \
             go build -trimpath -ldflags "$LDFLAGS" -o "$OUT/bin/$c$SUFFIX" "./cmd/$c"
         say "    $c$SUFFIX"
     done
 
     cp -r web/dist "$OUT/web/dist"
-    cp config/virt-manager.yaml "$OUT/config/"
+    cp config/ovirt-backup.yaml "$OUT/config/"
     cp deploy/install.sh "$OUT/install.sh"
     cp deploy/systemd/jhvirt.service "$OUT/systemd/"
 
@@ -440,7 +440,7 @@ make_installer() {
     HDR="dist/.header.$$"
     cat > "$HDR" <<'HEADER_EOF'
 #!/bin/sh
-# justhpc-virt-manager @VERSION@ (@PLATFORM@) — установщик в одном файле.
+# ovirt-backup @VERSION@ (@PLATFORM@) — установщик в одном файле.
 #
 # Файл состоит из этого скрипта и приклеенного следом архива tar.gz. Скрипт
 # находит начало архива по строке-метке, сверяет контрольную сумму,
@@ -512,7 +512,7 @@ extract() {
 
 usage() {
     cat <<USAGE
-justhpc-virt-manager $VERSION ($PLATFORM) — установщик в одном файле.
+ovirt-backup $VERSION ($PLATFORM) — установщик в одном файле.
 
   sudo sh ./$NAME.run                установить или обновить
   sudo sh ./$NAME.run --uninstall    выбрать цель удаления
@@ -563,7 +563,7 @@ if [ "$(id -u)" -ne 0 ]; then
     die "нужны права root: sudo sh $0"
 fi
 
-say "justhpc-virt-manager $VERSION ($PLATFORM)"
+say "ovirt-backup $VERSION ($PLATFORM)"
 verify
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/jhvirt-install.XXXXXX")" ||

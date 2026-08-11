@@ -7,9 +7,9 @@
 
 | Установка | Рабочий каталог | Конфигурация |
 |---|---|---|
-| Docker из репозитория | `<репозиторий>/deploy` | `<репозиторий>/deploy/.env`, `<репозиторий>/config/virt-manager.yaml` |
-| Docker из `.run` | `/opt/jhvirt/compose` | `/opt/jhvirt/compose/.env`, `/opt/jhvirt/config/virt-manager.yaml` |
-| systemd | `/opt/jhvirt` | `/opt/jhvirt/config/jhvirt.env`, `/opt/jhvirt/config/virt-manager.yaml` |
+| Docker из репозитория | `<репозиторий>/deploy` | `<репозиторий>/deploy/.env`, `<репозиторий>/config/ovirt-backup.yaml` |
+| Docker из `.run` | `/opt/jhvirt/compose` | `/opt/jhvirt/compose/.env`, `/opt/jhvirt/config/ovirt-backup.yaml` |
+| systemd | `/opt/jhvirt` | `/opt/jhvirt/config/jhvirt.env`, `/opt/jhvirt/config/ovirt-backup.yaml` |
 
 При другом `PREFIX` замените `/opt/jhvirt` фактическим путём.
 Полная карта конфигурации и данных находится в
@@ -39,7 +39,7 @@ Docker:
 
 ```bash
 docker compose ps
-docker compose logs --tail 150 justhpc-virt-manager
+docker compose logs --tail 150 ovirt-backup
 docker compose logs --tail 100 postgres
 ```
 
@@ -75,8 +75,8 @@ sudo systemctl cat jhvirt
 sudo systemd-run --quiet --wait --pipe --collect \
   --uid=jhvirt --gid=jhvirt --working-directory=/opt/jhvirt \
   --property=EnvironmentFile=/opt/jhvirt/config/jhvirt.env \
-  /opt/jhvirt/bin/justhpc-virt-server \
-  -config /opt/jhvirt/config/virt-manager.yaml -check-config
+  /opt/jhvirt/bin/ovirt-backup-server \
+  -config /opt/jhvirt/config/ovirt-backup.yaml -check-config
 ```
 
 Не публикуйте вывод `jhvirt.env` или `.env` целиком: там находится DSN или
@@ -108,7 +108,7 @@ cookie, прокси или кэше браузера.
 и URL:
 
 ```bash
-sudo sh jhvirt-*.run --mode systemd \
+sudo sh ovirt-backup-*.run --mode systemd \
   --url http://10.20.30.40:8080 --port 8080
 ```
 
@@ -175,7 +175,7 @@ stat -c '%a %U:%G' /root/jhvirt.dsn
 виде, предпочтительно `scp`, и выполните:
 
 ```bash
-sh jhvirt-*.run --check
+sh ovirt-backup-*.run --check
 ```
 
 Не открывайте `.run` редактором: после shell-заголовка находится двоичный
@@ -187,7 +187,7 @@ sh jhvirt-*.run --check
 
 ```bash
 uname -m
-sh jhvirt-*.run --version
+sh ovirt-backup-*.run --version
 ```
 
 `x86_64` соответствует `linux/amd64`, `aarch64` — `linux/arm64`.
@@ -265,8 +265,8 @@ sudo ss -ltnp 'sport = :8080'
 ```bash
 docker compose ps
 docker inspect --format '{{json .State.Health}}' \
-  "$(docker compose ps -q justhpc-virt-manager)"
-docker compose logs --tail 150 justhpc-virt-manager
+  "$(docker compose ps -q ovirt-backup)"
+docker compose logs --tail 150 ovirt-backup
 ```
 
 Если PostgreSQL ещё запускается, дождитесь её `healthy`. Если приложение
@@ -363,13 +363,13 @@ sudo systemctl enable --now jhvirt
 sudo systemd-run --quiet --wait --pipe --collect \
   --uid=jhvirt --gid=jhvirt --working-directory=/opt/jhvirt \
   --property=EnvironmentFile=/opt/jhvirt/config/jhvirt.env \
-  /opt/jhvirt/bin/justhpc-virt-server -reset-password admin
+  /opt/jhvirt/bin/ovirt-backup-server -reset-password admin
 ```
 
 Сброс для Docker из рабочего Compose-каталога:
 
 ```bash
-docker compose run --rm justhpc-virt-manager -reset-password admin
+docker compose run --rm ovirt-backup -reset-password admin
 ```
 
 Команда генерирует новый пароль, включает отключённую учётную запись и удаляет
@@ -388,7 +388,7 @@ docker compose run --rm justhpc-virt-manager -reset-password admin
 ```bash
 sudo systemctl restart jhvirt
 # или
-docker compose restart justhpc-virt-manager
+docker compose restart ovirt-backup
 ```
 
 Сброс пароля отдельной командой сам по себе счётчик работающего процесса не
@@ -436,7 +436,7 @@ grep '^JHV_EXTERNAL_URL=' .env
 
 ```bash
 # прямой HTTP, systemd
-sudo sh /tmp/jhvirt-*.run --mode systemd \
+sudo sh /tmp/ovirt-backup-*.run --mode systemd \
   --url http://10.20.30.40:8080 --port 8080
 
 # прямой HTTP, Docker
@@ -510,7 +510,7 @@ resolvectl query dengine.example.local
 
 # В контейнере приложения.
 cd <каталог-compose>
-docker compose exec -T justhpc-virt-manager \
+docker compose exec -T ovirt-backup \
   getent ahostsv4 dengine.example.local
 ```
 
@@ -736,7 +736,7 @@ dnf provides '*/qemu-img'
 
 Передавайте только необходимое и удаляйте секреты:
 
-- версия: `justhpc-virt-server -version` или `sh jhvirt-*.run --version`;
+- версия: `ovirt-backup-server -version` или `sh ovirt-backup-*.run --version`;
 - ОС и архитектура: `cat /etc/os-release`, `uname -m`;
 - способ установки и фактический внешний URL без паролей;
 - ответы `/healthz` и `/readyz`;

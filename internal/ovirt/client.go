@@ -116,7 +116,7 @@ func New(cfg Config) (*Client, error) {
 		cfg.Timeout = 60 * time.Second
 	}
 	if cfg.UserAgent == "" {
-		cfg.UserAgent = "justhpc-virt-manager"
+		cfg.UserAgent = "ovirt-backup"
 	}
 
 	tlsCfg, err := buildTLSConfig(cfg.CACert, cfg.InsecureTLS)

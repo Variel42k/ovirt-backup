@@ -1,5 +1,5 @@
 [Unit]
-Description=justhpc-virt-manager
+Description=ovirt-backup
 Documentation=file:@PREFIX@/docs/DEPLOY.md
 After=network-online.target postgresql.service
 Wants=network-online.target
@@ -9,7 +9,7 @@ Type=simple
 User=@USER_NAME@
 Group=@USER_NAME@
 WorkingDirectory=@PREFIX@
-ExecStart=@PREFIX@/bin/justhpc-virt-server -config @PREFIX@/config/virt-manager.yaml
+ExecStart=@PREFIX@/bin/ovirt-backup-server -config @PREFIX@/config/ovirt-backup.yaml
 Restart=on-failure
 RestartSec=5s
 

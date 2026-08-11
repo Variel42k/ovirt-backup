@@ -13,16 +13,21 @@
 
 При стандартном `PREFIX=/opt/jhvirt`:
 
+Название продукта и новые артефакты — `ovirt-backup`. Идентификаторы
+`/opt/jhvirt`, `jhvirt.service`, `jhvirt.env`, `JHV_*`, база `jhvirt` и cookie
+`jhvirt_session` намеренно сохранены: их переименование разорвало бы обычное
+обновление, существующие сессии и привязку к данным.
+
 | Режим | Основной YAML | Переменные окружения | Запуск |
 |---|---|---|---|
-| Docker из репозитория | `<репозиторий>/config/virt-manager.yaml` | `<репозиторий>/deploy/.env` | `<репозиторий>/deploy/docker-compose.yml` |
-| Docker из `.run` | `/opt/jhvirt/config/virt-manager.yaml` | `/opt/jhvirt/compose/.env` | `/opt/jhvirt/compose/docker-compose.yml` |
-| systemd из `.run` | `/opt/jhvirt/config/virt-manager.yaml` | `/opt/jhvirt/config/jhvirt.env` | `/etc/systemd/system/jhvirt.service` |
+| Docker из репозитория | `<репозиторий>/config/ovirt-backup.yaml` | `<репозиторий>/deploy/.env` | `<репозиторий>/deploy/docker-compose.yml` |
+| Docker из `.run` | `/opt/jhvirt/config/ovirt-backup.yaml` | `/opt/jhvirt/compose/.env` | `/opt/jhvirt/compose/docker-compose.yml` |
+| systemd из `.run` | `/opt/jhvirt/config/ovirt-backup.yaml` | `/opt/jhvirt/config/jhvirt.env` | `/etc/systemd/system/jhvirt.service` |
 
 При установке с другим `PREFIX` замените `/opt/jhvirt` указанным каталогом:
 
 ```bash
-sudo PREFIX=/srv/jhvirt sh ./jhvirt-*.run
+sudo PREFIX=/srv/jhvirt sh ./ovirt-backup-*.run
 ```
 
 Unit всегда устанавливается в `/etc/systemd/system/jhvirt.service`, но пути
@@ -34,7 +39,7 @@ Unit всегда устанавливается в `/etc/systemd/system/jhvirt.
 перекрывает предыдущий:
 
 1. встроенные значения по умолчанию;
-2. `virt-manager.yaml`;
+2. `ovirt-backup.yaml`;
 3. переменные окружения `JHV_*`.
 
 Имя переменной строится из YAML-пути: точки заменяются подчёркиваниями, имя
@@ -66,7 +71,7 @@ cd <репозиторий>/deploy
 Файлы:
 
 ```text
-../config/virt-manager.yaml   полная конфигурация приложения
+../config/ovirt-backup.yaml   полная конфигурация приложения
 .env                          параметры Compose и секреты PostgreSQL
 docker-compose.yml            описание контейнеров и привязка переменных
 ```
@@ -82,14 +87,14 @@ docker-compose.yml            описание контейнеров и при�
 | `JHV_RESTORE_DIR` | host-каталог, смонтированный как `/restores` |
 | `TZ` | часовой пояс контейнера и планировщика |
 
-YAML копируется в образ как `/app/config/virt-manager.yaml`. Не редактируйте
+YAML копируется в образ как `/app/config/ovirt-backup.yaml`. Не редактируйте
 его внутри контейнера: изменение исчезнет при пересоздании. После изменения
 host-файла пересоберите образ:
 
 ```bash
 cd <репозиторий>/deploy
-docker compose build justhpc-virt-manager
-docker compose run --rm --no-deps justhpc-virt-manager -check-config
+docker compose build ovirt-backup
+docker compose run --rm --no-deps ovirt-backup -check-config
 docker compose up -d
 PORT="$(sed -n 's/^JHV_PORT=//p' .env)"
 curl -fsS "http://127.0.0.1:${PORT:-8080}/readyz"
@@ -108,7 +113,7 @@ docker compose up -d
 Стандартные пути:
 
 ```text
-/opt/jhvirt/config/virt-manager.yaml
+/opt/jhvirt/config/ovirt-backup.yaml
 /opt/jhvirt/compose/.env
 /opt/jhvirt/compose/docker-compose.yml
 ```
@@ -116,18 +121,18 @@ docker compose up -d
 Редактирование и применение:
 
 ```bash
-sudoedit /opt/jhvirt/config/virt-manager.yaml
+sudoedit /opt/jhvirt/config/ovirt-backup.yaml
 sudoedit /opt/jhvirt/compose/.env
 
 cd /opt/jhvirt/compose
-sudo docker compose build justhpc-virt-manager
-sudo docker compose run --rm --no-deps justhpc-virt-manager -check-config
+sudo docker compose build ovirt-backup
+sudo docker compose run --rm --no-deps ovirt-backup -check-config
 sudo docker compose up -d
 ```
 
 При повторном запуске `.run` существующий YAML сохраняется, а конфигурация из
 новой версии записывается как
-`/opt/jhvirt/config/virt-manager.yaml.new`. Сравните файлы вручную и перенесите
+`/opt/jhvirt/config/ovirt-backup.yaml.new`. Сравните файлы вручную и перенесите
 нужные новые параметры. `.env` также сохраняется; установщик изменяет в нём
 только внешний URL и host-порт согласно переданным `--url` и `--port`.
 
@@ -136,7 +141,7 @@ sudo docker compose up -d
 Стандартные пути:
 
 ```text
-/opt/jhvirt/config/virt-manager.yaml   основные настройки
+/opt/jhvirt/config/ovirt-backup.yaml   основные настройки
 /opt/jhvirt/config/jhvirt.env          секреты и переопределения JHV_*
 /etc/systemd/system/jhvirt.service     unit
 /opt/jhvirt/data/secret.key            ключ шифрования
@@ -153,7 +158,7 @@ sudo systemctl show jhvirt -p FragmentPath -p ExecStart -p EnvironmentFiles
 Изменение YAML:
 
 ```bash
-sudoedit /opt/jhvirt/config/virt-manager.yaml
+sudoedit /opt/jhvirt/config/ovirt-backup.yaml
 ```
 
 Изменение переменных или DSN:
@@ -175,16 +180,17 @@ sudo systemd-run --quiet --wait --pipe --collect \
   --uid=jhvirt --gid=jhvirt \
   --working-directory=/opt/jhvirt \
   --property=EnvironmentFile=/opt/jhvirt/config/jhvirt.env \
-  /opt/jhvirt/bin/justhpc-virt-server \
-  -config /opt/jhvirt/config/virt-manager.yaml -check-config
+  /opt/jhvirt/bin/ovirt-backup-server \
+  -config /opt/jhvirt/config/ovirt-backup.yaml -check-config
 
 sudo systemctl restart jhvirt
 curl -fsS http://127.0.0.1:8080/readyz
 ```
 
-При обновлении существующий `virt-manager.yaml` не перезаписывается. Новый
-образец появляется рядом как `virt-manager.yaml.new`; `jhvirt.env` также
-сохраняется.
+При обновлении существующий `ovirt-backup.yaml` не перезаписывается. Новый
+образец появляется рядом как `ovirt-backup.yaml.new`; `jhvirt.env` также
+сохраняется. При первом обновлении с прежнего имени файла установщик копирует
+`virt-manager.yaml` в `ovirt-backup.yaml`, оставляя исходный файл на месте.
 
 ## 6. Ключ, база и каталоги данных
 
@@ -202,7 +208,7 @@ curl -fsS http://127.0.0.1:8080/readyz
 
 ```bash
 cd <каталог-compose>
-docker compose cp justhpc-virt-manager:/app/data/secret.key \
+docker compose cp ovirt-backup:/app/data/secret.key \
   ./secret.key.backup
 chmod 600 ./secret.key.backup
 ```
@@ -231,7 +237,7 @@ Docker из репозитория:
 ```bash
 cd <репозиторий>/deploy
 pwd
-ls -la .env docker-compose.yml ../config/virt-manager.yaml
+ls -la .env docker-compose.yml ../config/ovirt-backup.yaml
 grep -E '^(JHV_EXTERNAL_URL|JHV_PORT|JHV_BACKUP_DIR|JHV_RESTORE_DIR)=' .env
 ```
 
@@ -240,13 +246,13 @@ Docker из `.run`:
 ```bash
 sudo ls -la /opt/jhvirt/compose/.env \
   /opt/jhvirt/compose/docker-compose.yml \
-  /opt/jhvirt/config/virt-manager.yaml
+  /opt/jhvirt/config/ovirt-backup.yaml
 ```
 
 Systemd:
 
 ```bash
-sudo ls -la /opt/jhvirt/config/virt-manager.yaml \
+sudo ls -la /opt/jhvirt/config/ovirt-backup.yaml \
   /opt/jhvirt/config/jhvirt.env \
   /etc/systemd/system/jhvirt.service
 sudo grep -E '^(JHV_SERVER_EXTERNAL_URL|JHV_SERVER_PORT)=' \

@@ -34,7 +34,7 @@ async function submit() {
       <q-page class="flex flex-center bg-grey-2">
         <q-card style="width: 420px; max-width: 92vw" class="q-pa-sm">
           <q-card-section>
-            <div class="text-h6">justhpc-virt-manager</div>
+            <div class="text-h6">ovirt-backup</div>
             <div class="text-caption text-grey-7">
               Управление кластерами и одиночными серверами oVirt, РЕД Виртуализации и совместимых
             </div>

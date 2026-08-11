@@ -110,7 +110,7 @@ onBeforeUnmount(() => {
       <q-toolbar>
         <q-btn dense flat round icon="menu" aria-label="Меню" @click="drawer = !drawer" />
         <q-toolbar-title class="text-weight-medium">
-          justhpc-virt-manager
+          ovirt-backup
           <span class="text-caption q-ml-sm opacity-70">управление oVirt и совместимыми</span>
         </q-toolbar-title>
 

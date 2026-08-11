@@ -1,4 +1,4 @@
-// Command justhpc-virt-server manages oVirt engines and their forks: it polls
+// Command ovirt-backup-server manages oVirt engines and their forks: it polls
 // their state, revives what it is allowed to revive, and runs the backups.
 package main
 
@@ -42,7 +42,7 @@ func main() {
 }
 
 func run() error {
-	configPath := flag.String("config", "config/virt-manager.yaml", "путь к файлу конфигурации")
+	configPath := flag.String("config", "config/ovirt-backup.yaml", "путь к файлу конфигурации")
 	showVersion := flag.Bool("version", false, "показать версию и выйти")
 	checkConfig := flag.Bool("check-config", false, "проверить конфигурацию и выйти")
 	resetUser := flag.String("reset-password", "",
@@ -51,7 +51,7 @@ func run() error {
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Printf("justhpc-virt-server %s\n", version)
+		fmt.Printf("ovirt-backup-server %s\n", version)
 		return nil
 	}
 
@@ -88,7 +88,7 @@ func run() error {
 	// завершении работы.
 	defer func() { _ = logs.Close() }()
 	go logs.RotateDaily(rotateDone, log)
-	log.Info().Str("версия", version).Str("конфигурация", *configPath).Msg("justhpc-virt-server запускается")
+	log.Info().Str("версия", version).Str("конфигурация", *configPath).Msg("ovirt-backup-server запускается")
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -272,7 +272,7 @@ func printCredentials(username, password, title string) {
 	const rule = "════════════════════════════════════════════════════════════"
 	fmt.Fprintf(os.Stderr, "\n%s\n  %s\n\n  пользователь: %s\n  пароль:       %s\n\n"+
 		"  Запишите пароль: он больше не будет показан.\n"+
-		"  Забыли — задайте новый: justhpc-virt-server -reset-password %s\n%s\n\n",
+		"  Забыли — задайте новый: ovirt-backup-server -reset-password %s\n%s\n\n",
 		rule, title, username, password, username, rule)
 }
 

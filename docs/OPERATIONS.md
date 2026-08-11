@@ -53,7 +53,7 @@ curl -fsS http://localhost:8080/readyz     # база доступна, скол
 sudo systemd-run --quiet --wait --pipe --collect \
   --uid=jhvirt --gid=jhvirt --working-directory=/opt/jhvirt \
   --property=EnvironmentFile=/opt/jhvirt/config/jhvirt.env \
-  /opt/jhvirt/bin/justhpc-virt-server -reset-password admin
+  /opt/jhvirt/bin/ovirt-backup-server -reset-password admin
 ```
 
 Команда печатает новый пароль тем же блоком и завершается, не поднимая сервис;
@@ -62,7 +62,7 @@ sudo systemd-run --quiet --wait --pipe --collect \
 заблокирована — разблокируется. В Docker:
 
 ```bash
-docker compose run --rm justhpc-virt-manager -reset-password admin
+docker compose run --rm ovirt-backup -reset-password admin
 ```
 
 Удалять строку из таблицы `users` руками больше не нужно.
@@ -369,7 +369,7 @@ sed -i "s|^POSTGRES_PASSWORD=$|POSTGRES_PASSWORD=$(openssl rand -hex 24)|" .env
 sudo systemctl restart jhvirt
 ```
 
-В Docker — `docker compose restart justhpc-virt-manager`.
+В Docker — `docker compose restart ovirt-backup`.
 
 ### Пароль принят, но интерфейс снова показывает вход
 

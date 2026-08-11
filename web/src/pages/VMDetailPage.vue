@@ -288,15 +288,19 @@ onMounted(load)
                 outlined
                 dense
               />
-              <div class="row q-col-gutter-sm">
-                <div class="col-12 col-sm-4">
-                  <q-input v-model.number="verifyOptions.memory_mib" type="number" min="0" max="1048576" label="Память, МиБ" hint="0 — как у исходной ВМ" outlined dense />
-                </div>
-                <div class="col-6 col-sm-4">
-                  <q-input v-model.number="verifyOptions.vcpus" type="number" min="0" max="1024" label="vCPU" hint="0 — как у исходной ВМ" outlined dense />
-                </div>
-                <div class="col-6 col-sm-4">
-                  <q-input v-model.number="verifyOptions.timeout_sec" type="number" min="1" max="86400" label="Ожидание агента, с" outlined dense />
+              <!-- Обёртка забирает отступ .q-gutter-sm себе; без неё строка
+                   перебивает его своим отрицательным и уезжает к краю. -->
+              <div>
+                <div class="row q-col-gutter-sm">
+                  <div class="col-12 col-sm-4">
+                    <q-input v-model.number="verifyOptions.memory_mib" type="number" min="0" max="1048576" label="Память, МиБ" hint="0 — как у исходной ВМ" outlined dense />
+                  </div>
+                  <div class="col-6 col-sm-4">
+                    <q-input v-model.number="verifyOptions.vcpus" type="number" min="0" max="1024" label="vCPU" hint="0 — как у исходной ВМ" outlined dense />
+                  </div>
+                  <div class="col-6 col-sm-4">
+                    <q-input v-model.number="verifyOptions.timeout_sec" type="number" min="1" max="86400" label="Ожидание агента, с" outlined dense />
+                  </div>
                 </div>
               </div>
               <q-toggle

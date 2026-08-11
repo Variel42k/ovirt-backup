@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { useQuasar } from 'quasar'
-import { api, notifyError, notifyOk } from '@/api/client'
+import { api, notify, notifyError, notifyOk } from '@/api/client'
 import { ago, bytes } from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
@@ -87,7 +87,7 @@ async function check(target: StorageTarget) {
     if (result.ok) {
       notifyOk(`Хранилище «${target.name}» доступно (отклик ${result.latency})`)
     } else {
-      $q.notify({ type: 'negative', message: result.error, timeout: 12000, multiLine: true })
+      notify({ type: 'negative', message: result.error, timeout: 12000, multiLine: true })
     }
     await load()
   } catch (err) {
@@ -252,26 +252,25 @@ function location(target: StorageTarget): string {
         </q-card-section>
         <q-separator />
 
-        <q-card-section style="max-height: 70vh" class="scroll q-gutter-md">
-          <div class="row q-col-gutter-md">
-            <div class="col-12 col-sm-7">
-              <q-input v-model="form.name" label="Имя" outlined dense />
-            </div>
-            <div class="col-12 col-sm-5">
-              <q-select
-                v-model="form.kind"
-                :options="(app.meta?.storage_kinds ?? []).map((k) => ({ label: k.title, value: k.value }))"
-                emit-value
-                map-options
-                label="Тип"
-                outlined
-                dense
-                :disable="!!editing"
-              />
-            </div>
+        <!-- Одна сетка на всю форму; почему не .row внутри .q-gutter-* — см. ServersPage.vue. -->
+        <q-card-section style="max-height: 70vh" class="scroll row q-col-gutter-md">
+          <div class="col-12 col-sm-7">
+            <q-input v-model="form.name" label="Имя" outlined dense />
+          </div>
+          <div class="col-12 col-sm-5">
+            <q-select
+              v-model="form.kind"
+              :options="(app.meta?.storage_kinds ?? []).map((k) => ({ label: k.title, value: k.value }))"
+              emit-value
+              map-options
+              label="Тип"
+              outlined
+              dense
+              :disable="!!editing"
+            />
           </div>
 
-          <template v-if="form.kind === 'local'">
+          <div v-if="form.kind === 'local'" class="col-12">
             <q-input
               v-model="form.base_path"
               label="Путь"
@@ -279,83 +278,97 @@ function location(target: StorageTarget): string {
               outlined
               dense
             />
-          </template>
+          </div>
 
           <template v-if="form.kind === 's3'">
-            <q-input v-model="form.endpoint" label="Endpoint" hint="Например s3.example.org или https://minio:9000" outlined dense />
-            <div class="row q-col-gutter-md">
-              <div class="col-12 col-sm-6">
-                <q-input v-model="form.bucket" label="Bucket" outlined dense />
+            <div class="col-12">
+              <q-input v-model="form.endpoint" label="Endpoint" hint="Например s3.example.org или https://minio:9000" outlined dense />
+            </div>
+            <div class="col-12 col-sm-6">
+              <q-input v-model="form.bucket" label="Bucket" outlined dense />
+            </div>
+            <div class="col-12 col-sm-6">
+              <q-input v-model="form.region" label="Регион" outlined dense />
+            </div>
+            <div class="col-12">
+              <q-input v-model="form.prefix" label="Префикс" hint="Позволяет делить bucket с другими данными" outlined dense />
+            </div>
+            <div class="col-12 col-sm-6">
+              <q-input v-model="form.access_key" label="Access key" outlined dense />
+            </div>
+            <div class="col-12 col-sm-6">
+              <q-input
+                v-model="form.secret_key"
+                label="Secret key"
+                type="password"
+                :hint="editing ? 'Пусто — оставить прежний' : ''"
+                outlined
+                dense
+              />
+            </div>
+            <div class="col-12">
+              <div class="row q-gutter-md">
+                <q-toggle v-model="form.use_ssl" label="HTTPS" />
+                <q-toggle v-model="form.path_style" label="Path-style адресация" />
               </div>
-              <div class="col-12 col-sm-6">
-                <q-input v-model="form.region" label="Регион" outlined dense />
+              <div class="jhv-reason">
+                Path-style нужен MinIO и большинству локальных объектных хранилищ; AWS S3 работает без него.
               </div>
             </div>
-            <q-input v-model="form.prefix" label="Префикс" hint="Позволяет делить bucket с другими данными" outlined dense />
-            <div class="row q-col-gutter-md">
-              <div class="col-12 col-sm-6">
-                <q-input v-model="form.access_key" label="Access key" outlined dense />
-              </div>
-              <div class="col-12 col-sm-6">
-                <q-input
-                  v-model="form.secret_key"
-                  label="Secret key"
-                  type="password"
-                  :hint="editing ? 'Пусто — оставить прежний' : ''"
-                  outlined
-                  dense
-                />
-              </div>
+            <div class="col-12">
+              <q-input v-model="form.storage_class" label="Класс хранения" hint="Например STANDARD_IA или GLACIER_IR" outlined dense />
             </div>
-            <div class="row q-gutter-md">
-              <q-toggle v-model="form.use_ssl" label="HTTPS" />
-              <q-toggle v-model="form.path_style" label="Path-style адресация" />
-            </div>
-            <div class="jhv-reason">
-              Path-style нужен MinIO и большинству локальных объектных хранилищ; AWS S3 работает без него.
-            </div>
-            <q-input v-model="form.storage_class" label="Класс хранения" hint="Например STANDARD_IA или GLACIER_IR" outlined dense />
           </template>
 
           <template v-if="form.kind === 'sftp'">
-            <div class="row q-col-gutter-md">
-              <div class="col-12 col-sm-8">
-                <q-input v-model="form.host" label="Хост" outlined dense />
-              </div>
-              <div class="col-12 col-sm-4">
-                <q-input v-model.number="form.port" type="number" label="Порт" outlined dense />
-              </div>
+            <div class="col-12 col-sm-8">
+              <q-input v-model="form.host" label="Хост" outlined dense />
             </div>
-            <q-input v-model="form.username" label="Пользователь" outlined dense />
-            <q-input
-              v-model="form.password"
-              label="Пароль"
-              type="password"
-              :hint="editing ? 'Пусто — оставить прежний' : 'Либо пароль, либо приватный ключ'"
-              outlined
-              dense
-            />
-            <q-input
-              v-model="form.private_key"
-              label="Приватный ключ (PEM)"
-              type="textarea"
-              hint="Ключ без парольной фразы — автоматические задания не смогут её ввести"
-              outlined
-              dense
-              autogrow
-              :input-style="{ maxHeight: '120px' }"
-            />
-            <q-input
-              v-model="form.host_key"
-              label="Ключ хоста (формат authorized_keys)"
-              hint="Пусто — ключ сервера не проверяется. Для боевой установки задайте."
-              outlined
-              dense
-            />
-            <q-input v-model="form.base_path" label="Каталог на сервере" outlined dense />
+            <div class="col-12 col-sm-4">
+              <q-input v-model.number="form.port" type="number" label="Порт" outlined dense />
+            </div>
+            <div class="col-12">
+              <q-input v-model="form.username" label="Пользователь" outlined dense />
+            </div>
+            <div class="col-12">
+              <q-input
+                v-model="form.password"
+                label="Пароль"
+                type="password"
+                :hint="editing ? 'Пусто — оставить прежний' : 'Либо пароль, либо приватный ключ'"
+                outlined
+                dense
+              />
+            </div>
+            <div class="col-12">
+              <q-input
+                v-model="form.private_key"
+                label="Приватный ключ (PEM)"
+                type="textarea"
+                hint="Ключ без парольной фразы — автоматические задания не смогут её ввести"
+                outlined
+                dense
+                autogrow
+                :input-style="{ maxHeight: '120px' }"
+              />
+            </div>
+            <div class="col-12">
+              <q-input
+                v-model="form.host_key"
+                label="Ключ хоста (формат authorized_keys)"
+                hint="Пусто — ключ сервера не проверяется. Для боевой установки задайте."
+                outlined
+                dense
+              />
+            </div>
+            <div class="col-12">
+              <q-input v-model="form.base_path" label="Каталог на сервере" outlined dense />
+            </div>
           </template>
 
-          <q-toggle v-model="form.enabled" label="Хранилище доступно для заданий" />
+          <div class="col-12">
+            <q-toggle v-model="form.enabled" label="Хранилище доступно для заданий" />
+          </div>
         </q-card-section>
 
         <q-separator />

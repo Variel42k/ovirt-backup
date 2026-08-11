@@ -89,7 +89,7 @@ func (d *Dispatcher) executeLibvirt(ctx context.Context, srv *model.Server, req 
 		Status:          model.RunPending,
 		StorageTargetID: target.ID,
 		Encrypted:       req.Encrypt,
-		Compression:     d.cfg.Compression,
+		Compression:     d.Engine.Compression(),
 		CreatedAt:       time.Now().UTC(),
 	}
 
@@ -159,7 +159,7 @@ func (d *Dispatcher) executeLibvirt(ctx context.Context, srv *model.Server, req 
 	driver := kvm.NewDriver(conn, kvm.Config{
 		ScratchDir:       scratch,
 		ChunkSize:        int64(d.cfg.ChunkSize),
-		Compression:      d.cfg.Compression,
+		Compression:      run.Compression,
 		CompressionLevel: d.cfg.CompressionLevel,
 		MaxParallelDisks: d.cfg.Transfer.MaxParallelDisks,
 		RangeRetries:     d.cfg.Transfer.RangeRetries,

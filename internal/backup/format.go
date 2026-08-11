@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
@@ -43,10 +44,30 @@ const (
 const DefaultChunkSize = 4 << 20
 
 // Compression algorithms.
+//
+// Алгоритм записан в манифесте каждого диска, и читатель берёт его оттуда, а не
+// из конфигурации: сменить сжатие в настройках можно в любой момент, а копии,
+// сделанные до этого, обязаны читаться прежним кодеком.
 const (
 	CompressionNone = "none"
 	CompressionZstd = "zstd"
+	CompressionGzip = "gzip"
+	CompressionS2   = "s2"
 )
+
+// Compressions lists what a writer may be asked for, в порядке от плотного к
+// быстрому. Годится и для проверки настройки, и для подсказки в интерфейсе.
+var Compressions = []string{CompressionZstd, CompressionGzip, CompressionS2, CompressionNone}
+
+// KnownCompression reports whether the algorithm is one this build can read.
+func KnownCompression(name string) bool {
+	for _, c := range Compressions {
+		if c == name {
+			return true
+		}
+	}
+	return false
+}
 
 // Chunk is one grid cell present in this run's data blob.
 //
@@ -153,10 +174,9 @@ func (m *DiskManifest) Validate() error {
 	if m.VirtualSize < 0 {
 		return fmt.Errorf("некорректный размер диска: %d", m.VirtualSize)
 	}
-	switch m.Compression {
-	case CompressionNone, CompressionZstd:
-	default:
-		return fmt.Errorf("неизвестный алгоритм сжатия: %q", m.Compression)
+	if !KnownCompression(m.Compression) {
+		return fmt.Errorf("неизвестный алгоритм сжатия: %q "+
+			"(эта сборка читает: %s)", m.Compression, strings.Join(Compressions, ", "))
 	}
 	return nil
 }

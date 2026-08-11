@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { useQuasar } from 'quasar'
-import { api, notifyError, notifyOk } from '@/api/client'
+import { api, notify, notifyError, notifyOk } from '@/api/client'
 import { ago, connState } from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
@@ -129,7 +129,7 @@ async function fetchCA() {
     const result = await api.fetchCA(form.value.engine_url)
     form.value.ca_cert = result.ca_cert
     form.value.insecure_tls = false
-    $q.notify({ type: 'warning', message: result.warning, timeout: 12000, multiLine: true })
+    notify({ type: 'warning', message: result.warning, timeout: 12000, multiLine: true })
   } catch (err) {
     notifyError(err, 'Не удалось получить сертификат')
   }
@@ -301,18 +301,23 @@ onMounted(load)
         </q-card-section>
         <q-separator />
 
-        <q-card-section class="q-gutter-md">
-          <div class="row q-col-gutter-md">
-            <div class="col-12 col-sm-6">
-              <q-input v-model="form.name" label="Имя подключения" outlined dense />
-            </div>
-            <div class="col-12 col-sm-6">
-              <q-select v-model="form.kind" :options="kinds" emit-value map-options label="Продукт" outlined dense />
-            </div>
+        <!--
+          Одна сетка на всю форму, без вложенных .row внутри .q-gutter-*: оба
+          класса задают margin-left одному и тому же элементу, побеждает
+          col-gutter — и парные поля съезжают на 16px влево, вплотную к краю
+          карточки, пока одиночные стоят по отступу. Здесь всё выровнено по
+          колонкам: col-12 — во всю ширину, col-sm-6 — пара в строку.
+        -->
+        <q-card-section class="row q-col-gutter-md">
+          <div class="col-12 col-sm-6">
+            <q-input v-model="form.name" label="Имя подключения" outlined dense />
+          </div>
+          <div class="col-12 col-sm-6">
+            <q-select v-model="form.kind" :options="kinds" emit-value map-options label="Продукт" outlined dense />
           </div>
 
           <!-- Подключение к движку oVirt: REST API поверх HTTPS. -->
-          <template v-if="!isLibvirt">
+          <div v-if="!isLibvirt" class="col-12">
             <q-input
               v-model="form.engine_url"
               label="Адрес движка"
@@ -320,122 +325,134 @@ onMounted(load)
               outlined
               dense
             />
-          </template>
+          </div>
 
           <!-- Голый libvirt: собственного сетевого API нет, идём по SSH. -->
           <template v-else>
-            <div class="row q-col-gutter-md">
-              <div class="col-12 col-sm-8">
-                <q-input
-                  v-model="form.ssh_host"
-                  label="Адрес гипервизора"
-                  hint="Имя или IP хоста с libvirtd"
-                  outlined
-                  dense
-                />
-              </div>
-              <div class="col-12 col-sm-4">
-                <q-input v-model.number="form.ssh_port" type="number" label="Порт SSH" outlined dense />
-              </div>
+            <div class="col-12 col-sm-8">
+              <q-input
+                v-model="form.ssh_host"
+                label="Адрес гипервизора"
+                hint="Имя или IP хоста с libvirtd"
+                outlined
+                dense
+              />
+            </div>
+            <div class="col-12 col-sm-4">
+              <q-input v-model.number="form.ssh_port" type="number" label="Порт SSH" outlined dense />
             </div>
           </template>
 
-          <div class="row q-col-gutter-md">
-            <div class="col-12 col-sm-6">
-              <q-input
-                v-model="form.username"
-                label="Пользователь"
-                :hint="isLibvirt ? 'Пользователь SSH; должен состоять в группе libvirt' : 'admin@internal или admin@ovirt@internalsso'"
-                outlined
-                dense
-              />
-            </div>
-            <div class="col-12 col-sm-6">
-              <q-input
-                v-model="form.password"
-                label="Пароль"
-                type="password"
-                :hint="editing ? 'Пусто — оставить прежний' : isLibvirt ? 'Либо пароль, либо приватный ключ' : ''"
-                outlined
-                dense
-              />
-            </div>
+          <div class="col-12 col-sm-6">
+            <q-input
+              v-model="form.username"
+              label="Пользователь"
+              :hint="isLibvirt ? 'Пользователь SSH; должен состоять в группе libvirt' : 'admin@internal или admin@ovirt@internalsso'"
+              outlined
+              dense
+            />
+          </div>
+          <div class="col-12 col-sm-6">
+            <q-input
+              v-model="form.password"
+              label="Пароль"
+              type="password"
+              :hint="editing ? 'Пусто — оставить прежний' : isLibvirt ? 'Либо пароль, либо приватный ключ' : ''"
+              outlined
+              dense
+            />
           </div>
 
           <template v-if="isLibvirt">
-            <q-input
-              v-model="form.ssh_private_key"
-              label="Приватный ключ SSH (PEM)"
-              type="textarea"
-              :hint="editing ? 'Пусто — оставить прежний' : 'Ключ без парольной фразы: задания по расписанию не смогут её ввести'"
-              outlined
-              dense
-              autogrow
-              :input-style="{ maxHeight: '140px' }"
-            />
-            <q-input
-              v-model="form.ssh_host_key"
-              label="Ключ хоста (authorized_keys)"
-              hint="Пусто — подлинность гипервизора не проверяется. Для боевой установки задайте."
-              outlined
-              dense
-            />
-            <q-input
-              v-model="form.scratch_dir"
-              label="Каталог для scratch-файлов на гипервизоре"
-              hint="Сюда QEMU складывает вытесняемые блоки, пока идёт чтение бэкапа. Нужен запас места и доступ на запись для qemu."
-              outlined
-              dense
-            />
-          </template>
-
-          <template v-else>
-            <q-input
-              v-model="form.ca_cert"
-              label="CA-сертификат движка (PEM)"
-              type="textarea"
-              outlined
-              dense
-              autogrow
-              :input-style="{ maxHeight: '140px' }"
-            >
-              <template #after>
-                <q-btn flat dense icon="download" label="Получить" @click="fetchCA">
-                  <q-tooltip>Скачать сертификат с движка и показать для сверки</q-tooltip>
-                </q-btn>
-              </template>
-            </q-input>
-
-            <q-toggle
-              v-model="form.insecure_tls"
-              label="Не проверять сертификат TLS"
-              color="negative"
-            />
-            <div v-if="form.insecure_tls" class="jhv-reason text-negative">
-              Соединение с движком и с ovirt-imageio перестанет проверяться. Допустимо в лаборатории,
-              в бою лучше указать CA-сертификат.
+            <div class="col-12">
+              <q-input
+                v-model="form.ssh_private_key"
+                label="Приватный ключ SSH (PEM)"
+                type="textarea"
+                :hint="editing ? 'Пусто — оставить прежний' : 'Ключ без парольной фразы: задания по расписанию не смогут её ввести'"
+                outlined
+                dense
+                autogrow
+                :input-style="{ maxHeight: '140px' }"
+              />
+            </div>
+            <div class="col-12">
+              <q-input
+                v-model="form.ssh_host_key"
+                label="Ключ хоста (authorized_keys)"
+                hint="Пусто — подлинность гипервизора не проверяется. Для боевой установки задайте."
+                outlined
+                dense
+              />
+            </div>
+            <div class="col-12">
+              <q-input
+                v-model="form.scratch_dir"
+                label="Каталог для scratch-файлов на гипервизоре"
+                hint="Сюда QEMU складывает вытесняемые блоки, пока идёт чтение бэкапа. Нужен запас места и доступ на запись для qemu."
+                outlined
+                dense
+              />
             </div>
           </template>
 
-          <q-toggle v-model="form.enabled" label="Опрашивать этот сервер" />
-          <q-input v-model="form.notes" label="Заметки" outlined dense autogrow />
+          <template v-else>
+            <div class="col-12">
+              <q-input
+                v-model="form.ca_cert"
+                label="CA-сертификат движка (PEM)"
+                type="textarea"
+                outlined
+                dense
+                autogrow
+                :input-style="{ maxHeight: '140px' }"
+              >
+                <template #after>
+                  <q-btn flat dense icon="download" label="Получить" @click="fetchCA">
+                    <q-tooltip>Скачать сертификат с движка и показать для сверки</q-tooltip>
+                  </q-btn>
+                </template>
+              </q-input>
+            </div>
 
-          <q-banner v-if="probeResult" dense :class="probeResult.ok ? 'bg-green-1' : 'bg-red-1'">
-            <template #avatar>
-              <q-icon :name="probeResult.ok ? 'check_circle' : 'error'" :color="probeResult.ok ? 'positive' : 'negative'" />
-            </template>
-            <template v-if="probeResult.ok">
-              Подключение установлено: {{ probeResult.product_name }} {{ probeResult.version }},
-              хостов {{ probeResult.hosts }}, ВМ {{ probeResult.vms }}, отклик {{ probeResult.latency }}.
-              <div v-if="!probeResult.supports_cbt" class="text-warning">
-                Движок не поддерживает инкрементальный бэкап — будут доступны только полные копии через снапшот.
+            <div class="col-12">
+              <q-toggle
+                v-model="form.insecure_tls"
+                label="Не проверять сертификат TLS"
+                color="negative"
+              />
+              <div v-if="form.insecure_tls" class="jhv-reason text-negative">
+                Соединение с движком и с ovirt-imageio перестанет проверяться. Допустимо в лаборатории,
+                в бою лучше указать CA-сертификат.
               </div>
-            </template>
-            <template v-else>
-              <div class="jhv-wrap">{{ probeResult.error }}</div>
-              <div v-if="probeResult.hint" class="text-weight-medium q-mt-xs">{{ probeResult.hint }}</div>
-            </template>
-          </q-banner>
+            </div>
+          </template>
+
+          <div class="col-12">
+            <q-toggle v-model="form.enabled" label="Опрашивать этот сервер" />
+          </div>
+          <div class="col-12">
+            <q-input v-model="form.notes" label="Заметки" outlined dense autogrow />
+          </div>
+
+          <div v-if="probeResult" class="col-12">
+            <q-banner dense :class="probeResult.ok ? 'bg-green-1' : 'bg-red-1'">
+              <template #avatar>
+                <q-icon :name="probeResult.ok ? 'check_circle' : 'error'" :color="probeResult.ok ? 'positive' : 'negative'" />
+              </template>
+              <template v-if="probeResult.ok">
+                Подключение установлено: {{ probeResult.product_name }} {{ probeResult.version }},
+                хостов {{ probeResult.hosts }}, ВМ {{ probeResult.vms }}, отклик {{ probeResult.latency }}.
+                <div v-if="!probeResult.supports_cbt" class="text-warning">
+                  Движок не поддерживает инкрементальный бэкап — будут доступны только полные копии через снапшот.
+                </div>
+              </template>
+              <template v-else>
+                <div class="jhv-wrap">{{ probeResult.error }}</div>
+                <div v-if="probeResult.hint" class="text-weight-medium q-mt-xs">{{ probeResult.hint }}</div>
+              </template>
+            </q-banner>
+          </div>
         </q-card-section>
 
         <q-separator />

@@ -27,6 +27,7 @@ import (
 // Server holds the API dependencies.
 type Server struct {
 	cfg        config.Config
+	baseCfg    config.Config
 	store      *store.Store
 	pool       *ovirt.Pool
 	libvirt    *libvirtx.Pool
@@ -46,7 +47,10 @@ type Server struct {
 // Deps bundles what the API needs, so adding a dependency does not change
 // every call site.
 type Deps struct {
-	Config      config.Config
+	Config config.Config
+	// BaseConfig is the YAML/environment value before database overrides. It
+	// is the target of the runtime-settings reset endpoints.
+	BaseConfig  config.Config
 	Store       *store.Store
 	Pool        *ovirt.Pool
 	LibvirtPool *libvirtx.Pool
@@ -61,8 +65,12 @@ type Deps struct {
 
 // New builds the API server.
 func New(d Deps) *Server {
+	base := d.BaseConfig
+	if base.Backup.Compression == "" {
+		base = d.Config
+	}
 	return &Server{
-		cfg: d.Config, store: d.Store, pool: d.Pool, libvirt: d.LibvirtPool, engine: d.Engine,
+		cfg: d.Config, baseCfg: base, store: d.Store, pool: d.Pool, libvirt: d.LibvirtPool, engine: d.Engine,
 		scheduler: d.Scheduler, monitor: d.Monitor, remediator: d.Remediator,
 		bus: d.Bus, log: d.Logger, logs: d.Logs,
 		logins: newLoginLimiter(),
@@ -188,6 +196,13 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /logs/tail", s.admin(s.handleLogTail))
 	mux.HandleFunc("PUT /logs/level", s.admin(s.handleSetLogLevel))
 	mux.HandleFunc("POST /logs/rotate", s.admin(s.handleRotateLog))
+
+	// Параметры, которые применяются без перезапуска и переживают его в БД.
+	mux.HandleFunc("GET /settings/runtime", s.admin(s.handleRuntimeSettings))
+	mux.HandleFunc("PUT /settings/runtime/compression", s.admin(s.handleSetRuntimeCompression))
+	mux.HandleFunc("DELETE /settings/runtime/compression", s.admin(s.handleResetRuntimeCompression))
+	mux.HandleFunc("PUT /settings/runtime/log-rotation", s.admin(s.handleSetRuntimeLogRotation))
+	mux.HandleFunc("DELETE /settings/runtime/log-rotation", s.admin(s.handleResetRuntimeLogRotation))
 
 	// Пользователи.
 	mux.HandleFunc("GET /users", s.admin(s.handleListUsers))

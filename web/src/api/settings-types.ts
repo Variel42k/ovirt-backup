@@ -45,3 +45,24 @@ export interface LogStatus {
   files?: LogFile[]
   total_bytes: number
 }
+
+export interface RuntimeCompressionOption {
+  value: string
+  title: string
+  description?: string
+}
+
+export interface RuntimeSettings {
+  compression: {
+    value: string
+    level: number
+    source: 'config' | 'database'
+    options: RuntimeCompressionOption[]
+  }
+  log_rotation: {
+    max_size_mb: number
+    max_backups: number
+    max_age_days: number
+    source: 'config' | 'database'
+  }
+}

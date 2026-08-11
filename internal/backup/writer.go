@@ -54,6 +54,9 @@ func NewDiskWriter(ctx context.Context, manifest *DiskManifest, opts WriterOptio
 	if opts.Compression == "" {
 		opts.Compression = CompressionNone
 	}
+	if opts.Level == 0 {
+		opts.Level = 3
+	}
 
 	cd, err := newCodec(opts.Compression, opts.Level, opts.Cipher)
 	if err != nil {

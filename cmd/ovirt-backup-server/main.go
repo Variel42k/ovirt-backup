@@ -74,6 +74,9 @@ func run() error {
 		fmt.Println("конфигурация корректна")
 		return nil
 	}
+	// Keep the startup values separately: DELETE runtime-setting returns to
+	// YAML/environment even after the effective config is overlaid from DB.
+	baseCfg := *cfg
 
 	log, logs, err := logging.Setup(cfg.Logging)
 	if err != nil {
@@ -87,7 +90,6 @@ func run() error {
 	// Закрываем файл последним: до этого момента в него ещё пишут строки о
 	// завершении работы.
 	defer func() { _ = logs.Close() }()
-	go logs.RotateDaily(rotateDone, log)
 	log.Info().Str("версия", version).Str("конфигурация", *configPath).Msg("ovirt-backup-server запускается")
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -116,6 +118,31 @@ func run() error {
 		return fmt.Errorf("ключ шифрования секретов: %w", err)
 	}
 	st := store.New(db, cipher)
+	runtimeSettings, err := st.RuntimeSettings(ctx)
+	if err != nil {
+		return fmt.Errorf("загрузка настроек времени выполнения: %w", err)
+	}
+	if runtimeSettings.BackupCompression != nil {
+		if !backup.KnownCompression(*runtimeSettings.BackupCompression) {
+			return fmt.Errorf("неизвестное сжатие в runtime_settings: %q", *runtimeSettings.BackupCompression)
+		}
+		cfg.Backup.Compression = *runtimeSettings.BackupCompression
+		log.Info().Str("алгоритм", cfg.Backup.Compression).
+			Msg("сжатие новых бэкапов загружено из базы данных")
+	}
+	if runtimeSettings.HasLogRotation() {
+		if err := logs.UpdateRotation(*runtimeSettings.LogMaxSizeMB,
+			*runtimeSettings.LogMaxBackups, *runtimeSettings.LogMaxAgeDays); err != nil {
+			return fmt.Errorf("ротация журнала из базы данных: %w", err)
+		}
+		log.Info().Int("размер_МиБ", *runtimeSettings.LogMaxSizeMB).
+			Int("архивов", *runtimeSettings.LogMaxBackups).
+			Int("дней", *runtimeSettings.LogMaxAgeDays).
+			Msg("ротация журнала загружена из базы данных")
+	} else if runtimeSettings.LogMaxSizeMB != nil || runtimeSettings.LogMaxBackups != nil ||
+		runtimeSettings.LogMaxAgeDays != nil {
+		log.Warn().Msg("неполная настройка ротации в базе проигнорирована; используются значения конфигурации")
+	}
 
 	// Password recovery runs before anything else starts. Without it an operator
 	// who lost the bootstrap password has no way back in except deleting the
@@ -149,6 +176,7 @@ func run() error {
 	} else {
 		log.Warn().Msg("аутентификация выключена: API доступен без входа — используйте только за внешним периметром")
 	}
+	go logs.RotateDaily(rotateDone, log)
 
 	loadServer := func(ctx context.Context, serverID string) (*model.Server, error) {
 		return st.GetServer(ctx, serverID)
@@ -204,7 +232,7 @@ func run() error {
 	}()
 
 	apiServer := api.New(api.Deps{
-		Config: *cfg, Store: st, Pool: pool, LibvirtPool: libvirtPool, Engine: dispatcher,
+		Config: *cfg, BaseConfig: baseCfg, Store: st, Pool: pool, LibvirtPool: libvirtPool, Engine: dispatcher,
 		Scheduler: sched, Monitor: mon, Remediator: remediator, Bus: bus, Logger: log,
 		Logs: logs,
 	})

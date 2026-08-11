@@ -106,7 +106,7 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 
 	resp.Capabilities.QemuImg = backup.QemuImgAvailable(s.cfg.Backup.QemuImgPath)
 	resp.Capabilities.Encryption = true
-	resp.Capabilities.Compression = s.cfg.Backup.Compression
+	resp.Capabilities.Compression = s.engine.Compression()
 	resp.Capabilities.ChunkSize = s.cfg.Backup.ChunkSize
 	resp.Capabilities.DatabaseType = "postgres"
 	resp.Capabilities.SchedulerTZ = s.cfg.Scheduler.Timezone

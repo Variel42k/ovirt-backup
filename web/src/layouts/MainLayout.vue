@@ -9,7 +9,9 @@ const auth = useAuthStore()
 const app = useAppStore()
 const router = useRouter()
 
-const drawer = ref(true)
+// show-if-above сам открывает навигацию на широком экране. На мобильном
+// начальное true превращает её в модальную шторку поверх первой страницы.
+const drawer = ref(false)
 const firingAlerts = ref(0)
 const liveConnected = ref(false)
 let source: EventSource | null = null
@@ -69,6 +71,7 @@ function connectLive() {
   source.addEventListener('remediation', (event) => {
     try {
       const payload = JSON.parse((event as MessageEvent).data)
+      if (payload?.payload?.status === 'dry_run') return
       notifyEvent('warning', payload.message)
     } catch {
       /* см. выше */
@@ -114,38 +117,12 @@ onBeforeUnmount(() => {
           <span class="text-caption q-ml-sm opacity-70">управление oVirt и совместимыми</span>
         </q-toolbar-title>
 
-        <!--
-          Чип относится к режиму авто-восстановления, а не к сборке интерфейса.
-          Названия похожи, и спутать их легко: «боевая сборка» — про то, как
-          отдаётся интерфейс, «боевой режим» — про то, выполняет ли автоматика
-          действия. Поэтому чип кликабелен и ведёт туда, где режим переключается.
-        -->
-        <q-chip
-          v-if="app.meta?.capabilities.remediation_dry_run"
-          dense
-          clickable
-          color="warning"
-          text-color="white"
-          icon="science"
-          class="q-mr-sm"
-          @click="router.push({ name: 'settings' })"
-        >
-          Автоисправление: только наблюдение
-          <q-tooltip>
-            Это режим автоматического устранения сбоев, а не проверка восстановления бэкапа.
-            Действия по запуску ВМ и хостов записываются, но не выполняются — это состояние
-            по умолчанию для новой установки.
-            Посмотрите в «Настройки → Система», что автоматика предлагала сделать,
-            и там же переключите режим, когда решениям поверите.
-          </q-tooltip>
-        </q-chip>
-
         <q-btn
           v-if="notificationCount > 0"
           flat
           dense
           round
-          icon="notifications_off"
+          icon="clear_all"
           aria-label="Закрыть все уведомления"
           @click="closeAllNotifications"
         >

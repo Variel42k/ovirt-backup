@@ -128,7 +128,7 @@ func (r *Remediator) Consider(ctx context.Context, sit Situation) (*model.Remedi
 			r.decisionLog(sit, record).
 				Str("исход", "пропущено").
 				Str("что помешало", skip).
-				Msg("РЕЖИМ ПРОВЕРКИ: действие предложено, но не прошло ворота")
+				Msg("действие предложено, но не прошло ворота")
 		} else {
 			r.log.Debug().Str("объект", sit.ObjectName).Str("действие", string(sit.Action)).
 				Str("причина", skip).Msg("действие не выполнено")
@@ -152,7 +152,7 @@ func (r *Remediator) Consider(ctx context.Context, sit Situation) (*model.Remedi
 		r.decisionLog(sit, record).
 			Str("исход", "подавлено режимом проверки").
 			Str("было бы выполнено", r.describeEffect(sit)).
-			Msg("РЕЖИМ ПРОВЕРКИ: действие зафиксировано, но не выполнено")
+			Msg("действие зафиксировано, но не выполнено")
 		r.publish(record)
 		return record, nil
 	}
@@ -198,7 +198,7 @@ func (r *Remediator) Consider(ctx context.Context, sit Situation) (*model.Remedi
 // would be against the hourly budget. The normal mode logs a shorter line
 // because it repeats at every poll; here the verbosity is the point.
 func (r *Remediator) decisionLog(sit Situation, record *model.RemediationRecord) *zerolog.Event {
-	event := r.log.Warn().
+	event := r.log.Debug().
 		Str("режим", "проверка").
 		Str("объект", sit.ObjectName).
 		Str("тип объекта", string(sit.Scope)).

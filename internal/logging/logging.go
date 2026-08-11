@@ -3,18 +3,19 @@ package logging
 
 import (
 	"bufio"
+	"compress/gzip"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
-	lumberjack "gopkg.in/natefinch/lumberjack.v2"
 
 	"adveng/jh_virt/internal/config"
 )
@@ -28,8 +29,16 @@ import (
 // the monitoring being relied on), to see the log without shell access to the
 // host, and to be sure yesterday's log still exists.
 type Manager struct {
-	cfg  config.LoggingConfig
-	file *lumberjack.Logger
+	mu     sync.Mutex
+	cfg    config.LoggingConfig
+	file   *os.File
+	size   int64
+	closed bool
+
+	maintain chan struct{}
+	stop     chan struct{}
+	worker   sync.WaitGroup
+	stopOnce sync.Once
 	// level is stored separately from zerolog's global so the current value can
 	// be reported back; zerolog exposes a setter but reading it races.
 	level atomic.Value
@@ -54,14 +63,11 @@ func Setup(cfg config.LoggingConfig) (zerolog.Logger, *Manager, error) {
 		if err := os.MkdirAll(filepath.Dir(cfg.File), 0o750); err != nil {
 			return log.Logger, nil, fmt.Errorf("create log dir: %w", err)
 		}
-		m.file = &lumberjack.Logger{
-			Filename:   cfg.File,
-			MaxSize:    cfg.MaxSizeMB,
-			MaxBackups: cfg.MaxBackups,
-			MaxAge:     cfg.MaxAgeDays,
-			Compress:   true,
-		}
-		writers = append(writers, m.file)
+		m.maintain = make(chan struct{}, 1)
+		m.stop = make(chan struct{})
+		m.worker.Add(1)
+		go m.maintenanceWorker()
+		writers = append(writers, m)
 	}
 
 	logger := zerolog.New(io.MultiWriter(writers...)).With().Timestamp().Logger()
@@ -98,26 +104,130 @@ func (m *Manager) SetLevel(name string) (zerolog.Level, error) {
 }
 
 // Enabled reports whether a file is being written at all.
-func (m *Manager) Enabled() bool { return m != nil && m.file != nil }
+func (m *Manager) Enabled() bool {
+	if m == nil {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.cfg.File != ""
+}
 
 // Path returns the active log file.
 func (m *Manager) Path() string {
-	if !m.Enabled() {
+	if m == nil {
 		return ""
 	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return m.cfg.File
+}
+
+// Write appends one log record and rotates before it would exceed the active
+// size limit. All file state is protected by the manager mutex, including
+// runtime policy changes.
+func (m *Manager) Write(p []byte) (int, error) {
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return 0, os.ErrClosed
+	}
+	if m.cfg.File == "" {
+		m.mu.Unlock()
+		return len(p), nil
+	}
+	if int64(len(p)) > int64(m.cfg.MaxSizeMB)*1024*1024 {
+		m.mu.Unlock()
+		return 0, fmt.Errorf("строка журнала размером %d превышает предел файла", len(p))
+	}
+	if err := m.openLocked(); err != nil {
+		m.mu.Unlock()
+		return 0, err
+	}
+	rotated := false
+	if m.size > 0 && m.size+int64(len(p)) > int64(m.cfg.MaxSizeMB)*1024*1024 {
+		var err error
+		rotated, err = m.rotateLocked()
+		if err != nil {
+			m.mu.Unlock()
+			return 0, err
+		}
+	}
+	n, err := m.file.Write(p)
+	m.size += int64(n)
+	m.mu.Unlock()
+	if rotated {
+		m.requestMaintenance()
+	}
+	return n, err
+}
+
+func (m *Manager) openLocked() error {
+	if m.file != nil {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(m.cfg.File), 0o750); err != nil {
+		return fmt.Errorf("создание каталога журнала: %w", err)
+	}
+	f, err := os.OpenFile(m.cfg.File, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o640)
+	if err != nil {
+		return fmt.Errorf("открытие журнала %s: %w", m.cfg.File, err)
+	}
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return err
+	}
+	m.file = f
+	m.size = info.Size()
+	return nil
 }
 
 // Rotate closes the current file and starts a new one.
 func (m *Manager) Rotate() error {
-	if !m.Enabled() {
+	if m == nil {
+		return fmt.Errorf("менеджер журнала не настроен")
+	}
+	m.mu.Lock()
+	if m.cfg.File == "" {
+		m.mu.Unlock()
 		return fmt.Errorf("журнал в файл не пишется: не задан logging.file")
 	}
-	if err := m.file.Rotate(); err != nil {
+	rotated, err := m.rotateLocked()
+	m.mu.Unlock()
+	if err != nil {
 		return fmt.Errorf("смена файла журнала: %w", err)
 	}
-	m.rotated.Add(1)
+	if rotated {
+		m.requestMaintenance()
+	}
 	return nil
+}
+
+func (m *Manager) rotateLocked() (bool, error) {
+	if m.file != nil {
+		if err := m.file.Close(); err != nil {
+			return false, err
+		}
+		m.file = nil
+	}
+	info, err := os.Stat(m.cfg.File)
+	if err != nil && !os.IsNotExist(err) {
+		return false, err
+	}
+	rotated := err == nil && info.Size() > 0
+	if rotated {
+		archive := archiveName(m.cfg.File, time.Now().UTC())
+		if err := os.Rename(m.cfg.File, archive); err != nil {
+			return false, err
+		}
+		m.rotated.Add(1)
+	}
+	m.size = 0
+	if err := m.openLocked(); err != nil {
+		return rotated, err
+	}
+	return rotated, nil
 }
 
 // Close releases the log file.
@@ -127,19 +237,212 @@ func (m *Manager) Rotate() error {
 // lets a test remove its temporary directory on platforms that refuse to delete
 // an open file.
 func (m *Manager) Close() error {
-	if !m.Enabled() {
+	if m == nil {
 		return nil
 	}
-	return m.file.Close()
+	var closeErr error
+	m.stopOnce.Do(func() {
+		m.mu.Lock()
+		m.closed = true
+		if m.file != nil {
+			closeErr = m.file.Close()
+			m.file = nil
+		}
+		stop := m.stop
+		m.mu.Unlock()
+		if stop != nil {
+			close(stop)
+			m.worker.Wait()
+		}
+	})
+	return closeErr
+}
+
+// UpdateRotation applies a policy to the active writer. Cleanup is performed
+// by the single maintenance worker; the next write observes the new size limit.
+func (m *Manager) UpdateRotation(maxSizeMB, maxBackups, maxAgeDays int) error {
+	if err := ValidateRotation(maxSizeMB, maxBackups, maxAgeDays); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	m.cfg.MaxSizeMB = maxSizeMB
+	m.cfg.MaxBackups = maxBackups
+	m.cfg.MaxAgeDays = maxAgeDays
+	m.mu.Unlock()
+	m.requestMaintenance()
+	return nil
+}
+
+// ValidateRotation applies the same bounds as the database and web form.
+func ValidateRotation(maxSizeMB, maxBackups, maxAgeDays int) error {
+	switch {
+	case maxSizeMB < 1 || maxSizeMB > 10240:
+		return fmt.Errorf("размер файла должен быть от 1 до 10240 МиБ")
+	case maxBackups < 1 || maxBackups > 1000:
+		return fmt.Errorf("число архивов должно быть от 1 до 1000")
+	case maxAgeDays < 1 || maxAgeDays > 3650:
+		return fmt.Errorf("срок хранения должен быть от 1 до 3650 дней")
+	default:
+		return nil
+	}
+}
+
+func archiveName(path string, at time.Time) string {
+	ext := filepath.Ext(path)
+	stem := strings.TrimSuffix(path, ext)
+	base := stem + "-" + at.Format("2006-01-02T15-04-05.000")
+	for i := 0; ; i++ {
+		name := base + ext
+		if i > 0 {
+			name = fmt.Sprintf("%s-%d%s", base, i, ext)
+		}
+		if _, err := os.Stat(name); os.IsNotExist(err) {
+			return name
+		}
+	}
+}
+
+func (m *Manager) requestMaintenance() {
+	if m == nil || m.maintain == nil {
+		return
+	}
+	select {
+	case m.maintain <- struct{}{}:
+	default:
+	}
+}
+
+func (m *Manager) maintenanceWorker() {
+	defer m.worker.Done()
+	for {
+		select {
+		case <-m.maintain:
+			_ = m.maintainArchives()
+		case <-m.stop:
+			_ = m.maintainArchives()
+			return
+		}
+	}
+}
+
+type archiveFile struct {
+	path    string
+	modTime time.Time
+}
+
+func (m *Manager) maintainArchives() error {
+	m.mu.Lock()
+	cfg := m.cfg
+	m.mu.Unlock()
+	if cfg.File == "" {
+		return nil
+	}
+
+	dir := filepath.Dir(cfg.File)
+	base := filepath.Base(cfg.File)
+	ext := filepath.Ext(base)
+	prefix := strings.TrimSuffix(base, ext) + "-"
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), prefix) ||
+			strings.HasSuffix(entry.Name(), ".gz") || strings.HasSuffix(entry.Name(), ".tmp") {
+			continue
+		}
+		if ext != "" && !strings.HasSuffix(entry.Name(), ext) {
+			continue
+		}
+		if err := compressArchive(filepath.Join(dir, entry.Name())); err != nil {
+			return err
+		}
+	}
+
+	entries, err = os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	var archives []archiveFile
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), prefix) || !strings.HasSuffix(entry.Name(), ".gz") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		archives = append(archives, archiveFile{path: filepath.Join(dir, entry.Name()), modTime: info.ModTime()})
+	}
+	sort.Slice(archives, func(i, j int) bool { return archives[i].modTime.After(archives[j].modTime) })
+	cutoff := time.Now().Add(-time.Duration(cfg.MaxAgeDays) * 24 * time.Hour)
+	kept := 0
+	for _, archive := range archives {
+		if archive.modTime.Before(cutoff) || kept >= cfg.MaxBackups {
+			_ = os.Remove(archive.path)
+			continue
+		}
+		kept++
+	}
+	return nil
+}
+
+func compressArchive(path string) (err error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	in, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	tmp := path + ".gz.tmp"
+	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o640)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = out.Close()
+		if err != nil {
+			_ = os.Remove(tmp)
+		}
+	}()
+
+	zw := gzip.NewWriter(out)
+	if _, err = io.Copy(zw, in); err != nil {
+		_ = zw.Close()
+		return err
+	}
+	if err = zw.Close(); err != nil {
+		return err
+	}
+	if err = in.Close(); err != nil {
+		return err
+	}
+	if err = out.Close(); err != nil {
+		return err
+	}
+	final := path + ".gz"
+	// A previous process may have compressed the archive and failed only while
+	// removing the source. Replace that completed file deterministically.
+	_ = os.Remove(final)
+	if err = os.Rename(tmp, final); err != nil {
+		return err
+	}
+	_ = os.Chtimes(final, info.ModTime(), info.ModTime())
+	return os.Remove(path)
 }
 
 // RotateDaily rotates the log at every local midnight until ctx ends.
 //
-// lumberjack only rotates by size. On a quiet installation the file may never
-// reach the limit, and then it never rotates — which also means max_age_days
-// never applies to it, because that setting prunes rotated backups, not the
-// active file. A log that grows for a year and cannot be pruned is the failure
-// mode this closes.
+// On a quiet installation the file may never reach the size limit. Daily
+// rotation gives the age policy an archive it can actually remove.
 func (m *Manager) RotateDaily(done <-chan struct{}, log zerolog.Logger) {
 	if !m.Enabled() {
 		return
@@ -163,7 +466,7 @@ func (m *Manager) RotateDaily(done <-chan struct{}, log zerolog.Logger) {
 			log.Warn().Err(err).Msg("суточная смена файла журнала не удалась")
 			continue
 		}
-		log.Info().Str("файл", m.cfg.File).Msg("файл журнала сменён по расписанию")
+		log.Info().Str("файл", m.Path()).Msg("файл журнала сменён по расписанию")
 	}
 }
 
@@ -173,7 +476,15 @@ func nextMidnight(now time.Time) time.Time {
 }
 
 func (m *Manager) currentSize() (int64, error) {
-	info, err := os.Stat(m.cfg.File)
+	m.mu.Lock()
+	if m.file != nil {
+		size := m.size
+		m.mu.Unlock()
+		return size, nil
+	}
+	path := m.cfg.File
+	m.mu.Unlock()
+	info, err := os.Stat(path)
 	if err != nil {
 		return 0, err
 	}
@@ -193,13 +504,19 @@ type LogFile struct {
 
 // Files lists the active log and its rotated siblings, newest first.
 func (m *Manager) Files() ([]LogFile, error) {
-	if !m.Enabled() {
+	if m == nil {
 		return nil, nil
 	}
-	dir := filepath.Dir(m.cfg.File)
-	base := filepath.Base(m.cfg.File)
+	m.mu.Lock()
+	path := m.cfg.File
+	m.mu.Unlock()
+	if path == "" {
+		return nil, nil
+	}
+	dir := filepath.Dir(path)
+	base := filepath.Base(path)
 	ext := filepath.Ext(base)
-	prefix := strings.TrimSuffix(base, ext)
+	prefix := strings.TrimSuffix(base, ext) + "-"
 
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -212,8 +529,10 @@ func (m *Manager) Files() ([]LogFile, error) {
 			continue
 		}
 		name := entry.Name()
-		// lumberjack называет архивы <prefix>-<timestamp><ext>[.gz].
-		if !strings.HasPrefix(name, prefix) {
+		if strings.HasSuffix(name, ".tmp") {
+			continue
+		}
+		if name != base && !strings.HasPrefix(name, prefix) {
 			continue
 		}
 		info, err := entry.Info()
@@ -247,14 +566,15 @@ const maxTailBytes = 2 << 20
 
 // Tail returns the last n lines of the active log.
 func (m *Manager) Tail(n int) ([]string, error) {
-	if !m.Enabled() {
+	path := m.Path()
+	if path == "" {
 		return nil, fmt.Errorf("журнал в файл не пишется: не задан logging.file")
 	}
 	if n <= 0 {
 		n = 200
 	}
 
-	f, err := os.Open(m.cfg.File)
+	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -316,14 +636,17 @@ func (m *Manager) Status() Status {
 	if m == nil {
 		return Status{Level: "info"}
 	}
+	m.mu.Lock()
+	cfg := m.cfg
+	m.mu.Unlock()
 	st := Status{
 		Level:      m.Level().String(),
-		Format:     m.cfg.Format,
-		File:       m.cfg.File,
-		ToFile:     m.Enabled(),
-		MaxSizeMB:  m.cfg.MaxSizeMB,
-		MaxBackups: m.cfg.MaxBackups,
-		MaxAgeDays: m.cfg.MaxAgeDays,
+		Format:     cfg.Format,
+		File:       cfg.File,
+		ToFile:     cfg.File != "",
+		MaxSizeMB:  cfg.MaxSizeMB,
+		MaxBackups: cfg.MaxBackups,
+		MaxAgeDays: cfg.MaxAgeDays,
 		Compress:   true,
 		Rotations:  m.rotated.Load(),
 	}

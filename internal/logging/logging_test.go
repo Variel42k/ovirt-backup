@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -152,13 +153,9 @@ func TestRotateCreatesArchiveAndKeepsWriting(t *testing.T) {
 
 // waitForCompression дожидается, пока архив станет сжатым.
 //
-// Нужно не ради проверки как таковой, а ради уборки: lumberjack сжимает архив
-// в фоновой горутине, которую Rotate не дожидается и присоединить нельзя.
-// Без ожидания t.TempDir() удаляет каталог, пока горутина ещё пишет в него
-// .gz, и тест падает не на своём утверждении, а на «directory not empty» —
-// причём случайно и только на Linux, где расклад по времени другой.
-//
-// Заодно это настоящая проверка: Compress: true обещает, что архивы сжимаются.
+// Сжатие делает один фоновый worker, поэтому Rotate возвращается до появления
+// .gz. Ожидание проверяет обещанный формат архива, а Close затем явно
+// присоединяет worker перед уборкой временного каталога.
 func waitForCompression(t *testing.T, dir string) {
 	t.Helper()
 
@@ -169,7 +166,9 @@ func waitForCompression(t *testing.T, dir string) {
 			t.Fatalf("чтение каталога журналов: %v", err)
 		}
 		compressed, plain := 0, 0
+		var names []string
 		for _, e := range entries {
+			names = append(names, e.Name())
 			switch {
 			case strings.HasSuffix(e.Name(), ".gz"):
 				compressed++
@@ -181,7 +180,7 @@ func waitForCompression(t *testing.T, dir string) {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("архив не сжался за 5 с: сжатых %d, несжатых %d", compressed, plain)
+			t.Fatalf("архив не сжался за 5 с: сжатых %d, несжатых %d, файлы %v", compressed, plain, names)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -216,6 +215,93 @@ func TestNextMidnightIsTomorrowAtZero(t *testing.T) {
 	}
 	if got := next.Sub(now); got > 24*time.Hour {
 		t.Errorf("ждать %v — больше суток", got)
+	}
+}
+
+func TestUpdateRotationAppliesImmediately(t *testing.T) {
+	m, _ := testManager(t)
+	if err := m.UpdateRotation(64, 12, 90); err != nil {
+		t.Fatalf("update rotation: %v", err)
+	}
+	status := m.Status()
+	if status.MaxSizeMB != 64 || status.MaxBackups != 12 || status.MaxAgeDays != 90 {
+		t.Fatalf("new policy not reported: %+v", status)
+	}
+	if err := m.UpdateRotation(0, 12, 90); err == nil {
+		t.Fatal("zero file size was accepted")
+	}
+}
+
+func TestSizeRotationAndRetention(t *testing.T) {
+	m, _ := testManager(t)
+	payload := []byte(strings.Repeat("x", 600*1024))
+	for i := 0; i < 4; i++ {
+		if _, err := m.Write(payload); err != nil {
+			t.Fatalf("write %d: %v", i, err)
+		}
+	}
+	if err := m.UpdateRotation(1, 2, 30); err != nil {
+		t.Fatalf("update retention: %v", err)
+	}
+	if err := m.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	files, err := m.Files()
+	if err != nil {
+		t.Fatalf("files: %v", err)
+	}
+	archives := 0
+	for _, file := range files {
+		if !file.Current {
+			archives++
+			if !file.Compressed {
+				t.Errorf("archive is not gzip: %+v", file)
+			}
+		}
+	}
+	if archives != 2 {
+		t.Errorf("archives = %d, expected 2", archives)
+	}
+}
+
+func TestRotationPolicyCanChangeWhileWriting(t *testing.T) {
+	m, _ := testManager(t)
+	var wg sync.WaitGroup
+	for worker := 0; worker < 4; worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 100; i++ {
+				_, _ = m.Write([]byte("concurrent log line\n"))
+			}
+		}()
+	}
+	for i := 0; i < 50; i++ {
+		if err := m.UpdateRotation(1+i%3, 2+i%4, 7+i%5); err != nil {
+			t.Fatalf("update %d: %v", i, err)
+		}
+	}
+	wg.Wait()
+}
+
+func TestRotationRemovesArchivesOlderThanPolicy(t *testing.T) {
+	m, path := testManager(t)
+	old := filepath.Join(filepath.Dir(path), "jhvirt-2020-01-01T00-00-00.000.log.gz")
+	if err := os.WriteFile(old, []byte("old"), 0o640); err != nil {
+		t.Fatalf("write old archive: %v", err)
+	}
+	oldTime := time.Now().Add(-60 * 24 * time.Hour)
+	if err := os.Chtimes(old, oldTime, oldTime); err != nil {
+		t.Fatalf("age archive: %v", err)
+	}
+	if err := m.UpdateRotation(1, 3, 7); err != nil {
+		t.Fatalf("update policy: %v", err)
+	}
+	if err := m.maintainArchives(); err != nil {
+		t.Fatalf("maintenance: %v", err)
+	}
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Fatalf("old archive still exists: %v", err)
 	}
 }
 

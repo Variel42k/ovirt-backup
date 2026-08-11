@@ -143,6 +143,42 @@ func TestChainMergeNewestWins(t *testing.T) {
 	}
 }
 
+func TestChainMayMixCompressionAlgorithms(t *testing.T) {
+	ctx := context.Background()
+	backend := testBackend(t)
+	full := writeRun(t, backend, "mixed-full.data",
+		WriterOptions{Compression: CompressionZstd, Level: 3},
+		DiskManifest{RunID: "full", ChainID: "full", Type: model.BackupFull, DiskID: "d1"},
+		map[int64][]byte{0: pattern('A', testChunkSize)})
+	inc := writeRun(t, backend, "mixed-inc.data",
+		WriterOptions{Compression: CompressionGzip, Level: 3},
+		DiskManifest{RunID: "inc", ChainID: "full", ParentRunID: "full", ChainIndex: 1,
+			Type: model.BackupIncremental, DiskID: "d1"},
+		map[int64][]byte{1: pattern('B', testChunkSize)})
+	latest := writeRun(t, backend, "mixed-latest.data",
+		WriterOptions{Compression: CompressionS2, Level: 3},
+		DiskManifest{RunID: "latest", ChainID: "full", ParentRunID: "inc", ChainIndex: 2,
+			Type: model.BackupIncremental, DiskID: "d1"},
+		map[int64][]byte{2: pattern('C', testChunkSize)})
+
+	reader, err := NewChainReader(backend, nil, []*DiskManifest{full, inc, latest})
+	if err != nil {
+		t.Fatalf("chain reader: %v", err)
+	}
+	defer reader.Close()
+	for index, want := range [][]byte{
+		pattern('A', testChunkSize), pattern('B', testChunkSize), pattern('C', testChunkSize),
+	} {
+		got, err := reader.ReadChunk(ctx, int64(index))
+		if err != nil {
+			t.Fatalf("read chunk %d: %v", index, err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Errorf("chunk %d differs", index)
+		}
+	}
+}
+
 func TestStreamReconstructsWholeImage(t *testing.T) {
 	ctx := context.Background()
 	backend := testBackend(t)

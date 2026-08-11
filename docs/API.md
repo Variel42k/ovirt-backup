@@ -68,6 +68,46 @@ curl -b cookies.txt http://localhost:8080/api/v1/dashboard
 | `GET` | `/events` | поток server-sent events |
 | `GET` | `/audit` | журнал изменений (admin) |
 
+## Runtime-настройки
+
+Все методы раздела требуют роль `admin`. Настройки сохраняются в PostgreSQL и
+применяются без перезапуска процесса.
+
+| Метод | Путь | Описание |
+|---|---|---|
+| `GET` | `/settings/runtime` | эффективные значения и их источник |
+| `PUT/DELETE` | `/settings/runtime/compression` | задать алгоритм или вернуть конфигурационный |
+| `PUT/DELETE` | `/settings/runtime/log-rotation` | задать политику ротации или вернуть конфигурационную |
+
+```jsonc
+// PUT /settings/runtime/compression
+{ "compression": "gzip" } // zstd|gzip|s2|none
+
+// PUT /settings/runtime/log-rotation
+{ "max_size_mb": 200, "max_backups": 14, "max_age_days": 60 }
+
+// GET и ответы PUT/DELETE
+{
+  "compression": {
+    "value": "gzip", "level": 3, "source": "database",
+    "options": [
+      { "value": "zstd", "title": "ZSTD", "description": "…" },
+      { "value": "gzip", "title": "GZIP", "description": "…" },
+      { "value": "s2", "title": "S2", "description": "…" },
+      { "value": "none", "title": "NONE", "description": "…" }
+    ]
+  },
+  "log_rotation": {
+    "max_size_mb": 200, "max_backups": 14,
+    "max_age_days": 60, "source": "database"
+  }
+}
+```
+
+`DELETE` удаляет переопределение и возвращает значения из YAML/окружения.
+Сжатие меняется только для новых запусков; активный запуск использует алгоритм,
+зафиксированный при старте. `compression_level` через этот API не изменяется.
+
 ## Подключения
 
 | Метод | Путь | Описание |

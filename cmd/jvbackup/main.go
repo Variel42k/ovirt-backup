@@ -240,12 +240,25 @@ func cmdBackup(ctx context.Context, args []string) error {
 	verifyFraction := fs.Float64("verify-source", 0,
 		"доля чанков для побайтовой сверки с источником: 0 — не сверять, 1 — сверить всё")
 	exclude := fs.String("exclude", "", "диски через запятую, которые не копировать (vdb,vdc)")
+	compression := fs.String("compression", backup.CompressionZstd,
+		"сжатие чанков: "+strings.Join(backup.Compressions, ", ")+
+			" (gzip читается любым инструментом, s2 быстрее всех, none — если сжимает хранилище)")
+	compressionLevel := fs.Int("compression-level", 3, "уровень сжатия 1..9; для none не используется")
 	verbose := fs.Bool("v", false, "подробный вывод")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *domain == "" {
 		return fmt.Errorf("не указан -domain")
+	}
+	// Проверяем до подключения к гипервизору: опечатка в имени алгоритма иначе
+	// всплыла бы после снапшота, когда отменять уже дороже.
+	if !backup.KnownCompression(*compression) {
+		return fmt.Errorf("неизвестное сжатие %q: доступны %s",
+			*compression, strings.Join(backup.Compressions, ", "))
+	}
+	if *compressionLevel < 1 || *compressionLevel > 9 {
+		return fmt.Errorf("уровень сжатия должен быть от 1 до 9, получено %d", *compressionLevel)
 	}
 
 	log := newLogger(*verbose)
@@ -329,7 +342,11 @@ func cmdBackup(ctx context.Context, args []string) error {
 		}
 	}
 
-	driver := kvm.NewDriver(conn, kvm.Config{ScratchDir: h.scratch}, cipher, log)
+	driver := kvm.NewDriver(conn, kvm.Config{
+		ScratchDir:       h.scratch,
+		Compression:      *compression,
+		CompressionLevel: *compressionLevel,
+	}, cipher, log)
 	result, err := driver.Backup(ctx, req)
 	fmt.Fprintln(os.Stderr)
 	if err != nil {

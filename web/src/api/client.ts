@@ -1,5 +1,6 @@
 import axios, { AxiosError } from 'axios'
 import { Notify } from 'quasar'
+import type { QNotifyCreateOptions } from 'quasar'
 import { ref } from 'vue'
 import type {
   Alert,
@@ -29,7 +30,7 @@ import type {
   VerifyRun,
   VM,
 } from './types'
-import type { AuditEntry, LogStatus, User } from './settings-types'
+import type { AuditEntry, LogStatus, RuntimeSettings, User } from './settings-types'
 
 /** Строка предпросмотра отбора задания: попадает ли ВМ под условия и почему. */
 export interface JobPreviewRow {
@@ -69,47 +70,69 @@ export function errorMessage(err: unknown): string {
 // сообщения в одну с счётчиком повторов. Считая созданные, бейдж показывал бы
 // 3 там, где на экране две плашки, — и число в кнопке «закрыть все (3)» не
 // сходилось бы с тем, что видит оператор.
-const active = new Map<string, () => void>()
+interface ActiveNotification {
+  number: number
+  dismiss: () => void
+}
+
+const active = new Map<string, ActiveNotification>()
+let nextNotificationNumber = 0
 
 /** Сколько уведомлений висит на экране; для кнопки «закрыть все». */
 export const notificationCount = ref(0)
 
-function track(key: string, dismiss: () => void, timeout: number): void {
-  active.set(key, dismiss)
-  notificationCount.value = active.size
+const DEFAULT_TIMEOUT = 5000
 
-  // Уведомление с таймаутом исчезает само — снимаем его с учёта, иначе счётчик
-  // показывал бы призраков, а «закрыть все» дёргало бы закрытие закрытого.
-  if (timeout > 0) {
-    window.setTimeout(() => {
-      // Проверяем тождество: повтор того же текста продлил жизнь плашки и
-      // положил новую функцию, снимать её по старому таймеру нельзя.
-      if (active.get(key) === dismiss) {
-        active.delete(key)
-        notificationCount.value = active.size
-      }
-    }, timeout + 300)
-  }
+function removeNotification(key: string, entry: ActiveNotification): void {
+  if (active.get(key) !== entry) return
+  active.delete(key)
+  notificationCount.value = active.size
+  if (active.size === 0) nextNotificationNumber = 0
 }
 
-/** Показывает уведомление и берёт его на учёт. */
-function notify(options: Parameters<typeof Notify.create>[0] & { timeout?: number }): void {
-  const timeout = typeof options === 'object' ? (options.timeout ?? 5000) : 5000
-  const resolved = typeof options === 'object' ? options : { message: String(options) }
+/**
+ * Показывает уведомление и берёт его на учёт.
+ *
+ * Все уведомления интерфейса идут через неё, а не через $q.notify: о плашке,
+ * созданной в обход, кнопка «закрыть все» не знает — и та остаётся висеть
+ * после уборки, хотя оператор нажал ровно ту кнопку, которая должна убрать всё.
+ *
+ * Крестик на плашке ставит конфигурация Quasar в main.ts — общая и для этого
+ * вызова, и для тех, что появятся мимо него.
+ */
+export function notify(options: QNotifyCreateOptions | string): void {
+  const resolved: QNotifyCreateOptions = typeof options === 'object' ? options : { message: options }
+  const timeout = resolved.timeout ?? DEFAULT_TIMEOUT
+  const key = `${resolved.type ?? ''}:${resolved.message ?? ''}`
+  let entry = active.get(key)
+  if (!entry) {
+    entry = { number: ++nextNotificationNumber, dismiss: () => undefined }
+  }
+  const tracked = entry
+  const callerOnDismiss = resolved.onDismiss
   const dismiss = Notify.create({
-    // Крестик на каждой плашке: закрыть одну мешающую, не трогая остальные.
-    closeBtn: '✕',
     ...resolved,
+    message: `${tracked.number}. ${resolved.message ?? ''}`,
+    group: `ovirt-backup:${key}`,
+    timeout,
+    onDismiss: () => {
+      removeNotification(key, tracked)
+      callerOnDismiss?.()
+    },
   })
-  track(`${resolved.type ?? ''}:${resolved.message ?? ''}`, dismiss, timeout)
+  tracked.dismiss = dismiss
+  active.set(key, tracked)
+  notificationCount.value = active.size
 }
 
 /** Закрывает все висящие уведомления. Возвращает, сколько закрыла. */
 export function dismissAllNotifications(): number {
   const count = active.size
-  active.forEach((dismiss) => dismiss())
+  const entries = [...active.values()]
   active.clear()
   notificationCount.value = 0
+  nextNotificationNumber = 0
+  entries.forEach((entry) => entry.dismiss())
   return count
 }
 
@@ -281,6 +304,17 @@ export const api = {
     http.get<{ lines: string[]; file: string }>(`/logs/tail?lines=${lines}`).then((r) => r.data),
   setLogLevel: (level: string) => http.put('/logs/level', { level }).then((r) => r.data),
   rotateLog: () => http.post('/logs/rotate', {}).then((r) => r.data),
+
+  // Настройки, которые сохраняются в PostgreSQL и действуют без перезапуска.
+  runtimeSettings: () => http.get<RuntimeSettings>('/settings/runtime').then((r) => r.data),
+  setRuntimeCompression: (compression: string) =>
+    http.put<RuntimeSettings>('/settings/runtime/compression', { compression }).then((r) => r.data),
+  resetRuntimeCompression: () =>
+    http.delete<RuntimeSettings>('/settings/runtime/compression').then((r) => r.data),
+  setRuntimeLogRotation: (payload: { max_size_mb: number; max_backups: number; max_age_days: number }) =>
+    http.put<RuntimeSettings>('/settings/runtime/log-rotation', payload).then((r) => r.data),
+  resetRuntimeLogRotation: () =>
+    http.delete<RuntimeSettings>('/settings/runtime/log-rotation').then((r) => r.data),
 
   // Пользователи
   listUsers: () => http.get<ListResponse<User>>('/users').then((r) => unwrap(r.data)),

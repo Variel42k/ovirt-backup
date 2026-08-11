@@ -7,7 +7,7 @@ import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import BackupTypeHelpCard from '@/components/BackupTypeHelpCard.vue'
 import HelpArticleBody from '@/components/HelpArticleBody.vue'
-import type { AuditEntry, LogStatus, User } from '@/api/settings-types'
+import type { AuditEntry, LogStatus, RuntimeSettings, User } from '@/api/settings-types'
 import type { RemediationArchive, RemediationMode, RemediationPeriod } from '@/api/types'
 
 const $q = useQuasar()
@@ -18,6 +18,10 @@ const tab = ref('system')
 const users = ref<User[]>([])
 const audit = ref<AuditEntry[]>([])
 const loading = ref(false)
+const runtimeSettings = ref<RuntimeSettings | null>(null)
+const compressionBusy = ref(false)
+const rotationBusy = ref(false)
+const rotationForm = ref({ max_size_mb: 100, max_backups: 7, max_age_days: 30 })
 
 const dialog = ref(false)
 const editing = ref<User | null>(null)
@@ -27,15 +31,85 @@ async function load() {
   loading.value = true
   try {
     if (auth.canAdmin()) {
-      const [userList, auditList] = await Promise.all([api.listUsers(), api.audit(300)])
+      const [userList, auditList, runtime] = await Promise.all([
+        api.listUsers(), api.audit(300), api.runtimeSettings(),
+      ])
       users.value = userList
       audit.value = auditList
+      applyRuntimeSettings(runtime)
     }
   } catch (err) {
     notifyError(err, 'Не удалось загрузить настройки')
   } finally {
     loading.value = false
   }
+}
+
+function applyRuntimeSettings(value: RuntimeSettings) {
+  runtimeSettings.value = value
+  rotationForm.value = {
+    max_size_mb: value.log_rotation.max_size_mb,
+    max_backups: value.log_rotation.max_backups,
+    max_age_days: value.log_rotation.max_age_days,
+  }
+}
+
+async function changeCompression(value: string | null) {
+  if (!value || value === runtimeSettings.value?.compression.value) return
+  compressionBusy.value = true
+  try {
+    applyRuntimeSettings(await api.setRuntimeCompression(value))
+    await app.reloadMeta()
+    notifyOk(`Сжатие новых бэкапов: ${value}`)
+  } catch (err) {
+    notifyError(err, 'Не удалось изменить сжатие')
+  } finally {
+    compressionBusy.value = false
+  }
+}
+
+async function resetCompression() {
+  compressionBusy.value = true
+  try {
+    const value = await api.resetRuntimeCompression()
+    applyRuntimeSettings(value)
+    await app.reloadMeta()
+    notifyOk('Сжатие возвращено к конфигурации запуска')
+  } catch (err) {
+    notifyError(err, 'Не удалось сбросить сжатие')
+  } finally {
+    compressionBusy.value = false
+  }
+}
+
+async function saveRotation() {
+  rotationBusy.value = true
+  try {
+    applyRuntimeSettings(await api.setRuntimeLogRotation(rotationForm.value))
+    notifyOk('Политика ротации сохранена')
+    await loadLogs()
+  } catch (err) {
+    notifyError(err, 'Не удалось сохранить ротацию')
+  } finally {
+    rotationBusy.value = false
+  }
+}
+
+async function resetRotation() {
+  rotationBusy.value = true
+  try {
+    applyRuntimeSettings(await api.resetRuntimeLogRotation())
+    notifyOk('Ротация возвращена к конфигурации запуска')
+    await loadLogs()
+  } catch (err) {
+    notifyError(err, 'Не удалось сбросить ротацию')
+  } finally {
+    rotationBusy.value = false
+  }
+}
+
+function settingSource(source?: string): string {
+  return source === 'database' ? 'сохранено в БД' : 'конфигурация запуска'
 }
 
 function openCreate() {
@@ -255,8 +329,36 @@ onMounted(async () => {
                   <q-item-section side>{{ app.meta?.capabilities.database_type }}</q-item-section>
                 </q-item>
                 <q-item>
-                  <q-item-section>Сжатие бэкапов</q-item-section>
-                  <q-item-section side>{{ app.meta?.capabilities.compression }}</q-item-section>
+                  <q-item-section>
+                    <q-item-label>Сжатие новых бэкапов</q-item-label>
+                    <q-item-label caption>
+                      Уровень {{ runtimeSettings?.compression.level ?? '—' }} ·
+                      {{ settingSource(runtimeSettings?.compression.source) }}
+                    </q-item-label>
+                  </q-item-section>
+                  <q-item-section v-if="auth.canAdmin()" side style="min-width: 190px">
+                    <q-select
+                      :model-value="runtimeSettings?.compression.value"
+                      :options="runtimeSettings?.compression.options ?? []"
+                      option-label="title"
+                      option-value="value"
+                      emit-value
+                      map-options
+                      outlined
+                      dense
+                      :loading="compressionBusy"
+                      :disable="compressionBusy"
+                      @update:model-value="changeCompression"
+                    >
+                      <q-tooltip>Изменение применяется к новым запускам; выполняющиеся сохраняют прежний алгоритм</q-tooltip>
+                    </q-select>
+                  </q-item-section>
+                  <q-item-section v-else side>{{ app.meta?.capabilities.compression }}</q-item-section>
+                  <q-item-section v-if="runtimeSettings?.compression.source === 'database'" side>
+                    <q-btn flat dense round icon="restart_alt" :disable="compressionBusy" @click="resetCompression">
+                      <q-tooltip>Вернуть значение из YAML или окружения</q-tooltip>
+                    </q-btn>
+                  </q-item-section>
                 </q-item>
                 <q-item>
                   <q-item-section>Размер чанка</q-item-section>
@@ -332,9 +434,9 @@ onMounted(async () => {
 
               <div class="jhv-reason q-pa-sm">
                 Режим переключается на ходу и переживает перезапуск службы. Пока он включён,
-                в журнал подробно пишется каждое решение — что предложено, к какому объекту,
-                почему и что было бы сделано. При выходе из режима наблюдения сохраняются
-                в архив: это обоснование того, что автоматике можно доверить боевые машины.
+                каждое решение сохраняется в истории ниже — что предложено, к какому объекту,
+                почему и что было бы сделано. При выходе из режима наблюдения решения
+                сохраняются в архив: это обоснование того, что автоматике можно доверить боевые машины.
                 Остальные параметры авто-восстановления (какие действия разрешены, cooldown,
                 лимит попыток) задаются в <code>config/ovirt-backup.yaml</code>.
               </div>
@@ -455,10 +557,74 @@ onMounted(async () => {
             Постоянное значение задаётся в <code>logging.level</code>.
           </div>
 
+          <div class="row items-start q-col-gutter-sm q-mb-md">
+            <div class="col-12 col-sm-3">
+              <q-input
+                v-model.number="rotationForm.max_size_mb"
+                type="number"
+                min="1"
+                max="10240"
+                label="Размер файла, МиБ"
+                outlined
+                dense
+                :disable="rotationBusy"
+              />
+            </div>
+            <div class="col-12 col-sm-3">
+              <q-input
+                v-model.number="rotationForm.max_backups"
+                type="number"
+                min="1"
+                max="1000"
+                label="Архивов"
+                outlined
+                dense
+                :disable="rotationBusy"
+              />
+            </div>
+            <div class="col-12 col-sm-3">
+              <q-input
+                v-model.number="rotationForm.max_age_days"
+                type="number"
+                min="1"
+                max="3650"
+                label="Хранить, дней"
+                outlined
+                dense
+                :disable="rotationBusy"
+              />
+            </div>
+            <div class="col-12 col-sm-3 row items-center q-gutter-xs">
+              <q-btn
+                color="primary"
+                icon="save"
+                label="Сохранить"
+                :loading="rotationBusy"
+                @click="saveRotation"
+              />
+              <q-btn
+                v-if="runtimeSettings?.log_rotation.source === 'database'"
+                flat
+                dense
+                round
+                icon="restart_alt"
+                :disable="rotationBusy"
+                @click="resetRotation"
+              >
+                <q-tooltip>Вернуть значения из YAML или окружения</q-tooltip>
+              </q-btn>
+            </div>
+            <div class="col-12 text-caption text-grey-7">
+              {{ settingSource(runtimeSettings?.log_rotation.source) }} · архивы всегда сжимаются gzip,
+              файл также меняется раз в сутки в локальную полночь.
+            </div>
+          </div>
+
           <q-banner v-if="logStatus && !logStatus.to_file" dense class="bg-orange-1 q-mb-md">
             <template #avatar><q-icon name="warning" color="warning" /></template>
             Журнал в файл не пишется — задан только вывод в поток службы.
-            Укажите <code>logging.file</code>, чтобы включить файл, ротацию и просмотр отсюда.
+            Укажите <code>logging.file</code>, чтобы включить файл и просмотр отсюда.
+            Сохранённая политика ротации начнёт действовать после включения файла.
           </q-banner>
 
           <template v-else-if="logStatus">

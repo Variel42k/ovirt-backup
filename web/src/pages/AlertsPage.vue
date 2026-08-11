@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { useQuasar } from 'quasar'
-import { api, notifyError, notifyOk } from '@/api/client'
+import { api, notify, notifyError, notifyOk } from '@/api/client'
 import { ago, dateTime } from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
@@ -84,7 +84,7 @@ function remediate(alert: Alert) {
         if (record.status === 'succeeded' || record.status === 'dry_run') {
           notifyOk(`Действие: ${REM_STATUS_RU[record.status] ?? record.status}`)
         } else {
-          $q.notify({ type: 'warning', message: `${REM_STATUS_RU[record.status] ?? record.status}: ${record.error ?? ''}`, timeout: 10000 })
+          notify({ type: 'warning', message: `${REM_STATUS_RU[record.status] ?? record.status}: ${record.error ?? ''}`, timeout: 10000 })
         }
         await load()
       } catch (err) {
@@ -118,13 +118,6 @@ onMounted(async () => {
       <q-toggle v-model="includeResolved" label="Показывать закрытые" @update:model-value="load" />
       <q-btn flat dense round icon="refresh" :loading="loading" class="q-ml-sm" @click="load" />
     </div>
-
-    <q-banner v-if="app.meta?.capabilities.remediation_dry_run" dense class="bg-orange-1 q-mb-md">
-      <template #avatar><q-icon name="science" color="warning" /></template>
-      Авто-восстановление работает в режиме проверки: система только записывает, что сделала бы.
-      Убедитесь по журналу ниже, что решения верные, и отключите
-      <code>monitor.remediation.dry_run</code> в конфигурации.
-    </q-banner>
 
     <q-card flat bordered>
       <q-tabs v-model="tab" align="left" active-color="primary" indicator-color="primary" dense>

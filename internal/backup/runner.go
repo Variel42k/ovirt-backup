@@ -8,6 +8,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -29,6 +30,9 @@ type Engine struct {
 	cfg    config.BackupConfig
 	cipher *secret.Cipher
 	log    zerolog.Logger
+	// compression is sampled at the beginning of each run. Runtime changes
+	// therefore affect future runs without mixing algorithms inside one run.
+	compression atomic.Value
 
 	// external хранит режимы проверки, которые движок выполнить не может,
 	// потому что им нужен гипервизор, а не хранилище. Регистрация снаружи —
@@ -55,7 +59,7 @@ func NewEngine(st *store.Store, pool *ovirt.Pool, cfg config.BackupConfig, ciphe
 	if heavy < 1 {
 		heavy = 1
 	}
-	return &Engine{
+	e := &Engine{
 		store:    st,
 		pool:     pool,
 		cfg:      cfg,
@@ -64,6 +68,23 @@ func NewEngine(st *store.Store, pool *ovirt.Pool, cfg config.BackupConfig, ciphe
 		external: map[model.VerifyMode]ExternalVerifier{},
 		heavy:    make(chan struct{}, heavy),
 	}
+	e.compression.Store(cfg.Compression)
+	return e
+}
+
+// Compression returns the algorithm that the next backup run will use.
+func (e *Engine) Compression() string {
+	value, _ := e.compression.Load().(string)
+	return value
+}
+
+// SetCompression changes the algorithm for future backup runs.
+func (e *Engine) SetCompression(name string) error {
+	if !KnownCompression(name) {
+		return fmt.Errorf("неизвестное сжатие %q", name)
+	}
+	e.compression.Store(name)
+	return nil
 }
 
 // acquireHeavy занимает место в очереди проверок и восстановлений.
@@ -158,7 +179,7 @@ func (e *Engine) Execute(ctx context.Context, req RunRequest) (*model.BackupRun,
 		Status:          model.RunPending,
 		StorageTargetID: target.ID,
 		Encrypted:       req.Encrypt,
-		Compression:     e.cfg.Compression,
+		Compression:     e.Compression(),
 		CreatedAt:       time.Now().UTC(),
 	}
 
@@ -787,7 +808,7 @@ func (e *Engine) copyOneDisk(ctx context.Context, client *ovirt.Client, backend 
 		Backend:     backend,
 		DataKey:     dataKey,
 		ChunkSize:   chunkSize,
-		Compression: e.cfg.Compression,
+		Compression: run.Compression,
 		Level:       e.cfg.CompressionLevel,
 		Cipher:      cipher,
 	})

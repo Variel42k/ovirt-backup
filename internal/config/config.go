@@ -381,10 +381,26 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("не задано подключение к базе: укажите database.url " +
 			"(или JHV_DATABASE_URL) либо блок database.postgres")
 	}
+	// Список повторён здесь строкой, а не взят из internal/backup: движок
+	// бэкапа настраивается этой структурой, и импорт в обратную сторону замкнул
+	// бы пакеты друг на друга. При добавлении алгоритма правятся оба места, и
+	// тест на согласованность есть в internal/backup.
 	switch c.Backup.Compression {
-	case "none", "zstd":
+	case "none", "zstd", "gzip", "s2":
 	default:
-		return fmt.Errorf("backup.compression must be none or zstd, got %q", c.Backup.Compression)
+		return fmt.Errorf("backup.compression must be none, zstd, gzip or s2, got %q", c.Backup.Compression)
+	}
+	if c.Backup.CompressionLevel < 1 || c.Backup.CompressionLevel > 9 {
+		return fmt.Errorf("backup.compression_level must be between 1 and 9, got %d", c.Backup.CompressionLevel)
+	}
+	if c.Logging.MaxSizeMB < 1 || c.Logging.MaxSizeMB > 10240 {
+		return fmt.Errorf("logging.max_size_mb must be between 1 and 10240, got %d", c.Logging.MaxSizeMB)
+	}
+	if c.Logging.MaxBackups < 1 || c.Logging.MaxBackups > 1000 {
+		return fmt.Errorf("logging.max_backups must be between 1 and 1000, got %d", c.Logging.MaxBackups)
+	}
+	if c.Logging.MaxAgeDays < 1 || c.Logging.MaxAgeDays > 3650 {
+		return fmt.Errorf("logging.max_age_days must be between 1 and 3650, got %d", c.Logging.MaxAgeDays)
 	}
 	if c.Backup.ChunkSize < 64*1024 || c.Backup.ChunkSize%(64*1024) != 0 {
 		return fmt.Errorf("backup.chunk_size must be a multiple of 64 KiB and >= 64 KiB, got %d", c.Backup.ChunkSize)

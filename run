@@ -235,7 +235,10 @@ cmd_race() {
     set -- "$@" "$RACE_IMAGE" go test -race -count=1 ./...
 
     step "тесты с детектором гонок ($RACE_IMAGE)"
-    "$@"
+    # Git Bash автоматически превращает контейнерный /src в путь установки
+    # Git for Windows. Хостовый bind уже передан как Windows-путь через pwd -W,
+    # поэтому для этого вызова преобразование аргументов нужно отключить.
+    MSYS_NO_PATHCONV=1 "$@"
 }
 
 cmd_check() {

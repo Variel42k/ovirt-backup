@@ -18,7 +18,13 @@ app.use(Quasar, {
   plugins: { Notify, Dialog, Loading },
   lang: quasarLang,
   config: {
-    notify: { position: 'top-right', timeout: 4000, actions: [{ icon: 'close', color: 'white' }] },
+    // Крестик задаётся здесь, а не отдельным action: action рисуется второй
+    // строкой плашки, и вместе со встроенным крестиком их получалось два —
+    // разного вида, в разных местах и с одинаковым действием.
+    //
+    // Время жизни задаёт notify() из api/client.ts: она же снимает плашку с
+    // учёта, и два независимых умолчания разъезжались бы между собой.
+    notify: { position: 'top-right', closeBtn: '✕' },
   },
 })
 

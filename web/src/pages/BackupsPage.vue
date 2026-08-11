@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { useQuasar } from 'quasar'
-import { api, notifyError, notifyOk } from '@/api/client'
+import { api, notify, notifyError, notifyOk } from '@/api/client'
 import { bytes, dateTime, elapsed, runStatus, statusColor } from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
@@ -162,7 +162,7 @@ async function submitVerify() {
     if (result?.status === 'succeeded') {
       notifyOk('Проверка пройдена')
     } else if (result?.status) {
-      $q.notify({ type: 'negative', message: `Проверка не пройдена: ${result.error ?? ''}`, timeout: 12000 })
+      notify({ type: 'negative', message: `Проверка не пройдена: ${result.error ?? ''}`, timeout: 12000 })
     } else {
       notifyOk('Проверка запущена в фоне')
     }
@@ -813,15 +813,23 @@ const columns = [
                 dense
               />
 
-              <div class="row q-col-gutter-sm">
-                <div class="col-4">
-                  <q-input v-model.number="verifyForm.memory_mib" type="number" min="0" label="Память, МиБ" hint="0 — как у исходной ВМ" outlined dense />
-                </div>
-                <div class="col-4">
-                  <q-input v-model.number="verifyForm.vcpus" type="number" min="0" label="vCPU" hint="0 — как у исходной ВМ" outlined dense />
-                </div>
-                <div class="col-4">
-                  <q-input v-model.number="verifyForm.timeout_sec" type="number" label="Ожидание, с" outlined dense />
+              <!--
+                Обёртка не лишняя: отступ от .q-gutter-md достаётся ей, а не
+                строке. Оба класса задают margin-left одному элементу, и если
+                строка стоит здесь сама, побеждает её собственный отрицательный
+                отступ — поля съезжают влево, к самому краю карточки.
+              -->
+              <div>
+                <div class="row q-col-gutter-sm">
+                  <div class="col-4">
+                    <q-input v-model.number="verifyForm.memory_mib" type="number" min="0" label="Память, МиБ" hint="0 — как у исходной ВМ" outlined dense />
+                  </div>
+                  <div class="col-4">
+                    <q-input v-model.number="verifyForm.vcpus" type="number" min="0" label="vCPU" hint="0 — как у исходной ВМ" outlined dense />
+                  </div>
+                  <div class="col-4">
+                    <q-input v-model.number="verifyForm.timeout_sec" type="number" label="Ожидание, с" outlined dense />
+                  </div>
                 </div>
               </div>
 

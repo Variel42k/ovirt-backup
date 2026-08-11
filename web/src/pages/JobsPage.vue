@@ -443,45 +443,46 @@ const columns = [
         <q-card-section class="text-h6">{{ editing ? 'Изменить задание' : 'Новое задание' }}</q-card-section>
         <q-separator />
 
-        <q-card-section style="max-height: 70vh" class="scroll q-gutter-md">
-          <div class="row q-col-gutter-md">
-            <div class="col-12 col-sm-6">
-              <q-input v-model="form.name" label="Имя задания" outlined dense />
-            </div>
-            <div class="col-12 col-sm-6">
-              <q-select
-                :model-value="form.server_id"
-                :options="app.servers.map((s) => ({ label: s.name, value: s.id }))"
-                emit-value
-                map-options
-                label="Сервер"
-                outlined
-                dense
-                @update:model-value="changeServer"
-              />
-            </div>
+        <!-- Одна сетка на всю форму; почему не .row внутри .q-gutter-* — см. ServersPage.vue. -->
+        <q-card-section style="max-height: 70vh" class="scroll row q-col-gutter-md">
+          <div class="col-12 col-sm-6">
+            <q-input v-model="form.name" label="Имя задания" outlined dense />
+          </div>
+          <div class="col-12 col-sm-6">
+            <q-select
+              :model-value="form.server_id"
+              :options="app.servers.map((s) => ({ label: s.name, value: s.id }))"
+              emit-value
+              map-options
+              label="Сервер"
+              outlined
+              dense
+              @update:model-value="changeServer"
+            />
           </div>
 
-          <q-select
-            v-model="form.vm_ids"
-            :options="vmsOfServer.map((v) => ({ label: v.name, value: v.id }))"
-            emit-value
-            map-options
-            multiple
-            use-chips
-            clearable
-            label="Виртуальные машины"
-            hint="Пусто — все ВМ выбранного сервера"
-            outlined
-            dense
-          />
+          <div class="col-12">
+            <q-select
+              v-model="form.vm_ids"
+              :options="vmsOfServer.map((v) => ({ label: v.name, value: v.id }))"
+              emit-value
+              map-options
+              multiple
+              use-chips
+              clearable
+              label="Виртуальные машины"
+              hint="Пусто — все ВМ выбранного сервера"
+              outlined
+              dense
+            />
+          </div>
 
-          <div class="row items-center">
+          <div class="col-12 row items-center">
             <div class="text-subtitle2">Что и как копировать</div>
             <HelpButton article="hot-backup" label="Останавливается ли ВМ" />
           </div>
 
-          <div class="text-caption text-grey-7">
+          <div class="col-12 text-caption text-grey-7">
             <template v-if="form.vm_ids.length">
               Доступность проверяется для выбранных ВМ: {{ selectedVMs.length }}.
             </template>
@@ -490,23 +491,27 @@ const columns = [
             </template>
           </div>
 
-          <q-banner v-if="backupOptionsError" dense class="bg-orange-1">
-            <template #avatar><q-icon name="warning" color="warning" /></template>
-            {{ backupOptionsError }}
-            <template #action>
-              <q-btn flat dense icon="refresh" label="Повторить" @click="loadBackupOptions" />
-            </template>
-          </q-banner>
+          <div v-if="backupOptionsError" class="col-12">
+            <q-banner dense class="bg-orange-1">
+              <template #avatar><q-icon name="warning" color="warning" /></template>
+              {{ backupOptionsError }}
+              <template #action>
+                <q-btn flat dense icon="refresh" label="Повторить" @click="loadBackupOptions" />
+              </template>
+            </q-banner>
+          </div>
 
-          <BackupOptionsPicker
-            v-model="form.type"
-            :options="backupOptions"
-            :loading="backupOptionsLoading"
-            empty-text="На выбранном сервере нет ВМ, для которых можно проверить варианты бэкапа."
-            @select="pickBackupOption"
-          />
+          <div class="col-12">
+            <BackupOptionsPicker
+              v-model="form.type"
+              :options="backupOptions"
+              :loading="backupOptionsLoading"
+              empty-text="На выбранном сервере нет ВМ, для которых можно проверить варианты бэкапа."
+              @select="pickBackupOption"
+            />
+          </div>
 
-          <div v-if="form.type" class="row q-col-gutter-md">
+          <template v-if="form.type">
             <div class="col-12 col-sm-6">
               <q-input
                 v-model.number="form.full_every"
@@ -535,103 +540,106 @@ const columns = [
                 <template #append><HelpButton article="cbt" label="Что такое CBT" /></template>
               </q-select>
             </div>
-          </div>
+          </template>
 
-          <div class="row q-col-gutter-md">
-            <div class="col-12 col-sm-7">
-              <q-input v-model="form.schedule" label="Расписание (cron)" outlined dense class="jhv-mono">
-                <template #append>
-                  <q-btn-dropdown flat dense icon="event" auto-close>
-                    <q-list dense>
-                      <q-item
-                        v-for="preset in schedulePresets"
-                        :key="preset.value"
-                        clickable
-                        @click="form.schedule = preset.value"
-                      >
-                        <q-item-section>
-                          <q-item-label>{{ preset.label }}</q-item-label>
-                          <q-item-label caption class="jhv-mono">{{ preset.value }}</q-item-label>
-                        </q-item-section>
-                      </q-item>
-                    </q-list>
-                  </q-btn-dropdown>
-                </template>
-              </q-input>
-              <div class="jhv-reason">
-                Пять полей: минуты, часы, день месяца, месяц, день недели. Пусто — только ручной запуск.
-                Часовой пояс: {{ app.meta?.capabilities.scheduler_timezone }}.
-              </div>
-            </div>
-            <div class="col-12 col-sm-5">
-              <q-input
-                v-model.number="form.max_duration_minutes"
-                type="number"
-                label="Предел длительности, мин"
-                hint="0 — без ограничения"
-                outlined
-                dense
-              />
+          <div class="col-12 col-sm-7">
+            <q-input v-model="form.schedule" label="Расписание (cron)" outlined dense class="jhv-mono">
+              <template #append>
+                <q-btn-dropdown flat dense icon="event" auto-close>
+                  <q-list dense>
+                    <q-item
+                      v-for="preset in schedulePresets"
+                      :key="preset.value"
+                      clickable
+                      @click="form.schedule = preset.value"
+                    >
+                      <q-item-section>
+                        <q-item-label>{{ preset.label }}</q-item-label>
+                        <q-item-label caption class="jhv-mono">{{ preset.value }}</q-item-label>
+                      </q-item-section>
+                    </q-item>
+                  </q-list>
+                </q-btn-dropdown>
+              </template>
+            </q-input>
+            <div class="jhv-reason">
+              Пять полей: минуты, часы, день месяца, месяц, день недели. Пусто — только ручной запуск.
+              Часовой пояс: {{ app.meta?.capabilities.scheduler_timezone }}.
             </div>
           </div>
+          <div class="col-12 col-sm-5">
+            <q-input
+              v-model.number="form.max_duration_minutes"
+              type="number"
+              label="Предел длительности, мин"
+              hint="0 — без ограничения"
+              outlined
+              dense
+            />
+          </div>
 
-          <q-select
-            v-model="form.storage_target_ids"
-            :options="app.enabledStorages.map((s) => ({ label: s.name, value: s.id }))"
-            emit-value
-            map-options
-            multiple
-            use-chips
-            label="Хранилища"
-            hint="Несколько хранилищ — бэкап выполняется в каждое отдельно (правило 3-2-1)"
-            outlined
-            dense
-          />
+          <div class="col-12">
+            <q-select
+              v-model="form.storage_target_ids"
+              :options="app.enabledStorages.map((s) => ({ label: s.name, value: s.id }))"
+              emit-value
+              map-options
+              multiple
+              use-chips
+              label="Хранилища"
+              hint="Несколько хранилищ — бэкап выполняется в каждое отдельно (правило 3-2-1)"
+              outlined
+              dense
+            />
+          </div>
 
-          <div class="row items-center">
+          <div class="col-12 row items-center">
             <div class="text-subtitle2">Хранение копий</div>
             <HelpButton article="retention" label="Как работают правила хранения" />
           </div>
-          <div class="row q-col-gutter-sm">
-            <div class="col-6 col-sm-2">
-              <q-input v-model.number="form.retention.keep_last" type="number" label="Последних" outlined dense />
+          <!-- Шесть узких полей своей строкой: вложенная сетка внутри col-12 -->
+          <div class="col-12">
+            <div class="row q-col-gutter-sm">
+              <div class="col-6 col-sm-2">
+                <q-input v-model.number="form.retention.keep_last" type="number" label="Последних" outlined dense />
+              </div>
+              <div class="col-6 col-sm-2">
+                <q-input v-model.number="form.retention.keep_hourly" type="number" label="Часовых" outlined dense />
+              </div>
+              <div class="col-6 col-sm-2">
+                <q-input v-model.number="form.retention.keep_daily" type="number" label="Суточных" outlined dense />
+              </div>
+              <div class="col-6 col-sm-2">
+                <q-input v-model.number="form.retention.keep_weekly" type="number" label="Недельных" outlined dense />
+              </div>
+              <div class="col-6 col-sm-2">
+                <q-input v-model.number="form.retention.keep_monthly" type="number" label="Месячных" outlined dense />
+              </div>
+              <div class="col-6 col-sm-2">
+                <q-input v-model.number="form.retention.keep_yearly" type="number" label="Годовых" outlined dense />
+              </div>
             </div>
-            <div class="col-6 col-sm-2">
-              <q-input v-model.number="form.retention.keep_hourly" type="number" label="Часовых" outlined dense />
+            <div class="jhv-reason q-mt-sm">
+              Копия сохраняется, если её удерживает хотя бы одно правило. Звенья, от которых зависят
+              сохраняемые инкременты, не удаляются никогда — иначе цепочка перестала бы восстанавливаться.
             </div>
-            <div class="col-6 col-sm-2">
-              <q-input v-model.number="form.retention.keep_daily" type="number" label="Суточных" outlined dense />
-            </div>
-            <div class="col-6 col-sm-2">
-              <q-input v-model.number="form.retention.keep_weekly" type="number" label="Недельных" outlined dense />
-            </div>
-            <div class="col-6 col-sm-2">
-              <q-input v-model.number="form.retention.keep_monthly" type="number" label="Месячных" outlined dense />
-            </div>
-            <div class="col-6 col-sm-2">
-              <q-input v-model.number="form.retention.keep_yearly" type="number" label="Годовых" outlined dense />
-            </div>
-          </div>
-          <div class="jhv-reason">
-            Копия сохраняется, если её удерживает хотя бы одно правило. Звенья, от которых зависят
-            сохраняемые инкременты, не удаляются никогда — иначе цепочка перестала бы восстанавливаться.
           </div>
 
-          <div class="row q-col-gutter-md items-center">
-            <div class="col-12 col-sm-4">
-              <q-select
-                v-model="form.verify_after"
-                :options="[{ label: 'Не проверять', value: '' }, ...(app.meta?.verify_modes ?? []).map((m) => ({ label: m.title, value: m.value }))]"
-                emit-value
-                map-options
-                label="Проверка после бэкапа"
-                outlined
-                dense
-              >
-                <template #append><HelpButton article="verify" label="Режимы проверки" /></template>
-              </q-select>
-            </div>
-            <div class="col-12 col-sm-8 q-gutter-md">
+          <div class="col-12 col-sm-4">
+            <q-select
+              v-model="form.verify_after"
+              :options="[{ label: 'Не проверять', value: '' }, ...(app.meta?.verify_modes ?? []).map((m) => ({ label: m.title, value: m.value }))]"
+              emit-value
+              map-options
+              label="Проверка после бэкапа"
+              outlined
+              dense
+            >
+              <template #append><HelpButton article="verify" label="Режимы проверки" /></template>
+            </q-select>
+          </div>
+          <div class="col-12 col-sm-8 self-center">
+            <div class="row items-center q-gutter-md">
               <q-toggle v-model="form.enabled" label="Задание включено" />
               <span class="items-center inline-block">
                 <q-toggle v-model="form.quiesce" label="Заморозка ФС гостя" />
@@ -642,42 +650,48 @@ const columns = [
           </div>
 
           <template v-if="form.verify_after === 'boot'">
-            <q-banner v-if="!bootHosts.length" dense class="bg-orange-1">
-              <template #avatar><q-icon name="warning" color="warning" /></template>
-              Нет включённого подключения типа KVM. Добавьте KVM-хост, на котором можно
-              безопасно запускать восстановленные образы.
-            </q-banner>
-            <template v-else>
-              <q-select
-                v-model="form.verify_options.boot_host_id"
-                :options="bootHosts.map((s) => ({ label: s.name, value: s.id }))"
-                emit-value
-                map-options
-                label="KVM-хост для проверки образа"
-                hint="Для oVirt требуется отдельный KVM-хост; для KVM по умолчанию выбран исходный"
-                outlined
-                dense
-              />
-              <div class="row q-col-gutter-sm">
-                <div class="col-12 col-sm-4">
-                  <q-input v-model.number="form.verify_options.memory_mib" type="number" min="0" max="1048576" label="Память, МиБ" hint="0 — как у исходной ВМ" outlined dense />
-                </div>
-                <div class="col-6 col-sm-4">
-                  <q-input v-model.number="form.verify_options.vcpus" type="number" min="0" max="1024" label="vCPU" hint="0 — как у исходной ВМ" outlined dense />
-                </div>
-                <div class="col-6 col-sm-4">
-                  <q-input v-model.number="form.verify_options.timeout_sec" type="number" min="1" max="86400" label="Ожидание агента, с" outlined dense />
-                </div>
-              </div>
-              <q-toggle
-                v-model="form.verify_options.keep_on_failure"
-                label="Оставлять неудачную ВМ и образ для диагностики"
-              />
-              <q-banner dense class="bg-blue-1">
-                <template #avatar><q-icon name="lan" color="primary" /></template>
-                Проверочная ВМ запускается со всеми дисками, но без сетевых интерфейсов. При включённом сохранении
-                неудачных проверок ВМ и образ нужно удалить с KVM-хоста вручную.
+            <div v-if="!bootHosts.length" class="col-12">
+              <q-banner dense class="bg-orange-1">
+                <template #avatar><q-icon name="warning" color="warning" /></template>
+                Нет включённого подключения типа KVM. Добавьте KVM-хост, на котором можно
+                безопасно запускать восстановленные образы.
               </q-banner>
+            </div>
+            <template v-else>
+              <div class="col-12">
+                <q-select
+                  v-model="form.verify_options.boot_host_id"
+                  :options="bootHosts.map((s) => ({ label: s.name, value: s.id }))"
+                  emit-value
+                  map-options
+                  label="KVM-хост для проверки образа"
+                  hint="Для oVirt требуется отдельный KVM-хост; для KVM по умолчанию выбран исходный"
+                  outlined
+                  dense
+                />
+              </div>
+              <div class="col-12 col-sm-4">
+                <q-input v-model.number="form.verify_options.memory_mib" type="number" min="0" max="1048576" label="Память, МиБ" hint="0 — как у исходной ВМ" outlined dense />
+              </div>
+              <div class="col-6 col-sm-4">
+                <q-input v-model.number="form.verify_options.vcpus" type="number" min="0" max="1024" label="vCPU" hint="0 — как у исходной ВМ" outlined dense />
+              </div>
+              <div class="col-6 col-sm-4">
+                <q-input v-model.number="form.verify_options.timeout_sec" type="number" min="1" max="86400" label="Ожидание агента, с" outlined dense />
+              </div>
+              <div class="col-12">
+                <q-toggle
+                  v-model="form.verify_options.keep_on_failure"
+                  label="Оставлять неудачную ВМ и образ для диагностики"
+                />
+              </div>
+              <div class="col-12">
+                <q-banner dense class="bg-blue-1">
+                  <template #avatar><q-icon name="lan" color="primary" /></template>
+                  Проверочная ВМ запускается со всеми дисками, но без сетевых интерфейсов. При включённом сохранении
+                  неудачных проверок ВМ и образ нужно удалить с KVM-хоста вручную.
+                </q-banner>
+              </div>
             </template>
           </template>
         </q-card-section>

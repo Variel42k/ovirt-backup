@@ -1,10 +1,16 @@
 package backup
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
+	"strings"
+	"sync"
 
+	"github.com/klauspost/compress/gzip"
+	"github.com/klauspost/compress/s2"
 	"github.com/klauspost/compress/zstd"
 
 	"adveng/jh_virt/internal/secret"
@@ -17,46 +23,57 @@ import (
 // chunks by offset and must not decompress a terabyte to reach the last one.
 type codec struct {
 	compression string
-	enc         *zstd.Encoder
-	dec         *zstd.Decoder
+	algo        compressor     // nil — сжатие выключено
 	cipher      *secret.Cipher // nil — шифрование выключено
+}
+
+// compressor is one algorithm.
+//
+// Отдельный интерфейс, а не ветвления по имени в encode/decode: алгоритм
+// выбирается один раз при создании кодека, и добавление ещё одного не трогает
+// путь данных, где ошибка стоит дороже всего — испорченный чанк заметен только
+// при восстановлении.
+//
+// Реализации рассчитаны на последовательное использование: чанки одного диска
+// пишутся строго по возрастанию индекса, у каждого диска свой кодек. Там, где
+// алгоритм требует состояния (gzip), оно берётся из пула — так безопасно и при
+// параллельном чтении цепочки.
+type compressor interface {
+	compress(plain []byte) ([]byte, error)
+	decompress(stored []byte, wantLen int) ([]byte, error)
+	close()
 }
 
 func newCodec(compression string, level int, cipher *secret.Cipher) (*codec, error) {
 	c := &codec{compression: compression, cipher: cipher}
-	if compression != CompressionZstd {
+	if compression != "" && compression != CompressionNone && (level < 1 || level > 9) {
+		return nil, fmt.Errorf("уровень сжатия должен быть от 1 до 9, получено %d", level)
+	}
+	switch compression {
+	case "", CompressionNone:
 		return c, nil
+	case CompressionZstd:
+		algo, err := newZstdCompressor(level)
+		if err != nil {
+			return nil, err
+		}
+		c.algo = algo
+	case CompressionGzip:
+		c.algo = newGzipCompressor(level)
+	case CompressionS2:
+		c.algo = newS2Compressor(level)
+	default:
+		// Раньше неизвестное имя молча означало «без сжатия», и такой кодек
+		// отдавал бы сжатые байты как готовые данные. Отказ громче и дешевле.
+		return nil, fmt.Errorf("неизвестный алгоритм сжатия %q (доступны: %s)",
+			compression, strings.Join(Compressions, ", "))
 	}
-
-	encLevel := zstd.SpeedDefault
-	switch {
-	case level <= 1:
-		encLevel = zstd.SpeedFastest
-	case level >= 9:
-		encLevel = zstd.SpeedBestCompression
-	case level >= 6:
-		encLevel = zstd.SpeedBetterCompression
-	}
-
-	enc, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(encLevel), zstd.WithEncoderConcurrency(1))
-	if err != nil {
-		return nil, err
-	}
-	dec, err := zstd.NewReader(nil, zstd.WithDecoderConcurrency(1))
-	if err != nil {
-		enc.Close()
-		return nil, err
-	}
-	c.enc, c.dec = enc, dec
 	return c, nil
 }
 
 func (c *codec) close() {
-	if c.enc != nil {
-		_ = c.enc.Close()
-	}
-	if c.dec != nil {
-		c.dec.Close()
+	if c.algo != nil {
+		c.algo.close()
 	}
 }
 
@@ -67,8 +84,11 @@ func (c *codec) encode(plain []byte) (stored []byte, digest string, err error) {
 	digest = hex.EncodeToString(sum[:])
 
 	out := plain
-	if c.enc != nil {
-		compressed := c.enc.EncodeAll(plain, make([]byte, 0, len(plain)/2+64))
+	if c.algo != nil {
+		compressed, err := c.algo.compress(plain)
+		if err != nil {
+			return nil, "", fmt.Errorf("сжатие чанка (%s): %w", c.compression, err)
+		}
 		// Incompressible data (already-compressed guest filesystems, encrypted
 		// volumes) would otherwise grow by the frame header on every chunk.
 		if len(compressed) < len(plain) {
@@ -99,11 +119,11 @@ func (c *codec) decode(stored []byte, wantLen int) ([]byte, error) {
 		}
 		buf = plain
 	}
-	if c.dec != nil && len(buf) != wantLen {
+	if c.algo != nil && len(buf) != wantLen {
 		// Equal lengths mean the encoder decided compression was not worth it.
-		plain, err := c.dec.DecodeAll(buf, make([]byte, 0, wantLen))
+		plain, err := c.algo.decompress(buf, wantLen)
 		if err != nil {
-			return nil, fmt.Errorf("распаковка чанка: %w", err)
+			return nil, fmt.Errorf("распаковка чанка (%s): %w", c.compression, err)
 		}
 		buf = plain
 	}
@@ -122,3 +142,145 @@ func verifyDigest(plain []byte, want string) error {
 	}
 	return nil
 }
+
+// zstd — плотное сжатие при разумной скорости, выбор по умолчанию.
+type zstdCompressor struct {
+	enc *zstd.Encoder
+	dec *zstd.Decoder
+}
+
+func newZstdCompressor(level int) (*zstdCompressor, error) {
+	encLevel := zstd.SpeedDefault
+	switch {
+	case level <= 1:
+		encLevel = zstd.SpeedFastest
+	case level >= 9:
+		encLevel = zstd.SpeedBestCompression
+	case level >= 6:
+		encLevel = zstd.SpeedBetterCompression
+	}
+
+	enc, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(encLevel), zstd.WithEncoderConcurrency(1))
+	if err != nil {
+		return nil, err
+	}
+	dec, err := zstd.NewReader(nil, zstd.WithDecoderConcurrency(1))
+	if err != nil {
+		enc.Close()
+		return nil, err
+	}
+	return &zstdCompressor{enc: enc, dec: dec}, nil
+}
+
+func (z *zstdCompressor) compress(plain []byte) ([]byte, error) {
+	return z.enc.EncodeAll(plain, make([]byte, 0, len(plain)/2+64)), nil
+}
+
+func (z *zstdCompressor) decompress(stored []byte, wantLen int) ([]byte, error) {
+	return z.dec.DecodeAll(stored, make([]byte, 0, wantLen))
+}
+
+func (z *zstdCompressor) close() {
+	_ = z.enc.Close()
+	z.dec.Close()
+}
+
+// gzip — на копию уходит больше процессора, чем на zstd, при худшей плотности.
+// Смысл в другом: получившийся чанк распакует что угодно, вплоть до gunzip в
+// busybox на аварийном загрузочном носителе, где ни этой программы, ни zstd не
+// будет.
+type gzipCompressor struct {
+	level int
+	// Writer у gzip — с состоянием, и один на кодек не годится: цепочку при
+	// восстановлении читают параллельно. Пул даёт и безопасность, и повторное
+	// использование буферов.
+	writers sync.Pool
+	readers sync.Pool
+}
+
+func newGzipCompressor(level int) *gzipCompressor {
+	switch {
+	case level <= 0:
+		level = gzip.DefaultCompression
+	case level > gzip.BestCompression:
+		level = gzip.BestCompression
+	}
+	return &gzipCompressor{level: level}
+}
+
+func (g *gzipCompressor) compress(plain []byte) ([]byte, error) {
+	buf := bytes.NewBuffer(make([]byte, 0, len(plain)/2+64))
+
+	zw, _ := g.writers.Get().(*gzip.Writer)
+	if zw == nil {
+		var err error
+		if zw, err = gzip.NewWriterLevel(buf, g.level); err != nil {
+			return nil, err
+		}
+	} else {
+		zw.Reset(buf)
+	}
+
+	if _, err := zw.Write(plain); err != nil {
+		return nil, err
+	}
+	if err := zw.Close(); err != nil {
+		return nil, err
+	}
+	g.writers.Put(zw)
+	return buf.Bytes(), nil
+}
+
+func (g *gzipCompressor) decompress(stored []byte, wantLen int) ([]byte, error) {
+	src := bytes.NewReader(stored)
+
+	zr, _ := g.readers.Get().(*gzip.Reader)
+	var err error
+	if zr == nil {
+		zr, err = gzip.NewReader(src)
+	} else {
+		err = zr.Reset(src)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	// Читаем не больше чанка плюс байт: длину проверит вызывающий, а предел
+	// не даёт подсунутому объекту хранилища развернуться в память целиком.
+	out := bytes.NewBuffer(make([]byte, 0, wantLen))
+	if _, err := io.Copy(out, io.LimitReader(zr, int64(wantLen)+1)); err != nil {
+		return nil, err
+	}
+	if err := zr.Close(); err != nil {
+		return nil, err
+	}
+	g.readers.Put(zr)
+	return out.Bytes(), nil
+}
+
+func (g *gzipCompressor) close() {}
+
+// s2 — сжатие для случая, когда узкое место процессор, а не диск: раза в три
+// быстрее zstd на запись и заметно быстрее на чтение, плотность ниже. Уместно
+// на гипервизоре, который и так занят, или когда канал до хранилища быстрый.
+type s2Compressor struct{ level int }
+
+func newS2Compressor(level int) *s2Compressor { return &s2Compressor{level: level} }
+
+func (s *s2Compressor) compress(plain []byte) ([]byte, error) {
+	dst := make([]byte, 0, s2.MaxEncodedLen(len(plain)))
+	switch {
+	case s.level >= 9:
+		return s2.EncodeBest(dst, plain), nil
+	case s.level >= 6:
+		return s2.EncodeBetter(dst, plain), nil
+	default:
+		return s2.Encode(dst, plain), nil
+	}
+}
+
+func (s *s2Compressor) decompress(stored []byte, wantLen int) ([]byte, error) {
+	return s2.Decode(make([]byte, 0, wantLen), stored)
+}
+
+func (s *s2Compressor) close() {}

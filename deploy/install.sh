@@ -20,6 +20,7 @@
 #   ./install.sh --uninstall=systemd   снять только systemd-службу
 #   ./install.sh --uninstall=docker    снять только контейнеры
 #   ./install.sh --uninstall=all       снять оба варианта, данные оставить
+#   ./install.sh --uninstall=all --remove-config  также удалить YAML/env
 
 set -eu
 
@@ -38,6 +39,7 @@ CONFIG_NAME="ovirt-backup.yaml"
 LEGACY_CONFIG_NAME="virt-manager.yaml"
 
 MODE=""; URL=""; DATABASE_URL_FILE=""; UNINSTALL_TARGET=""; START=1; PORT=8080
+UNINSTALL_REMOVE_CONFIG=0
 
 die() { printf '\nошибка: %s\n' "$*" >&2; exit 1; }
 say() { printf '%s\n' "$*"; }
@@ -57,6 +59,7 @@ while [ $# -gt 0 ]; do
         --no-start) START=0; shift ;;
         --uninstall=*) MODE=uninstall; UNINSTALL_TARGET="${1#--uninstall=}"; shift ;;
         --uninstall) MODE=uninstall; shift ;;
+        --remove-config) UNINSTALL_REMOVE_CONFIG=1; shift ;;
         # Справка — это шапка файла: два описания разъезжаются, одно нет.
         # Границей служит первая строка не-комментарий, а не номер строки:
         # по номерам вывод уже захватывал лишнее при правке шапки.
@@ -235,6 +238,58 @@ remove_application_files() {
     rm -f "$PREFIX/VERSION"
 }
 
+remove_configuration_files() {
+    REMOVE_SHARED_CONFIG=0
+    case "$UNINSTALL_TARGET" in
+        all) REMOVE_SHARED_CONFIG=1 ;;
+        docker)
+            systemd_install_present || REMOVE_SHARED_CONFIG=1
+            ;;
+        systemd)
+            docker_bundle_present || REMOVE_SHARED_CONFIG=1
+            ;;
+    esac
+
+    step "удаление конфигурации выбранной установки"
+    case "$UNINSTALL_TARGET" in
+        docker|all)
+            REMOVE_CONFIG_LAST_DIR=""
+            for dir in "$PREFIX/compose" "$COMPOSE_DIR"; do
+                [ "$dir" = "$REMOVE_CONFIG_LAST_DIR" ] && continue
+                REMOVE_CONFIG_LAST_DIR="$dir"
+                if [ -f "$dir/.env" ]; then
+                    rm -f "$dir/.env"
+                    say "    удалён $dir/.env"
+                fi
+            done
+            ;;
+    esac
+    case "$UNINSTALL_TARGET" in
+        systemd|all)
+            if [ -f "$PREFIX/config/jhvirt.env" ]; then
+                rm -f "$PREFIX/config/jhvirt.env"
+                say "    удалён $PREFIX/config/jhvirt.env"
+            fi
+            ;;
+    esac
+
+    if [ "$REMOVE_SHARED_CONFIG" -eq 1 ]; then
+        for name in "$CONFIG_NAME" "$CONFIG_NAME.new" \
+            "$LEGACY_CONFIG_NAME" "$LEGACY_CONFIG_NAME.new"; do
+            if [ -f "$PREFIX/config/$name" ]; then
+                rm -f "$PREFIX/config/$name"
+                say "    удалён $PREFIX/config/$name"
+            fi
+        done
+    else
+        say "    общий YAML сохранён: он нужен оставшемуся способу запуска"
+    fi
+
+    if [ "$BUNDLE" -eq 0 ] && { [ "$UNINSTALL_TARGET" = docker ] || [ "$UNINSTALL_TARGET" = all ]; }; then
+        say "    config/$CONFIG_NAME в репозитории сохранён как файл исходного кода"
+    fi
+}
+
 choose_uninstall() {
     say ""
     say "Что удалить?"
@@ -255,7 +310,29 @@ choose_uninstall() {
             4) say "Удаление отменено."; return 1 ;;
             *) say "Нет такого варианта."; continue ;;
         esac
-        printf 'Удалить %s, сохранив конфигурацию, ключи и данные? [y/N]: ' "$UNINSTALL_LABEL"
+
+        say ""
+        say "Что делать с конфигурацией выбранной установки?"
+        say ""
+        say "  1) сохранить — YAML и env останутся (рекомендуется)"
+        say "  2) удалить   — удалить YAML/env; ключи, база и данные останутся"
+        say ""
+        while :; do
+            printf 'Номер [1]: '
+            read -r UNINSTALL_CONFIG_CHOICE || UNINSTALL_CONFIG_CHOICE=""
+            [ -n "$UNINSTALL_CONFIG_CHOICE" ] || UNINSTALL_CONFIG_CHOICE=1
+            case "$UNINSTALL_CONFIG_CHOICE" in
+                1) UNINSTALL_REMOVE_CONFIG=0; break ;;
+                2) UNINSTALL_REMOVE_CONFIG=1; break ;;
+                *) say "Нет такого варианта." ;;
+            esac
+        done
+
+        if [ "$UNINSTALL_REMOVE_CONFIG" -eq 1 ]; then
+            printf 'Удалить %s и его конфигурацию? Ключи, база и данные будут сохранены. [y/N]: ' "$UNINSTALL_LABEL"
+        else
+            printf 'Удалить %s, сохранив конфигурацию, ключи и данные? [y/N]: ' "$UNINSTALL_LABEL"
+        fi
         read -r UNINSTALL_CONFIRM || UNINSTALL_CONFIRM=""
         case "$UNINSTALL_CONFIRM" in
             y|Y|yes|YES|да|Да|ДА) return 0 ;;
@@ -296,17 +373,32 @@ uninstall() {
             ;;
     esac
 
+    if [ "$UNINSTALL_REMOVE_CONFIG" -eq 1 ]; then
+        if [ "$UNINSTALL_ERRORS" -eq 0 ]; then
+            remove_configuration_files
+        else
+            say "    конфигурация не удалена: сначала устраните ошибки остановки"
+        fi
+    fi
+
     say ""
-    say "Снято: $UNINSTALL_SUMMARY. Данные намеренно оставлены:"
+    if [ "$UNINSTALL_REMOVE_CONFIG" -eq 1 ] && [ "$UNINSTALL_ERRORS" -eq 0 ]; then
+        say "Снято: $UNINSTALL_SUMMARY. Конфигурация выбранной установки удалена."
+        say "Ключи и данные намеренно оставлены:"
+    else
+        say "Снято: $UNINSTALL_SUMMARY. Конфигурация и данные намеренно оставлены:"
+    fi
     if [ "$UNINSTALL_TARGET" = docker ] || [ "$UNINSTALL_TARGET" = all ]; then
         say "  контейнерные тома — ключ, база и данные приложения"
     fi
     if [ "$UNINSTALL_TARGET" = systemd ] || [ "$UNINSTALL_TARGET" = all ]; then
         say "  PostgreSQL и база jhvirt не удалялись"
     fi
-    if [ -d "$PREFIX" ]; then
+    if [ -d "$PREFIX" ] && [ "$UNINSTALL_REMOVE_CONFIG" -eq 0 ]; then
         say "  $PREFIX/data   — ключ шифрования секретов"
         say "  $PREFIX/config — конфигурация"
+    elif [ -d "$PREFIX" ]; then
+        say "  $PREFIX/data — ключ шифрования секретов"
     fi
     if [ "$UNINSTALL_TARGET" = docker ] || [ "$UNINSTALL_TARGET" = all ]; then
         say ""
@@ -356,6 +448,9 @@ choose() {
     done
 }
 
+if [ "$UNINSTALL_REMOVE_CONFIG" -eq 1 ] && [ "$MODE" != uninstall ]; then
+    die "--remove-config используется только вместе с --uninstall"
+fi
 [ -n "$MODE" ] || choose
 if [ "$MODE" = uninstall ]; then
     if [ -z "$UNINSTALL_TARGET" ]; then

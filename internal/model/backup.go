@@ -56,7 +56,7 @@ func (t BackupType) UsesCBT() bool {
 func (t BackupType) Title() string {
 	switch t {
 	case BackupFull:
-		return "Полный (CBT)"
+		return "Полный с точкой отсчёта"
 	case BackupIncremental:
 		return "Инкрементальный"
 	case BackupDifferential:

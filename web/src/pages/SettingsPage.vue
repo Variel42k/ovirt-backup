@@ -5,8 +5,6 @@ import { api, notifyError, notifyOk } from '@/api/client'
 import { bytes, dateTime } from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
-import BackupTypeHelpCard from '@/components/BackupTypeHelpCard.vue'
-import HelpArticleBody from '@/components/HelpArticleBody.vue'
 import type { AuditEntry, LogStatus, RuntimeSettings, User } from '@/api/settings-types'
 import type { RemediationArchive, RemediationMode, RemediationPeriod } from '@/api/types'
 
@@ -298,8 +296,6 @@ watch(tab, (value) => {
 onMounted(async () => {
   await app.loadMeta()
   await loadMode()
-  // Справка — содержимое вкладки «Справка», грузим сразу вместе со страницей.
-  await app.loadHelp().catch(() => undefined)
   await load()
 })
 </script>
@@ -314,7 +310,6 @@ onMounted(async () => {
         <q-tab v-if="auth.canAdmin()" name="users" :label="`Пользователи (${users.length})`" />
         <q-tab v-if="auth.canAdmin()" name="audit" label="Аудит" />
         <q-tab v-if="auth.canAdmin()" name="logs" label="Журнал" />
-        <q-tab name="reference" label="Справка" />
       </q-tabs>
       <q-separator />
 
@@ -678,75 +673,6 @@ onMounted(async () => {
               <q-item-section class="text-grey-7">
                 {{ logFilter ? 'Под фильтр ничего не подошло.' : 'Записей нет.' }}
               </q-item-section>
-            </q-item>
-          </q-list>
-        </q-tab-panel>
-        <q-tab-panel name="reference">
-          <div class="text-subtitle1 q-mb-sm">Как это работает</div>
-          <div class="jhv-reason q-mb-sm">
-            Те же статьи открываются кнопкой «?» рядом с полями формы задания — там,
-            где вопрос обычно и возникает.
-          </div>
-          <q-list bordered separator class="q-mb-lg">
-            <q-expansion-item
-              v-for="article in app.help?.articles ?? []"
-              :key="article.id"
-              :label="article.title"
-              :caption="article.summary"
-              expand-separator
-              icon="menu_book"
-            >
-              <q-card flat>
-                <q-card-section>
-                  <HelpArticleBody :article="article" />
-                </q-card-section>
-              </q-card>
-            </q-expansion-item>
-          </q-list>
-
-          <div class="text-subtitle1 q-mb-sm">Типы бэкапа</div>
-          <q-list bordered separator class="q-mb-lg">
-            <q-expansion-item
-              v-for="t in app.help?.backup_types ?? []"
-              :key="t.value"
-              :label="t.title"
-              :caption="t.summary"
-              expand-separator
-              icon="backup"
-            >
-              <q-card flat>
-                <q-card-section>
-                  <BackupTypeHelpCard :type="t.value" />
-                  <div class="text-caption text-grey-7 q-mt-sm">
-                    значение в API: <code class="jhv-mono">{{ t.value }}</code>
-                  </div>
-                </q-card-section>
-              </q-card>
-            </q-expansion-item>
-          </q-list>
-
-          <div class="text-subtitle1 q-mb-sm">Режимы проверки</div>
-          <q-list bordered separator dense class="q-mb-lg">
-            <q-item v-for="m in app.meta?.verify_modes ?? []" :key="m.value">
-              <q-item-section>
-                <q-item-label>
-                  {{ m.title }}
-                  <q-badge v-if="m.needs_hypervisor" color="orange" class="q-ml-xs">нужен KVM-хост</q-badge>
-                </q-item-label>
-                <q-item-label caption class="jhv-wrap">{{ m.description }}</q-item-label>
-              </q-item-section>
-              <q-item-section side><code class="jhv-mono">{{ m.value }}</code></q-item-section>
-            </q-item>
-          </q-list>
-
-          <div class="text-subtitle1 q-mb-sm">Восстановительные действия</div>
-          <q-list bordered separator dense>
-            <q-item v-for="a in app.meta?.remediation_actions ?? []" :key="a.value">
-              <q-item-section>
-                <q-item-label>{{ a.title }}</q-item-label>
-                <q-item-label v-if="a.description" caption class="text-negative">{{ a.description }}</q-item-label>
-              </q-item-section>
-              <q-item-section side><code class="jhv-mono">{{ a.value }}</code></q-item-section>
             </q-item>
           </q-list>
         </q-tab-panel>

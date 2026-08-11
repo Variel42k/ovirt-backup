@@ -157,6 +157,7 @@ ssh server 'sudo sh /tmp/ovirt-backup-1.0.0-linux-amd64.run'
 | `sudo sh ./ovirt-backup-*.run --uninstall=docker` | снять только Compose-контейнеры и сеть |
 | `sudo sh ./ovirt-backup-*.run --uninstall=systemd` | снять только `jhvirt.service` |
 | `sudo sh ./ovirt-backup-*.run --uninstall=all` | снять Docker Compose и systemd |
+| `sudo sh ./ovirt-backup-*.run --uninstall=all --remove-config` | дополнительно удалить YAML/env; ключи и данные сохранить |
 | `sh ./ovirt-backup-*.run --extract [каталог]` | только распаковать, ничего не ставить |
 | `sh ./ovirt-backup-*.run --check` | проверить целостность файла |
 | `sh ./ovirt-backup-*.run --version` | версия и платформа без распаковки |

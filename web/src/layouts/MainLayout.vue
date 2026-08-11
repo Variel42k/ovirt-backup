@@ -26,6 +26,7 @@ const links = [
   { name: 'retention', label: 'Хранение', icon: 'auto_delete' },
   { name: 'storages', label: 'Хранилища', icon: 'inventory_2' },
   { name: 'alerts', label: 'Оповещения', icon: 'notifications_active' },
+  { name: 'documentation', label: 'Документация', icon: 'menu_book' },
   { name: 'settings', label: 'Настройки', icon: 'settings' },
 ]
 

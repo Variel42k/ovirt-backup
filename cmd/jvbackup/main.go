@@ -508,7 +508,7 @@ func cmdInspect(ctx context.Context, args []string) error {
 		if disk.BackupCandidate() {
 			fmt.Printf("    %-6s %-8s %-8s копируется%s\n",
 				disk.Target, disk.Format, disk.Bus,
-				map[bool]string{true: "", false: " (без CBT)"}[disk.SupportsCBT()])
+				map[bool]string{true: "", false: " (без отслеживания изменений)"}[disk.SupportsCBT()])
 			continue
 		}
 		fmt.Printf("    %-6s %-8s %-8s пропускается: %s\n",

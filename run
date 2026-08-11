@@ -453,6 +453,7 @@ make_installer() {
 #   sudo sh ./@NAME@.run                установить или обновить
 #   sudo sh ./@NAME@.run --uninstall    выбрать цель удаления
 #   sudo sh ./@NAME@.run --uninstall=systemd|docker|all
+#   sudo sh ./@NAME@.run --uninstall=all --remove-config
 #   sh ./@NAME@.run --extract [каталог] только распаковать, не устанавливать
 #   sh ./@NAME@.run --check             проверить целостность файла
 #   sh ./@NAME@.run --version
@@ -520,6 +521,7 @@ ovirt-backup $VERSION ($PLATFORM) — установщик в одном фай�
   sudo sh ./$NAME.run                установить или обновить
   sudo sh ./$NAME.run --uninstall    выбрать цель удаления
   sudo sh ./$NAME.run --uninstall=systemd|docker|all
+  sudo sh ./$NAME.run --uninstall=all --remove-config
   sh ./$NAME.run --extract [каталог] только распаковать, не устанавливать
   sh ./$NAME.run --check             проверить целостность файла
   sh ./$NAME.run --version

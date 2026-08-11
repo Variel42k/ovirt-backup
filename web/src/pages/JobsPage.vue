@@ -533,11 +533,11 @@ const columns = [
                 ]"
                 emit-value
                 map-options
-                label="Если CBT станет недоступен"
+                label="Если отслеживание изменений станет недоступно"
                 outlined
                 dense
               >
-                <template #append><HelpButton article="cbt" label="Что такое CBT" /></template>
+                <template #append><HelpButton article="changed-blocks" label="Как отслеживаются изменения" /></template>
               </q-select>
             </div>
           </template>

@@ -7,11 +7,11 @@ import HelpArticleBody from './HelpArticleBody.vue'
 // A question mark next to the field it explains.
 //
 // The point is the placement: an operator picking a backup type wants to know
-// what CBT is at that moment, not after finding the documentation. The article
+// how changed-block tracking works at that moment, without leaving the form. The article
 // is fetched on first open, so pages that never ask pay nothing.
 
 const props = defineProps<{
-  /** Идентификатор статьи: cbt, quiesce, retention, verify, hot-backup, chains. */
+  /** Идентификатор статьи: changed-blocks, quiesce, retention, verify, hot-backup, chains. */
   article: string
   label?: string
   dense?: boolean

@@ -487,18 +487,26 @@ export interface BootReport {
 
 /** Один отрисовываемый кусок статьи справки. */
 export interface HelpBlock {
-  kind: 'text' | 'list' | 'table' | 'note' | 'warning'
+  kind: 'text' | 'list' | 'table' | 'flow' | 'note' | 'warning'
   heading?: string
   text?: string
   items?: string[]
   columns?: string[]
   rows?: string[][]
+  steps?: HelpStep[]
+}
+
+export interface HelpStep {
+  title: string
+  detail: string
+  icon?: string
 }
 
 export interface HelpArticle {
   id: string
   title: string
   summary: string
+  category?: string
   blocks: HelpBlock[]
 }
 

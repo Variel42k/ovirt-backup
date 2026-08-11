@@ -394,7 +394,7 @@ func buildOptions(a Assessment) []Option {
 			} else if !cbtReady {
 				o.Rationale = "работает всегда, независимо от формата дисков и версии движка"
 			} else {
-				o.Rationale = "запасной вариант: полная копия без CBT, но каждый раз читается весь занятый объём"
+				o.Rationale = "запасной вариант: полная копия без отслеживания изменений, но каждый раз читается весь занятый объём"
 			}
 		case model.BackupConfig:
 			o.Rationale = "секунды на выполнение; защищает от потери описания ВМ, но не от потери данных"
@@ -462,7 +462,7 @@ func buildPresets(a Assessment) []SchedulePreset {
 			EstimatedFootprint: (increment*7 + a.TotalUsed) * 4,
 		},
 		{
-			Name:               "Каждые 4 часа — короткий RPO",
+			Name:               "Каждые 4 часа",
 			Description:        "Инкремент каждые 4 часа, полная копия раз в сутки. Для систем, где терять больше нескольких часов нельзя.",
 			Type:               model.BackupIncremental,
 			Schedule:           "0 */4 * * *",

@@ -114,7 +114,7 @@ onBeforeUnmount(() => {
                 <q-item-label>
                   {{ s.server.name }}
                   <q-badge v-if="!s.server.supports_cbt && s.server.state === 'online'" color="grey-7" class="q-ml-sm">
-                    без CBT
+                    без отслеживания изменений
                   </q-badge>
                 </q-item-label>
                 <q-item-label caption>

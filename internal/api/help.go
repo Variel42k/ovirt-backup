@@ -11,30 +11,38 @@ import (
 // It lives on the backend for the same reason the enum titles do: the service
 // already owns the vocabulary, and a copy in the SPA would drift from it the
 // first time a type gains a caveat. The UI renders these structures next to the
-// fields they explain, so the answer is where the question is asked — an
-// operator choosing a backup type should not have to go find out what "CBT"
-// means somewhere else.
+// fields they explain, so the answer is where the question is asked. The same
+// content also feeds the full documentation page in the SPA.
 //
 // The content is deliberately specific about limits and failure modes. A
 // reference that only lists capabilities teaches an operator to be surprised.
 
 // helpBlock is one renderable piece of an article.
 type helpBlock struct {
-	// Kind — как отрисовать: text, list, table, note, warning.
+	// Kind — как отрисовать: text, list, table, flow, note, warning.
 	Kind    string     `json:"kind"`
 	Heading string     `json:"heading,omitempty"`
 	Text    string     `json:"text,omitempty"`
 	Items   []string   `json:"items,omitempty"`
 	Columns []string   `json:"columns,omitempty"`
 	Rows    [][]string `json:"rows,omitempty"`
+	Steps   []helpStep `json:"steps,omitempty"`
+}
+
+// helpStep is one node in a technical data-flow diagram.
+type helpStep struct {
+	Title  string `json:"title"`
+	Detail string `json:"detail"`
+	Icon   string `json:"icon,omitempty"`
 }
 
 // helpArticle is one reference topic.
 type helpArticle struct {
-	ID      string      `json:"id"`
-	Title   string      `json:"title"`
-	Summary string      `json:"summary"`
-	Blocks  []helpBlock `json:"blocks"`
+	ID       string      `json:"id"`
+	Title    string      `json:"title"`
+	Summary  string      `json:"summary"`
+	Category string      `json:"category,omitempty"`
+	Blocks   []helpBlock `json:"blocks"`
 }
 
 // backupTypeHelp explains one strategy in the shape the job form renders.
@@ -77,7 +85,7 @@ func backupTypeHelpEntries() []backupTypeHelp {
 				"с которой следующий запуск сравнит состояние. Гость про это не знает и не останавливается.",
 			Requires: []string{
 				"Движок с поддержкой Backup API (oVirt 4.4+ и форки) или libvirt 6.0+ для KVM",
-				"Включённое отслеживание изменённых блоков (CBT) на дисках ВМ",
+				"Включённое отслеживание изменённых блоков на дисках ВМ",
 			},
 			Restore: "Восстанавливается сам по себе: нужен только этот запуск, никаких других копий.",
 			GoodFor: "Первый бэкап новой ВМ и периодическая точка отсчёта, чтобы цепочка инкрементов не росла бесконечно.",
@@ -85,17 +93,17 @@ func backupTypeHelpEntries() []backupTypeHelp {
 				"Читает весь занятый объём диска — самый долгий из ежедневных вариантов",
 				"Пустые и освобождённые блоки не копируются, поэтому «полный» обычно заметно меньше номинального размера диска",
 			},
-			Related: []string{"cbt", "hot-backup", "chains"},
+			Related: []string{"changed-blocks", "hot-backup", "chains"},
 		},
 		{
 			Value:          string(model.BackupIncremental),
 			Title:          model.BackupIncremental.Title(),
 			Summary:        "Только блоки, изменившиеся с прошлого запуска любого типа. Самый быстрый и компактный вариант.",
 			VMKeepsRunning: true,
-			HowItWorks: "Гипервизор ведёт карту изменённых блоков (CBT). Запуск спрашивает у неё, " +
+			HowItWorks: "Гипервизор ведёт карту изменённых блоков. Запуск спрашивает у неё, " +
 				"что поменялось с checkpoint предыдущей копии, и забирает только эти блоки.",
 			Requires: []string{
-				"Включённый CBT на дисках",
+				"Включённое отслеживание изменений на дисках",
 				"Предыдущая копия в том же хранилище, на которую можно опереться",
 			},
 			Restore: "Собирается вся цепочка: полный бэкап и все инкременты после него. " +
@@ -106,7 +114,7 @@ func backupTypeHelpEntries() []backupTypeHelp {
 				"Если опорной точки нет или checkpoint потерян, запуск честно выполнится как полный, а причина попадёт в запись о нём",
 				"Чем длиннее цепочка, тем больше звеньев нужно для восстановления — ограничьте её параметром «полный каждые N»",
 			},
-			Related: []string{"cbt", "raw-disks", "chains", "retention"},
+			Related: []string{"changed-blocks", "raw-disks", "chains", "retention"},
 		},
 		{
 			Value:          string(model.BackupDifferential),
@@ -116,7 +124,7 @@ func backupTypeHelpEntries() []backupTypeHelp {
 			HowItWorks: "Как инкремент, но точка отсчёта всегда одна — последний полный бэкап, " +
 				"а не предыдущий запуск. Каждая следующая разностная копия больше предыдущей.",
 			Requires: []string{
-				"Включённый CBT на дисках",
+				"Включённое отслеживание изменений на дисках",
 				"Полный бэкап в том же хранилище",
 			},
 			Restore: "Всегда ровно две точки: полный бэкап и одна разностная копия. " +
@@ -126,7 +134,7 @@ func backupTypeHelpEntries() []backupTypeHelp {
 			Caveats: []string{
 				"Занимает больше инкремента и растёт до следующего полного бэкапа",
 			},
-			Related: []string{"cbt", "raw-disks", "chains"},
+			Related: []string{"changed-blocks", "raw-disks", "chains"},
 		},
 		{
 			Value:          string(model.BackupSnapshot),
@@ -141,14 +149,14 @@ func backupTypeHelpEntries() []backupTypeHelp {
 				"Свободное место в домене хранения под временный слой",
 			},
 			Restore: "Восстанавливается сам по себе, как и полный бэкап.",
-			GoodFor: "Диски в формате raw, старые движки и любой случай, когда CBT включить нельзя. " +
+			GoodFor: "Диски в формате raw, старые движки и любой случай, когда отслеживание изменений включить нельзя. " +
 				"Для raw-дисков это не запасной, а основной вариант — и полноценный.",
 			Caveats: []string{
 				"Инкременты от такой копии невозможны: checkpoint не создаётся",
 				"Слияние снапшота после копирования нагружает хранилище",
 				"Если ВМ активно пишет, временный слой растёт — на переполненном домене это риск",
 			},
-			Related: []string{"raw-disks", "cbt", "hot-backup"},
+			Related: []string{"raw-disks", "changed-blocks", "hot-backup"},
 		},
 		{
 			Value:          string(model.BackupOVA),
@@ -183,8 +191,194 @@ func backupTypeHelpEntries() []backupTypeHelp {
 	}
 }
 
-func helpArticles() []helpArticle {
+func technicalHelpArticles() []helpArticle {
 	return []helpArticle{
+		{
+			ID:       "backup-pipeline",
+			Title:    "Путь данных от ВМ до хранилища",
+			Summary:  "Гипервизор фиксирует момент диска, сервис читает только нужные области и сохраняет их чанками. ВМ продолжает работать.",
+			Category: "Архитектура бэкапа",
+			Blocks: []helpBlock{
+				{
+					Kind:    "note",
+					Heading: "Главная гарантия",
+					Text: "Для дисковых бэкапов выключение ВМ не требуется. В точке начала гипервизор " +
+						"отделяет состояние, которое читает бэкап, от новых записей гостя. Пауза возможна " +
+						"только на время необязательной заморозки файловых систем, обычно это доли секунды.",
+				},
+				{
+					Kind:    "flow",
+					Heading: "Общий конвейер",
+					Steps: []helpStep{
+						{Title: "Работающая ВМ", Detail: "Гость продолжает читать и записывать диски", Icon: "computer"},
+						{Title: "Точка диска", Detail: "oVirt Backup API, снапшот или libvirt backup", Icon: "camera_alt"},
+						{Title: "Поток блоков", Detail: "ovirt-imageio по HTTPS или NBD через SSH", Icon: "sync_alt"},
+						{Title: "Обработка", Detail: "Чанки, сжатие, шифрование, SHA-256", Icon: "memory"},
+						{Title: "Репозиторий", Detail: "Локальный путь, S3 или SFTP", Icon: "inventory_2"},
+					},
+				},
+				{
+					Kind:    "table",
+					Heading: "Компоненты и ответственность",
+					Columns: []string{"Компонент", "Взаимодействие", "Что делает"},
+					Rows: [][]string{
+						{"ovirt-backup", "REST API и фоновые задания Go", "планирует запуск, фиксирует тип и алгоритм сжатия, пишет состояние в PostgreSQL"},
+						{"oVirt Engine", "HTTPS REST API", "создаёт точку бэкапа или снапшот и выдаёт передачу диска"},
+						{"ovirt-imageio", "HTTPS, диапазонное чтение и extents", "отдаёт логическое содержимое диска и карту занятых или изменённых областей"},
+						{"go-libvirt, libvirt и QEMU", "libvirt RPC через SSH", "создают pull-mode backup, временные scratch-файлы и NBD-экспорты"},
+						{"NBD", "unix-сокет гипервизора через SSH-туннель", "отдаёт блоки и метаданные о выделенных или изменённых областях"},
+						{"minio-go и pkg/sftp", "S3 API или SFTP", "записывают объекты данных, манифесты дисков и описание ВМ в удалённое хранилище"},
+						{"klauspost/compress", "zstd, gzip или s2", "сжимает каждый чанк независимо; несжимаемый чанк сохраняется без сжатия"},
+					},
+				},
+				{
+					Kind:    "text",
+					Heading: "Что именно сохраняется",
+					Text: "Сервис не копирует исходный файл диска как один файл. Логический образ делится " +
+						"на чанки. Нулевые области полного бэкапа пропускаются; присутствующие чанки сжимаются " +
+						"выбранным алгоритмом, при необходимости шифруются AES-GCM и получают SHA-256. " +
+						"Манифест хранит смещение, длину, контрольную сумму, алгоритм и ссылку на объект данных.",
+				},
+			},
+		},
+		{
+			ID:       "ovirt-data-path",
+			Title:    "Как снимается бэкап в oVirt",
+			Summary:  "Управление идёт через REST API движка, а диски читаются через ovirt-imageio. Для raw предусмотрен горячий снапшот.",
+			Category: "Архитектура бэкапа",
+			Blocks: []helpBlock{
+				{
+					Kind:    "flow",
+					Heading: "Управление и поток данных",
+					Steps: []helpStep{
+						{Title: "ovirt-backup", Detail: "StartBackup или CreateSnapshot", Icon: "backup"},
+						{Title: "oVirt Engine", Detail: "фиксирует точку и возвращает идентификатор", Icon: "dns"},
+						{Title: "Image Transfer", Detail: "создаёт передачу выбранного диска", Icon: "swap_horiz"},
+						{Title: "ovirt-imageio", Detail: "extents и HTTP Range", Icon: "cloud_download"},
+						{Title: "Чанки бэкапа", Detail: "сжатие и запись в репозиторий", Icon: "save"},
+					},
+				},
+				{
+					Kind:    "text",
+					Heading: "Полный и последующие запуски для qcow2",
+					Text: "Сервис вызывает Backup API для всех дисков ВМ. Движок фиксирует новую точку " +
+						"отсчёта, а для последующего запуска принимает идентификатор предыдущей точки. " +
+						"После состояния ready гостевые файловые системы размораживаются, и длительное чтение " +
+						"идёт уже из зафиксированного представления. Для полного запуска imageio сообщает " +
+						"занятые области, для последующего - изменённые. Сервис открывает отдельную передачу " +
+						"каждого диска и читает эти диапазоны по HTTPS.",
+				},
+				{
+					Kind:    "text",
+					Heading: "raw и режим через снапшот",
+					Text: "Для raw нет встроенной карты изменений, поэтому сервис создаёт временный " +
+						"снапшот oVirt без памяти ВМ. Новые записи гостя уходят в новый слой, а imageio " +
+						"читает неизменяемый образ снапшота полностью. После закрытия передач снапшот " +
+						"удаляется, и движок сливает накопленные записи. Машина всё это время работает.",
+				},
+				{
+					Kind: "note",
+					Text: "Независимо от исходного формата oVirt отдаёт сервису логический поток в формате raw. " +
+						"Это не прямое чтение активного файла qcow2 или raw на домене хранения.",
+				},
+				{
+					Kind: "warning",
+					Text: "Сервис должен разрешать DNS-имена движка и гипервизоров и иметь сетевой доступ " +
+						"к REST API и выбранной точке ovirt-imageio. Незакрытая передача или неудалённый " +
+						"временный снапшот требуют проверки в движке.",
+				},
+			},
+		},
+		{
+			ID:       "kvm-data-path",
+			Title:    "Как снимается бэкап в KVM/libvirt",
+			Summary:  "Сервис подключается к libvirt и NBD через один SSH-канал; QEMU сохраняет старые блоки до их чтения.",
+			Category: "Архитектура бэкапа",
+			Blocks: []helpBlock{
+				{
+					Kind:    "flow",
+					Heading: "Управление и поток данных",
+					Steps: []helpStep{
+						{Title: "ovirt-backup", Detail: "SSH на порт 22", Icon: "backup"},
+						{Title: "go-libvirt", Detail: "RPC к libvirt-sock", Icon: "settings_ethernet"},
+						{Title: "QEMU backup", Detail: "copy-before-write и scratch", Icon: "content_copy"},
+						{Title: "NBD export", Detail: "блоки и метаданные", Icon: "swap_horiz"},
+						{Title: "Репозиторий", Detail: "чанки и манифесты", Icon: "inventory_2"},
+					},
+				},
+				{
+					Kind:    "text",
+					Heading: "Как сохраняется момент работающей ВМ",
+					Text: "Через библиотеку github.com/digitalocean/go-libvirt сервис вызывает " +
+						"DomainBackupBegin в pull-режиме. QEMU ставит фильтр copy-before-write. Если гость " +
+						"перезаписывает блок до того, как его прочитал бэкап, старое содержимое сначала " +
+						"попадает в scratch-файл. NBD читает старый блок из scratch либо ещё не изменённый " +
+						"блок из активного слоя. Поэтому весь экспорт относится к одному моменту, хотя ВМ пишет дальше.",
+				},
+				{
+					Kind:    "table",
+					Heading: "raw и qcow2 на KVM",
+					Columns: []string{"Формат", "Полная копия без остановки", "Последующие изменения", "Источник блоков"},
+					Rows: [][]string{
+						{"qcow2", "да", "карта хранится в заголовке qcow2", "NBD: base:allocation или карта изменений"},
+						{"raw", "да", "недоступно, каждый запуск полный", "NBD: занятые области полного экспорта"},
+					},
+				},
+				{
+					Kind:    "text",
+					Heading: "Сеть и файлы на гипервизоре",
+					Text: "SSH переносит и управляющий RPC к /var/run/libvirt/libvirt-sock, и поток " +
+						"локального NBD unix-сокета; открывать NBD-порт наружу не нужно. На гипервизоре " +
+						"создаются временные scratch-файлы. Они растут только на объём блоков, которые гость " +
+						"успел перезаписать во время чтения, и удаляются после EndBackup.",
+				},
+				{
+					Kind: "warning",
+					Text: "В scratch_dir нужен запас свободного места. Если сервис аварийно завершился, " +
+						"открытое задание удерживает copy-before-write и scratch продолжает расти. Следующий " +
+						"запуск пытается закрыть такое задание до начала нового.",
+				},
+			},
+		},
+		{
+			ID:       "consistency-levels",
+			Title:    "Согласованность копии работающей ВМ",
+			Summary:  "Остановка ВМ не нужна, но для баз данных важно отличать согласованность диска, файловой системы и приложения.",
+			Category: "Архитектура бэкапа",
+			Blocks: []helpBlock{
+				{
+					Kind:    "table",
+					Columns: []string{"Уровень", "Как получается", "Что гарантирует"},
+					Rows: [][]string{
+						{"Согласованность диска", "точка гипервизора без гостевого агента", "состояние как после внезапного отключения питания"},
+						{"Согласованность файловой системы", "fsfreeze через qemu-guest-agent", "буферы файловой системы сброшены, запись временно приостановлена"},
+						{"Согласованность приложения", "VSS либо штатный backup mode приложения", "транзакции и данные приложения подготовлены к копированию"},
+					},
+				},
+				{
+					Kind:    "flow",
+					Heading: "Запуск с заморозкой файловых систем",
+					Steps: []helpStep{
+						{Title: "Сброс буферов", Detail: "qemu-guest-agent выполняет fsfreeze", Icon: "ac_unit"},
+						{Title: "Фиксация точки", Detail: "Backup API, снапшот или DomainBackupBegin", Icon: "camera_alt"},
+						{Title: "Разморозка", Detail: "выполняется сразу после фиксации", Icon: "play_circle"},
+						{Title: "Чтение", Detail: "длительный перенос идёт без паузы ВМ", Icon: "cloud_download"},
+					},
+				},
+				{
+					Kind: "warning",
+					Text: "fsfreeze не переводит PostgreSQL, Oracle, Microsoft SQL Server и другие СУБД " +
+						"в режим резервного копирования. Для гарантии на уровне транзакций настройте VSS " +
+						"или pre/post-команды средствами самого приложения. Без этого копия остаётся " +
+						"пригодной для аварийного восстановления, но незаписанные транзакции могут потеряться.",
+				},
+			},
+		},
+	}
+}
+
+func helpArticles() []helpArticle {
+	return append(technicalHelpArticles(), []helpArticle{
 		{
 			ID:      "hot-backup",
 			Title:   "Останавливается ли ВМ во время бэкапа",
@@ -201,7 +395,7 @@ func helpArticles() []helpArticle {
 					Heading: "Что происходит с ВМ",
 					Columns: []string{"Тип", "ВМ работает", "Что чувствует гость"},
 					Rows: [][]string{
-						{"Полный (CBT)", "да", "ничего"},
+						{"Полный с точкой отсчёта", "да", "ничего"},
 						{"Инкрементальный", "да", "ничего"},
 						{"Разностный", "да", "ничего"},
 						{"Полный через снапшот", "да", "короткая пауза ввода-вывода при создании и удалении снапшота"},
@@ -232,7 +426,7 @@ func helpArticles() []helpArticle {
 			Blocks: []helpBlock{
 				{
 					Kind: "warning",
-					Text: "Если в вариантах бэкапа написано «недоступно» напротив полного (CBT), " +
+					Text: "Если в вариантах бэкапа написано «недоступно» напротив полного с точкой отсчёта, " +
 						"инкрементального и разностного — это не значит, что ВМ нельзя защитить. " +
 						"Вариант «Полный через снапшот» доступен, и он снимает полную копию " +
 						"без остановки машины.",
@@ -249,7 +443,7 @@ func helpArticles() []helpArticle {
 				{
 					Kind:    "table",
 					Heading: "Что меняется, а что нет",
-					Columns: []string{"Свойство", "qcow2 с CBT", "raw"},
+					Columns: []string{"Свойство", "qcow2 с отслеживанием изменений", "raw"},
 					Rows: [][]string{
 						{"ВМ останавливается", "нет", "нет"},
 						{"Полнота копии", "все данные", "все данные"},
@@ -289,13 +483,13 @@ func helpArticles() []helpArticle {
 			},
 		},
 		{
-			ID:      "cbt",
-			Title:   "CBT — отслеживание изменённых блоков",
+			ID:      "changed-blocks",
+			Title:   "Отслеживание изменённых блоков",
 			Summary: "Карта того, какие блоки диска изменились с прошлого раза. Без неё инкрементальные копии невозможны.",
 			Blocks: []helpBlock{
 				{
 					Kind: "text",
-					Text: "CBT (Changed Block Tracking) — это карта, которую гипервизор ведёт сам, " +
+					Text: "Это карта, которую гипервизор ведёт сам, " +
 						"пока ВМ работает: для каждого блока диска он помнит, менялся ли тот после " +
 						"последней отметки. Отметка называется checkpoint.",
 				},
@@ -510,5 +704,5 @@ func helpArticles() []helpArticle {
 				},
 			},
 		},
-	}
+	}...)
 }

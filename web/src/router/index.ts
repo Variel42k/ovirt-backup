@@ -32,6 +32,7 @@ const routes = [
       { path: 'retention', name: 'retention', component: () => import('@/pages/RetentionPage.vue') },
       { path: 'storages', name: 'storages', component: () => import('@/pages/StoragesPage.vue') },
       { path: 'alerts', name: 'alerts', component: () => import('@/pages/AlertsPage.vue') },
+      { path: 'documentation', name: 'documentation', component: () => import('@/pages/DocumentationPage.vue') },
       { path: 'settings', name: 'settings', component: () => import('@/pages/SettingsPage.vue') },
     ],
   },

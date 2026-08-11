@@ -106,6 +106,7 @@ HTTPS через nginx, который передаёт запросы на ло
 | `--uninstall=docker` | снять только Compose-контейнеры и сеть |
 | `--uninstall=systemd` | снять только `jhvirt.service` |
 | `--uninstall=all` | снять Docker Compose и systemd |
+| `--remove-config` | вместе с `--uninstall` удалить YAML/env выбранной установки |
 | `PREFIX=/srv/jhvirt` | установить bundle не в `/opt/jhvirt` |
 
 `--mode podman` не является допустимым режимом и завершается подсказкой выбрать
@@ -545,8 +546,10 @@ sudo sh /tmp/ovirt-backup-<новая-версия>.run \
 ## 13. Удаление
 
 Интерактивно запустите установщик без аргументов и выберите **удалить**. Затем
-выберите Docker Compose, systemd или оба варианта. Перед действием будет
-отдельное подтверждение.
+выберите Docker Compose, systemd или оба варианта. Следующий выбор определяет,
+сохранить или удалить YAML/env-файлы. Безопасное значение по умолчанию —
+сохранить. Перед действием будет отдельное подтверждение с итоговым составом
+удаления.
 
 Для автоматизации:
 
@@ -554,6 +557,7 @@ sudo sh /tmp/ovirt-backup-<новая-версия>.run \
 sudo sh /tmp/ovirt-backup-*.run --uninstall=docker
 sudo sh /tmp/ovirt-backup-*.run --uninstall=systemd
 sudo sh /tmp/ovirt-backup-*.run --uninstall=all
+sudo sh /tmp/ovirt-backup-*.run --uninstall=all --remove-config
 ```
 
 Из репозитория:
@@ -563,6 +567,7 @@ cd deploy
 sudo ./install.sh --uninstall=docker
 sudo ./install.sh --uninstall=systemd
 sudo ./install.sh --uninstall=all
+sudo ./install.sh --uninstall=all --remove-config
 ```
 
 `docker` останавливает и удаляет только Compose-контейнеры и сеть, `systemd`
@@ -570,7 +575,7 @@ sudo ./install.sh --uninstall=all
 варианта используют один `PREFIX`, общие бинарники не удаляются при снятии
 только одного варианта.
 
-Во всех режимах намеренно сохраняются:
+Без `--remove-config` во всех режимах намеренно сохраняются:
 
 - PostgreSQL и её данные;
 - `config/ovirt-backup.yaml` и `jhvirt.env`;
@@ -581,6 +586,19 @@ sudo ./install.sh --uninstall=all
 Полное удаление этих данных выполняйте только после отдельной резервной копии.
 Потеря `secret.key` делает сохранённые пароли и зашифрованные копии
 нерасшифровываемыми.
+
+`--remove-config` удаляет только конфигурацию выбранной установки:
+
+- Docker: Compose `.env`;
+- systemd: `jhvirt.env`;
+- при снятии последнего способа запуска или `--uninstall=all`: также YAML и
+  прежние `.new`/legacy-варианты из `$PREFIX/config`.
+
+Если Docker и systemd используют общий `$PREFIX`, YAML сохраняется при снятии
+только одного варианта, поскольку он нужен оставшемуся. При запуске установщика
+из Git-репозитория versioned-файл `config/ovirt-backup.yaml` не удаляется как
+часть исходного кода. PostgreSQL, `secret.key`, volumes, бэкапы и восстановленные
+образы `--remove-config` не затрагивает.
 
 ## 14. Что резервировать в самом сервисе
 

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"strings"
 	"testing"
 
 	"adveng/jh_virt/internal/model"
@@ -63,7 +64,7 @@ func TestRelatedArticlesExist(t *testing.T) {
 // Blocks are rendered by kind; an unknown kind would silently disappear.
 func TestArticleBlocksAreRenderable(t *testing.T) {
 	renderable := map[string]bool{
-		"text": true, "list": true, "table": true, "note": true, "warning": true,
+		"text": true, "list": true, "table": true, "flow": true, "note": true, "warning": true,
 	}
 
 	for _, a := range helpArticles() {
@@ -87,6 +88,15 @@ func TestArticleBlocksAreRenderable(t *testing.T) {
 							a.ID, i, r, len(row), len(b.Columns))
 					}
 				}
+			} else if b.Kind == "flow" {
+				if len(b.Steps) < 2 {
+					t.Errorf("статья %q, блок %d: в схеме должно быть не меньше двух шагов", a.ID, i)
+				}
+				for step, value := range b.Steps {
+					if value.Title == "" || value.Detail == "" {
+						t.Errorf("статья %q, блок %d, шаг %d заполнен не полностью", a.ID, i, step)
+					}
+				}
 			} else if b.Text == "" && len(b.Items) == 0 {
 				t.Errorf("статья %q, блок %d: нет содержимого", a.ID, i)
 			}
@@ -101,9 +111,31 @@ func TestKeyTopicsArePresent(t *testing.T) {
 	for _, a := range helpArticles() {
 		known[a.ID] = true
 	}
-	for _, id := range []string{"cbt", "quiesce", "hot-backup", "retention", "verify", "chains"} {
+	for _, id := range []string{
+		"backup-pipeline", "ovirt-data-path", "kvm-data-path", "consistency-levels",
+		"changed-blocks", "quiesce", "hot-backup", "retention", "verify", "chains",
+	} {
 		if !known[id] {
 			t.Errorf("в справке нет статьи %q", id)
+		}
+	}
+}
+
+func TestUserFacingHelpAvoidsUnexplainedRecoveryAcronyms(t *testing.T) {
+	for _, entry := range backupTypeHelpEntries() {
+		for _, text := range append([]string{entry.Title, entry.Summary, entry.HowItWorks}, entry.Requires...) {
+			if strings.Contains(text, "CBT") || strings.Contains(text, "RPO") {
+				t.Errorf("тип %q содержит внутреннее сокращение: %q", entry.Value, text)
+			}
+		}
+	}
+	for _, article := range helpArticles() {
+		for _, block := range article.Blocks {
+			for _, text := range append([]string{article.Title, article.Summary, block.Heading, block.Text}, block.Items...) {
+				if strings.Contains(text, "CBT") || strings.Contains(text, "RPO") {
+					t.Errorf("статья %q содержит внутреннее сокращение: %q", article.ID, text)
+				}
+			}
 		}
 	}
 }

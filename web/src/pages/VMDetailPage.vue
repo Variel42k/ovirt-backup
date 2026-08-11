@@ -37,7 +37,7 @@ const verifyOptions = ref({
 })
 const starting = ref(false)
 
-/** Все диски ВМ не умеют CBT: инкременты невозможны, но полная копия — да. */
+/** Если диски не отслеживают изменения, инкременты невозможны, но полная копия доступна. */
 const allDisksRaw = computed(
   () => (recommendation.value?.assessment.disk_count ?? 0) > 0 &&
         recommendation.value?.assessment.cbt_possible_disks === 0,
@@ -406,7 +406,7 @@ onMounted(load)
                   dense
                   size="sm"
                   color="primary"
-                  label="Включить CBT"
+                  label="Включить отслеживание изменений"
                   @click="enableCBT(disk.id)"
                 />
               </q-item-section>

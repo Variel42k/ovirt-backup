@@ -80,6 +80,7 @@ func (d *Dispatcher) executeLibvirt(ctx context.Context, srv *model.Server, req 
 
 	run := &model.BackupRun{
 		ID:              uuid.NewString(),
+		JobRunID:        req.JobRunID,
 		JobID:           req.JobID,
 		JobName:         req.JobName,
 		ServerID:        srv.ID,

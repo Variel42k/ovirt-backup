@@ -5,10 +5,13 @@ package config
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/spf13/viper"
+
+	"adveng/jh_virt/internal/model"
 )
 
 const envPrefix = "JHV"
@@ -21,6 +24,7 @@ type Config struct {
 	Logging   LoggingConfig   `mapstructure:"logging"`
 	Secrets   SecretsConfig   `mapstructure:"secrets"`
 	Monitor   MonitorConfig   `mapstructure:"monitor"`
+	Metrics   MetricsConfig   `mapstructure:"metrics"`
 	Backup    BackupConfig    `mapstructure:"backup"`
 	Scheduler SchedulerConfig `mapstructure:"scheduler"`
 }
@@ -55,6 +59,11 @@ type AuthConfig struct {
 	BootstrapUser     string        `mapstructure:"bootstrap_user"`
 	BootstrapPassword string        `mapstructure:"bootstrap_password"`
 	APITokens         []string      `mapstructure:"api_tokens"`
+}
+
+type MetricsConfig struct {
+	Enabled   bool   `mapstructure:"enabled"`
+	TokenFile string `mapstructure:"token_file"`
 }
 
 // DatabaseConfig описывает подключение к PostgreSQL.
@@ -266,8 +275,9 @@ type MonitorConfig struct {
 	CollectIOStats bool `mapstructure:"collect_io_stats"`
 	// IORetention — сколько хранить эти метрики. Они мельче проб состояния и
 	// копятся быстрее, поэтому срок отдельный.
-	IORetention time.Duration     `mapstructure:"io_retention"`
-	Remediation RemediationConfig `mapstructure:"remediation"`
+	IORetention   time.Duration               `mapstructure:"io_retention"`
+	BackupQuality model.BackupQualitySettings `mapstructure:"backup_quality"`
+	Remediation   RemediationConfig           `mapstructure:"remediation"`
 }
 
 // RemediationConfig gates the automatic "revive" actions. Everything that can
@@ -417,6 +427,31 @@ func (c *Config) Validate() error {
 	if c.Monitor.Interval < time.Second {
 		return fmt.Errorf("monitor.interval must be >= 1s, got %s", c.Monitor.Interval)
 	}
+	if err := c.Monitor.BackupQuality.Validate(); err != nil {
+		return fmt.Errorf("monitor.backup_quality: %w", err)
+	}
+	if c.Metrics.Enabled {
+		if strings.TrimSpace(c.Metrics.TokenFile) == "" {
+			return fmt.Errorf("metrics.enabled requires metrics.token_file")
+		}
+		body, err := os.ReadFile(c.Metrics.TokenFile)
+		if err != nil {
+			return fmt.Errorf("metrics.token_file %q: %w", c.Metrics.TokenFile, err)
+		}
+		if strings.TrimSpace(string(body)) == "" {
+			return fmt.Errorf("metrics.token_file %q is empty", c.Metrics.TokenFile)
+		}
+		info, err := os.Stat(c.Metrics.TokenFile)
+		if err != nil {
+			return fmt.Errorf("metrics.token_file %q: %w", c.Metrics.TokenFile, err)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("metrics.token_file %q is not a regular file", c.Metrics.TokenFile)
+		}
+		if info.Mode().Perm()&0o077 != 0 {
+			return fmt.Errorf("metrics.token_file %q must not be accessible by group or others (expected mode 0600)", c.Metrics.TokenFile)
+		}
+	}
 	if _, err := time.LoadLocation(c.Scheduler.Timezone); err != nil {
 		return fmt.Errorf("scheduler.timezone %q: %w", c.Scheduler.Timezone, err)
 	}
@@ -451,6 +486,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("auth.bootstrap_user", "admin")
 	v.SetDefault("auth.bootstrap_password", "")
 	v.SetDefault("auth.api_tokens", []string{})
+	v.SetDefault("metrics.enabled", false)
+	v.SetDefault("metrics.token_file", "")
 
 	// Пустое значение по умолчанию нужно, чтобы ключ существовал: привязка
 	// переменных окружения идёт по списку известных ключей, и без этой строки
@@ -484,6 +521,16 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("monitor.remediation.enabled", true)
 	v.SetDefault("monitor.collect_io_stats", true)
 	v.SetDefault("monitor.io_retention", "168h")
+	v.SetDefault("monitor.backup_quality.stale_intervals", 2)
+	v.SetDefault("monitor.backup_quality.verify_max_age_days", 7)
+	v.SetDefault("monitor.backup_quality.performance_window_runs", 10)
+	v.SetDefault("monitor.backup_quality.performance_degradation_percent", 50)
+	v.SetDefault("monitor.backup_quality.performance_consecutive_runs", 3)
+	v.SetDefault("monitor.backup_quality.storage_warning_free_percent", 15)
+	v.SetDefault("monitor.backup_quality.storage_critical_free_percent", 5)
+	v.SetDefault("monitor.backup_quality.storage_warning_forecast_days", 30)
+	v.SetDefault("monitor.backup_quality.storage_critical_forecast_days", 7)
+	v.SetDefault("monitor.backup_quality.history_retention_days", 90)
 	v.SetDefault("monitor.remediation.dry_run", true)
 	v.SetDefault("monitor.remediation.archive_dir", "data/remediation-archives")
 	v.SetDefault("monitor.remediation.cooldown", "10m")

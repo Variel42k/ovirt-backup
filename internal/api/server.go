@@ -3,6 +3,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"os"
@@ -20,24 +21,27 @@ import (
 	"adveng/jh_virt/internal/logging"
 	"adveng/jh_virt/internal/monitor"
 	"adveng/jh_virt/internal/ovirt"
+	"adveng/jh_virt/internal/quality"
 	"adveng/jh_virt/internal/scheduler"
 	"adveng/jh_virt/internal/store"
 )
 
 // Server holds the API dependencies.
 type Server struct {
-	cfg        config.Config
-	baseCfg    config.Config
-	store      *store.Store
-	pool       *ovirt.Pool
-	libvirt    *libvirtx.Pool
-	engine     *dispatch.Dispatcher
-	scheduler  *scheduler.Scheduler
-	monitor    *monitor.Monitor
-	remediator *monitor.Remediator
-	bus        *events.Bus
-	log        zerolog.Logger
-	logs       *logging.Manager
+	cfg          config.Config
+	baseCfg      config.Config
+	store        *store.Store
+	pool         *ovirt.Pool
+	libvirt      *libvirtx.Pool
+	engine       *dispatch.Dispatcher
+	scheduler    *scheduler.Scheduler
+	monitor      *monitor.Monitor
+	remediator   *monitor.Remediator
+	bus          *events.Bus
+	log          zerolog.Logger
+	logs         *logging.Manager
+	quality      *quality.Service
+	metricsToken []byte
 	// logins притормаживает подбор пароля. В памяти, а не в базе: ограничение
 	// действует на процесс, переживать перезапуск ему не нужно, а запись в
 	// базу на каждую неудачную попытку сама стала бы точкой приложения силы.
@@ -61,6 +65,7 @@ type Deps struct {
 	Bus         *events.Bus
 	Logger      zerolog.Logger
 	Logs        *logging.Manager
+	Quality     *quality.Service
 }
 
 // New builds the API server.
@@ -69,10 +74,18 @@ func New(d Deps) *Server {
 	if base.Backup.Compression == "" {
 		base = d.Config
 	}
+	if d.Quality == nil {
+		d.Quality = quality.New(d.Store, d.Config.Monitor.BackupQuality, d.Config.Location())
+	}
+	var metricsToken []byte
+	if d.Config.Metrics.Enabled {
+		body, _ := os.ReadFile(d.Config.Metrics.TokenFile)
+		metricsToken = bytes.TrimSpace(body)
+	}
 	return &Server{
 		cfg: d.Config, baseCfg: base, store: d.Store, pool: d.Pool, libvirt: d.LibvirtPool, engine: d.Engine,
 		scheduler: d.Scheduler, monitor: d.Monitor, remediator: d.Remediator,
-		bus: d.Bus, log: d.Logger, logs: d.Logs,
+		bus: d.Bus, log: d.Logger, logs: d.Logs, quality: d.Quality, metricsToken: metricsToken,
 		logins: newLoginLimiter(),
 	}
 }
@@ -85,6 +98,7 @@ func (s *Server) Handler() http.Handler {
 	// reach them without credentials.
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /readyz", s.handleReadyz)
+	mux.Handle("GET /metrics", s.metricsHandler())
 
 	api := http.NewServeMux()
 	s.routes(api)
@@ -185,6 +199,10 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /remediation/periods/{id}/archive", s.handleGetRemediationArchive)
 	mux.HandleFunc("POST /remediations", s.writer(s.handleManualRemediation))
 	mux.HandleFunc("GET /coverage", s.handleCoverage)
+	mux.HandleFunc("GET /monitoring/backup-quality", s.handleBackupQuality)
+	mux.HandleFunc("GET /monitoring/backup-series", s.handleBackupSeries)
+	mux.HandleFunc("GET /monitoring/storage-capacity", s.handleStorageCapacity)
+	mux.HandleFunc("GET /job-runs", s.handleListJobRuns)
 	mux.HandleFunc("GET /health-samples", s.handleHealthSamples)
 	mux.HandleFunc("GET /disk-samples", s.handleDiskSamples)
 	mux.HandleFunc("GET /mount-samples", s.handleMountSamples)
@@ -203,6 +221,8 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /settings/runtime/compression", s.admin(s.handleResetRuntimeCompression))
 	mux.HandleFunc("PUT /settings/runtime/log-rotation", s.admin(s.handleSetRuntimeLogRotation))
 	mux.HandleFunc("DELETE /settings/runtime/log-rotation", s.admin(s.handleResetRuntimeLogRotation))
+	mux.HandleFunc("PUT /settings/runtime/backup-quality", s.admin(s.handleSetRuntimeBackupQuality))
+	mux.HandleFunc("DELETE /settings/runtime/backup-quality", s.admin(s.handleResetRuntimeBackupQuality))
 
 	// Пользователи.
 	mux.HandleFunc("GET /users", s.admin(s.handleListUsers))

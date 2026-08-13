@@ -470,6 +470,7 @@ sudo systemctl restart jhvirt
 - [ ] Вход через форму и `/auth/me` работают по фактическому URL.
 - [ ] Для HTTPS cookie имеет `Secure`; для временного HTTP не имеет.
 - [ ] `data/secret.key` скопирован отдельно от БД и хранилища ВМ.
+- [ ] `/metrics` отвечает только с отдельным Bearer-токеном.
 - [ ] Снята резервная копия PostgreSQL.
 - [ ] Хранилище прошло встроенную проверку записи/чтения/удаления.
 - [ ] Выполнен полный и инкрементальный бэкап выбрасываемой ВМ.
@@ -598,13 +599,14 @@ sudo ./install.sh --uninstall=all --remove-config
 только одного варианта, поскольку он нужен оставшемуся. При запуске установщика
 из Git-репозитория versioned-файл `config/ovirt-backup.yaml` не удаляется как
 часть исходного кода. PostgreSQL, `secret.key`, volumes, бэкапы и восстановленные
-образы `--remove-config` не затрагивает.
+образы `--remove-config` не затрагивает. Отдельный `metrics.token` считается
+частью конфигурации и при этом ключе удаляется, хотя сам Docker volume остаётся.
 
 ## 14. Что резервировать в самом сервисе
 
 ### Docker
 
-- том `jhvirt-data` с `secret.key`;
+- том `jhvirt-data` с `secret.key` и `metrics.token`;
 - том `postgres-data` или логический `pg_dump`;
 - рабочий `.env` с правами `0600`;
 - изменённый `config/ovirt-backup.yaml`;
@@ -623,12 +625,43 @@ chmod 600 /root/jhvirt-secret.key.backup
 - `/opt/jhvirt/data/secret.key`;
 - `/opt/jhvirt/config/ovirt-backup.yaml`;
 - `/opt/jhvirt/config/jhvirt.env`;
+- `/opt/jhvirt/config/metrics.token`;
 - логический дамп PostgreSQL;
 - внешние хранилища копий.
 
 Храните ключ отдельно от базы и отдельно от копий ВМ.
 
-## 15. Аварийное восстановление без сервиса
+## 15. Prometheus после установки
+
+Установщик включает endpoint и создаёт отдельный token-файл с правами `0600`.
+Он сохраняется при обновлении и обычном удалении приложения; удаляется только
+при явном `--remove-config`.
+
+Systemd:
+
+```bash
+sudo stat -c '%U:%G %a %n' /opt/jhvirt/config/metrics.token
+sudo -u jhvirt test -r /opt/jhvirt/config/metrics.token
+curl -fsS -H "Authorization: Bearer $(sudo cat /opt/jhvirt/config/metrics.token)" \
+  http://127.0.0.1:8080/metrics | head
+```
+
+Docker Compose:
+
+```bash
+cd /opt/jhvirt/compose   # либо каталог deploy репозитория
+docker compose exec -T ovirt-backup sh -c \
+  'test "$(stat -c %a /app/data/metrics.token)" = 600'
+TOKEN="$(docker compose exec -T ovirt-backup cat /app/data/metrics.token | tr -d '\r\n')"
+curl -fsS -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8080/metrics | head
+unset TOKEN
+```
+
+Для удалённого Prometheus используйте TLS reverse proxy, VPN или отдельную
+управляющую сеть. Пример `prometheus.yml`, названия метрик и запросы Grafana
+приведены в [OPERATIONS.md](OPERATIONS.md).
+
+## 16. Аварийное восстановление без сервиса
 
 Формат копий самодостаточен. После установки бинаря `jvbackup`:
 

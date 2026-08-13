@@ -259,6 +259,10 @@ curl -b cookies.txt http://localhost:8080/api/v1/dashboard
 | `GET` | `/remediations` | журнал восстановительных действий |
 | `POST` | `/remediations` | выполнить действие вручную |
 | `GET` | `/health-samples` | история проб состояния |
+| `GET` | `/monitoring/backup-quality` | худшее состояние ВМ по расписаниям и репликам |
+| `GET` | `/monitoring/backup-series?period=24h\|7d\|30d\|90d` | успешность, пропуски, скорость и объёмы |
+| `GET` | `/monitoring/storage-capacity?period=24h\|7d\|30d\|90d` | история и прогноз хранилищ |
+| `GET` | `/job-runs` | общие запуски заданий; фильтры `job_id`, `server_id`, `limit` |
 
 ```jsonc
 // POST /remediations — обходит cooldown и лимит попыток
@@ -269,6 +273,58 @@ curl -b cookies.txt http://localhost:8080/api/v1/dashboard
 `action`: `vm_start`, `vm_unpause`, `vm_reset`, `host_activate`, `host_fence`,
 `engine_reconnect`. Разрушительные (`vm_reset`, `host_fence`) требуют
 `confirm: true`.
+
+`GET /coverage` сохранён для старых клиентов, но использует прежнюю форму
+ответа. Новые клиенты должны читать `/monitoring/backup-quality`: его свежесть
+рассчитывается по каждому cron-интервалу и каждой обязательной реплике.
+
+Успешность `backup_job_runs` означает, что все выбранные ВМ и все назначенные
+хранилища получили полные дочерние копии. Ответ `POST /jobs/{id}/run`:
+
+```json
+{"status":"queued","job_run_id":"…","vms":4,"replicas":8}
+```
+
+### Runtime-пороги (admin)
+
+| Метод | Путь | Описание |
+|---|---|---|
+| `GET` | `/settings/runtime` | эффективные значения и источник `config`/`database` |
+| `PUT` | `/settings/runtime/backup-quality` | сохранить полный набор порогов в PostgreSQL |
+| `DELETE` | `/settings/runtime/backup-quality` | сбросить к YAML/окружению |
+
+```json
+{
+  "stale_intervals": 2,
+  "verify_max_age_days": 7,
+  "performance_window_runs": 10,
+  "performance_degradation_percent": 50,
+  "performance_consecutive_runs": 3,
+  "storage_warning_free_percent": 15,
+  "storage_critical_free_percent": 5,
+  "storage_warning_forecast_days": 30,
+  "storage_critical_forecast_days": 7,
+  "history_retention_days": 90
+}
+```
+
+Изменение пишется в аудит и применяется без перезапуска. Запрос всегда передаёт
+весь объект: частичное изменение не поддерживается.
+
+### `/metrics`
+
+`GET /metrics` находится вне `/api/v1` и cookie-аутентификации. При
+`metrics.enabled: false` возвращается `404`. При включении нужен отдельный
+заголовок:
+
+```http
+Authorization: Bearer <содержимое metrics.token_file>
+```
+
+Отсутствующий или неверный токен даёт `401`. Сравнение выполняется в постоянное
+время. Endpoint не принимает `auth.api_tokens` и не выводит URL с учётными
+данными, DSN, токены, cookie или ключи. Имена объектов находятся только в
+`*_info`-метриках; рабочие ряды маркированы стабильными ID.
 
 ## Поток событий
 

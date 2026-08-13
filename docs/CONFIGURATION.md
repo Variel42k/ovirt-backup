@@ -278,4 +278,56 @@ sudo grep -E '^(JHV_SERVER_EXTERNAL_URL|JHV_SERVER_PORT)=' \
   /opt/jhvirt/config/jhvirt.env
 ```
 
+## Мониторинг качества и Prometheus
+
+Базовые пороги находятся в `monitor.backup_quality`:
+
+```yaml
+monitor:
+  backup_quality:
+    stale_intervals: 2
+    verify_max_age_days: 7
+    performance_window_runs: 10
+    performance_degradation_percent: 50
+    performance_consecutive_runs: 3
+    storage_warning_free_percent: 15
+    storage_critical_free_percent: 5
+    storage_warning_forecast_days: 30
+    storage_critical_forecast_days: 7
+    history_retention_days: 90
+```
+
+Администратор меняет этот блок на ходу в **Настройки → Мониторинг**. Полный
+набор значений записывается в единственную строку `runtime_settings`; источник
+в ответе API и форме обозначен как `database`. Сброс удаляет все поля
+переопределения и немедленно возвращает YAML/окружение (`config`). Частичное
+переопределение не применяется: так критический и предупреждающий пороги не
+могут оказаться взяты из разных версий настройки.
+
+Экспорт метрик настраивается отдельно:
+
+```yaml
+metrics:
+  enabled: true
+  token_file: "/opt/jhvirt/config/metrics.token"
+```
+
+При `enabled: true` файл должен существовать, содержать непустой токен и иметь
+права без доступа группы и остальных, обычно `0600`. Это не `auth.api_tokens`:
+endpoint `/metrics` находится вне cookie-аутентификации и принимает только
+этот секрет. При выключенном экспорте endpoint отвечает `404`, чтобы не
+раскрывать лишнюю поверхность.
+
+Установщики создают и сохраняют файл автоматически:
+
+| Режим | Token-файл |
+|---|---|
+| systemd | `/opt/jhvirt/config/metrics.token`, владелец `jhvirt`, `0600` |
+| Docker Compose | `/app/data/metrics.token` в volume `ovirt-backup_jhvirt-data`, `0600` |
+
+Обновление не заменяет токен. Обычное удаление сохраняет его; токен удаляется
+только вместе с конфигурацией (`--remove-config`). Не помещайте его в
+`prometheus.yml` открытым текстом: используйте `bearer_token_file` и права
+файловой системы.
+
 Не выводите `.env` или `jhvirt.env` целиком: они содержат секреты.

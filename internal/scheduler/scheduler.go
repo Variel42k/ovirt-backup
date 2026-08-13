@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"adveng/jh_virt/internal/dispatch"
 	"adveng/jh_virt/internal/events"
 	"adveng/jh_virt/internal/model"
+	"adveng/jh_virt/internal/quality"
 	"adveng/jh_virt/internal/repo"
 	"adveng/jh_virt/internal/store"
 )
@@ -48,11 +50,12 @@ func ValidateSchedule(spec string, loc *time.Location) (time.Time, error) {
 
 // Scheduler owns the cron engine and the backup worker pool.
 type Scheduler struct {
-	store  *store.Store
-	engine *dispatch.Dispatcher
-	cfg    config.Config
-	bus    *events.Bus
-	log    zerolog.Logger
+	store   *store.Store
+	engine  *dispatch.Dispatcher
+	cfg     config.Config
+	bus     *events.Bus
+	log     zerolog.Logger
+	quality *quality.Service
 
 	cron *cron.Cron
 
@@ -68,6 +71,13 @@ type Scheduler struct {
 	// workers ограничивает число одновременно выполняющихся бэкапов.
 	workers chan struct{}
 	baseCtx context.Context
+}
+
+// SetQualityService connects the schedule-aware health evaluator. It is kept
+// separate from New so scheduler tests and small command-line tools can run
+// without constructing the monitoring subsystem.
+func (s *Scheduler) SetQualityService(service *quality.Service) {
+	s.quality = service
 }
 
 // New builds the scheduler.
@@ -97,6 +107,14 @@ func (s *Scheduler) Start(ctx context.Context) error {
 	if err := s.registerMaintenance(); err != nil {
 		return err
 	}
+	var catchUps []missedSchedule
+	if s.cfg.Scheduler.Enabled {
+		var err error
+		catchUps, err = s.recoverMissedSchedules(ctx)
+		if err != nil {
+			return err
+		}
+	}
 	if err := s.Reload(ctx); err != nil {
 		return err
 	}
@@ -110,7 +128,76 @@ func (s *Scheduler) Start(ctx context.Context) error {
 		Str("часовой пояс", s.cfg.Scheduler.Timezone).
 		Int("рабочих потоков", cap(s.workers)).
 		Msg("планировщик запущен")
+	if s.cfg.Scheduler.CatchUpMissed {
+		for _, missed := range catchUps {
+			missed := missed
+			go func() {
+				if _, err := s.TriggerJob(ctx, missed.jobID, "catch_up", &missed.latest); err != nil {
+					s.log.Warn().Err(err).Str("задание", missed.jobID).
+						Msg("не удалось выполнить последний пропущенный запуск")
+				}
+			}()
+		}
+	}
 	return nil
+}
+
+type missedSchedule struct {
+	jobID  string
+	latest time.Time
+}
+
+// recoverMissedSchedules records every schedule point lost while the service
+// was stopped as one aggregate row. Catch-up, when enabled, starts only the
+// latest point; replaying every old point can overload both the engine and the
+// backup repository after a long outage.
+func (s *Scheduler) recoverMissedSchedules(ctx context.Context) ([]missedSchedule, error) {
+	jobs, err := s.store.ListBackupJobs(ctx, "")
+	if err != nil {
+		return nil, fmt.Errorf("загрузка заданий для восстановления расписания: %w", err)
+	}
+	now := time.Now().UTC()
+	var out []missedSchedule
+	for _, job := range jobs {
+		if !job.Enabled || job.Schedule == "" || job.NextRunAt == nil || job.NextRunAt.After(now) {
+			continue
+		}
+		schedule, err := cronParser.Parse(job.Schedule)
+		if err != nil {
+			continue
+		}
+		count, latest := 0, job.NextRunAt.In(s.cfg.Location())
+		for point := latest; !point.After(now.In(s.cfg.Location())); point = schedule.Next(point) {
+			count++
+			latest = point
+			if count >= 100000 {
+				s.log.Warn().Str("задание", job.Name).Msg("число пропущенных точек ограничено 100000")
+				break
+			}
+		}
+		if count == 0 {
+			continue
+		}
+		latestUTC := latest.UTC()
+		ended := now
+		vms, _ := s.resolveVMs(ctx, job)
+		run := &model.BackupJobRun{
+			JobID: job.ID, JobName: job.Name, ServerID: job.ServerID, TriggeredBy: "scheduler",
+			ScheduledAt: &latestUTC, MissedIntervals: count, Status: model.RunMissed,
+			VMCount: len(vms), ReplicaCount: len(vms) * len(job.StorageTargetIDs),
+			Error: "служба не работала в запланированное время", EndedAt: &ended,
+		}
+		if err := s.store.CreateBackupJobRun(ctx, run); err != nil {
+			return nil, err
+		}
+		_ = s.store.RaiseAlert(ctx, &model.Alert{
+			ServerID: job.ServerID, Scope: model.ScopeBackup, ObjectID: job.ID, ObjectName: job.Name,
+			Kind: model.AlertBackupScheduleMissed, Severity: model.SeverityWarning,
+			Message: fmt.Sprintf("задание «%s» пропустило точек расписания: %d", job.Name, count),
+		})
+		out = append(out, missedSchedule{jobID: job.ID, latest: latestUTC})
+	}
+	return out, nil
 }
 
 // Stop halts the cron engine and waits for in-flight ticks to finish.
@@ -195,7 +282,7 @@ func (s *Scheduler) registerMaintenance() error {
 		{"@every 1h", "ретенция", s.runRetention},
 		{"@every 1h", "просроченные бэкапы", s.pruneExpired},
 		{"@every 15m", "проверка хранилищ", s.checkStorageTargets},
-		{"@every 1h", "устаревшие бэкапы", s.checkBackupFreshness},
+		{"@every 15m", "качество бэкапов", s.checkBackupQuality},
 		{"@every 6h", "очистка истории", s.purgeHistory},
 	}
 
@@ -224,7 +311,8 @@ func (s *Scheduler) runScheduled(jobID string) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	_, err := s.TriggerJob(ctx, jobID, "scheduler")
+	scheduledAt := time.Now().UTC()
+	jobRun, err := s.TriggerJob(ctx, jobID, "scheduler", &scheduledAt)
 	switch {
 	case err == nil:
 	case errors.Is(err, ErrJobBusy):
@@ -233,6 +321,12 @@ func (s *Scheduler) runScheduled(jobID string) {
 		// утопило бы журнал в шуме, скрыв настоящие сбои.
 		s.log.Warn().Str("задание", jobID).
 			Msg("пропуск запуска: предыдущий ещё выполняется — задание не укладывается в интервал расписания")
+		if jobRun != nil {
+			_ = s.store.RaiseAlert(ctx, &model.Alert{ServerID: jobRun.ServerID, Scope: model.ScopeBackup,
+				ObjectID: jobRun.JobID, ObjectName: jobRun.JobName, Kind: model.AlertBackupScheduleMissed,
+				Severity: model.SeverityWarning,
+				Message:  fmt.Sprintf("задание «%s» пропустило точку расписания: предыдущий запуск ещё выполняется", jobRun.JobName)})
+		}
 	default:
 		s.log.Error().Err(err).Str("задание", jobID).Msg("запуск задания по расписанию не удался")
 	}
@@ -240,7 +334,7 @@ func (s *Scheduler) runScheduled(jobID string) {
 
 // TriggerJob executes a job now: it resolves the VMs it covers and queues a
 // backup for each. It returns as soon as the runs are queued.
-func (s *Scheduler) TriggerJob(ctx context.Context, jobID, triggeredBy string) ([]string, error) {
+func (s *Scheduler) TriggerJob(ctx context.Context, jobID, triggeredBy string, scheduledAt *time.Time) (*model.BackupJobRun, error) {
 	job, err := s.store.GetBackupJob(ctx, jobID)
 	if err != nil {
 		return nil, err
@@ -253,9 +347,17 @@ func (s *Scheduler) TriggerJob(ctx context.Context, jobID, triggeredBy string) (
 	if err != nil {
 		return nil, err
 	}
+	now := time.Now().UTC()
+	jobRun := &model.BackupJobRun{JobID: job.ID, JobName: job.Name, ServerID: job.ServerID,
+		TriggeredBy: triggeredBy, ScheduledAt: scheduledAt, Status: model.RunRunning,
+		VMCount: len(vms), ReplicaCount: len(vms) * len(job.StorageTargetIDs), StartedAt: &now}
 	if len(vms) == 0 {
 		s.log.Warn().Str("задание", job.Name).Msg("задание не выбрало ни одной ВМ")
-		return nil, nil
+		jobRun.Status, jobRun.Error, jobRun.EndedAt = model.RunFailed, "задание не выбрало ни одной ВМ", &now
+		if err := s.store.CreateBackupJobRun(ctx, jobRun); err != nil {
+			return nil, err
+		}
+		return jobRun, nil
 	}
 
 	// Заявка на задание — после всех проверок и до первого бэкапа. Если
@@ -263,11 +365,24 @@ func (s *Scheduler) TriggerJob(ctx context.Context, jobID, triggeredBy string) (
 	// цепочек два одновременных бэкапа одной ВМ вдобавок соревнуются за
 	// родительский чекпоинт и оставляют цепочку в неопределённом состоянии.
 	if !s.claimJob(job.ID) {
-		return nil, fmt.Errorf("%w: задание %q ещё выполняется с прошлого раза; "+
+		jobRun.EndedAt = &now
+		if scheduledAt != nil {
+			jobRun.Status, jobRun.MissedIntervals = model.RunMissed, 1
+		} else {
+			jobRun.Status = model.RunFailed
+		}
+		jobRun.Error = "предыдущий запуск ещё выполняется"
+		if createErr := s.store.CreateBackupJobRun(ctx, jobRun); createErr != nil {
+			return nil, createErr
+		}
+		return jobRun, fmt.Errorf("%w: задание %q ещё выполняется с прошлого раза; "+
 			"дождитесь окончания или отмените текущие бэкапы", ErrJobBusy, job.Name)
 	}
+	if err := s.store.CreateBackupJobRun(ctx, jobRun); err != nil {
+		s.releaseJob(job.ID)
+		return nil, err
+	}
 
-	now := time.Now().UTC()
 	var nextRun *time.Time
 	if job.Schedule != "" {
 		if next, err := ValidateSchedule(job.Schedule, s.cfg.Location()); err == nil {
@@ -285,12 +400,12 @@ func (s *Scheduler) TriggerJob(ctx context.Context, jobID, triggeredBy string) (
 		Str("инициатор", triggeredBy).
 		Msg("задание запущено")
 
-	var queued []string
 	var wg sync.WaitGroup
 
 	for _, vm := range vms {
 		for _, targetID := range job.StorageTargetIDs {
 			req := backup.RunRequest{
+				JobRunID:        jobRun.ID,
 				ServerID:        job.ServerID,
 				VMID:            vm.ID,
 				Type:            job.Type,
@@ -307,8 +422,6 @@ func (s *Scheduler) TriggerJob(ctx context.Context, jobID, triggeredBy string) (
 				Retention:       job.Retention,
 				TriggeredBy:     triggeredBy,
 			}
-			queued = append(queued, vm.ID)
-
 			wg.Add(1)
 			go func(req backup.RunRequest, job *model.BackupJob) {
 				defer wg.Done()
@@ -322,10 +435,10 @@ func (s *Scheduler) TriggerJob(ctx context.Context, jobID, triggeredBy string) (
 	go func() {
 		defer s.releaseJob(job.ID)
 		wg.Wait()
-		s.finishJob(ctx, job)
+		s.finishJob(context.WithoutCancel(ctx), job, jobRun)
 	}()
 
-	return queued, nil
+	return jobRun, nil
 }
 
 // claimJob помечает задание выполняющимся. Возвращает false, если оно уже
@@ -424,7 +537,8 @@ func (s *Scheduler) executeOne(ctx context.Context, req backup.RunRequest, job *
 		return
 	}
 
-	_ = s.store.ResolveAlert(ctx, run.ServerID, model.ScopeVM, run.VMID, model.AlertBackupFailed)
+	_ = s.store.ResolveAlert(ctx, run.ServerID, model.ScopeBackup,
+		backupAlertObjectID(run), model.AlertBackupFailed)
 
 	if req.VerifyAfter != "" && run.Status != model.RunFailed {
 		if _, err := s.engine.Verify(ctx, run.ID, req.VerifyAfter, req.VerifyOptions); err != nil {
@@ -441,11 +555,10 @@ func (s *Scheduler) executeOne(ctx context.Context, req backup.RunRequest, job *
 	}
 }
 
-func (s *Scheduler) finishJob(ctx context.Context, job *model.BackupJob) {
+func (s *Scheduler) finishJob(ctx context.Context, job *model.BackupJob, jobRun *model.BackupJobRun) {
 	runs, err := s.store.ListBackupRuns(ctx, store.RunFilter{
-		JobID: job.ID,
-		Since: ptr(time.Now().Add(-24 * time.Hour)),
-		Limit: 200,
+		JobRunID:       jobRun.ID,
+		IncludeDeleted: true,
 	})
 	if err != nil {
 		return
@@ -453,16 +566,37 @@ func (s *Scheduler) finishJob(ctx context.Context, job *model.BackupJob) {
 
 	status := model.RunSucceeded
 	for _, r := range runs {
-		if r.Status == model.RunFailed {
-			status = model.RunFailed
-			break
+		switch r.Status {
+		case model.RunSucceeded:
+			jobRun.SucceededCount++
+		case model.RunPartial:
+			jobRun.PartialCount++
+		case model.RunCanceled:
+			jobRun.CanceledCount++
+		default:
+			jobRun.FailedCount++
 		}
-		if r.Status == model.RunPartial {
-			status = model.RunPartial
-		}
+	}
+	accounted := jobRun.SucceededCount + jobRun.PartialCount + jobRun.FailedCount + jobRun.CanceledCount
+	if accounted < jobRun.ReplicaCount {
+		jobRun.FailedCount += jobRun.ReplicaCount - accounted
+	}
+	switch {
+	case jobRun.FailedCount > 0:
+		status = model.RunFailed
+	case jobRun.PartialCount > 0:
+		status = model.RunPartial
+	case jobRun.CanceledCount == jobRun.ReplicaCount:
+		status = model.RunCanceled
+	case jobRun.CanceledCount > 0:
+		status = model.RunPartial
 	}
 
 	now := time.Now().UTC()
+	jobRun.Status, jobRun.EndedAt = status, &now
+	if err := s.store.UpdateBackupJobRun(ctx, jobRun); err != nil {
+		s.log.Warn().Err(err).Str("запуск", jobRun.ID).Msg("не удалось сохранить итог пакетного запуска")
+	}
 	var nextRun *time.Time
 	if job.Schedule != "" {
 		if next, err := ValidateSchedule(job.Schedule, s.cfg.Location()); err == nil {
@@ -472,8 +606,11 @@ func (s *Scheduler) finishJob(ctx context.Context, job *model.BackupJob) {
 	if err := s.store.SetJobSchedulingState(ctx, job.ID, &now, status, nextRun); err != nil {
 		s.log.Debug().Err(err).Msg("не удалось сохранить итог задания")
 	}
+	if status == model.RunSucceeded {
+		_ = s.store.ResolveAlert(ctx, job.ServerID, model.ScopeBackup, job.ID, model.AlertBackupScheduleMissed)
+	}
 	s.bus.Publish(events.Event{
-		Kind: events.KindJob, ObjectID: job.ID,
+		Kind: events.KindJob, ServerID: job.ServerID, ObjectID: jobRun.ID, Payload: jobRun,
 		Message: fmt.Sprintf("задание «%s» завершено: %s", job.Name, status),
 	})
 }
@@ -612,6 +749,14 @@ func (s *Scheduler) checkStorageTargets(ctx context.Context) {
 		if err := s.store.UpdateStorageTargetHealth(ctx, target.ID, checkErr == nil, msg, free, used); err != nil {
 			s.log.Debug().Err(err).Msg("не удалось сохранить состояние хранилища")
 		}
+		if err := s.store.AddStorageUsageSample(ctx, &model.StorageUsageSample{
+			StorageTargetID: target.ID, CheckOK: checkErr == nil,
+			CapacityKnown: target.Kind != model.StorageS3 && free+used > 0,
+			FreeBytes:     free, UsedBytes: used,
+		}); err != nil {
+			s.log.Debug().Err(err).Str("хранилище", target.Name).
+				Msg("не удалось сохранить пробу ёмкости хранилища")
+		}
 
 		if checkErr != nil {
 			_ = s.store.RaiseAlert(ctx, &model.Alert{
@@ -626,60 +771,22 @@ func (s *Scheduler) checkStorageTargets(ctx context.Context) {
 	}
 }
 
-// checkBackupFreshness alerts on VMs a job covers but has not backed up
-// recently. A schedule that silently stopped firing is otherwise invisible
-// until somebody needs a restore.
-func (s *Scheduler) checkBackupFreshness(ctx context.Context) {
-	jobs, err := s.store.ListBackupJobs(ctx, "")
-	if err != nil {
+func (s *Scheduler) checkBackupQuality(ctx context.Context) {
+	if s.quality == nil {
 		return
 	}
-
-	for _, job := range jobs {
-		if !job.Enabled || job.Schedule == "" {
-			continue
-		}
-		// Two missed firings is the threshold: one can be a slow night, two is
-		// a pattern.
-		interval, err := scheduleInterval(job.Schedule, s.cfg.Location())
-		if err != nil {
-			continue
-		}
-		deadline := time.Now().Add(-2 * interval)
-
-		vms, err := s.resolveVMs(ctx, job)
-		if err != nil {
-			continue
-		}
-		for _, vm := range vms {
-			runs, err := s.store.ListBackupRuns(ctx, store.RunFilter{
-				ServerID: job.ServerID,
-				VMID:     vm.ID,
-				Statuses: []model.RunStatus{model.RunSucceeded, model.RunPartial},
-				Limit:    1,
-			})
-			if err != nil {
-				continue
-			}
-			if len(runs) > 0 && runs[0].CreatedAt.After(deadline) {
-				_ = s.store.ResolveAlert(ctx, job.ServerID, model.ScopeVM, vm.ID, model.AlertBackupStale)
-				continue
-			}
-
-			message := fmt.Sprintf("ВМ %s не бэкапилась дольше двух интервалов расписания задания «%s»",
-				vm.Name, job.Name)
-			if len(runs) == 0 {
-				message = fmt.Sprintf("ВМ %s ни разу не бэкапилась заданием «%s»", vm.Name, job.Name)
-			}
-			_ = s.store.RaiseAlert(ctx, &model.Alert{
-				ServerID: job.ServerID, Scope: model.ScopeVM, ObjectID: vm.ID, ObjectName: vm.Name,
-				Kind: model.AlertBackupStale, Severity: model.SeverityWarning, Message: message,
-			})
-		}
+	if err := s.quality.EvaluateAlerts(ctx); err != nil {
+		s.log.Warn().Err(err).Msg("не удалось пересчитать качество бэкапов")
 	}
 }
 
 func (s *Scheduler) purgeHistory(ctx context.Context) {
+	if s.quality != nil {
+		cutoff := time.Now().Add(-time.Duration(s.quality.Settings().HistoryRetentionDays) * 24 * time.Hour)
+		if n, err := s.store.PurgeStorageUsageSamples(ctx, cutoff); err == nil && n > 0 {
+			s.log.Debug().Int64("удалено", n).Msg("история ёмкости хранилищ очищена")
+		}
+	}
 	if s.cfg.Monitor.HistoryRetention > 0 {
 		cutoff := time.Now().Add(-s.cfg.Monitor.HistoryRetention)
 		if n, err := s.store.PurgeHealthSamples(ctx, cutoff); err == nil && n > 0 {
@@ -704,11 +811,15 @@ func (s *Scheduler) purgeHistory(ctx context.Context) {
 
 func (s *Scheduler) raiseBackupAlert(ctx context.Context, run *model.BackupRun, cause error) {
 	_ = s.store.RaiseAlert(ctx, &model.Alert{
-		ServerID: run.ServerID, Scope: model.ScopeVM, ObjectID: run.VMID, ObjectName: run.VMName,
+		ServerID: run.ServerID, Scope: model.ScopeBackup, ObjectID: backupAlertObjectID(run), ObjectName: run.VMName,
 		Kind: model.AlertBackupFailed, Severity: model.SeverityCritical,
 		Message: fmt.Sprintf("бэкап ВМ %s не выполнен: %v", run.VMName, cause),
 		Details: run.Error,
 	})
+}
+
+func backupAlertObjectID(run *model.BackupRun) string {
+	return strings.Join([]string{run.JobID, run.VMID, run.StorageTargetID}, "/")
 }
 
 func (s *Scheduler) raiseVerifyAlert(ctx context.Context, run *model.BackupRun, cause error) {
@@ -718,21 +829,3 @@ func (s *Scheduler) raiseVerifyAlert(ctx context.Context, run *model.BackupRun, 
 		Message: fmt.Sprintf("проверка бэкапа ВМ %s не пройдена: %v", run.VMName, cause),
 	})
 }
-
-// scheduleInterval estimates how often a cron expression fires, by measuring
-// the gap between the next two firings.
-func scheduleInterval(spec string, loc *time.Location) (time.Duration, error) {
-	sched, err := cronParser.Parse(spec)
-	if err != nil {
-		return 0, err
-	}
-	now := time.Now().In(loc)
-	first := sched.Next(now)
-	second := sched.Next(first)
-	if second.IsZero() || !second.After(first) {
-		return 24 * time.Hour, nil
-	}
-	return second.Sub(first), nil
-}
-
-func ptr[T any](v T) *T { return &v }

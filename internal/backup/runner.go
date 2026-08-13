@@ -108,8 +108,9 @@ type RunRequest struct {
 	VMID     string
 	Type     model.BackupType
 
-	JobID   string
-	JobName string
+	JobRunID string
+	JobID    string
+	JobName  string
 	// FullEvery принудительно делает полный бэкап каждые N звеньев цепочки.
 	FullEvery int
 	// FallbackType используется, когда выбранный тип недоступен для этой ВМ.
@@ -170,6 +171,7 @@ func (e *Engine) Execute(ctx context.Context, req RunRequest) (*model.BackupRun,
 
 	run := &model.BackupRun{
 		ID:              uuid.NewString(),
+		JobRunID:        req.JobRunID,
 		JobID:           req.JobID,
 		JobName:         req.JobName,
 		ServerID:        srv.ID,

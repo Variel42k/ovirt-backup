@@ -21,6 +21,13 @@ func nullTime(v sql.NullTime) *time.Time {
 	return &t
 }
 
+func nullString(v string) any {
+	if v == "" {
+		return nil
+	}
+	return v
+}
+
 // utc приводит прочитанное время к UTC.
 //
 // TIMESTAMPTZ хранит момент, а не пояс, но драйвер отдаёт его в поясе

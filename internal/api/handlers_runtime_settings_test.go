@@ -14,6 +14,7 @@ import (
 	"adveng/jh_virt/internal/config"
 	"adveng/jh_virt/internal/dispatch"
 	"adveng/jh_virt/internal/logging"
+	"adveng/jh_virt/internal/model"
 )
 
 func TestRuntimeSettingsHandlersApplyAndReset(t *testing.T) {
@@ -24,6 +25,13 @@ func TestRuntimeSettingsHandlersApplyAndReset(t *testing.T) {
 	base.Logging = config.LoggingConfig{
 		Level: "info", Format: "json", File: filepath.Join(t.TempDir(), "service.log"),
 		MaxSizeMB: 100, MaxBackups: 7, MaxAgeDays: 30,
+	}
+	base.Monitor.BackupQuality = model.BackupQualitySettings{
+		StaleIntervals: 2, VerifyMaxAgeDays: 7, PerformanceWindowRuns: 10,
+		PerformanceDegradationPct: 50, PerformanceConsecutiveRuns: 3,
+		StorageWarningFreePct: 15, StorageCriticalFreePct: 5,
+		StorageWarningForecastDays: 30, StorageCriticalForecastDays: 7,
+		HistoryRetentionDays: 90,
 	}
 
 	_, logs, err := logging.Setup(base.Logging)
@@ -66,6 +74,15 @@ func TestRuntimeSettingsHandlersApplyAndReset(t *testing.T) {
 	if rotation.LogRotation.MaxSizeMB != 64 || rotation.LogRotation.Source != "database" {
 		t.Fatalf("rotation was not applied: %+v", rotation.LogRotation)
 	}
+	quality := call(s.handleSetRuntimeBackupQuality, "PUT", `{
+		"stale_intervals":3,"verify_max_age_days":14,"performance_window_runs":12,
+		"performance_degradation_percent":40,"performance_consecutive_runs":2,
+		"storage_warning_free_percent":20,"storage_critical_free_percent":8,
+		"storage_warning_forecast_days":45,"storage_critical_forecast_days":10,
+		"history_retention_days":180}`)
+	if quality.BackupQuality.Source != "database" || quality.BackupQuality.Value.StaleIntervals != 3 {
+		t.Fatalf("quality was not applied: %+v", quality.BackupQuality)
+	}
 
 	resetCompression := call(s.handleResetRuntimeCompression, "DELETE", "")
 	if resetCompression.Compression.Value != "zstd" || resetCompression.Compression.Source != "config" {
@@ -74,5 +91,9 @@ func TestRuntimeSettingsHandlersApplyAndReset(t *testing.T) {
 	resetRotation := call(s.handleResetRuntimeLogRotation, "DELETE", "")
 	if resetRotation.LogRotation.MaxSizeMB != 100 || resetRotation.LogRotation.Source != "config" {
 		t.Fatalf("rotation reset failed: %+v", resetRotation.LogRotation)
+	}
+	resetQuality := call(s.handleResetRuntimeBackupQuality, "DELETE", "")
+	if resetQuality.BackupQuality.Source != "config" || resetQuality.BackupQuality.Value.StaleIntervals != 2 {
+		t.Fatalf("quality reset failed: %+v", resetQuality.BackupQuality)
 	}
 }

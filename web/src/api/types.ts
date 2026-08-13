@@ -2,7 +2,7 @@
 // клиентом: генератор из OpenAPI добавил бы шаг сборки ради десятка структур.
 
 export type ConnState = 'unknown' | 'online' | 'degraded' | 'offline'
-export type RunStatus = 'pending' | 'running' | 'succeeded' | 'partial' | 'failed' | 'canceled'
+export type RunStatus = 'pending' | 'running' | 'succeeded' | 'partial' | 'failed' | 'canceled' | 'missed'
 export type Severity = 'info' | 'warning' | 'critical'
 export type AlertState = 'firing' | 'acked' | 'resolved'
 export type DesiredState = 'as_is' | 'up' | 'down'
@@ -191,6 +191,7 @@ export interface SkippedDisk {
 
 export interface BackupRun {
   id: string
+  job_run_id?: string
   job_id?: string
   job_name?: string
   server_id: string
@@ -222,6 +223,111 @@ export interface BackupRun {
   created_at: string
   disks?: BackupDisk[]
   skipped_disks?: SkippedDisk[]
+}
+
+export type BackupQualityState = 'ok' | 'none' | 'failed' | 'overdue' | 'partial' | 'verify_overdue' | 'degraded'
+
+export interface BackupQualityItem {
+  server_id: string
+  server_name: string
+  vm_id: string
+  vm_name: string
+  vm_status: string
+  job_id: string
+  job_name: string
+  storage_target_id: string
+  storage_name: string
+  state: BackupQualityState
+  reason: string
+  freshness_ok: boolean
+  replica_ok: boolean
+  verification_ok: boolean
+  performance_ok: boolean
+  last_success_at?: string
+  last_run_at?: string
+  last_run_status?: RunStatus
+  next_expected_at?: string
+  last_verified_at?: string
+  verify_mode?: string
+  duration_sec: number
+  throughput_bps: number
+  read_bytes: number
+  stored_bytes: number
+  compression_ratio: number
+  error?: string
+  skipped_disks?: SkippedDisk[]
+}
+
+export interface BackupQualitySummary {
+  generated_at: string
+  items: BackupQualityItem[]
+  total_vms: number
+  protected_vms: number
+  total_policies: number
+  healthy_policies: number
+  overdue: number
+  replica_failures: number
+  verification_overdue: number
+  performance_degraded: number
+  by_state: Record<string, number>
+}
+
+export interface BackupSeriesPoint {
+  at: string
+  succeeded: number
+  partial: number
+  failed: number
+  canceled: number
+  missed: number
+  duration_p50_sec: number
+  duration_p95_sec: number
+  throughput_p50_bps: number
+  read_bytes: number
+  stored_bytes: number
+  compression_ratio: number
+}
+
+export interface StorageCapacityPoint {
+  at: string
+  capacity_known: boolean
+  free_bytes: number
+  used_bytes: number
+}
+
+export interface StorageCapacityItem {
+  storage_target_id: string
+  storage_name: string
+  kind: string
+  check_ok: boolean
+  capacity_known: boolean
+  free_bytes: number
+  used_bytes: number
+  growth_bytes_day: number
+  forecast_days?: number
+  state: 'ok' | 'warning' | 'critical' | 'unknown'
+  reason: string
+  points: StorageCapacityPoint[]
+}
+
+export interface BackupJobRun {
+  id: string
+  job_id: string
+  job_name: string
+  server_id: string
+  triggered_by: string
+  scheduled_at?: string
+  missed_intervals: number
+  status: RunStatus
+  vm_count: number
+  replica_count: number
+  succeeded_count: number
+  partial_count: number
+  failed_count: number
+  canceled_count: number
+  error?: string
+  started_at?: string
+  ended_at?: string
+  created_at: string
 }
 
 export interface VerifyRun {
@@ -451,6 +557,9 @@ export interface Dashboard {
     alerts_critical: number
     running_backups: number
     stored_bytes: number
+    overdue_policies: number
+    incomplete_replicas: number
+    storages_at_risk: number
   }
 }
 

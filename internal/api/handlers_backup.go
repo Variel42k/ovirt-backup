@@ -212,7 +212,7 @@ func (s *Server) handleRunJob(w http.ResponseWriter, r *http.Request) {
 		actor = "user:" + p.Username
 	}
 
-	queued, err := s.scheduler.TriggerJob(context.WithoutCancel(r.Context()), id, actor)
+	jobRun, err := s.scheduler.TriggerJob(context.WithoutCancel(r.Context()), id, actor, nil)
 	if err != nil {
 		s.audit(r, "job.run", model.ScopeBackup, id, false, err.Error())
 		s.writeError(w, r, err)
@@ -220,8 +220,10 @@ func (s *Server) handleRunJob(w http.ResponseWriter, r *http.Request) {
 	}
 	s.audit(r, "job.run", model.ScopeBackup, id, true, "")
 	writeJSON(w, http.StatusAccepted, map[string]any{
-		"status": "queued",
-		"vms":    len(queued),
+		"status":     "queued",
+		"job_run_id": jobRun.ID,
+		"vms":        jobRun.VMCount,
+		"replicas":   jobRun.ReplicaCount,
 	})
 }
 

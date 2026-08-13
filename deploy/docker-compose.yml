@@ -79,6 +79,8 @@ services:
       JHV_MONITOR_REMEDIATION_DRY_RUN: "${JHV_REMEDIATION_DRY_RUN:-true}"
       # Пароль первого администратора; пусто — будет сгенерирован и напечатан.
       JHV_AUTH_BOOTSTRAP_PASSWORD: "${JHV_ADMIN_PASSWORD:-}"
+      JHV_METRICS_ENABLED: "${JHV_METRICS_ENABLED:-false}"
+      JHV_METRICS_TOKEN_FILE: "/app/data/metrics.token"
       TZ: "${TZ:-Europe/Moscow}"
     volumes:
       # Ключ шифрования секретов и временные файлы. Терять нельзя: без

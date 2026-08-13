@@ -26,6 +26,7 @@ import (
 	"adveng/jh_virt/internal/model"
 	"adveng/jh_virt/internal/monitor"
 	"adveng/jh_virt/internal/ovirt"
+	"adveng/jh_virt/internal/quality"
 	"adveng/jh_virt/internal/scheduler"
 	"adveng/jh_virt/internal/secret"
 	"adveng/jh_virt/internal/store"
@@ -143,6 +144,15 @@ func run() error {
 		runtimeSettings.LogMaxAgeDays != nil {
 		log.Warn().Msg("неполная настройка ротации в базе проигнорирована; используются значения конфигурации")
 	}
+	if runtimeSettings.HasBackupQuality() {
+		cfg.Monitor.BackupQuality = runtimeSettings.BackupQuality()
+		if err := cfg.Monitor.BackupQuality.Validate(); err != nil {
+			return fmt.Errorf("настройки качества бэкапов из базы данных: %w", err)
+		}
+		log.Info().Msg("пороги качества бэкапов загружены из базы данных")
+	} else if runtimeSettings.QualityStaleIntervals != nil || runtimeSettings.QualityVerifyMaxAgeDays != nil {
+		log.Warn().Msg("неполные настройки качества в базе проигнорированы; используются значения конфигурации")
+	}
 
 	// Password recovery runs before anything else starts. Without it an operator
 	// who lost the bootstrap password has no way back in except deleting the
@@ -212,8 +222,10 @@ func run() error {
 
 	remediator := monitor.NewRemediator(st, pool, libvirtPool, cfg.Monitor.Remediation, bus, log)
 	mon := monitor.New(st, pool, libvirtPool, remediator, cfg.Monitor, bus, log)
+	qualityService := quality.New(st, cfg.Monitor.BackupQuality, cfg.Location())
 
 	sched := scheduler.New(st, dispatcher, *cfg, bus, log)
+	sched.SetQualityService(qualityService)
 	if err := sched.Start(ctx); err != nil {
 		return fmt.Errorf("запуск планировщика: %w", err)
 	}
@@ -234,7 +246,7 @@ func run() error {
 	apiServer := api.New(api.Deps{
 		Config: *cfg, BaseConfig: baseCfg, Store: st, Pool: pool, LibvirtPool: libvirtPool, Engine: dispatcher,
 		Scheduler: sched, Monitor: mon, Remediator: remediator, Bus: bus, Logger: log,
-		Logs: logs,
+		Logs: logs, Quality: qualityService,
 	})
 
 	httpServer := &http.Server{

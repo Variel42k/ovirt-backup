@@ -25,8 +25,14 @@ type runtimeLogRotationResponse struct {
 }
 
 type runtimeSettingsResponse struct {
-	Compression runtimeCompressionResponse `json:"compression"`
-	LogRotation runtimeLogRotationResponse `json:"log_rotation"`
+	Compression   runtimeCompressionResponse   `json:"compression"`
+	LogRotation   runtimeLogRotationResponse   `json:"log_rotation"`
+	BackupQuality runtimeBackupQualityResponse `json:"backup_quality"`
+}
+
+type runtimeBackupQualityResponse struct {
+	Value  model.BackupQualitySettings `json:"value"`
+	Source string                      `json:"source"`
 }
 
 func (s *Server) runtimeSettings(r *http.Request) (runtimeSettingsResponse, error) {
@@ -44,6 +50,14 @@ func (s *Server) runtimeSettings(r *http.Request) (runtimeSettingsResponse, erro
 	rotationSource := "config"
 	if stored.HasLogRotation() {
 		rotationSource = "database"
+	}
+	qualitySource := "config"
+	qualityValue := s.baseCfg.Monitor.BackupQuality
+	if stored.HasBackupQuality() {
+		qualitySource = "database"
+		qualityValue = stored.BackupQuality()
+	} else if s.quality != nil {
+		qualityValue = s.quality.Settings()
 	}
 
 	descriptions := map[string]string{
@@ -68,6 +82,7 @@ func (s *Server) runtimeSettings(r *http.Request) (runtimeSettingsResponse, erro
 			MaxSizeMB: status.MaxSizeMB, MaxBackups: status.MaxBackups,
 			MaxAgeDays: status.MaxAgeDays, Source: rotationSource,
 		},
+		BackupQuality: runtimeBackupQualityResponse{Value: qualityValue, Source: qualitySource},
 	}, nil
 }
 
@@ -185,6 +200,53 @@ func (s *Server) handleResetRuntimeLogRotation(w http.ResponseWriter, r *http.Re
 	}
 	s.log.Info().Str("оператор", actor).Msg("ротация журнала возвращена к конфигурации запуска")
 	s.audit(r, "settings.log_rotation.reset", model.ScopeServer, "", true, "")
+	s.handleRuntimeSettings(w, r)
+}
+
+func (s *Server) handleSetRuntimeBackupQuality(w http.ResponseWriter, r *http.Request) {
+	var value model.BackupQualitySettings
+	if err := decodeJSON(r, &value); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	if err := value.Validate(); err != nil {
+		s.writeError(w, r, badRequest("%v", err))
+		return
+	}
+	actor := runtimeActor(r)
+	previous := s.quality.Settings()
+	if err := s.store.SetBackupQuality(r.Context(), value, actor); err != nil {
+		s.audit(r, "settings.backup_quality", model.ScopeServer, "", false, err.Error())
+		s.writeError(w, r, err)
+		return
+	}
+	if err := s.quality.SetSettings(value); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	s.log.Info().Str("оператор", actor).Msg("пороги качества бэкапов изменены")
+	s.audit(r, "settings.backup_quality", model.ScopeServer, "", true,
+		fmt.Sprintf("%+v -> %+v", previous, value))
+	s.handleRuntimeSettings(w, r)
+}
+
+func (s *Server) handleResetRuntimeBackupQuality(w http.ResponseWriter, r *http.Request) {
+	actor := runtimeActor(r)
+	value := s.baseCfg.Monitor.BackupQuality
+	if err := value.Validate(); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	if err := s.store.ResetBackupQuality(r.Context(), actor); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	if err := s.quality.SetSettings(value); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	s.log.Info().Str("оператор", actor).Msg("пороги качества бэкапов возвращены к конфигурации запуска")
+	s.audit(r, "settings.backup_quality.reset", model.ScopeServer, "", true, "")
 	s.handleRuntimeSettings(w, r)
 }
 

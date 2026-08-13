@@ -5,7 +5,10 @@ import { ref } from 'vue'
 import type {
   Alert,
   BackupJob,
+  BackupJobRun,
+  BackupQualitySummary,
   BackupRun,
+  BackupSeriesPoint,
   BootVerifyOptions,
   CoverageSummary,
   Dashboard,
@@ -26,11 +29,12 @@ import type {
   RetentionPolicy,
   Server,
   StorageDomain,
+  StorageCapacityItem,
   StorageTarget,
   VerifyRun,
   VM,
 } from './types'
-import type { AuditEntry, LogStatus, RuntimeSettings, User } from './settings-types'
+import type { AuditEntry, BackupQualitySettings, LogStatus, RuntimeSettings, User } from './settings-types'
 
 /** Строка предпросмотра отбора задания: попадает ли ВМ под условия и почему. */
 export interface JobPreviewRow {
@@ -288,6 +292,14 @@ export const api = {
   remediate: (payload: Record<string, unknown>) => http.post('/remediations', payload, { timeout: 900_000 }).then((r) => r.data),
   coverage: (params: Record<string, string | number> = {}) =>
     http.get<CoverageSummary>('/coverage', { params }).then((r) => r.data),
+  backupQuality: (serverId = '') =>
+    http.get<BackupQualitySummary>('/monitoring/backup-quality', { params: serverId ? { server_id: serverId } : undefined }).then((r) => r.data),
+  backupSeries: (period: '24h' | '7d' | '30d' | '90d', serverId = '') =>
+    http.get<BackupSeriesPoint[]>('/monitoring/backup-series', { params: { period, ...(serverId ? { server_id: serverId } : {}) } }).then((r) => r.data),
+  storageCapacity: (period: '24h' | '7d' | '30d' | '90d') =>
+    http.get<StorageCapacityItem[]>('/monitoring/storage-capacity', { params: { period } }).then((r) => r.data),
+  jobRuns: (params: Record<string, string | number> = {}) =>
+    http.get<BackupJobRun[]>('/job-runs', { params }).then((r) => r.data),
   diskSamples: (params: Record<string, string | number>) =>
     http.get<ListResponse<DiskSample>>('/disk-samples', { params }).then((r) => unwrap(r.data)),
   mountSamples: (params: Record<string, string | number>) =>
@@ -315,6 +327,10 @@ export const api = {
     http.put<RuntimeSettings>('/settings/runtime/log-rotation', payload).then((r) => r.data),
   resetRuntimeLogRotation: () =>
     http.delete<RuntimeSettings>('/settings/runtime/log-rotation').then((r) => r.data),
+  setRuntimeBackupQuality: (payload: BackupQualitySettings) =>
+    http.put<RuntimeSettings>('/settings/runtime/backup-quality', payload).then((r) => r.data),
+  resetRuntimeBackupQuality: () =>
+    http.delete<RuntimeSettings>('/settings/runtime/backup-quality').then((r) => r.data),
 
   // Пользователи
   listUsers: () => http.get<ListResponse<User>>('/users').then((r) => unwrap(r.data)),

@@ -127,18 +127,21 @@ type dashboardResponse struct {
 	RecentRuns []*model.BackupRun     `json:"recent_runs"`
 	Storages   []*model.StorageTarget `json:"storages"`
 	Totals     struct {
-		Servers        int   `json:"servers"`
-		ServersOnline  int   `json:"servers_online"`
-		Hosts          int   `json:"hosts"`
-		HostsUp        int   `json:"hosts_up"`
-		VMs            int   `json:"vms"`
-		VMsUp          int   `json:"vms_up"`
-		VMsPaused      int   `json:"vms_paused"`
-		ProtectedVMs   int   `json:"protected_vms"`
-		AlertsFiring   int   `json:"alerts_firing"`
-		AlertsCritical int   `json:"alerts_critical"`
-		RunningBackups int   `json:"running_backups"`
-		StoredBytes    int64 `json:"stored_bytes"`
+		Servers            int   `json:"servers"`
+		ServersOnline      int   `json:"servers_online"`
+		Hosts              int   `json:"hosts"`
+		HostsUp            int   `json:"hosts_up"`
+		VMs                int   `json:"vms"`
+		VMsUp              int   `json:"vms_up"`
+		VMsPaused          int   `json:"vms_paused"`
+		ProtectedVMs       int   `json:"protected_vms"`
+		AlertsFiring       int   `json:"alerts_firing"`
+		AlertsCritical     int   `json:"alerts_critical"`
+		RunningBackups     int   `json:"running_backups"`
+		StoredBytes        int64 `json:"stored_bytes"`
+		OverduePolicies    int   `json:"overdue_policies"`
+		IncompleteReplicas int   `json:"incomplete_replicas"`
+		StoragesAtRisk     int   `json:"storages_at_risk"`
 	} `json:"totals"`
 }
 
@@ -155,6 +158,11 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			s.log.Warn().Err(err).Str("сервер", srv.Name).Msg("не удалось собрать сводку")
 			continue
+		}
+		if qualitySummary, qualityErr := s.quality.Evaluate(r.Context(), srv.ID); qualityErr == nil {
+			summary.ProtectedVMs = qualitySummary.ProtectedVMs
+			resp.Totals.OverduePolicies += qualitySummary.Overdue
+			resp.Totals.IncompleteReplicas += qualitySummary.ReplicaFailures
 		}
 		resp.Servers = append(resp.Servers, summary)
 
@@ -193,6 +201,13 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	storages, err := s.store.ListStorageTargets(r.Context())
 	if err == nil {
 		resp.Storages = storages
+	}
+	if capacities, capacityErr := s.quality.Capacities(r.Context(), "90d"); capacityErr == nil {
+		for _, capacity := range capacities {
+			if capacity.State == "warning" || capacity.State == "critical" {
+				resp.Totals.StoragesAtRisk++
+			}
+		}
 	}
 
 	if resp.Servers == nil {

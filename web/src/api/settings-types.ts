@@ -65,4 +65,21 @@ export interface RuntimeSettings {
     max_age_days: number
     source: 'config' | 'database'
   }
+  backup_quality: {
+    value: BackupQualitySettings
+    source: 'config' | 'database'
+  }
+}
+
+export interface BackupQualitySettings {
+  stale_intervals: number
+  verify_max_age_days: number
+  performance_window_runs: number
+  performance_degradation_percent: number
+  performance_consecutive_runs: number
+  storage_warning_free_percent: number
+  storage_critical_free_percent: number
+  storage_warning_forecast_days: number
+  storage_critical_forecast_days: number
+  history_retention_days: number
 }

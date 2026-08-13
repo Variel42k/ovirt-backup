@@ -5,7 +5,7 @@ import { api, notifyError, notifyOk } from '@/api/client'
 import { bytes, dateTime } from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
-import type { AuditEntry, LogStatus, RuntimeSettings, User } from '@/api/settings-types'
+import type { AuditEntry, BackupQualitySettings, LogStatus, RuntimeSettings, User } from '@/api/settings-types'
 import type { RemediationArchive, RemediationMode, RemediationPeriod } from '@/api/types'
 
 const $q = useQuasar()
@@ -20,6 +20,19 @@ const runtimeSettings = ref<RuntimeSettings | null>(null)
 const compressionBusy = ref(false)
 const rotationBusy = ref(false)
 const rotationForm = ref({ max_size_mb: 100, max_backups: 7, max_age_days: 30 })
+const qualityBusy = ref(false)
+const qualityForm = ref<BackupQualitySettings>({
+  stale_intervals: 2,
+  verify_max_age_days: 7,
+  performance_window_runs: 10,
+  performance_degradation_percent: 50,
+  performance_consecutive_runs: 3,
+  storage_warning_free_percent: 15,
+  storage_critical_free_percent: 5,
+  storage_warning_forecast_days: 30,
+  storage_critical_forecast_days: 7,
+  history_retention_days: 90,
+})
 
 const dialog = ref(false)
 const editing = ref<User | null>(null)
@@ -50,6 +63,7 @@ function applyRuntimeSettings(value: RuntimeSettings) {
     max_backups: value.log_rotation.max_backups,
     max_age_days: value.log_rotation.max_age_days,
   }
+  qualityForm.value = { ...value.backup_quality.value }
 }
 
 async function changeCompression(value: string | null) {
@@ -103,6 +117,30 @@ async function resetRotation() {
     notifyError(err, 'Не удалось сбросить ротацию')
   } finally {
     rotationBusy.value = false
+  }
+}
+
+async function saveQuality() {
+  qualityBusy.value = true
+  try {
+    applyRuntimeSettings(await api.setRuntimeBackupQuality(qualityForm.value))
+    notifyOk('Пороги мониторинга сохранены')
+  } catch (err) {
+    notifyError(err, 'Не удалось сохранить пороги мониторинга')
+  } finally {
+    qualityBusy.value = false
+  }
+}
+
+async function resetQuality() {
+  qualityBusy.value = true
+  try {
+    applyRuntimeSettings(await api.resetRuntimeBackupQuality())
+    notifyOk('Пороги мониторинга возвращены к конфигурации запуска')
+  } catch (err) {
+    notifyError(err, 'Не удалось сбросить пороги мониторинга')
+  } finally {
+    qualityBusy.value = false
   }
 }
 
@@ -307,6 +345,7 @@ onMounted(async () => {
     <q-card flat bordered>
       <q-tabs v-model="tab" align="left" active-color="primary" indicator-color="primary" dense>
         <q-tab name="system" label="Система" />
+        <q-tab v-if="auth.canAdmin()" name="monitoring" label="Мониторинг" />
         <q-tab v-if="auth.canAdmin()" name="users" :label="`Пользователи (${users.length})`" />
         <q-tab v-if="auth.canAdmin()" name="audit" label="Аудит" />
         <q-tab v-if="auth.canAdmin()" name="logs" label="Журнал" />
@@ -469,6 +508,70 @@ onMounted(async () => {
                   </q-item>
                 </q-list>
               </template>
+            </div>
+          </div>
+        </q-tab-panel>
+
+        <q-tab-panel v-if="auth.canAdmin()" name="monitoring">
+          <div class="row q-col-gutter-md">
+            <div class="col-12 col-lg-8">
+              <div class="text-subtitle1 q-mb-xs">Качество бэкапов</div>
+              <div class="text-caption text-grey-7 q-mb-md">
+                {{ settingSource(runtimeSettings?.backup_quality.source) }} · изменения применяются без перезапуска
+              </div>
+              <div class="row q-col-gutter-md">
+                <div class="col-12 col-sm-6">
+                  <q-input v-model.number="qualityForm.stale_intervals" type="number" min="1" max="10"
+                           label="Просрочка после интервалов" outlined dense :disable="qualityBusy" />
+                </div>
+                <div class="col-12 col-sm-6">
+                  <q-input v-model.number="qualityForm.verify_max_age_days" type="number" min="1" max="365"
+                           label="Проверка старше, дней" outlined dense :disable="qualityBusy" />
+                </div>
+                <div class="col-12 col-sm-6">
+                  <q-input v-model.number="qualityForm.performance_window_runs" type="number" min="5" max="50"
+                           label="Запусков для базовой скорости" outlined dense :disable="qualityBusy" />
+                </div>
+                <div class="col-12 col-sm-6">
+                  <q-input v-model.number="qualityForm.performance_consecutive_runs" type="number" min="1" max="10"
+                           label="Медленных запусков подряд" outlined dense :disable="qualityBusy" />
+                </div>
+                <div class="col-12 col-sm-6">
+                  <q-input v-model.number="qualityForm.performance_degradation_percent" type="number" min="10" max="90"
+                           label="Снижение скорости, %" outlined dense :disable="qualityBusy" />
+                </div>
+                <div class="col-12 col-sm-6">
+                  <q-input v-model.number="qualityForm.history_retention_days" type="number" min="7" max="3650"
+                           label="История ёмкости, дней" outlined dense :disable="qualityBusy" />
+                </div>
+              </div>
+
+              <q-separator class="q-my-md" />
+              <div class="text-subtitle2 q-mb-md">Свободное место и прогноз</div>
+              <div class="row q-col-gutter-md">
+                <div class="col-6 col-sm-3">
+                  <q-input v-model.number="qualityForm.storage_warning_free_percent" type="number" min="1" max="99"
+                           label="Предупреждение, %" outlined dense :disable="qualityBusy" />
+                </div>
+                <div class="col-6 col-sm-3">
+                  <q-input v-model.number="qualityForm.storage_critical_free_percent" type="number" min="1" max="99"
+                           label="Критично, %" outlined dense :disable="qualityBusy" />
+                </div>
+                <div class="col-6 col-sm-3">
+                  <q-input v-model.number="qualityForm.storage_warning_forecast_days" type="number" min="1" max="365"
+                           label="Прогноз, дней" outlined dense :disable="qualityBusy" />
+                </div>
+                <div class="col-6 col-sm-3">
+                  <q-input v-model.number="qualityForm.storage_critical_forecast_days" type="number" min="1" max="365"
+                           label="Критичный прогноз" outlined dense :disable="qualityBusy" />
+                </div>
+              </div>
+
+              <div class="row items-center q-gutter-sm q-mt-lg">
+                <q-btn color="primary" unelevated icon="save" label="Сохранить" :loading="qualityBusy" @click="saveQuality" />
+                <q-btn v-if="runtimeSettings?.backup_quality.source === 'database'" flat icon="restart_alt"
+                       label="Вернуть конфигурацию" :disable="qualityBusy" @click="resetQuality" />
+              </div>
             </div>
           </div>
         </q-tab-panel>

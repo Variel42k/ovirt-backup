@@ -46,6 +46,12 @@ auth:
   # Статические токены для интеграций: заголовок `Authorization: Bearer <token>`.
   api_tokens: []
 
+# Экспорт Prometheus использует отдельный токен и не принимает cookie или
+# auth.api_tokens. Установщик создаёт защищённый файл автоматически.
+metrics:
+  enabled: false
+  token_file: ""
+
 # СУБД — PostgreSQL, другой сервис не знает.
 database:
   # Подключение одной строкой, в любой из двух форм:
@@ -92,6 +98,19 @@ monitor:
   history_retention: 168h
   # Порог: сколько подряд неудачных проб до перевода объекта в состояние «авария».
   failure_threshold: 3
+  # Эти пороги можно менять в «Настройки → Мониторинг». Значения из БД имеют
+  # приоритет и применяются без перезапуска; сброс возвращает этот блок.
+  backup_quality:
+    stale_intervals: 2
+    verify_max_age_days: 7
+    performance_window_runs: 10
+    performance_degradation_percent: 50
+    performance_consecutive_runs: 3
+    storage_warning_free_percent: 15
+    storage_critical_free_percent: 5
+    storage_warning_forecast_days: 30
+    storage_critical_forecast_days: 7
+    history_retention_days: 90
   remediation:
     enabled: true
     # true — сохранять решения в БД и истории, но ничего не выполнять.
@@ -153,5 +172,6 @@ backup:
 scheduler:
   enabled: true
   timezone: "Asia/Yekaterinburg"
-  # Задания, которые запустились бы в момент простоя сервиса, будут выполнены при старте.
+  # После простоя все точки фиксируются как пропущенные. true дополнительно
+  # запускает одну последнюю точку; старые точки по очереди не проигрываются.
   catch_up_missed: true

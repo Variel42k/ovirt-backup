@@ -69,7 +69,7 @@ onBeforeUnmount(() => {
           <div class="jhv-metric__value" :class="data.totals.protected_vms < data.totals.vms ? 'text-warning' : ''">
             {{ data.totals.protected_vms }}<span class="text-h6 text-grey-6">/{{ data.totals.vms }}</span>
           </div>
-          <div class="text-caption text-grey-7">ВМ с хотя бы одним бэкапом</div>
+          <div class="text-caption text-grey-7">по расписанию и всем репликам</div>
         </q-card>
       </div>
       <div class="col-6 col-md-3 col-lg-2">
@@ -90,6 +90,21 @@ onBeforeUnmount(() => {
           <div class="text-caption text-grey-7">за неделю: {{ bytes(data.totals.stored_bytes) }}</div>
         </q-card>
       </div>
+    </div>
+
+    <div v-if="data" class="row q-gutter-sm items-center q-mb-md">
+      <q-chip dense icon="schedule" :color="data.totals.overdue_policies ? 'warning' : 'grey-3'"
+              :text-color="data.totals.overdue_policies ? 'white' : 'grey-9'">
+        Просрочено политик: {{ data.totals.overdue_policies }}
+      </q-chip>
+      <q-chip dense icon="content_copy" :color="data.totals.incomplete_replicas ? 'negative' : 'grey-3'"
+              :text-color="data.totals.incomplete_replicas ? 'white' : 'grey-9'">
+        Неполных реплик: {{ data.totals.incomplete_replicas }}
+      </q-chip>
+      <q-chip dense icon="storage" :color="data.totals.storages_at_risk ? 'warning' : 'grey-3'"
+              :text-color="data.totals.storages_at_risk ? 'white' : 'grey-9'">
+        Хранилищ под риском: {{ data.totals.storages_at_risk }}
+      </q-chip>
     </div>
 
     <div class="row q-col-gutter-md">

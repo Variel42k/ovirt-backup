@@ -14,7 +14,7 @@ import (
 	"adveng/jh_virt/internal/model"
 )
 
-const runColumns = `id, job_id, job_name, server_id, vm_id, vm_name, type, status, parent_run_id,
+const runColumns = `id, job_run_id, job_id, job_name, server_id, vm_id, vm_name, type, status, parent_run_id,
 	chain_id, chain_index, storage_target_id, repo_path, engine_backup_id, from_checkpoint_id,
 	to_checkpoint_id, snapshot_id, disk_count, logical_bytes, read_bytes, stored_bytes, progress,
 	encrypted, compression, verify_status, verified_at, error, started_at, ended_at, expires_at,
@@ -37,8 +37,8 @@ func (s *Store) CreateBackupRun(ctx context.Context, r *model.BackupRun) error {
 	}
 
 	_, err := s.db.Exec(ctx, `INSERT INTO backup_runs (`+runColumns+`)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		r.ID, r.JobID, r.JobName, r.ServerID, r.VMID, r.VMName, string(r.Type), string(r.Status),
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		r.ID, nullString(r.JobRunID), r.JobID, r.JobName, r.ServerID, r.VMID, r.VMName, string(r.Type), string(r.Status),
 		r.ParentRunID, r.ChainID, r.ChainIndex, r.StorageTargetID, r.RepoPath, r.EngineBackupID,
 		r.FromCheckpointID, r.ToCheckpointID, r.SnapshotID, r.DiskCount, r.LogicalBytes,
 		r.ReadBytes, r.StoredBytes, r.Progress, r.Encrypted, r.Compression, string(r.VerifyStatus),
@@ -107,6 +107,7 @@ type RunFilter struct {
 	ServerID string
 	VMID     string
 	JobID    string
+	JobRunID string
 	ChainID  string
 	TargetID string
 	Statuses []model.RunStatus
@@ -137,6 +138,9 @@ func (s *Store) ListBackupRuns(ctx context.Context, f RunFilter) ([]*model.Backu
 	}
 	if f.JobID != "" {
 		add(`job_id=?`, f.JobID)
+	}
+	if f.JobRunID != "" {
+		add(`job_run_id=?`, f.JobRunID)
 	}
 	if f.ChainID != "" {
 		add(`chain_id=?`, f.ChainID)
@@ -253,7 +257,8 @@ func scanRun(row rowScanner) (*model.BackupRun, error) {
 		createdAt                                 time.Time
 		skipped                                   string
 	)
-	err := row.Scan(&r.ID, &r.JobID, &r.JobName, &r.ServerID, &r.VMID, &r.VMName, &typ, &status,
+	var jobRunID sql.NullString
+	err := row.Scan(&r.ID, &jobRunID, &r.JobID, &r.JobName, &r.ServerID, &r.VMID, &r.VMName, &typ, &status,
 		&r.ParentRunID, &r.ChainID, &r.ChainIndex, &r.StorageTargetID, &r.RepoPath,
 		&r.EngineBackupID, &r.FromCheckpointID, &r.ToCheckpointID, &r.SnapshotID, &r.DiskCount,
 		&r.LogicalBytes, &r.ReadBytes, &r.StoredBytes, &r.Progress, &r.Encrypted, &r.Compression,
@@ -267,6 +272,7 @@ func scanRun(row rowScanner) (*model.BackupRun, error) {
 	}
 
 	r.Type = model.BackupType(typ)
+	r.JobRunID = jobRunID.String
 	r.Status = model.RunStatus(status)
 	r.VerifyStatus = model.RunStatus(verifyStatus)
 	r.VerifiedAt = nullTime(verifiedAt)

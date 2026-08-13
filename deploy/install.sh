@@ -118,12 +118,52 @@ gen_secret() {
     fi
 }
 
+docker_metrics_volume() {
+	printf '%s_jhvirt-data' "$(project_name)"
+}
+
+ensure_docker_metrics_token() {
+	VOL="$(docker_metrics_volume)"
+	if ! volume_exists "$VOL"; then
+		docker volume create \
+			--label "com.docker.compose.project=$(project_name)" \
+			--label "com.docker.compose.volume=jhvirt-data" "$VOL" >/dev/null
+	fi
+	TOKEN="$(gen_secret 32)"
+	[ -n "$TOKEN" ] || die "не удалось сгенерировать токен Prometheus"
+	printf '%s\n' "$TOKEN" | docker run --rm -i --network none --user root \
+		-v "$VOL:/data" docker.io/library/postgres:17-alpine sh -c '
+		if [ -s /data/metrics.token ]; then
+			cat >/dev/null
+		else
+			umask 077
+			cat > /data/metrics.token
+			chown 10001:10001 /data/metrics.token
+			chmod 600 /data/metrics.token
+		fi
+		chown 10001:10001 /data
+		chmod 700 /data' || die "не удалось создать token-файл Prometheus в томе $VOL"
+}
+
+remove_docker_metrics_token() {
+	VOL="$(docker_metrics_volume)"
+	volume_exists "$VOL" || return 0
+	docker run --rm --network none --user root -v "$VOL:/data" \
+		docker.io/library/postgres:17-alpine rm -f /data/metrics.token >/dev/null 2>&1 || {
+		say "    предупреждение: не удалось удалить metrics.token из тома $VOL"
+		return 1
+	}
+	return 0
+}
+
 set_plain_env() {
-    KEY="$1"; VALUE="$2"; FILE="$3"; TMP="$FILE.tmp.$$"
-    grep -v "^${KEY}=" "$FILE" > "$TMP" || true
-    printf '%s=%s\n' "$KEY" "$VALUE" >> "$TMP"
-    chmod 600 "$TMP"
-    mv "$TMP" "$FILE"
+    KEY="$1"; VALUE="$2"; FILE="$3"; JHV_ENV_TMP="${TMPDIR:-/tmp}/jhvirt-env.$$"
+	grep -v "^${KEY}=" "$FILE" > "$JHV_ENV_TMP" || true
+	printf '%s=%s\n' "$KEY" "$VALUE" >> "$JHV_ENV_TMP"
+	chmod 600 "$JHV_ENV_TMP"
+	cat "$JHV_ENV_TMP" > "$FILE"
+	chmod 600 "$FILE"
+	rm -f "$JHV_ENV_TMP"
 }
 
 install_bundle_config() {
@@ -251,25 +291,33 @@ remove_configuration_files() {
     esac
 
     step "удаление конфигурации выбранной установки"
-    case "$UNINSTALL_TARGET" in
-        docker|all)
+	case "$UNINSTALL_TARGET" in
+		docker|all)
             REMOVE_CONFIG_LAST_DIR=""
             for dir in "$PREFIX/compose" "$COMPOSE_DIR"; do
                 [ "$dir" = "$REMOVE_CONFIG_LAST_DIR" ] && continue
                 REMOVE_CONFIG_LAST_DIR="$dir"
-                if [ -f "$dir/.env" ]; then
-                    rm -f "$dir/.env"
+				if [ -f "$dir/.env" ]; then
+					if have docker; then
+						COMPOSE_DIR="$dir"
+						remove_docker_metrics_token || true
+					fi
+					rm -f "$dir/.env"
                     say "    удалён $dir/.env"
                 fi
             done
             ;;
     esac
     case "$UNINSTALL_TARGET" in
-        systemd|all)
+		systemd|all)
             if [ -f "$PREFIX/config/jhvirt.env" ]; then
                 rm -f "$PREFIX/config/jhvirt.env"
                 say "    удалён $PREFIX/config/jhvirt.env"
-            fi
+			fi
+			if [ -f "$PREFIX/config/metrics.token" ]; then
+				rm -f "$PREFIX/config/metrics.token"
+				say "    удалён $PREFIX/config/metrics.token"
+			fi
             ;;
     esac
 
@@ -704,10 +752,11 @@ install_containers() {
         BACKUPS="./backups"; RESTORES="./restores"
     fi
 
-    if [ -f "$WORK/.env" ]; then
+	if [ -f "$WORK/.env" ]; then
         say "    $WORK/.env уже есть; пароль базы и пользовательские настройки сохранены"
         set_plain_env JHV_EXTERNAL_URL "$URL" "$WORK/.env"
-        set_plain_env JHV_PORT "$PORT" "$WORK/.env"
+		set_plain_env JHV_PORT "$PORT" "$WORK/.env"
+		set_plain_env JHV_METRICS_ENABLED true "$WORK/.env"
     else
         # Пароль базы задаётся один раз — при создании тома. Если том с прошлой
         # установки уцелел, а .env исчез, сгенерированный пароль базе не
@@ -766,13 +815,17 @@ PostgreSQL хранит пароль внутри тома и новый не п
             printf 'JHV_ADMIN_PASSWORD=%s\n' "$ADMPASS"
             printf 'JHV_BACKUP_DIR=%s\n' "$BACKUPS"
             printf 'JHV_RESTORE_DIR=%s\n' "$RESTORES"
-            printf 'JHV_LOG_FILE=/app/logs/jhvirt.log\n'
+			printf 'JHV_LOG_FILE=/app/logs/jhvirt.log\n'
+			printf 'JHV_METRICS_ENABLED=true\n'
             printf 'TZ=%s\n' "$(cat /etc/timezone 2>/dev/null || echo Europe/Moscow)"
         } > "$WORK/.env"
         umask 022
         chmod 600 "$WORK/.env"
         say "    создан $WORK/.env, пароль базы сгенерирован"
-    fi
+	fi
+
+	step "token-файл Prometheus"
+	ensure_docker_metrics_token
 
     [ "$BUNDLE" -eq 1 ] && { chown -R "$USER_NAME:$USER_NAME" "$PREFIX"; chmod 700 "$PREFIX/data"; }
 
@@ -1062,8 +1115,20 @@ install_systemd() {
         say "    подключение к базе сохранено из $ENV_FILE"
     fi
 
-    set_env JHV_SERVER_EXTERNAL_URL "$URL" "$ENV_FILE"
-    set_env JHV_SERVER_PORT "$PORT" "$ENV_FILE"
+	set_env JHV_SERVER_EXTERNAL_URL "$URL" "$ENV_FILE"
+	set_env JHV_SERVER_PORT "$PORT" "$ENV_FILE"
+	METRICS_TOKEN_FILE="$PREFIX/config/metrics.token"
+	if [ ! -s "$METRICS_TOKEN_FILE" ]; then
+		METRICS_TOKEN="$(gen_secret 32)"
+		[ -n "$METRICS_TOKEN" ] || die "не удалось сгенерировать токен Prometheus"
+		umask 077
+		printf '%s\n' "$METRICS_TOKEN" > "$METRICS_TOKEN_FILE"
+		umask 022
+	fi
+	chown "$USER_NAME:$USER_NAME" "$METRICS_TOKEN_FILE"
+	chmod 600 "$METRICS_TOKEN_FILE"
+	set_env JHV_METRICS_ENABLED true "$ENV_FILE"
+	set_env JHV_METRICS_TOKEN_FILE "$METRICS_TOKEN_FILE" "$ENV_FILE"
 
     ADMPASS=""
     if [ "$START" -eq 1 ] && [ "$ENV_EXISTED" -eq 0 ] &&

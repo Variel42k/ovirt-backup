@@ -14,3 +14,4 @@ coverage.out
 .vscode/
 *.key
 .env
+.env.tmp.*

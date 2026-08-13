@@ -82,12 +82,13 @@ const (
 	RunPartial   RunStatus = "partial" // часть дисков сохранена, часть — нет
 	RunFailed    RunStatus = "failed"
 	RunCanceled  RunStatus = "canceled"
+	RunMissed    RunStatus = "missed"
 )
 
 // Terminal reports whether the status will not change on its own.
 func (s RunStatus) Terminal() bool {
 	switch s {
-	case RunSucceeded, RunPartial, RunFailed, RunCanceled:
+	case RunSucceeded, RunPartial, RunFailed, RunCanceled, RunMissed:
 		return true
 	}
 	return false
@@ -384,6 +385,7 @@ func (j *BackupJob) Validate() error {
 // BackupRun is one execution: one VM, one point in time, one repository.
 type BackupRun struct {
 	ID       string     `json:"id"`
+	JobRunID string     `json:"job_run_id,omitempty"`
 	JobID    string     `json:"job_id,omitempty"`
 	JobName  string     `json:"job_name,omitempty"`
 	ServerID string     `json:"server_id"`
@@ -436,6 +438,30 @@ type BackupRun struct {
 	CreatedAt time.Time  `json:"created_at"`
 
 	Disks []BackupDisk `json:"disks,omitempty"`
+}
+
+// BackupJobRun groups every VM/repository copy started by one scheduler tick
+// or one manual invocation. It is deliberately a snapshot of the job: deleting
+// a job must not erase the evidence that one of its replicas failed.
+type BackupJobRun struct {
+	ID              string     `json:"id"`
+	JobID           string     `json:"job_id"`
+	JobName         string     `json:"job_name"`
+	ServerID        string     `json:"server_id"`
+	TriggeredBy     string     `json:"triggered_by"`
+	ScheduledAt     *time.Time `json:"scheduled_at,omitempty"`
+	MissedIntervals int        `json:"missed_intervals"`
+	Status          RunStatus  `json:"status"`
+	VMCount         int        `json:"vm_count"`
+	ReplicaCount    int        `json:"replica_count"`
+	SucceededCount  int        `json:"succeeded_count"`
+	PartialCount    int        `json:"partial_count"`
+	FailedCount     int        `json:"failed_count"`
+	CanceledCount   int        `json:"canceled_count"`
+	Error           string     `json:"error,omitempty"`
+	StartedAt       *time.Time `json:"started_at,omitempty"`
+	EndedAt         *time.Time `json:"ended_at,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
 }
 
 // Duration returns how long the run took, or 0 while it is still going.

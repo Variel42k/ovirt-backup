@@ -79,13 +79,24 @@ interface ActiveNotification {
   dismiss: () => void
 }
 
+const POPUP_NOTIFICATIONS_STORAGE_KEY = 'ovirt-backup:popup-notifications-enabled'
 const active = new Map<string, ActiveNotification>()
 let nextNotificationNumber = 0
 
 /** Сколько уведомлений висит на экране; для кнопки «закрыть все». */
 export const notificationCount = ref(0)
+export const popupNotificationsEnabled = ref(readPopupNotificationsPreference())
 
 const DEFAULT_TIMEOUT = 5000
+
+function readPopupNotificationsPreference(): boolean {
+  if (typeof window === 'undefined') return true
+  try {
+    return window.localStorage.getItem(POPUP_NOTIFICATIONS_STORAGE_KEY) !== 'false'
+  } catch {
+    return true
+  }
+}
 
 function removeNotification(key: string, entry: ActiveNotification): void {
   if (active.get(key) !== entry) return
@@ -105,6 +116,8 @@ function removeNotification(key: string, entry: ActiveNotification): void {
  * вызова, и для тех, что появятся мимо него.
  */
 export function notify(options: QNotifyCreateOptions | string): void {
+  if (!popupNotificationsEnabled.value) return
+
   const resolved: QNotifyCreateOptions = typeof options === 'object' ? options : { message: options }
   const timeout = resolved.timeout ?? DEFAULT_TIMEOUT
   const key = `${resolved.type ?? ''}:${resolved.message ?? ''}`
@@ -138,6 +151,24 @@ export function dismissAllNotifications(): number {
   nextNotificationNumber = 0
   entries.forEach((entry) => entry.dismiss())
   return count
+}
+
+export function setPopupNotificationsEnabled(enabled: boolean): void {
+  popupNotificationsEnabled.value = enabled
+  try {
+    window.localStorage.setItem(POPUP_NOTIFICATIONS_STORAGE_KEY, String(enabled))
+  } catch {
+    // Keep the preference for this page when persistent browser storage is unavailable.
+  }
+  if (!enabled) dismissAllNotifications()
+}
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('storage', (event) => {
+    if (event.key !== POPUP_NOTIFICATIONS_STORAGE_KEY) return
+    popupNotificationsEnabled.value = event.newValue !== 'false'
+    if (!popupNotificationsEnabled.value) dismissAllNotifications()
+  })
 }
 
 /** Показывает ошибку пользователю и возвращает её текст. */

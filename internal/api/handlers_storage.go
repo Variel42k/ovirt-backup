@@ -127,6 +127,12 @@ func (s *Server) handleCreateStorage(w http.ResponseWriter, r *http.Request) {
 	target := &model.StorageTarget{Enabled: true, UseSSL: true}
 	payload.apply(target)
 
+	if err := ensureLocalPathUsable(r.Context(), target); err != nil {
+		s.audit(r, "storage.create", model.ScopeStorageTarget, target.Name, false, err.Error())
+		s.writeError(w, r, err)
+		return
+	}
+
 	if err := s.store.CreateStorageTarget(r.Context(), target); err != nil {
 		s.audit(r, "storage.create", model.ScopeStorageTarget, target.Name, false, err.Error())
 		s.writeError(w, r, err)
@@ -160,6 +166,12 @@ func (s *Server) handleUpdateStorage(w http.ResponseWriter, r *http.Request) {
 	}
 	payload.apply(existing)
 
+	if err := ensureLocalPathUsable(r.Context(), existing); err != nil {
+		s.audit(r, "storage.update", model.ScopeStorageTarget, id, false, err.Error())
+		s.writeError(w, r, err)
+		return
+	}
+
 	if err := s.store.UpdateStorageTarget(r.Context(), existing); err != nil {
 		s.audit(r, "storage.update", model.ScopeStorageTarget, id, false, err.Error())
 		s.writeError(w, r, err)
@@ -169,6 +181,30 @@ func (s *Server) handleUpdateStorage(w http.ResponseWriter, r *http.Request) {
 
 	go s.checkStorage(context.WithoutCancel(r.Context()), id)
 	writeJSON(w, http.StatusOK, existing)
+}
+
+// ensureLocalPathUsable refuses to save a local repository whose directory
+// cannot be created.
+//
+// Для сетевых хранилищ такая проверка была бы вредной: S3 или SFTP бывают
+// временно недоступны, и запрет на сохранение из-за этого означал бы, что
+// настроить хранилище можно только при работающей сети. С локальным каталогом
+// иначе: он либо создаётся сразу, либо не создастся никогда, и отказ здесь —
+// это опечатка в пути, а не сбой.
+//
+// Раньше запись сохранялась, а отказ приходил позже, из фоновой проверки. Со
+// стороны оператора это выглядело как неисправное хранилище, а не как неверный
+// путь: он снова шёл в форму создания, хотя править нужно было уже сохранённую
+// запись, которая продолжала выдавать ту же ошибку при каждой проверке.
+func ensureLocalPathUsable(ctx context.Context, target *model.StorageTarget) error {
+	if target.Kind != model.StorageLocal {
+		return nil
+	}
+	backend, err := repo.Open(ctx, target)
+	if err != nil {
+		return badRequest("%v", err)
+	}
+	return backend.Close()
 }
 
 func (s *Server) handleDeleteStorage(w http.ResponseWriter, r *http.Request) {

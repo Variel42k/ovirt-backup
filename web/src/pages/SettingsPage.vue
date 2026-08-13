@@ -1,7 +1,13 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { useQuasar } from 'quasar'
-import { api, notifyError, notifyOk } from '@/api/client'
+import {
+  api,
+  notifyError,
+  notifyOk,
+  popupNotificationsEnabled,
+  setPopupNotificationsEnabled,
+} from '@/api/client'
 import { bytes, dateTime } from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
@@ -356,6 +362,26 @@ onMounted(async () => {
         <q-tab-panel name="system">
           <div class="row q-col-gutter-md">
             <div class="col-12 col-md-6">
+              <q-list bordered separator dense class="q-mb-md">
+                <q-item-label header>Интерфейс</q-item-label>
+                <q-item tag="label" clickable>
+                  <q-item-section avatar>
+                    <q-icon :name="popupNotificationsEnabled ? 'notifications_active' : 'notifications_off'" />
+                  </q-item-section>
+                  <q-item-section>
+                    <q-item-label>Всплывающие уведомления</q-item-label>
+                    <q-item-label caption>Настройка этого браузера</q-item-label>
+                  </q-item-section>
+                  <q-item-section side>
+                    <q-toggle
+                      :model-value="popupNotificationsEnabled"
+                      aria-label="Всплывающие уведомления"
+                      @update:model-value="setPopupNotificationsEnabled"
+                    />
+                  </q-item-section>
+                </q-item>
+              </q-list>
+
               <q-list bordered separator dense>
                 <q-item-label header>Параметры развёртывания</q-item-label>
                 <q-item>

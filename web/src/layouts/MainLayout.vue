@@ -1,7 +1,15 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { api, dismissAllNotifications, notificationCount, notifyEvent, notifyError } from '@/api/client'
+import {
+  api,
+  dismissAllNotifications,
+  notificationCount,
+  notifyEvent,
+  notifyError,
+  popupNotificationsEnabled,
+  setPopupNotificationsEnabled,
+} from '@/api/client'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 
@@ -128,7 +136,14 @@ onBeforeUnmount(() => {
           @click="closeAllNotifications"
         >
           <q-badge floating color="negative">{{ notificationCount }}</q-badge>
-          <q-tooltip>Закрыть все уведомления ({{ notificationCount }})</q-tooltip>
+          <q-tooltip
+            class="jhv-notification-control-tooltip"
+            anchor="center left"
+            self="center right"
+            :offset="[8, 0]"
+          >
+            Закрыть все уведомления ({{ notificationCount }})
+          </q-tooltip>
         </q-btn>
 
         <q-btn flat dense round :icon="liveConnected ? 'sensors' : 'sensors_off'">
@@ -137,8 +152,25 @@ onBeforeUnmount(() => {
 
         <q-btn flat dense round icon="account_circle">
           <q-menu>
-            <q-list style="min-width: 180px">
+            <q-list style="min-width: 320px">
               <q-item-label header>{{ auth.username }} — {{ auth.role }}</q-item-label>
+              <q-separator />
+              <q-item tag="label" clickable>
+                <q-item-section avatar>
+                  <q-icon :name="popupNotificationsEnabled ? 'notifications_active' : 'notifications_off'" />
+                </q-item-section>
+                <q-item-section>
+                  <q-item-label>Всплывающие уведомления</q-item-label>
+                  <q-item-label caption>Настройка этого браузера</q-item-label>
+                </q-item-section>
+                <q-item-section side>
+                  <q-toggle
+                    :model-value="popupNotificationsEnabled"
+                    aria-label="Всплывающие уведомления"
+                    @update:model-value="setPopupNotificationsEnabled"
+                  />
+                </q-item-section>
+              </q-item>
               <q-separator />
               <q-item clickable v-close-popup @click="doLogout">
                 <q-item-section avatar><q-icon name="logout" /></q-item-section>

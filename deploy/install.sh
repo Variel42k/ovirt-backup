@@ -21,6 +21,7 @@
 #   ./install.sh --uninstall=docker    снять только контейнеры
 #   ./install.sh --uninstall=all       снять оба варианта, данные оставить
 #   ./install.sh --uninstall=all --remove-config  также удалить YAML/env
+#   ./install.sh --uninstall=all --purge          удалить всё: базу, ключ, данные
 
 set -eu
 
@@ -39,7 +40,7 @@ CONFIG_NAME="ovirt-backup.yaml"
 LEGACY_CONFIG_NAME="virt-manager.yaml"
 
 MODE=""; URL=""; DATABASE_URL_FILE=""; UNINSTALL_TARGET=""; START=1; PORT=8080
-UNINSTALL_REMOVE_CONFIG=0
+UNINSTALL_REMOVE_CONFIG=0; UNINSTALL_REMOVE_DATA=0
 
 die() { printf '\nошибка: %s\n' "$*" >&2; exit 1; }
 say() { printf '%s\n' "$*"; }
@@ -60,6 +61,10 @@ while [ $# -gt 0 ]; do
         --uninstall=*) MODE=uninstall; UNINSTALL_TARGET="${1#--uninstall=}"; shift ;;
         --uninstall) MODE=uninstall; shift ;;
         --remove-config) UNINSTALL_REMOVE_CONFIG=1; shift ;;
+        # Отдельный ключ, а не значение --uninstall: полное удаление стирает
+        # ключ шифрования, и набрать его случайно, промахнувшись по списку
+        # вариантов, не выйдет — придётся написать слово целиком.
+        --purge) UNINSTALL_REMOVE_CONFIG=1; UNINSTALL_REMOVE_DATA=1; shift ;;
         # Справка — это шапка файла: два описания разъезжаются, одно нет.
         # Границей служит первая строка не-комментарий, а не номер строки:
         # по номерам вывод уже захватывал лишнее при правке шапки.
@@ -154,6 +159,65 @@ remove_docker_metrics_token() {
 		return 1
 	}
 	return 0
+}
+
+# Имена томов, которые заводит compose. Кандидатов несколько: имя проекта
+# менялось между версиями, и установка, сделанная прежней, лежит в томах со
+# старым префиксом. Удалять или чинить надо именно те, что нашлись, иначе
+# «полное удаление» оставило бы данные лежать под чужим именем, а установка
+# рядом завела бы пустую базу.
+data_volume_candidates() {
+    for PREF in "$(project_name)" jhvirt "$COMPOSE_SERVICE" "$LEGACY_COMPOSE_SERVICE"; do
+        printf '%s_postgres-data\n%s_jhvirt-data\n' "$PREF" "$PREF"
+    done | awk '!seen[$0]++'
+}
+
+# reset_db_password задаёт новый пароль пользователю базы прямо в уцелевшем томе.
+#
+# Пароль PostgreSQL хранит внутри кластера, поэтому «пароль потерян» и «данные
+# потеряны» — разные беды: временный контейнер поднимает базу из того же тома и
+# меняет пароль через локальный сокет, где действует доверительная
+# аутентификация. Сами данные при этом не трогаются.
+#
+# Так закрывается тупик, в который упиралась установка поверх тома от прошлой
+# установки без .env: раньше оставалось либо найти прежний файл, либо стереть
+# базу вместе с подключениями, заданиями и историей.
+reset_db_password() {
+    RDB_VOL="$1"; RDB_PASS="$2"; RDB_USER="${3:-jhvirt}"
+    RDB_NAME="jhv-pgreset-$$"
+
+    docker rm -f "$RDB_NAME" >/dev/null 2>&1
+    docker run -d --name "$RDB_NAME" --network none \
+        -v "$RDB_VOL:/var/lib/postgresql/data" \
+        docker.io/library/postgres:17-alpine >/dev/null 2>&1 ||
+        { say "    не удалось поднять временный контейнер базы"; return 1; }
+
+    RDB_READY=0; RDB_TRY=0
+    while [ "$RDB_TRY" -lt 40 ]; do
+        if docker exec "$RDB_NAME" pg_isready -U "$RDB_USER" -q 2>/dev/null; then
+            RDB_READY=1; break
+        fi
+        RDB_TRY=$((RDB_TRY+1)); sleep 2
+    done
+
+    RDB_RC=1
+    if [ "$RDB_READY" -eq 1 ]; then
+        # Пароль передаётся через переменную окружения, а не в тексте команды:
+        # в ps его видно всем, кто есть на машине.
+        if docker exec -e RDB_PASS="$RDB_PASS" "$RDB_NAME" \
+            psql -U "$RDB_USER" -d "$RDB_USER" -q -v ON_ERROR_STOP=1 \
+            -c "ALTER USER \"$RDB_USER\" PASSWORD '$(printf '%s' "$RDB_PASS")';" >/dev/null 2>&1; then
+            RDB_RC=0
+        else
+            say "    база поднялась, но сменить пароль не удалось"
+        fi
+    else
+        say "    временная база не поднялась за 80 секунд"
+    fi
+
+    docker stop "$RDB_NAME" >/dev/null 2>&1
+    docker rm "$RDB_NAME" >/dev/null 2>&1
+    return "$RDB_RC"
 }
 
 set_plain_env() {
@@ -362,19 +426,42 @@ choose_uninstall() {
         say ""
         say "Что делать с конфигурацией выбранной установки?"
         say ""
-        say "  1) сохранить — YAML и env останутся (рекомендуется)"
-        say "  2) удалить   — удалить YAML/env; ключи, база и данные останутся"
+        say "  1) сохранить    — YAML и env останутся (рекомендуется)"
+        say "  2) удалить      — YAML/env; ключи, база и данные останутся"
+        say "  3) удалить всё  — вместе с базой, ключом шифрования и данными"
         say ""
         while :; do
             printf 'Номер [1]: '
             read -r UNINSTALL_CONFIG_CHOICE || UNINSTALL_CONFIG_CHOICE=""
             [ -n "$UNINSTALL_CONFIG_CHOICE" ] || UNINSTALL_CONFIG_CHOICE=1
             case "$UNINSTALL_CONFIG_CHOICE" in
-                1) UNINSTALL_REMOVE_CONFIG=0; break ;;
-                2) UNINSTALL_REMOVE_CONFIG=1; break ;;
+                1) UNINSTALL_REMOVE_CONFIG=0; UNINSTALL_REMOVE_DATA=0; break ;;
+                2) UNINSTALL_REMOVE_CONFIG=1; UNINSTALL_REMOVE_DATA=0; break ;;
+                3) UNINSTALL_REMOVE_CONFIG=1; UNINSTALL_REMOVE_DATA=1; break ;;
                 *) say "Нет такого варианта." ;;
             esac
         done
+
+        if [ "$UNINSTALL_REMOVE_DATA" -eq 1 ]; then
+            # Отдельное подтверждение словом, а не y/N: это единственное
+            # действие установщика, которое нельзя отменить ничем. Вместе с
+            # ключом шифрования пропадает возможность прочитать уже сделанные
+            # копии — они останутся лежать в хранилище нечитаемыми. Нажать «y»
+            # не глядя слишком легко, набрать слово — уже осознанное действие.
+            say ""
+            say "Будут удалены: база со всеми подключениями, заданиями и историей,"
+            say "ключ шифрования secret.key и данные приложения."
+            say ""
+            say "Уже сделанные копии останутся в хранилище, но без secret.key их"
+            say "не расшифровать — ни этой установкой, ни любой другой."
+            say ""
+            printf 'Наберите УДАЛИТЬ, чтобы подтвердить: '
+            read -r UNINSTALL_CONFIRM || UNINSTALL_CONFIRM=""
+            case "$UNINSTALL_CONFIRM" in
+                УДАЛИТЬ|удалить) return 0 ;;
+                *) say "Удаление отменено."; return 1 ;;
+            esac
+        fi
 
         if [ "$UNINSTALL_REMOVE_CONFIG" -eq 1 ]; then
             printf 'Удалить %s и его конфигурацию? Ключи, база и данные будут сохранены. [y/N]: ' "$UNINSTALL_LABEL"
@@ -387,6 +474,51 @@ choose_uninstall() {
             *) say "Удаление отменено."; return 1 ;;
         esac
     done
+}
+
+# remove_data_stores удаляет то, что все остальные ветки удаления берегут:
+# базу, ключ шифрования и данные приложения. Вызывается только после явного
+# подтверждения словом.
+#
+# Тома перебираются по всем известным префиксам имени проекта: установка,
+# сделанная прежней версией, лежит в томах со старым именем, и «полное
+# удаление», которое их не тронуло, оставило бы после себя и базу с
+# подключениями, и ключ — то есть не было бы полным.
+remove_data_stores() {
+    say ""
+    say "==> удаление базы, ключа и данных"
+
+    if [ "$UNINSTALL_TARGET" = docker ] || [ "$UNINSTALL_TARGET" = all ]; then
+        if have docker; then
+            REMOVED_ANY=0
+            for VOL in $(data_volume_candidates); do
+                volume_exists "$VOL" || continue
+                if docker volume rm "$VOL" >/dev/null 2>&1; then
+                    say "    удалён том $VOL"
+                    REMOVED_ANY=1
+                else
+                    say "    предупреждение: не удалось удалить том $VOL"
+                    UNINSTALL_ERRORS=$((UNINSTALL_ERRORS+1))
+                fi
+            done
+            [ "$REMOVED_ANY" -eq 1 ] || say "    томов с данными не найдено"
+        else
+            say "    docker недоступен — тома не удалены"
+        fi
+    fi
+
+    if [ "$UNINSTALL_TARGET" = systemd ] || [ "$UNINSTALL_TARGET" = all ]; then
+        if [ -d "$PREFIX/data" ]; then
+            rm -rf "$PREFIX/data" && say "    удалён $PREFIX/data (ключ шифрования)" ||
+                { say "    предупреждение: не удалось удалить $PREFIX/data"
+                  UNINSTALL_ERRORS=$((UNINSTALL_ERRORS+1)); }
+        fi
+        # Базу локальной PostgreSQL не трогаем сами: кластер может обслуживать и
+        # чужие базы, а команда на удаление — короткая и точная, её лучше
+        # выполнить осознанно, чем получить в подарок от установщика.
+        say "    база локальной PostgreSQL не удалялась; если она больше не нужна:"
+        say "      sudo -u postgres dropdb jhvirt && sudo -u postgres dropuser jhvirt"
+    fi
 }
 
 uninstall() {
@@ -426,6 +558,14 @@ uninstall() {
             remove_configuration_files
         else
             say "    конфигурация не удалена: сначала устраните ошибки остановки"
+        fi
+    fi
+
+    if [ "${UNINSTALL_REMOVE_DATA:-0}" -eq 1 ]; then
+        if [ "$UNINSTALL_ERRORS" -eq 0 ]; then
+            remove_data_stores
+        else
+            say "    данные не удалены: сначала устраните ошибки остановки"
         fi
     fi
 
@@ -773,20 +913,40 @@ install_containers() {
                 break
             fi
         done
-        VOLRM="docker volume rm"
+        RESET_DB=0
         if [ -n "$VOL" ]; then
-            die "том базы $VOL остался с прошлой установки, а $WORK/.env — нет.
+            if [ -t 0 ]; then
+                say ""
+                say "Том базы $VOL остался с прошлой установки, а $WORK/.env — нет."
+                say "Пароль базы был только в нём, и новый база не примет: он задан"
+                say "внутри тома при создании кластера."
+                say ""
+                say "  1) задать базе новый пароль — подключения, задания и история"
+                say "     сохраняются (рекомендуется)"
+                say "  2) отменить установку — например, чтобы поискать прежний .env"
+                say ""
+                while :; do
+                    printf 'Номер [1]: '
+                    read -r VOL_CHOICE || VOL_CHOICE=""
+                    [ -n "$VOL_CHOICE" ] || VOL_CHOICE=1
+                    case "$VOL_CHOICE" in
+                        1) RESET_DB=1; break ;;
+                        2) die "установка отменена; прежний .env — единственное место,
+где хранился пароль базы. Полностью убрать старую установку вместе с
+данными: $SELF --uninstall, вариант «удалить всё»." ;;
+                        *) say "Нет такого варианта." ;;
+                    esac
+                done
+            else
+                die "том базы $VOL остался с прошлой установки, а $WORK/.env — нет.
 
 PostgreSQL хранит пароль внутри тома и новый не примет: служба будет
 перезапускаться с «password authentication failed».
 
-Одно из двух:
-  • верните прежний .env — в нём пароль, который база ждёт;
-  • либо удалите том вместе с данными и поставьте заново:
-      $VOLRM $VOL
-
-Во втором случае теряются подключения, задания и история. Сами копии лежат в
-хранилище и не пострадают, но сервис о них забудет."
+В диалоговом режиме установщик предлагает задать базе новый пароль, сохранив
+данные. Без диалога: верните прежний .env либо снимите установку вместе с
+данными — $SELF --uninstall, вариант «удалить всё»."
+            fi
         fi
 
         # Пароль базы генерируется: внутренний секрет, человеком был бы придуман
@@ -795,18 +955,40 @@ PostgreSQL хранит пароль внутри тома и новый не п
         PGPASS="$(gen_secret 24)"
         [ -n "$PGPASS" ] || die "не удалось сгенерировать пароль базы"
 
+        # Имя проекта берётся у найденного тома, а не пишется постоянной строкой:
+        # оно менялось между версиями, и compose с новым именем завёл бы пустые
+        # тома рядом со старыми. База выглядела бы чистой, хотя данные целы и
+        # лежат под прежним префиксом — а новый пароль достался бы не тому тому.
+        PROJECT="ovirt-backup"
+        [ -n "$VOL" ] && PROJECT="${VOL%_postgres-data}"
+
+        if [ "$RESET_DB" -eq 1 ]; then
+            say "==> смена пароля базы в томе $VOL"
+            reset_db_password "$VOL" "$PGPASS" ||
+                die "не удалось сменить пароль базы в томе $VOL.
+Данные не тронуты. Верните прежний .env либо снимите установку вместе с
+данными: $SELF --uninstall, вариант «удалить всё»."
+            say "    пароль базы изменён, данные сохранены"
+            # Учётные записи уже есть в этой базе, и первый администратор
+            # заново не создаётся: сгенерировать и напечатать пароль значило бы
+            # выдать за рабочий тот, которым войти нельзя.
+            ADMPASS=""
+        fi
+
         # Пароль администратора задаём сами, а не вылавливаем потом из журнала:
         # формат вывода у docker compose и docker-compose разный, поэтому пароль
         # задаётся до старта, а не извлекается из журнала.
         #
         # Из .env он стирается сразу после запуска: учётная запись уже создана,
         # и держать пароль в файле дольше незачем.
-        ADMPASS="$(gen_secret 18)"
-        [ -n "$ADMPASS" ] || die "не удалось сгенерировать пароль администратора"
+        if [ "$RESET_DB" -eq 0 ]; then
+            ADMPASS="$(gen_secret 18)"
+            [ -n "$ADMPASS" ] || die "не удалось сгенерировать пароль администратора"
+        fi
 
         umask 077
         {
-            printf 'COMPOSE_PROJECT_NAME=ovirt-backup\n'
+            printf 'COMPOSE_PROJECT_NAME=%s\n' "$PROJECT"
             printf 'POSTGRES_USER=jhvirt\n'
             printf 'POSTGRES_PASSWORD=%s\n' "$PGPASS"
             printf 'POSTGRES_DB=jhvirt\n'

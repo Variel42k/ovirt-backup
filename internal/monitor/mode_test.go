@@ -40,6 +40,65 @@ func testRemediator(t *testing.T) (*Remediator, *store.Store, string) {
 	return NewRemediator(st, nil, nil, cfg, nil, zerolog.Nop()), st, archives
 }
 
+// Наблюдение не должно превращать историю в ленту опросов: пока ВМ лежит,
+// мониторинг предлагает одно и то же решение каждую минуту, и без защиты каждая
+// минута оседала бы отдельной записью на странице оповещений. Отсекается тем же
+// интервалом, что и повторные попытки в боевом режиме, — история периода
+// наблюдения показывает, что происходило бы в бою.
+func TestObserveModeRecordsRepeatedSituationOnce(t *testing.T) {
+	ctx := context.Background()
+	_, st, dir := testRemediator(t)
+
+	cfg := config.RemediationConfig{
+		Enabled: true, DryRun: true, AllowVMStart: true,
+		Cooldown: time.Hour, ArchiveDir: dir,
+	}
+	r := NewRemediator(st, nil, nil, cfg, nil, zerolog.Nop())
+
+	sit := Situation{
+		ServerID: "srv-1", Scope: model.ScopeVM, ObjectID: "vm-1", ObjectName: "db-01",
+		Action: model.ActionVMStart, Reason: "ВМ выключена, а должна работать",
+	}
+
+	for i := 0; i < 4; i++ {
+		if _, err := r.Consider(ctx, sit); err != nil {
+			t.Fatalf("опрос %d: %v", i+1, err)
+		}
+	}
+
+	records, err := st.ListRemediations(ctx, "srv-1", 100)
+	if err != nil {
+		t.Fatalf("чтение истории: %v", err)
+	}
+	if len(records) != 1 {
+		statuses := make([]string, 0, len(records))
+		for _, rec := range records {
+			statuses = append(statuses, string(rec.Status))
+		}
+		t.Fatalf("четыре опроса одной ситуации оставили %d записей (%v), ожидалась одна",
+			len(records), statuses)
+	}
+	if records[0].Status != model.RemDryRun {
+		t.Errorf("статус записи %q, ожидался %q", records[0].Status, model.RemDryRun)
+	}
+
+	// Решение оператора — не повтор мониторинга: его запись должна пройти, иначе
+	// нажатие кнопки в интерфейсе осталось бы без следа в истории.
+	forced := sit
+	forced.Force = true
+	forced.TriggeredBy = "user:admin"
+	if _, err := r.Consider(ctx, forced); err != nil {
+		t.Fatalf("ручной запуск: %v", err)
+	}
+	records, err = st.ListRemediations(ctx, "srv-1", 100)
+	if err != nil {
+		t.Fatalf("чтение истории: %v", err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("после ручного запуска записей %d, ожидалось 2", len(records))
+	}
+}
+
 // The mode must survive a restart. An operator halfway through observing the
 // automation would be badly served by a service that quietly starts acting
 // because it was restarted for an unrelated reason.

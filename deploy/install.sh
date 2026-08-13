@@ -815,7 +815,10 @@ PostgreSQL хранит пароль внутри тома и новый не п
             printf 'JHV_ADMIN_PASSWORD=%s\n' "$ADMPASS"
             printf 'JHV_BACKUP_DIR=%s\n' "$BACKUPS"
             printf 'JHV_RESTORE_DIR=%s\n' "$RESTORES"
-			printf 'JHV_LOG_FILE=/app/logs/jhvirt.log\n'
+            # Внутри тома с данными, а не в /app/logs: тот каталог образ создаёт
+            # в своём слое, и при пересоздании контейнера журнал пропадает — как
+            # раз тогда, когда по нему разбираются, что было до обновления.
+            printf 'JHV_LOG_FILE=/app/data/logs/jhvirt.log\n'
 			printf 'JHV_METRICS_ENABLED=true\n'
             printf 'TZ=%s\n' "$(cat /etc/timezone 2>/dev/null || echo Europe/Moscow)"
         } > "$WORK/.env"

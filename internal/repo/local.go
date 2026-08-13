@@ -31,9 +31,82 @@ func newLocal(target *model.StorageTarget) (Backend, error) {
 		return nil, fmt.Errorf("путь хранилища: %w", err)
 	}
 	if err := os.MkdirAll(root, 0o750); err != nil {
-		return nil, fmt.Errorf("создание каталога хранилища %s: %w", root, err)
+		return nil, fmt.Errorf("создание каталога хранилища %s: %w%s", root, err, pathHint(root))
 	}
 	return &local{name: target.Name, root: root}, nil
+}
+
+// pathHint explains the most common mistake in a local storage path.
+//
+// Путь трактуется внутри службы, а в установке из контейнера хостовый каталог
+// виден под другим именем: /srv/backups снаружи — это /backups внутри. Оператор
+// же берёт путь из вывода df на хосте, и в ответ получает «mkdir /home:
+// permission denied» — сообщение, из которого следует, что не хватило прав,
+// тогда как на самом деле такого каталога у службы просто нет. Подсказка
+// перечисляет то, куда служба писать может, и разница становится очевидной.
+func pathHint(root string) string {
+	writable := writableMounts()
+	if len(writable) == 0 {
+		return "\nПуть задаётся внутри службы, а не на хосте: в установке из контейнера " +
+			"смонтированный каталог виден под своим именем в контейнере."
+	}
+	return fmt.Sprintf("\nПуть %s задаётся внутри службы, а не на хосте. "+
+		"Служба может писать в: %s", root, strings.Join(writable, ", "))
+}
+
+// writableMounts lists mounted directories the service can actually write to.
+//
+// Смотрим именно точки монтирования, а не каталоги вообще: том с копиями и
+// каталог восстановления попадают внутрь контейнера монтированием, и ровно они
+// оператору и нужны. Системные файловые системы отсеиваются — предлагать
+// хранить бэкапы в /proc не стоит.
+func writableMounts() []string {
+	raw, err := os.ReadFile("/proc/self/mountinfo")
+	if err != nil {
+		return nil
+	}
+
+	seen := map[string]bool{}
+	var out []string
+	for _, line := range strings.Split(string(raw), "\n") {
+		// Поля до " - " описывают точку монтирования, после — тип ФС.
+		parts := strings.SplitN(line, " - ", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		fields := strings.Fields(parts[0])
+		if len(fields) < 5 {
+			continue
+		}
+		point := fields[4]
+		if point == "/" || seen[point] || isSystemPath(point) {
+			continue
+		}
+		seen[point] = true
+
+		// Права проверяем попыткой, а не разбором режима и владельца: в
+		// контейнере действуют и capabilities, и uid, и права на ФС, и
+		// единственный надёжный ответ даёт сама файловая система.
+		probe, err := os.MkdirTemp(point, ".jhv-probe-")
+		if err != nil {
+			continue
+		}
+		_ = os.RemoveAll(probe)
+		out = append(out, point)
+		if len(out) == 8 {
+			break
+		}
+	}
+	return out
+}
+
+func isSystemPath(point string) bool {
+	for _, prefix := range []string{"/proc", "/sys", "/dev", "/run", "/etc"} {
+		if point == prefix || strings.HasPrefix(point, prefix+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 func (l *local) Kind() model.StorageKind { return model.StorageLocal }

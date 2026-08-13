@@ -274,7 +274,7 @@ function location(target: StorageTarget): string {
             <q-input
               v-model="form.base_path"
               label="Путь"
-              hint="Локальный каталог или точка монтирования NFS/CIFS. Каталог создаётся автоматически."
+              hint="Путь внутри службы, а не на хосте: в установке из контейнера это /backups, а не путь из df. Каталог создаётся автоматически; сюда же монтируют NFS или CIFS."
               outlined
               dense
             />

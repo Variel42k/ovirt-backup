@@ -246,13 +246,36 @@ func (s *Server) spaHandler() http.Handler {
 			return
 		}
 
+		// Оболочку приложения браузер обязан перепроверять при каждой загрузке.
+		// В ней записаны имена файлов сборки, а те содержат хэш содержимого:
+		// после обновления сохранённая в кэше оболочка просит куски, которых в
+		// новой сборке уже нет. Ломается при этом не всё сразу — открытые
+		// страницы лежат в памяти и работают, — а только те разделы, куда
+		// пользователь ещё не заходил: их код подгружается лениво и молча
+		// падает на 404. Выглядит это как «перестала работать кнопка», и связь
+		// с обновлением не очевидна совершенно.
+		//
+		// no-cache, а не no-store: перепроверка почти бесплатна, ответ 304
+		// оставляет файл в кэше и не гоняет его заново.
+		serveShell := func() {
+			w.Header().Set("Cache-Control", "no-cache")
+			http.ServeFile(w, r, filepath.Join(dir, "index.html"))
+		}
+
 		clean := filepath.Clean(strings.TrimPrefix(r.URL.Path, "/"))
 		if clean == "." || clean == "/" {
-			http.ServeFile(w, r, filepath.Join(dir, "index.html"))
+			serveShell()
 			return
 		}
 		target := filepath.Join(dir, clean)
 		if info, err := os.Stat(target); err == nil && !info.IsDir() {
+			// Обратная сторона того же правила: имя файла сборки меняется
+			// вместе с содержимым, поэтому его можно держать в кэше сколь
+			// угодно долго. Дешёвая перепроверка оболочки и вечный кэш для
+			// всего остального — одно решение, разнесённое на две ветки.
+			if strings.HasPrefix(r.URL.Path, "/assets/") {
+				w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+			}
 			fileServer.ServeHTTP(w, r)
 			return
 		}
@@ -269,7 +292,7 @@ func (s *Server) spaHandler() http.Handler {
 			http.NotFound(w, r)
 			return
 		}
-		http.ServeFile(w, r, filepath.Join(dir, "index.html"))
+		serveShell()
 	})
 }
 

@@ -464,14 +464,17 @@ func (s *Scheduler) TriggerJob(ctx context.Context, jobID, triggeredBy string, s
 		return nil, err
 	}
 
+	s.scheduleMu.Lock()
 	var nextRun *time.Time
 	if job.Schedule != "" {
 		if next, err := ValidateSchedule(job.Schedule, s.Location()); err == nil {
 			nextRun = &next
 		}
 	}
-	if err := s.store.SetJobSchedulingState(ctx, job.ID, &now, model.RunRunning, nextRun); err != nil {
-		s.log.Debug().Err(err).Msg("не удалось отметить запуск задания")
+	scheduleStateErr := s.store.SetJobSchedulingState(ctx, job.ID, &now, model.RunRunning, nextRun)
+	s.scheduleMu.Unlock()
+	if scheduleStateErr != nil {
+		s.log.Debug().Err(scheduleStateErr).Msg("не удалось отметить запуск задания")
 	}
 
 	s.log.Info().
@@ -678,14 +681,17 @@ func (s *Scheduler) finishJob(ctx context.Context, job *model.BackupJob, jobRun 
 	if err := s.store.UpdateBackupJobRun(ctx, jobRun); err != nil {
 		s.log.Warn().Err(err).Str("запуск", jobRun.ID).Msg("не удалось сохранить итог пакетного запуска")
 	}
+	s.scheduleMu.Lock()
 	var nextRun *time.Time
 	if job.Schedule != "" {
 		if next, err := ValidateSchedule(job.Schedule, s.Location()); err == nil {
 			nextRun = &next
 		}
 	}
-	if err := s.store.SetJobSchedulingState(ctx, job.ID, &now, status, nextRun); err != nil {
-		s.log.Debug().Err(err).Msg("не удалось сохранить итог задания")
+	scheduleStateErr := s.store.SetJobSchedulingState(ctx, job.ID, &now, status, nextRun)
+	s.scheduleMu.Unlock()
+	if scheduleStateErr != nil {
+		s.log.Debug().Err(scheduleStateErr).Msg("не удалось сохранить итог задания")
 	}
 	if status == model.RunSucceeded {
 		_ = s.store.ResolveAlert(ctx, job.ServerID, model.ScopeBackup, job.ID, model.AlertBackupScheduleMissed)

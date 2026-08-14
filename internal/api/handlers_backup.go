@@ -94,7 +94,11 @@ func (s *Server) validateJob(ctx context.Context, job *model.BackupJob) error {
 		}
 	}
 	if job.Schedule != "" {
-		if _, err := scheduler.ValidateSchedule(job.Schedule, s.cfg.Location()); err != nil {
+		loc := s.cfg.Location()
+		if s.scheduler != nil {
+			loc = s.scheduler.Location()
+		}
+		if _, err := scheduler.ValidateSchedule(job.Schedule, loc); err != nil {
 			return badRequest("%v", err)
 		}
 	}

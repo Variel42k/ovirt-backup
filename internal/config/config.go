@@ -60,6 +60,42 @@ type AuthConfig struct {
 	BootstrapUser     string        `mapstructure:"bootstrap_user"`
 	BootstrapPassword string        `mapstructure:"bootstrap_password"`
 	APITokens         []string      `mapstructure:"api_tokens"`
+	OIDC              OIDCConfig    `mapstructure:"oidc"`
+}
+
+// OIDCConfig describes the external identity provider.
+//
+// Пароль пользователя при таком входе через службу не проходит вовсе: она
+// получает от провайдера подписанный токен и по нему заводит сессию. Отсюда и
+// 2FA, и единый вход, и мгновенный отзыв доступа — всё это остаётся заботой
+// провайдера, а не воспроизводится здесь заново и хуже.
+type OIDCConfig struct {
+	Enabled bool `mapstructure:"enabled"`
+	// Issuer — адрес провайдера; остальные точки берутся из его discovery.
+	Issuer       string `mapstructure:"issuer"`
+	ClientID     string `mapstructure:"client_id"`
+	ClientSecret string `mapstructure:"client_secret"`
+	// RedirectURL должен совпадать с зарегистрированным у провайдера точно,
+	// вплоть до схемы и завершающего пути.
+	RedirectURL string   `mapstructure:"redirect_url"`
+	Scopes      []string `mapstructure:"scopes"`
+	// Заголовок кнопки на странице входа: «Войти через …».
+	ButtonLabel string `mapstructure:"button_label"`
+	// GroupsClaim — где в токене лежат группы, RoleMapping — во что они
+	// превращаются. Роль назначается по первому совпадению в порядке
+	// admin, operator, auditor, viewer: у пользователя может быть несколько
+	// групп, и старшая должна побеждать.
+	GroupsClaim string            `mapstructure:"groups_claim"`
+	RoleMapping map[string]string `mapstructure:"role_mapping"`
+	// DefaultRole получают те, чьи группы ни во что не отобразились. Пусто —
+	// вход запрещён: молча выдавать права тому, кого не ждали, нельзя.
+	DefaultRole string `mapstructure:"default_role"`
+	// AllowLocalLogin оставляет вход по паролю рядом с внешним.
+	//
+	// Выключать не рекомендуется: локальная запись администратора — это путь
+	// внутрь, когда провайдер недоступен, а недоступен он бывает ровно в той
+	// аварии, ради которой и разворачивают систему восстановления.
+	AllowLocalLogin bool `mapstructure:"allow_local_login"`
 }
 
 type MetricsConfig struct {
@@ -358,6 +394,19 @@ type SchedulerConfig struct {
 	CatchUpMissed bool   `mapstructure:"catch_up_missed"`
 }
 
+// validRole reports whether a role name is one the authorization layer knows.
+//
+// Список повторён строкой, а не взят из internal/model: конфигурация лежит
+// ниже модели и импорт замкнул бы пакеты друг на друга. Расхождение ловится
+// тестом в internal/api, где обе стороны уже видны.
+func validRole(role string) bool {
+	switch role {
+	case "admin", "operator", "viewer":
+		return true
+	}
+	return false
+}
+
 // Load reads the configuration from path (optional) merged over the built-in
 // defaults, then applies environment overrides and validates the result.
 func Load(path string) (*Config, error) {
@@ -421,6 +470,33 @@ func (c *Config) Validate() error {
 	}
 	if c.Logging.MaxAgeDays < 1 || c.Logging.MaxAgeDays > 3650 {
 		return fmt.Errorf("logging.max_age_days must be between 1 and 3650, got %d", c.Logging.MaxAgeDays)
+	}
+	if c.Auth.OIDC.Enabled {
+		for key, value := range map[string]string{
+			"auth.oidc.issuer":       c.Auth.OIDC.Issuer,
+			"auth.oidc.client_id":    c.Auth.OIDC.ClientID,
+			"auth.oidc.redirect_url": c.Auth.OIDC.RedirectURL,
+		} {
+			if strings.TrimSpace(value) == "" {
+				return fmt.Errorf("%s обязателен при auth.oidc.enabled", key)
+			}
+		}
+		// Роль, взятая из воздуха, — это выданные права. Если группы ни во что
+		// не отображаются и умолчания нет, вход запрещается, и это правильный
+		// исход: неизвестному пользователю не место в системе, которая
+		// управляет чужими виртуальными машинами.
+		if len(c.Auth.OIDC.RoleMapping) == 0 && c.Auth.OIDC.DefaultRole == "" {
+			return fmt.Errorf("задайте auth.oidc.role_mapping либо auth.oidc.default_role: " +
+				"иначе вошедшему через провайдера не из чего назначить роль")
+		}
+		for group, role := range c.Auth.OIDC.RoleMapping {
+			if !validRole(role) {
+				return fmt.Errorf("auth.oidc.role_mapping[%q]: неизвестная роль %q", group, role)
+			}
+		}
+		if c.Auth.OIDC.DefaultRole != "" && !validRole(c.Auth.OIDC.DefaultRole) {
+			return fmt.Errorf("auth.oidc.default_role: неизвестная роль %q", c.Auth.OIDC.DefaultRole)
+		}
 	}
 	if c.Backup.ChunkSize < 64*1024 || c.Backup.ChunkSize%(64*1024) != 0 {
 		return fmt.Errorf("backup.chunk_size must be a multiple of 64 KiB and >= 64 KiB, got %d", c.Backup.ChunkSize)
@@ -508,6 +584,17 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("auth.bootstrap_user", "admin")
 	v.SetDefault("auth.bootstrap_password", "")
 	v.SetDefault("auth.api_tokens", []string{})
+	v.SetDefault("auth.oidc.enabled", false)
+	v.SetDefault("auth.oidc.issuer", "")
+	v.SetDefault("auth.oidc.client_id", "")
+	v.SetDefault("auth.oidc.client_secret", "")
+	v.SetDefault("auth.oidc.redirect_url", "")
+	v.SetDefault("auth.oidc.scopes", []string{"openid", "profile", "email", "groups"})
+	v.SetDefault("auth.oidc.button_label", "")
+	v.SetDefault("auth.oidc.groups_claim", "groups")
+	v.SetDefault("auth.oidc.role_mapping", map[string]string{})
+	v.SetDefault("auth.oidc.default_role", "")
+	v.SetDefault("auth.oidc.allow_local_login", true)
 	v.SetDefault("metrics.enabled", false)
 	v.SetDefault("metrics.token_file", "")
 

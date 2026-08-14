@@ -59,6 +59,10 @@ export interface RuntimeSettings {
     source: 'config' | 'database'
     options: RuntimeCompressionOption[]
   }
+  timezone: {
+    value: string
+    source: 'config' | 'database'
+  }
   log_rotation: {
     max_size_mb: number
     max_backups: number

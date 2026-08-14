@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -122,6 +123,15 @@ func run() error {
 	runtimeSettings, err := st.RuntimeSettings(ctx)
 	if err != nil {
 		return fmt.Errorf("загрузка настроек времени выполнения: %w", err)
+	}
+	if runtimeSettings.SchedulerTimezone != nil {
+		timezone := strings.TrimSpace(*runtimeSettings.SchedulerTimezone)
+		if _, err := time.LoadLocation(timezone); err != nil {
+			return fmt.Errorf("часовой пояс в runtime_settings %q: %w", timezone, err)
+		}
+		cfg.Scheduler.Timezone = timezone
+		log.Info().Str("часовой пояс", timezone).
+			Msg("часовой пояс расписаний загружен из базы данных")
 	}
 	if runtimeSettings.BackupCompression != nil {
 		if !backup.KnownCompression(*runtimeSettings.BackupCompression) {

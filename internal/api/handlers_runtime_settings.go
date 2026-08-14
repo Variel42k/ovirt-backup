@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"adveng/jh_virt/internal/backup"
 	"adveng/jh_virt/internal/logging"
@@ -24,8 +25,14 @@ type runtimeLogRotationResponse struct {
 	Source     string `json:"source"`
 }
 
+type runtimeTimezoneResponse struct {
+	Value  string `json:"value"`
+	Source string `json:"source"`
+}
+
 type runtimeSettingsResponse struct {
 	Compression   runtimeCompressionResponse   `json:"compression"`
+	Timezone      runtimeTimezoneResponse      `json:"timezone"`
 	LogRotation   runtimeLogRotationResponse   `json:"log_rotation"`
 	BackupQuality runtimeBackupQualityResponse `json:"backup_quality"`
 }
@@ -45,6 +52,10 @@ func (s *Server) runtimeSettings(r *http.Request) (runtimeSettingsResponse, erro
 	compressionSource := "config"
 	if stored.BackupCompression != nil {
 		compressionSource = "database"
+	}
+	timezoneSource := "config"
+	if stored.SchedulerTimezone != nil {
+		timezoneSource = "database"
 	}
 	status := s.logs.Status()
 	rotationSource := "config"
@@ -78,12 +89,20 @@ func (s *Server) runtimeSettings(r *http.Request) (runtimeSettingsResponse, erro
 			Value: compression, Level: s.cfg.Backup.CompressionLevel,
 			Source: compressionSource, Options: options,
 		},
+		Timezone: runtimeTimezoneResponse{Value: s.schedulerTimezone(), Source: timezoneSource},
 		LogRotation: runtimeLogRotationResponse{
 			MaxSizeMB: status.MaxSizeMB, MaxBackups: status.MaxBackups,
 			MaxAgeDays: status.MaxAgeDays, Source: rotationSource,
 		},
 		BackupQuality: runtimeBackupQualityResponse{Value: qualityValue, Source: qualitySource},
 	}, nil
+}
+
+func (s *Server) schedulerTimezone() string {
+	if s.scheduler != nil {
+		return s.scheduler.Timezone()
+	}
+	return s.cfg.Scheduler.Timezone
 }
 
 func (s *Server) handleRuntimeSettings(w http.ResponseWriter, r *http.Request) {
@@ -97,6 +116,76 @@ func (s *Server) handleRuntimeSettings(w http.ResponseWriter, r *http.Request) {
 
 type compressionRequest struct {
 	Compression string `json:"compression"`
+}
+
+type timezoneRequest struct {
+	Timezone string `json:"timezone"`
+}
+
+func (s *Server) handleSetRuntimeTimezone(w http.ResponseWriter, r *http.Request) {
+	var req timezoneRequest
+	if err := decodeJSON(r, &req); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	req.Timezone = strings.TrimSpace(req.Timezone)
+	if req.Timezone == "" {
+		s.writeError(w, r, badRequest("часовой пояс не задан"))
+		return
+	}
+	if _, err := time.LoadLocation(req.Timezone); err != nil {
+		s.writeError(w, r, badRequest("неизвестный часовой пояс %q", req.Timezone))
+		return
+	}
+	if s.scheduler == nil {
+		s.writeError(w, r, fmt.Errorf("планировщик недоступен"))
+		return
+	}
+
+	actor := runtimeActor(r)
+	previous := s.scheduler.Timezone()
+	if err := s.scheduler.SetTimezone(r.Context(), req.Timezone); err != nil {
+		s.audit(r, "settings.timezone", model.ScopeServer, "", false, err.Error())
+		s.writeError(w, r, err)
+		return
+	}
+	if err := s.store.SetSchedulerTimezone(r.Context(), req.Timezone, actor); err != nil {
+		_ = s.scheduler.SetTimezone(r.Context(), previous)
+		s.audit(r, "settings.timezone", model.ScopeServer, "", false, err.Error())
+		s.writeError(w, r, err)
+		return
+	}
+	s.log.Info().Str("было", previous).Str("стало", req.Timezone).
+		Str("оператор", actor).Msg("часовой пояс расписаний изменён")
+	s.audit(r, "settings.timezone", model.ScopeServer, "", true,
+		fmt.Sprintf("%s -> %s", previous, req.Timezone))
+	s.handleRuntimeSettings(w, r)
+}
+
+func (s *Server) handleResetRuntimeTimezone(w http.ResponseWriter, r *http.Request) {
+	if s.scheduler == nil {
+		s.writeError(w, r, fmt.Errorf("планировщик недоступен"))
+		return
+	}
+	actor := runtimeActor(r)
+	previous := s.scheduler.Timezone()
+	value := s.baseCfg.Scheduler.Timezone
+	if err := s.scheduler.SetTimezone(r.Context(), value); err != nil {
+		s.audit(r, "settings.timezone.reset", model.ScopeServer, "", false, err.Error())
+		s.writeError(w, r, err)
+		return
+	}
+	if err := s.store.ResetSchedulerTimezone(r.Context(), actor); err != nil {
+		_ = s.scheduler.SetTimezone(r.Context(), previous)
+		s.audit(r, "settings.timezone.reset", model.ScopeServer, "", false, err.Error())
+		s.writeError(w, r, err)
+		return
+	}
+	s.log.Info().Str("было", previous).Str("стало", value).
+		Str("оператор", actor).Msg("часовой пояс расписаний возвращён к конфигурации запуска")
+	s.audit(r, "settings.timezone.reset", model.ScopeServer, "", true,
+		fmt.Sprintf("%s -> %s", previous, value))
+	s.handleRuntimeSettings(w, r)
 }
 
 func (s *Server) handleSetRuntimeCompression(w http.ResponseWriter, r *http.Request) {

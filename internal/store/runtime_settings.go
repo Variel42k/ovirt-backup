@@ -10,7 +10,7 @@ import (
 	"adveng/jh_virt/internal/model"
 )
 
-const runtimeSettingsColumns = `backup_compression, log_max_size_mb, log_max_backups,
+const runtimeSettingsColumns = `backup_compression, scheduler_timezone, log_max_size_mb, log_max_backups,
 	log_max_age_days, quality_stale_intervals, quality_verify_max_age_days,
 	quality_performance_window_runs, quality_performance_degradation_percent,
 	quality_performance_consecutive_runs, quality_storage_warning_free_percent,
@@ -22,7 +22,7 @@ const runtimeSettingsColumns = `backup_compression, log_max_size_mb, log_max_bac
 func (s *Store) RuntimeSettings(ctx context.Context) (model.RuntimeSettings, error) {
 	row := s.db.QueryRow(ctx, `SELECT `+runtimeSettingsColumns+` FROM runtime_settings WHERE id=1`)
 	var out model.RuntimeSettings
-	if err := row.Scan(&out.BackupCompression, &out.LogMaxSizeMB, &out.LogMaxBackups,
+	if err := row.Scan(&out.BackupCompression, &out.SchedulerTimezone, &out.LogMaxSizeMB, &out.LogMaxBackups,
 		&out.LogMaxAgeDays, &out.QualityStaleIntervals, &out.QualityVerifyMaxAgeDays,
 		&out.QualityPerformanceWindowRuns, &out.QualityPerformanceDegradationPct,
 		&out.QualityPerformanceConsecutiveRuns, &out.QualityStorageWarningFreePct,
@@ -36,6 +36,30 @@ func (s *Store) RuntimeSettings(ctx context.Context) (model.RuntimeSettings, err
 	}
 	out.UpdatedAt = utc(out.UpdatedAt)
 	return out, nil
+}
+
+// SetSchedulerTimezone persists the IANA timezone used by all cron schedules.
+func (s *Store) SetSchedulerTimezone(ctx context.Context, timezone, actor string) error {
+	now := time.Now().UTC()
+	_, err := s.db.Exec(ctx, `INSERT INTO runtime_settings
+		(id, scheduler_timezone, updated_by, updated_at) VALUES (1,?,?,?)
+		ON CONFLICT (id) DO UPDATE SET scheduler_timezone=EXCLUDED.scheduler_timezone,
+		updated_by=EXCLUDED.updated_by, updated_at=EXCLUDED.updated_at`,
+		timezone, actor, now)
+	if err != nil {
+		return fmt.Errorf("save scheduler timezone: %w", err)
+	}
+	return nil
+}
+
+// ResetSchedulerTimezone removes the database override.
+func (s *Store) ResetSchedulerTimezone(ctx context.Context, actor string) error {
+	_, err := s.db.Exec(ctx, `UPDATE runtime_settings SET scheduler_timezone=NULL,
+		updated_by=?, updated_at=? WHERE id=1`, actor, time.Now().UTC())
+	if err != nil {
+		return fmt.Errorf("reset scheduler timezone: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) SetBackupQuality(ctx context.Context, q model.BackupQualitySettings, actor string) error {

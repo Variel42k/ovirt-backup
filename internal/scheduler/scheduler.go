@@ -58,6 +58,12 @@ type Scheduler struct {
 	quality *quality.Service
 
 	cron *cron.Cron
+	// scheduleMu serializes job reloads with a timezone change. robfig/cron can
+	// accept updates while running, but a reload must use one timezone snapshot.
+	scheduleMu sync.Mutex
+	timezoneMu sync.RWMutex
+	timezone   string
+	location   *time.Location
 
 	mu      sync.Mutex
 	entries map[string]cron.EntryID
@@ -78,6 +84,9 @@ type Scheduler struct {
 // without constructing the monitoring subsystem.
 func (s *Scheduler) SetQualityService(service *quality.Service) {
 	s.quality = service
+	if service != nil {
+		service.SetLocation(s.Location())
+	}
 }
 
 // New builds the scheduler.
@@ -86,18 +95,83 @@ func New(st *store.Store, engine *dispatch.Dispatcher, cfg config.Config, bus *e
 	if workers < 1 {
 		workers = 1
 	}
+	loc := cfg.Location()
 	return &Scheduler{
-		store:   st,
-		engine:  engine,
-		cfg:     cfg,
-		bus:     bus,
-		log:     log,
-		cron:    cron.New(cron.WithLocation(cfg.Location()), cron.WithParser(cronParser)),
-		entries: map[string]cron.EntryID{},
-		running: map[string]context.CancelFunc{},
-		active:  map[string]struct{}{},
-		workers: make(chan struct{}, workers),
+		store:    st,
+		engine:   engine,
+		cfg:      cfg,
+		bus:      bus,
+		log:      log,
+		cron:     cron.New(cron.WithLocation(loc), cron.WithParser(cronParser)),
+		timezone: cfg.Scheduler.Timezone,
+		location: loc,
+		entries:  map[string]cron.EntryID{},
+		running:  map[string]context.CancelFunc{},
+		active:   map[string]struct{}{},
+		workers:  make(chan struct{}, workers),
 	}
+}
+
+// Timezone returns the effective IANA timezone used for cron schedules.
+func (s *Scheduler) Timezone() string {
+	s.timezoneMu.RLock()
+	defer s.timezoneMu.RUnlock()
+	return s.timezone
+}
+
+// Location returns the effective scheduler location.
+func (s *Scheduler) Location() *time.Location {
+	s.timezoneMu.RLock()
+	defer s.timezoneMu.RUnlock()
+	return s.location
+}
+
+func (s *Scheduler) timezoneSnapshot() (string, *time.Location) {
+	s.timezoneMu.RLock()
+	defer s.timezoneMu.RUnlock()
+	return s.timezone, s.location
+}
+
+func (s *Scheduler) storeTimezone(name string, loc *time.Location) {
+	s.timezoneMu.Lock()
+	s.timezone, s.location = name, loc
+	s.timezoneMu.Unlock()
+}
+
+// SetTimezone applies an IANA timezone and recalculates every future job
+// occurrence. In-flight jobs are independent from cron entries and continue.
+func (s *Scheduler) SetTimezone(ctx context.Context, name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("часовой пояс не задан")
+	}
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		return fmt.Errorf("часовой пояс %q: %w", name, err)
+	}
+
+	s.scheduleMu.Lock()
+	defer s.scheduleMu.Unlock()
+	previousName, previousLoc := s.timezoneSnapshot()
+	if name == previousName {
+		return nil
+	}
+	s.storeTimezone(name, loc)
+	if err := s.reload(ctx); err != nil {
+		s.storeTimezone(previousName, previousLoc)
+		if rollbackErr := s.reload(ctx); rollbackErr != nil {
+			return fmt.Errorf("применение часового пояса: %w; откат расписаний: %v", err, rollbackErr)
+		}
+		return err
+	}
+	if s.quality != nil {
+		s.quality.SetLocation(loc)
+	}
+	return nil
+}
+
+func cronSpecInTimezone(spec, timezone string) string {
+	return "CRON_TZ=" + timezone + " " + spec
 }
 
 // Start loads the jobs, registers the housekeeping tasks and begins ticking.
@@ -125,7 +199,7 @@ func (s *Scheduler) Start(ctx context.Context) error {
 	}
 	s.cron.Start()
 	s.log.Info().
-		Str("часовой пояс", s.cfg.Scheduler.Timezone).
+		Str("часовой пояс", s.Timezone()).
 		Int("рабочих потоков", cap(s.workers)).
 		Msg("планировщик запущен")
 	if s.cfg.Scheduler.CatchUpMissed {
@@ -166,8 +240,9 @@ func (s *Scheduler) recoverMissedSchedules(ctx context.Context) ([]missedSchedul
 		if err != nil {
 			continue
 		}
-		count, latest := 0, job.NextRunAt.In(s.cfg.Location())
-		for point := latest; !point.After(now.In(s.cfg.Location())); point = schedule.Next(point) {
+		loc := s.Location()
+		count, latest := 0, job.NextRunAt.In(loc)
+		for point := latest; !point.After(now.In(loc)); point = schedule.Next(point) {
 			count++
 			latest = point
 			if count >= 100000 {
@@ -223,6 +298,12 @@ func (s *Scheduler) Stop() {
 // Reload rebuilds the cron entries from the stored job definitions. It is
 // called at startup and whenever a job is created, edited or deleted.
 func (s *Scheduler) Reload(ctx context.Context) error {
+	s.scheduleMu.Lock()
+	defer s.scheduleMu.Unlock()
+	return s.reload(ctx)
+}
+
+func (s *Scheduler) reload(ctx context.Context) error {
 	jobs, err := s.store.ListBackupJobs(ctx, "")
 	if err != nil {
 		return fmt.Errorf("загрузка заданий: %w", err)
@@ -236,7 +317,7 @@ func (s *Scheduler) Reload(ctx context.Context) error {
 		delete(s.entries, jobID)
 	}
 
-	loc := s.cfg.Location()
+	timezone, loc := s.timezoneSnapshot()
 	active := 0
 	for _, job := range jobs {
 		if !job.Enabled || job.Schedule == "" {
@@ -252,7 +333,7 @@ func (s *Scheduler) Reload(ctx context.Context) error {
 		}
 
 		jobID := job.ID
-		entryID, err := s.cron.AddFunc(job.Schedule, func() {
+		entryID, err := s.cron.AddFunc(cronSpecInTimezone(job.Schedule, timezone), func() {
 			s.runScheduled(jobID)
 		})
 		if err != nil {
@@ -385,7 +466,7 @@ func (s *Scheduler) TriggerJob(ctx context.Context, jobID, triggeredBy string, s
 
 	var nextRun *time.Time
 	if job.Schedule != "" {
-		if next, err := ValidateSchedule(job.Schedule, s.cfg.Location()); err == nil {
+		if next, err := ValidateSchedule(job.Schedule, s.Location()); err == nil {
 			nextRun = &next
 		}
 	}
@@ -599,7 +680,7 @@ func (s *Scheduler) finishJob(ctx context.Context, job *model.BackupJob, jobRun 
 	}
 	var nextRun *time.Time
 	if job.Schedule != "" {
-		if next, err := ValidateSchedule(job.Schedule, s.cfg.Location()); err == nil {
+		if next, err := ValidateSchedule(job.Schedule, s.Location()); err == nil {
 			nextRun = &next
 		}
 	}

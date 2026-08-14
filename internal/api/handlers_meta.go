@@ -109,7 +109,7 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 	resp.Capabilities.Compression = s.engine.Compression()
 	resp.Capabilities.ChunkSize = s.cfg.Backup.ChunkSize
 	resp.Capabilities.DatabaseType = "postgres"
-	resp.Capabilities.SchedulerTZ = s.cfg.Scheduler.Timezone
+	resp.Capabilities.SchedulerTZ = s.schedulerTimezone()
 	resp.Capabilities.RemediationOn = s.cfg.Monitor.Remediation.Enabled
 	// Живое значение, а не настройка: режим переключается на ходу, и
 	// интерфейс должен показывать то, что действует сейчас.

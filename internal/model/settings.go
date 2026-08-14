@@ -56,6 +56,7 @@ func (s BackupQualitySettings) Validate() error {
 // Nil fields fall back to the process configuration loaded at startup.
 type RuntimeSettings struct {
 	BackupCompression                  *string   `json:"backup_compression,omitempty"`
+	SchedulerTimezone                  *string   `json:"scheduler_timezone,omitempty"`
 	LogMaxSizeMB                       *int      `json:"log_max_size_mb,omitempty"`
 	LogMaxBackups                      *int      `json:"log_max_backups,omitempty"`
 	LogMaxAgeDays                      *int      `json:"log_max_age_days,omitempty"`

@@ -287,6 +287,7 @@ JHV_BACKUP_TRANSFER_PREFER_PROXY=true
 | `database.url` | подключение к PostgreSQL одной строкой |
 | `monitor.interval` | период опроса движков |
 | `monitor.backup_quality.*` | свежесть, проверки, деградация скорости, место и срок истории |
+| `scheduler.timezone` | IANA-зона cron-расписаний; администратор может переопределить её в web без перезапуска |
 | `monitor.remediation.dry_run` | `true` — только фиксировать намеченные действия (стартовое значение; дальше режим переключается в интерфейсе и хранится в БД) |
 | `monitor.remediation.archive_dir` | куда складывать архивы периодов наблюдения |
 | `monitor.remediation.allow_host_fence` | разрешить автоматическую перезагрузку хоста по питанию |

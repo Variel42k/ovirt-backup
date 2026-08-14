@@ -115,7 +115,7 @@ type CapacityItem struct {
 
 type Service struct {
 	store    *store.Store
-	location *time.Location
+	location atomic.Pointer[time.Location]
 	settings atomic.Value // model.BackupQualitySettings
 }
 
@@ -123,9 +123,18 @@ func New(st *store.Store, settings model.BackupQualitySettings, loc *time.Locati
 	if loc == nil {
 		loc = time.UTC
 	}
-	s := &Service{store: st, location: loc}
+	s := &Service{store: st}
+	s.location.Store(loc)
 	s.settings.Store(settings)
 	return s
+}
+
+// SetLocation changes the timezone used for schedule-aware quality checks.
+func (s *Service) SetLocation(loc *time.Location) {
+	if loc == nil {
+		loc = time.UTC
+	}
+	s.location.Store(loc)
 }
 
 func (s *Service) Settings() model.BackupQualitySettings {
@@ -210,7 +219,7 @@ func (s *Service) Evaluate(ctx context.Context, serverID string) (*Summary, erro
 		if err != nil {
 			continue
 		}
-		interval, err := scheduleInterval(job.Schedule, s.location)
+		interval, err := scheduleInterval(job.Schedule, s.location.Load())
 		if err != nil {
 			continue
 		}

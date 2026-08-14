@@ -77,11 +77,15 @@ curl -b cookies.txt http://localhost:8080/api/v1/dashboard
 |---|---|---|
 | `GET` | `/settings/runtime` | эффективные значения и их источник |
 | `PUT/DELETE` | `/settings/runtime/compression` | задать алгоритм или вернуть конфигурационный |
+| `PUT/DELETE` | `/settings/runtime/timezone` | задать IANA-зону расписаний или вернуть конфигурационную |
 | `PUT/DELETE` | `/settings/runtime/log-rotation` | задать политику ротации или вернуть конфигурационную |
 
 ```jsonc
 // PUT /settings/runtime/compression
 { "compression": "gzip" } // zstd|gzip|s2|none
+
+// PUT /settings/runtime/timezone
+{ "timezone": "Asia/Yekaterinburg" }
 
 // PUT /settings/runtime/log-rotation
 { "max_size_mb": 200, "max_backups": 14, "max_age_days": 60 }
@@ -97,6 +101,9 @@ curl -b cookies.txt http://localhost:8080/api/v1/dashboard
       { "value": "none", "title": "NONE", "description": "…" }
     ]
   },
+  "timezone": {
+    "value": "Asia/Yekaterinburg", "source": "database"
+  },
   "log_rotation": {
     "max_size_mb": 200, "max_backups": 14,
     "max_age_days": 60, "source": "database"
@@ -107,6 +114,9 @@ curl -b cookies.txt http://localhost:8080/api/v1/dashboard
 `DELETE` удаляет переопределение и возвращает значения из YAML/окружения.
 Сжатие меняется только для новых запусков; активный запуск использует алгоритм,
 зафиксированный при старте. `compression_level` через этот API не изменяется.
+Смена часового пояса немедленно пересчитывает будущие точки всех cron-заданий,
+но не отменяет и не перезапускает уже выполняющиеся бэкапы. Неизвестная IANA-зона
+возвращает `400`.
 
 ## Подключения
 
@@ -290,6 +300,7 @@ curl -b cookies.txt http://localhost:8080/api/v1/dashboard
 | Метод | Путь | Описание |
 |---|---|---|
 | `GET` | `/settings/runtime` | эффективные значения и источник `config`/`database` |
+| `PUT/DELETE` | `/settings/runtime/timezone` | сохранить IANA-зону расписаний или сбросить к YAML/окружению |
 | `PUT` | `/settings/runtime/backup-quality` | сохранить полный набор порогов в PostgreSQL |
 | `DELETE` | `/settings/runtime/backup-quality` | сбросить к YAML/окружению |
 

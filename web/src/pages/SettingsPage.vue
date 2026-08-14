@@ -24,6 +24,10 @@ const audit = ref<AuditEntry[]>([])
 const loading = ref(false)
 const runtimeSettings = ref<RuntimeSettings | null>(null)
 const compressionBusy = ref(false)
+const timezoneBusy = ref(false)
+const timezoneForm = ref('')
+const timezoneOptions = ref(loadTimezoneOptions())
+const filteredTimezoneOptions = ref([...timezoneOptions.value])
 const rotationBusy = ref(false)
 const rotationForm = ref({ max_size_mb: 100, max_backups: 7, max_age_days: 30 })
 const qualityBusy = ref(false)
@@ -43,6 +47,41 @@ const qualityForm = ref<BackupQualitySettings>({
 const dialog = ref(false)
 const editing = ref<User | null>(null)
 const form = ref({ username: '', password: '', role: 'operator', disabled: false })
+
+function loadTimezoneOptions(): string[] {
+  const fallback = [
+    'UTC',
+    'Europe/Kaliningrad',
+    'Europe/Moscow',
+    'Europe/Samara',
+    'Asia/Yekaterinburg',
+    'Asia/Omsk',
+    'Asia/Novosibirsk',
+    'Asia/Irkutsk',
+    'Asia/Yakutsk',
+    'Asia/Vladivostok',
+    'Asia/Magadan',
+    'Asia/Kamchatka',
+  ]
+  try {
+    return [...new Set(['UTC', ...Intl.supportedValuesOf('timeZone')])].sort()
+  } catch {
+    return fallback
+  }
+}
+
+function filterTimezones(value: string, update: (callback: () => void) => void) {
+  update(() => {
+    const needle = value.trim().toLocaleLowerCase()
+    filteredTimezoneOptions.value = needle
+      ? timezoneOptions.value.filter((timezone) => timezone.toLocaleLowerCase().includes(needle))
+      : [...timezoneOptions.value]
+  })
+}
+
+const timezoneDirty = computed(
+  () => timezoneForm.value.trim() !== (runtimeSettings.value?.timezone.value ?? ''),
+)
 
 async function load() {
   loading.value = true
@@ -64,12 +103,46 @@ async function load() {
 
 function applyRuntimeSettings(value: RuntimeSettings) {
   runtimeSettings.value = value
+  timezoneForm.value = value.timezone.value
+  if (!timezoneOptions.value.includes(value.timezone.value)) {
+    timezoneOptions.value = [...timezoneOptions.value, value.timezone.value].sort()
+  }
+  filteredTimezoneOptions.value = [...timezoneOptions.value]
   rotationForm.value = {
     max_size_mb: value.log_rotation.max_size_mb,
     max_backups: value.log_rotation.max_backups,
     max_age_days: value.log_rotation.max_age_days,
   }
   qualityForm.value = { ...value.backup_quality.value }
+}
+
+async function saveTimezone() {
+  const timezone = timezoneForm.value.trim()
+  if (!timezone || !timezoneDirty.value) return
+  timezoneBusy.value = true
+  try {
+    applyRuntimeSettings(await api.setRuntimeTimezone(timezone))
+    await app.reloadMeta()
+    notifyOk(`Часовой пояс расписаний: ${timezone}`)
+  } catch (err) {
+    notifyError(err, 'Не удалось изменить часовой пояс')
+  } finally {
+    timezoneBusy.value = false
+  }
+}
+
+async function resetTimezone() {
+  timezoneBusy.value = true
+  try {
+    const value = await api.resetRuntimeTimezone()
+    applyRuntimeSettings(value)
+    await app.reloadMeta()
+    notifyOk('Часовой пояс возвращён к конфигурации запуска')
+  } catch (err) {
+    notifyError(err, 'Не удалось сбросить часовой пояс')
+  } finally {
+    timezoneBusy.value = false
+  }
 }
 
 async function changeCompression(value: string | null) {
@@ -430,9 +503,58 @@ onMounted(async () => {
                     {{ app.meta?.capabilities.qemu_img ? 'доступен' : 'не установлен' }}
                   </q-item-section>
                 </q-item>
-                <q-item>
-                  <q-item-section>Часовой пояс расписаний</q-item-section>
-                  <q-item-section side>{{ app.meta?.capabilities.scheduler_timezone }}</q-item-section>
+                <q-item class="items-start">
+                  <q-item-section>
+                    <q-item-label>Часовой пояс расписаний</q-item-label>
+                    <q-item-label v-if="auth.canAdmin()" caption>
+                      {{ settingSource(runtimeSettings?.timezone.source) }}
+                    </q-item-label>
+                    <div v-if="auth.canAdmin()" class="row items-center no-wrap q-gutter-xs q-mt-sm">
+                      <q-select
+                        v-model="timezoneForm"
+                        class="col"
+                        style="min-width: 0"
+                        :options="filteredTimezoneOptions"
+                        outlined
+                        dense
+                        use-input
+                        fill-input
+                        hide-selected
+                        input-debounce="0"
+                        new-value-mode="add-unique"
+                        :loading="timezoneBusy"
+                        :disable="timezoneBusy"
+                        aria-label="Часовой пояс расписаний"
+                        @filter="filterTimezones"
+                      />
+                      <q-btn
+                        flat
+                        dense
+                        round
+                        icon="save"
+                        aria-label="Сохранить часовой пояс"
+                        :disable="timezoneBusy || !timezoneDirty"
+                        @click="saveTimezone"
+                      >
+                        <q-tooltip>Сохранить и пересчитать следующие запуски</q-tooltip>
+                      </q-btn>
+                      <q-btn
+                        v-if="runtimeSettings?.timezone.source === 'database'"
+                        flat
+                        dense
+                        round
+                        icon="restart_alt"
+                        aria-label="Сбросить часовой пояс"
+                        :disable="timezoneBusy"
+                        @click="resetTimezone"
+                      >
+                        <q-tooltip>Вернуть значение из YAML или окружения</q-tooltip>
+                      </q-btn>
+                    </div>
+                    <q-item-label v-else caption>
+                      {{ app.meta?.capabilities.scheduler_timezone }}
+                    </q-item-label>
+                  </q-item-section>
                 </q-item>
                 <q-item>
                   <q-item-section>Аутентификация</q-item-section>

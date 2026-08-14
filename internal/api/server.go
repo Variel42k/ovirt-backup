@@ -219,6 +219,8 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /settings/runtime", s.admin(s.handleRuntimeSettings))
 	mux.HandleFunc("PUT /settings/runtime/compression", s.admin(s.handleSetRuntimeCompression))
 	mux.HandleFunc("DELETE /settings/runtime/compression", s.admin(s.handleResetRuntimeCompression))
+	mux.HandleFunc("PUT /settings/runtime/timezone", s.admin(s.handleSetRuntimeTimezone))
+	mux.HandleFunc("DELETE /settings/runtime/timezone", s.admin(s.handleResetRuntimeTimezone))
 	mux.HandleFunc("PUT /settings/runtime/log-rotation", s.admin(s.handleSetRuntimeLogRotation))
 	mux.HandleFunc("DELETE /settings/runtime/log-rotation", s.admin(s.handleResetRuntimeLogRotation))
 	mux.HandleFunc("PUT /settings/runtime/backup-quality", s.admin(s.handleSetRuntimeBackupQuality))

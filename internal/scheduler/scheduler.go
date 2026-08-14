@@ -21,6 +21,7 @@ import (
 	"adveng/jh_virt/internal/events"
 	"adveng/jh_virt/internal/model"
 	"adveng/jh_virt/internal/quality"
+	"adveng/jh_virt/internal/replication"
 	"adveng/jh_virt/internal/repo"
 	"adveng/jh_virt/internal/store"
 )
@@ -50,12 +51,13 @@ func ValidateSchedule(spec string, loc *time.Location) (time.Time, error) {
 
 // Scheduler owns the cron engine and the backup worker pool.
 type Scheduler struct {
-	store   *store.Store
-	engine  *dispatch.Dispatcher
-	cfg     config.Config
-	bus     *events.Bus
-	log     zerolog.Logger
-	quality *quality.Service
+	store      *store.Store
+	engine     *dispatch.Dispatcher
+	cfg        config.Config
+	bus        *events.Bus
+	log        zerolog.Logger
+	quality    *quality.Service
+	replicator *replication.Replicator
 
 	cron *cron.Cron
 	// scheduleMu serializes job reloads with a timezone change. robfig/cron can
@@ -77,6 +79,10 @@ type Scheduler struct {
 	// workers ограничивает число одновременно выполняющихся бэкапов.
 	workers chan struct{}
 	baseCtx context.Context
+}
+
+func (s *Scheduler) SetReplicator(replicator *replication.Replicator) {
+	s.replicator = replicator
 }
 
 // SetQualityService connects the schedule-aware health evaluator. It is kept
@@ -487,12 +493,20 @@ func (s *Scheduler) TriggerJob(ctx context.Context, jobID, triggeredBy string, s
 	var wg sync.WaitGroup
 
 	for _, vm := range vms {
-		for _, targetID := range job.StorageTargetIDs {
+		targetIDs := job.StorageTargetIDs
+		if job.ReplicationEnabled {
+			targetIDs = job.StorageTargetIDs[:1]
+		}
+		for _, targetID := range targetIDs {
+			runType := job.Type
+			if job.ForceFullNext {
+				runType = model.BackupFull
+			}
 			req := backup.RunRequest{
 				JobRunID:        jobRun.ID,
 				ServerID:        job.ServerID,
 				VMID:            vm.ID,
-				Type:            job.Type,
+				Type:            runType,
 				JobID:           job.ID,
 				JobName:         job.Name,
 				FullEvery:       job.FullEvery,
@@ -624,8 +638,19 @@ func (s *Scheduler) executeOne(ctx context.Context, req backup.RunRequest, job *
 	_ = s.store.ResolveAlert(ctx, run.ServerID, model.ScopeBackup,
 		backupAlertObjectID(run), model.AlertBackupFailed)
 
+	if job != nil && job.ReplicationEnabled && s.replicator != nil && run.Status != model.RunFailed {
+		if _, err := s.replicator.QueueRun(context.WithoutCancel(ctx), run.ID, job.StorageTargetIDs); err != nil {
+			s.log.Error().Err(err).Str("run", run.ID).Msg("реплики не поставлены в очередь")
+			s.raiseBackupAlert(ctx, run, fmt.Errorf("постановка реплик в очередь: %w", err))
+		}
+	}
+
 	if req.VerifyAfter != "" && run.Status != model.RunFailed {
-		if _, err := s.engine.Verify(ctx, run.ID, req.VerifyAfter, req.VerifyOptions); err != nil {
+		primary, copyErr := s.store.GetBackupCopyForTarget(ctx, run.ID, run.StorageTargetID)
+		if copyErr != nil {
+			s.log.Warn().Err(copyErr).Str("run", run.ID).Msg("не удалось определить основную копию для проверки")
+			s.raiseVerifyAlert(ctx, run, copyErr)
+		} else if _, err := s.engine.VerifyCopy(ctx, run.ID, primary.ID, req.VerifyAfter, req.VerifyOptions); err != nil {
 			s.log.Warn().Err(err).Str("run", run.ID).Msg("проверка после бэкапа не пройдена")
 			s.raiseVerifyAlert(ctx, run, err)
 		}
@@ -649,7 +674,43 @@ func (s *Scheduler) finishJob(ctx context.Context, job *model.BackupJob, jobRun 
 	}
 
 	status := model.RunSucceeded
+	primaryFailed := false
+	targets := make(map[string]struct{}, len(job.StorageTargetIDs))
+	for _, targetID := range job.StorageTargetIDs {
+		targets[targetID] = struct{}{}
+	}
 	for _, r := range runs {
+		if job.ReplicationEnabled {
+			copies, copyErr := s.store.ListBackupCopies(ctx, r.ID)
+			if copyErr != nil {
+				jobRun.FailedCount += len(job.StorageTargetIDs)
+				continue
+			}
+			for _, copy := range copies {
+				if !copy.Required {
+					continue
+				}
+				if _, expected := targets[copy.StorageTargetID]; !expected {
+					continue
+				}
+				if copy.Healthy() {
+					jobRun.SucceededCount++
+				} else {
+					switch copy.Status {
+					case model.CopyCanceled:
+						jobRun.CanceledCount++
+					case model.CopyPending, model.CopyCopying, model.CopyVerifying:
+						jobRun.PartialCount++
+					default:
+						jobRun.FailedCount++
+					}
+				}
+				if copy.Role == model.CopyPrimary && !copy.Healthy() {
+					primaryFailed = true
+				}
+			}
+			continue
+		}
 		switch r.Status {
 		case model.RunSucceeded:
 			jobRun.SucceededCount++
@@ -666,9 +727,9 @@ func (s *Scheduler) finishJob(ctx context.Context, job *model.BackupJob, jobRun 
 		jobRun.FailedCount += jobRun.ReplicaCount - accounted
 	}
 	switch {
-	case jobRun.FailedCount > 0:
+	case primaryFailed:
 		status = model.RunFailed
-	case jobRun.PartialCount > 0:
+	case jobRun.FailedCount > 0 || jobRun.PartialCount > 0:
 		status = model.RunPartial
 	case jobRun.CanceledCount == jobRun.ReplicaCount:
 		status = model.RunCanceled
@@ -680,6 +741,9 @@ func (s *Scheduler) finishJob(ctx context.Context, job *model.BackupJob, jobRun 
 	jobRun.Status, jobRun.EndedAt = status, &now
 	if err := s.store.UpdateBackupJobRun(ctx, jobRun); err != nil {
 		s.log.Warn().Err(err).Str("запуск", jobRun.ID).Msg("не удалось сохранить итог пакетного запуска")
+	}
+	if job.ForceFullNext && !primaryFailed {
+		_ = s.store.ClearForceFullNext(ctx, job.ID)
 	}
 	s.scheduleMu.Lock()
 	var nextRun *time.Time

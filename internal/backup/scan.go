@@ -2,6 +2,7 @@ package backup
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"sort"
 	"strings"
@@ -9,6 +10,17 @@ import (
 	"adveng/jh_virt/internal/model"
 	"adveng/jh_virt/internal/repo"
 )
+
+// RunManifestSHA256 fingerprints the exact portable manifest representation.
+// Replicas with the same run id are merged only when this value matches.
+func RunManifestSHA256(doc *RunManifest) (string, error) {
+	encoded, err := EncodeManifest(doc)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(encoded)
+	return fmt.Sprintf("%x", sum[:]), nil
+}
 
 // Reading a repository without the service's database.
 //

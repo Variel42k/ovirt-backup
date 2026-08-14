@@ -270,6 +270,40 @@ async function runNow(job: BackupJob) {
   }
 }
 
+function enableReplication(job: BackupJob) {
+	$q.dialog({
+		title: 'Включить основное хранилище и реплики',
+		message: 'Следующий запуск будет полным. Гипервизор будет прочитан только для первого хранилища, остальные копии создаст служба репликации.',
+		cancel: { label: 'Отмена', flat: true },
+		ok: { label: 'Включить', color: 'primary' },
+	}).onOk(async () => {
+		try {
+			await api.enableJobReplication(job.id)
+			notifyOk('Репликация включена; следующий запуск будет полным')
+			await load()
+		} catch (err) {
+			notifyError(err, 'Не удалось включить репликацию')
+		}
+	})
+}
+
+function changePrimary(job: BackupJob, storageTargetID: string) {
+	$q.dialog({
+		title: 'Сменить основное хранилище',
+		message: `Хранилище «${app.storageName(storageTargetID)}» станет основным. Следующий запуск принудительно начнёт новую полную цепочку.`,
+		cancel: { label: 'Отмена', flat: true },
+		ok: { label: 'Сменить', color: 'primary' },
+	}).onOk(async () => {
+		try {
+			await api.changeJobPrimary(job.id, storageTargetID)
+			notifyOk('Основное хранилище изменено')
+			await load()
+		} catch (err) {
+			notifyError(err, 'Не удалось сменить основное хранилище')
+		}
+	})
+}
+
 function confirmDelete(job: BackupJob) {
   $q.dialog({
     title: 'Удалить задание',
@@ -398,16 +432,17 @@ const columns = [
 
       <template #body-cell-storages="props">
         <q-td :props="props">
-          <q-chip
-            v-for="id in props.row.storage_target_ids"
+			<q-chip
+			v-for="(id, index) in props.row.storage_target_ids"
             :key="id"
             dense
             square
             color="grey-3"
             text-color="dark"
           >
-            {{ app.storageName(id) }}
+				{{ app.storageName(id) }} · {{ props.row.replication_enabled ? (index === 0 ? 'Основное' : 'Реплика') : 'legacy' }}
           </q-chip>
+			<div v-if="props.row.force_full_next" class="text-caption text-warning">следующий запуск будет полным</div>
         </q-td>
       </template>
 
@@ -432,6 +467,17 @@ const columns = [
           <q-btn v-if="auth.canWrite()" flat dense round icon="play_arrow" color="positive" @click="runNow(props.row)">
             <q-tooltip>Запустить сейчас</q-tooltip>
           </q-btn>
+			<q-btn v-if="auth.canAdmin() && !props.row.replication_enabled && props.row.type !== 'ova'" flat dense round icon="sync_alt" color="primary" @click="enableReplication(props.row)">
+				<q-tooltip>Перевести задание на основное хранилище и реплики</q-tooltip>
+			</q-btn>
+			<q-btn-dropdown v-if="auth.canAdmin() && props.row.replication_enabled && props.row.storage_target_ids.length > 1" flat dense round dropdown-icon="swap_horiz">
+				<q-list dense>
+					<q-item v-for="id in props.row.storage_target_ids.slice(1)" :key="id" clickable v-close-popup @click="changePrimary(props.row, id)">
+						<q-item-section avatar><q-icon name="storage" /></q-item-section>
+						<q-item-section>Сделать основным: {{ app.storageName(id) }}</q-item-section>
+					</q-item>
+				</q-list>
+			</q-btn-dropdown>
           <q-btn v-if="auth.canWrite()" flat dense round icon="edit" @click="openEdit(props.row)" />
           <q-btn v-if="auth.canWrite()" flat dense round icon="delete" color="negative" @click="confirmDelete(props.row)" />
         </q-td>
@@ -587,10 +633,14 @@ const columns = [
               multiple
               use-chips
               label="Хранилища"
-              hint="Несколько хранилищ — бэкап выполняется в каждое отдельно (правило 3-2-1)"
+				hint="Первое — основное: ВМ читается один раз. Остальные — обязательные реплики из уже записанных данных."
               outlined
               dense
             />
+			<div v-if="form.storage_target_ids.length" class="jhv-reason q-mt-sm">
+				Основное: {{ app.storageName(form.storage_target_ids[0]) }}
+				<template v-if="form.storage_target_ids.length > 1"> · Реплики: {{ form.storage_target_ids.slice(1).map(app.storageName).join(', ') }}</template>
+			</div>
           </div>
 
           <div class="col-12 row items-center">

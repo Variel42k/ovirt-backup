@@ -18,7 +18,7 @@ const runColumns = `id, job_run_id, job_id, job_name, server_id, vm_id, vm_name,
 	chain_id, chain_index, storage_target_id, repo_path, engine_backup_id, from_checkpoint_id,
 	to_checkpoint_id, snapshot_id, disk_count, logical_bytes, read_bytes, stored_bytes, progress,
 	encrypted, compression, verify_status, verified_at, error, started_at, ended_at, expires_at,
-	deleted, created_at, skipped_disks`
+	deleted, created_at, skipped_disks, manifest_sha256, imported`
 
 // CreateBackupRun records a new run in the pending state.
 func (s *Store) CreateBackupRun(ctx context.Context, r *model.BackupRun) error {
@@ -37,15 +37,19 @@ func (s *Store) CreateBackupRun(ctx context.Context, r *model.BackupRun) error {
 	}
 
 	_, err := s.db.Exec(ctx, `INSERT INTO backup_runs (`+runColumns+`)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		r.ID, nullString(r.JobRunID), r.JobID, r.JobName, r.ServerID, r.VMID, r.VMName, string(r.Type), string(r.Status),
 		r.ParentRunID, r.ChainID, r.ChainIndex, r.StorageTargetID, r.RepoPath, r.EngineBackupID,
 		r.FromCheckpointID, r.ToCheckpointID, r.SnapshotID, r.DiskCount, r.LogicalBytes,
 		r.ReadBytes, r.StoredBytes, r.Progress, r.Encrypted, r.Compression, string(r.VerifyStatus),
 		r.VerifiedAt, r.Error, r.StartedAt, r.EndedAt,
-		r.ExpiresAt, r.Deleted, r.CreatedAt, encodeSkipped(r.SkippedDisks))
+		r.ExpiresAt, r.Deleted, r.CreatedAt, encodeSkipped(r.SkippedDisks), r.ManifestSHA256, r.Imported)
 	if err != nil {
 		return fmt.Errorf("insert backup run: %w", err)
+	}
+	if _, err := s.EnsurePrimaryCopy(ctx, r); err != nil {
+		_ = s.PurgeRunRecord(ctx, r.ID)
+		return fmt.Errorf("create primary backup copy: %w", err)
 	}
 	return nil
 }
@@ -57,21 +61,21 @@ func (s *Store) UpdateBackupRun(ctx context.Context, r *model.BackupRun) error {
 		engine_backup_id=?, from_checkpoint_id=?, to_checkpoint_id=?, snapshot_id=?, disk_count=?,
 		logical_bytes=?, read_bytes=?, stored_bytes=?, progress=?, encrypted=?, compression=?,
 		verify_status=?, verified_at=?, error=?, started_at=?, ended_at=?, expires_at=?, deleted=?,
-		skipped_disks=?
+		skipped_disks=?, manifest_sha256=?, imported=?
 		WHERE id=?`,
 		string(r.Status), r.ParentRunID, r.ChainID, r.ChainIndex, r.StorageTargetID, r.RepoPath,
 		r.EngineBackupID, r.FromCheckpointID, r.ToCheckpointID, r.SnapshotID, r.DiskCount,
 		r.LogicalBytes, r.ReadBytes, r.StoredBytes, r.Progress, r.Encrypted, r.Compression,
 		string(r.VerifyStatus), r.VerifiedAt, r.Error, r.StartedAt,
 		r.EndedAt, r.ExpiresAt, r.Deleted,
-		encodeSkipped(r.SkippedDisks), r.ID)
+		encodeSkipped(r.SkippedDisks), r.ManifestSHA256, r.Imported, r.ID)
 	if err != nil {
 		return fmt.Errorf("update backup run: %w", err)
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return ErrNotFound
 	}
-	return nil
+	return s.SyncPrimaryCopy(ctx, r)
 }
 
 // SetRunProgress is the hot path used by the transfer loop; it touches only the
@@ -263,7 +267,7 @@ func scanRun(row rowScanner) (*model.BackupRun, error) {
 		&r.EngineBackupID, &r.FromCheckpointID, &r.ToCheckpointID, &r.SnapshotID, &r.DiskCount,
 		&r.LogicalBytes, &r.ReadBytes, &r.StoredBytes, &r.Progress, &r.Encrypted, &r.Compression,
 		&verifyStatus, &verifiedAt, &r.Error, &startedAt, &endedAt, &expiresAt, &r.Deleted, &createdAt,
-		&skipped)
+		&skipped, &r.ManifestSHA256, &r.Imported)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -355,7 +359,7 @@ func (s *Store) ListBackupDisks(ctx context.Context, runID string) ([]model.Back
 	return out, rows.Err()
 }
 
-const verifyColumns = `id, run_id, mode, status, progress, details, error, started_at, ended_at, created_at`
+const verifyColumns = `id, run_id, mode, status, progress, details, error, started_at, ended_at, created_at, copy_id`
 
 // CreateVerifyRun records a verification request.
 func (s *Store) CreateVerifyRun(ctx context.Context, v *model.VerifyRun) error {
@@ -365,9 +369,9 @@ func (s *Store) CreateVerifyRun(ctx context.Context, v *model.VerifyRun) error {
 	if v.CreatedAt.IsZero() {
 		v.CreatedAt = time.Now().UTC()
 	}
-	_, err := s.db.Exec(ctx, `INSERT INTO verify_runs (`+verifyColumns+`) VALUES (?,?,?,?,?,?,?,?,?,?)`,
+	_, err := s.db.Exec(ctx, `INSERT INTO verify_runs (`+verifyColumns+`) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
 		v.ID, v.RunID, string(v.Mode), string(v.Status), v.Progress, jsonOrNull(v.Details), v.Error,
-		v.StartedAt, v.EndedAt, v.CreatedAt)
+		v.StartedAt, v.EndedAt, v.CreatedAt, nullString(v.CopyID))
 	if err != nil {
 		return fmt.Errorf("insert verify run: %w", err)
 	}
@@ -428,8 +432,9 @@ func scanVerify(row rowScanner) (*model.VerifyRun, error) {
 		startedAt, endedAt sql.NullTime
 		createdAt          time.Time
 	)
+	var copyID sql.NullString
 	err := row.Scan(&v.ID, &v.RunID, &mode, &status, &v.Progress, &v.Details, &v.Error,
-		&startedAt, &endedAt, &createdAt)
+		&startedAt, &endedAt, &createdAt, &copyID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -437,6 +442,7 @@ func scanVerify(row rowScanner) (*model.VerifyRun, error) {
 		return nil, fmt.Errorf("scan verify run: %w", err)
 	}
 	v.Mode = model.VerifyMode(mode)
+	v.CopyID = copyID.String
 	v.Status = model.RunStatus(status)
 	v.StartedAt = nullTime(startedAt)
 	v.EndedAt = nullTime(endedAt)
@@ -446,7 +452,7 @@ func scanVerify(row rowScanner) (*model.VerifyRun, error) {
 
 const restoreColumns = `id, run_id, target, status, disk_ids, output_path, output_format,
 	target_server_id, target_disk_id, target_domain_id, target_vm_id, progress, error,
-	started_at, ended_at, created_at`
+	started_at, ended_at, created_at, copy_id`
 
 // CreateRestoreRun records a restore request.
 func (s *Store) CreateRestoreRun(ctx context.Context, r *model.RestoreRun) error {
@@ -457,10 +463,10 @@ func (s *Store) CreateRestoreRun(ctx context.Context, r *model.RestoreRun) error
 		r.CreatedAt = time.Now().UTC()
 	}
 	_, err := s.db.Exec(ctx, `INSERT INTO restore_runs (`+restoreColumns+`)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		r.ID, r.RunID, string(r.Target), string(r.Status), encodeJSON(r.DiskIDs), r.OutputPath,
 		r.OutputFormat, r.TargetServerID, r.TargetDiskID, r.TargetDomainID, r.TargetVMID,
-		r.Progress, r.Error, r.StartedAt, r.EndedAt, r.CreatedAt)
+		r.Progress, r.Error, r.StartedAt, r.EndedAt, r.CreatedAt, nullString(r.CopyID))
 	if err != nil {
 		return fmt.Errorf("insert restore run: %w", err)
 	}
@@ -521,9 +527,10 @@ func scanRestore(row rowScanner) (*model.RestoreRun, error) {
 		startedAt, endedAt sql.NullTime
 		createdAt          time.Time
 	)
+	var copyID sql.NullString
 	err := row.Scan(&r.ID, &r.RunID, &target, &status, &diskIDs, &r.OutputPath, &r.OutputFormat,
 		&r.TargetServerID, &r.TargetDiskID, &r.TargetDomainID, &r.TargetVMID, &r.Progress,
-		&r.Error, &startedAt, &endedAt, &createdAt)
+		&r.Error, &startedAt, &endedAt, &createdAt, &copyID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -531,6 +538,7 @@ func scanRestore(row rowScanner) (*model.RestoreRun, error) {
 		return nil, fmt.Errorf("scan restore run: %w", err)
 	}
 	r.Target = model.RestoreTarget(target)
+	r.CopyID = copyID.String
 	r.Status = model.RunStatus(status)
 	r.DiskIDs = decodeStrings(diskIDs)
 	r.StartedAt = nullTime(startedAt)

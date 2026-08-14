@@ -77,18 +77,51 @@ type Backend interface {
 	Close() error
 }
 
+// optimizedCopier is implemented by a backend that can copy an object without
+// routing its body through the application. The bool reports whether the
+// optimization was applicable; callers then fall back to Get+Put.
+type optimizedCopier interface {
+	copyFrom(ctx context.Context, source Backend, key string, size int64) (written int64, applicable bool, err error)
+}
+
+// CopyOptimized attempts a storage-native object copy.
+func CopyOptimized(ctx context.Context, source, destination Backend, key string, size int64) (int64, bool, error) {
+	c, ok := destination.(optimizedCopier)
+	if !ok {
+		return 0, false, nil
+	}
+	return c.copyFrom(ctx, source, key, size)
+}
+
+// ObjectLockValidator is implemented by S3 targets configured for immutable
+// backup objects. It never enables bucket lock implicitly.
+type ObjectLockValidator interface {
+	CheckObjectLock(ctx context.Context) error
+}
+
 // Open builds a backend from a stored target definition.
 func Open(ctx context.Context, target *model.StorageTarget) (Backend, error) {
+	var (
+		backend Backend
+		err     error
+	)
 	switch target.Kind {
 	case model.StorageLocal:
-		return newLocal(target)
+		backend, err = newLocal(target)
 	case model.StorageS3:
-		return newS3(ctx, target)
+		backend, err = newS3(ctx, target)
 	case model.StorageSFTP:
-		return newSFTP(target)
+		backend, err = newSFTP(target)
 	default:
 		return nil, errors.New("неизвестный тип хранилища: " + string(target.Kind))
 	}
+	if err != nil {
+		return nil, err
+	}
+	if target.RateLimit > 0 {
+		backend = newRateLimitedBackend(backend, target.RateLimit)
+	}
+	return backend, nil
 }
 
 // probePrefix is where Check writes its scratch object. A dedicated prefix

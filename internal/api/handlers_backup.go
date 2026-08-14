@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -140,8 +141,12 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	job := &model.BackupJob{Enabled: true, Concurrency: 1, FallbackType: model.BackupSnapshot}
+	job := &model.BackupJob{Enabled: true, Concurrency: 1, FallbackType: model.BackupSnapshot,
+		ReplicationEnabled: true}
 	payload.apply(job)
+	if job.Type == model.BackupOVA {
+		job.ReplicationEnabled = false
+	}
 	if job.Retention.Empty() {
 		job.Retention = model.DefaultRetention()
 	}
@@ -171,12 +176,25 @@ func (s *Server) handleUpdateJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	previousPrimary := ""
+	if len(job.StorageTargetIDs) > 0 {
+		previousPrimary = job.StorageTargetIDs[0]
+	}
 	var payload jobPayload
 	if err := decodeJSON(r, &payload); err != nil {
 		s.writeError(w, r, err)
 		return
 	}
 	payload.apply(job)
+	if job.ReplicationEnabled && previousPrimary != "" && len(job.StorageTargetIDs) > 0 &&
+		job.StorageTargetIDs[0] != previousPrimary {
+		s.writeError(w, r, badRequest("основное хранилище меняется отдельным действием change-primary"))
+		return
+	}
+	if job.ReplicationEnabled && !slices.Contains(job.StorageTargetIDs, previousPrimary) {
+		s.writeError(w, r, badRequest("нельзя удалить основное хранилище обычным редактированием задания"))
+		return
+	}
 	if err := s.validateJob(r.Context(), job); err != nil {
 		s.writeError(w, r, err)
 		return
@@ -384,12 +402,22 @@ func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
+	for _, run := range runs {
+		if err := s.store.EnrichRunCopies(r.Context(), run, false); err != nil {
+			s.writeError(w, r, err)
+			return
+		}
+	}
 	writeList(w, runs)
 }
 
 func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 	run, err := s.store.GetBackupRunFull(r.Context(), r.PathValue("id"))
 	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	if err := s.store.EnrichRunCopies(r.Context(), run, true); err != nil {
 		s.writeError(w, r, err)
 		return
 	}
@@ -411,6 +439,12 @@ func (s *Server) handleRunChain(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.writeError(w, r, err)
 		return
+	}
+	for _, item := range chain {
+		if err := s.store.EnrichRunCopies(r.Context(), item, false); err != nil {
+			s.writeError(w, r, err)
+			return
+		}
 	}
 	writeList(w, chain)
 }
@@ -438,7 +472,8 @@ func (s *Server) handleCancelRun(w http.ResponseWriter, r *http.Request) {
 
 // verifyRequest picks how deeply to check a stored backup.
 type verifyRequest struct {
-	Mode string `json:"mode"`
+	Mode   string `json:"mode"`
+	CopyID string `json:"copy_id"`
 	// Параметры пробного запуска; для остальных режимов игнорируются.
 	BootHostID    string `json:"boot_host_id"`
 	DiskID        string `json:"disk_id"`
@@ -494,7 +529,7 @@ func (s *Server) handleVerifyRun(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
 		defer cancel()
 
-		record, err := s.engine.Verify(ctx, id, mode, opts)
+		record, err := s.engine.VerifyCopy(ctx, id, req.CopyID, mode, opts)
 		s.audit(r, "backup.verify", model.ScopeBackup, id, err == nil, string(mode))
 		if err != nil {
 			// A failed verification is a valid answer, not a broken request:
@@ -509,7 +544,7 @@ func (s *Server) handleVerifyRun(w http.ResponseWriter, r *http.Request) {
 	s.audit(r, "backup.verify", model.ScopeBackup, id, true, string(mode))
 	go func() {
 		ctx := context.WithoutCancel(r.Context())
-		if _, err := s.engine.Verify(ctx, id, mode, opts); err != nil {
+		if _, err := s.engine.VerifyCopy(ctx, id, req.CopyID, mode, opts); err != nil {
 			s.log.Warn().Err(err).Str("run", id).Str("режим", string(mode)).Msg("проверка не пройдена")
 		}
 	}()
@@ -609,6 +644,7 @@ func (s *Server) handleGetVerification(w http.ResponseWriter, r *http.Request) {
 
 // restoreRequest describes a restore operation.
 type restoreRequest struct {
+	CopyID         string   `json:"copy_id"`
 	Target         string   `json:"target"` // file | disk | new_disk
 	DiskIDs        []string `json:"disk_ids"`
 	OutputDir      string   `json:"output_dir"`
@@ -664,6 +700,7 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 
 	restoreReq := backup.RestoreRequest{
 		RunID:          id,
+		CopyID:         req.CopyID,
 		DiskIDs:        req.DiskIDs,
 		Target:         target,
 		OutputDir:      req.OutputDir,
@@ -677,7 +714,7 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 
 	// Validate the restore point before answering, so an impossible request
 	// fails immediately instead of in a background goroutine nobody watches.
-	set, err := s.engine.LoadChain(r.Context(), id)
+	set, err := s.engine.LoadChainCopy(r.Context(), id, req.CopyID)
 	if err != nil {
 		s.writeError(w, r, err)
 		return

@@ -9,6 +9,8 @@ coverage.out
 /web/dist/
 /web/node_modules/
 /web/.vite/
+/web/test-results/
+/web/playwright-report/
 
 # Каталог, куда compose монтирует локальное хранилище копий: туда попадают
 # сами бэкапы, а им в репозитории не место.

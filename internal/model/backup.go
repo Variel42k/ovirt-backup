@@ -124,6 +124,10 @@ type StorageTarget struct {
 	UseSSL       bool   `json:"use_ssl"`
 	PathStyle    bool   `json:"path_style"`
 	StorageClass string `json:"storage_class,omitempty"`
+	// Object Lock применяется только к финальным объектам бэкапа в S3.
+	// Probe и staging намеренно остаются удаляемыми.
+	ObjectLockEnabled bool `json:"object_lock_enabled"`
+	ObjectLockDays    int  `json:"object_lock_days"`
 
 	// SFTP
 	Host       string `json:"host,omitempty"`
@@ -134,7 +138,7 @@ type StorageTarget struct {
 	HostKey    string `json:"host_key,omitempty"`
 
 	// Ограничение полосы, байт/с. 0 — без ограничения.
-	RateLimit int64 `json:"rate_limit"`
+	RateLimit int64 `json:"rate_limit"` // bytes/second for aggregate streaming writes; 0 means unlimited
 
 	LastCheckAt  *time.Time `json:"last_check_at,omitempty"`
 	LastCheckOK  bool       `json:"last_check_ok"`
@@ -331,6 +335,11 @@ type BackupJob struct {
 
 	// Хранилища: первое — основное, остальные — копии (правило 3-2-1).
 	StorageTargetIDs []string `json:"storage_target_ids"`
+	// ReplicationEnabled означает новую модель: первый target получает данные
+	// от гипервизора, остальные копируются из опубликованного бэкапа.
+	ReplicationEnabled bool `json:"replication_enabled"`
+	// ForceFullNext устанавливается мастером перехода или смены primary.
+	ForceFullNext bool `json:"force_full_next"`
 
 	Retention RetentionPolicy `json:"retention"`
 
@@ -370,6 +379,9 @@ func (j *BackupJob) Validate() error {
 	}
 	if len(j.StorageTargetIDs) == 0 {
 		return fmt.Errorf("не выбрано ни одного хранилища")
+	}
+	if j.Type == BackupOVA && (j.ReplicationEnabled || len(j.StorageTargetIDs) != 1) {
+		return fmt.Errorf("OVA не поддерживает репликацию и требует ровно одно хранилище")
 	}
 	switch j.Type {
 	case BackupFull, BackupIncremental, BackupDifferential, BackupSnapshot, BackupOVA, BackupConfig:
@@ -435,9 +447,124 @@ type BackupRun struct {
 	EndedAt   *time.Time `json:"ended_at,omitempty"`
 	ExpiresAt *time.Time `json:"expires_at,omitempty"`
 	Deleted   bool       `json:"deleted"`
-	CreatedAt time.Time  `json:"created_at"`
+	Imported  bool       `json:"imported"`
+	// ManifestSHA256 позволяет отличить ту же точку в другом хранилище от
+	// конфликта идентификаторов при восстановлении каталога.
+	ManifestSHA256 string    `json:"manifest_sha256,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
 
-	Disks []BackupDisk `json:"disks,omitempty"`
+	Disks            []BackupDisk `json:"disks,omitempty"`
+	Copies           []BackupCopy `json:"copies,omitempty"`
+	CopyCount        int          `json:"copy_count"`
+	HealthyCopyCount int          `json:"healthy_copy_count"`
+	ProtectionStatus string       `json:"protection_status"`
+}
+
+type BackupCopyRole string
+
+const (
+	CopyPrimary BackupCopyRole = "primary"
+	CopyReplica BackupCopyRole = "replica"
+)
+
+type BackupCopyStatus string
+
+const (
+	CopyPending   BackupCopyStatus = "pending"
+	CopyCopying   BackupCopyStatus = "copying"
+	CopyVerifying BackupCopyStatus = "verifying"
+	CopySucceeded BackupCopyStatus = "succeeded"
+	CopyFailed    BackupCopyStatus = "failed"
+	CopyCanceled  BackupCopyStatus = "canceled"
+	CopyLocked    BackupCopyStatus = "locked"
+	CopyDeleted   BackupCopyStatus = "deleted"
+)
+
+// BackupCopy is one physical location of a logical restore point.
+type BackupCopy struct {
+	ID                string           `json:"id"`
+	RunID             string           `json:"run_id"`
+	StorageTargetID   string           `json:"storage_target_id"`
+	StorageTargetName string           `json:"storage_target_name,omitempty"`
+	Role              BackupCopyRole   `json:"role"`
+	Required          bool             `json:"required"`
+	Status            BackupCopyStatus `json:"status"`
+	RepoPath          string           `json:"repo_path"`
+	SourceCopyID      string           `json:"source_copy_id,omitempty"`
+	ManifestSHA256    string           `json:"manifest_sha256,omitempty"`
+	ObjectCount       int              `json:"object_count"`
+	CopiedObjects     int              `json:"copied_objects"`
+	TotalBytes        int64            `json:"total_bytes"`
+	CopiedBytes       int64            `json:"copied_bytes"`
+	AttemptCount      int              `json:"attempt_count"`
+	NextRetryAt       *time.Time       `json:"next_retry_at,omitempty"`
+	LastError         string           `json:"last_error,omitempty"`
+	VerifiedAt        *time.Time       `json:"verified_at,omitempty"`
+	LockedUntil       *time.Time       `json:"locked_until,omitempty"`
+	StartedAt         *time.Time       `json:"started_at,omitempty"`
+	EndedAt           *time.Time       `json:"ended_at,omitempty"`
+	CreatedAt         time.Time        `json:"created_at"`
+	UpdatedAt         time.Time        `json:"updated_at"`
+}
+
+// Healthy reports whether the physical data can be read for verification,
+// restore or further replication. A copy locked by S3 retention remains
+// healthy; a structurally blocked copy uses the same status but has no
+// retention deadline and is not readable.
+func (c *BackupCopy) Healthy() bool {
+	return c != nil && (c.Status == CopySucceeded ||
+		(c.Status == CopyLocked && c.LockedUntil != nil))
+}
+
+type ReplicationAttempt struct {
+	ID            string     `json:"id"`
+	CopyID        string     `json:"copy_id"`
+	SourceCopyID  string     `json:"source_copy_id,omitempty"`
+	Status        RunStatus  `json:"status"`
+	Attempt       int        `json:"attempt"`
+	ObjectCount   int        `json:"object_count"`
+	CopiedObjects int        `json:"copied_objects"`
+	TotalBytes    int64      `json:"total_bytes"`
+	CopiedBytes   int64      `json:"copied_bytes"`
+	Error         string     `json:"error,omitempty"`
+	StartedAt     *time.Time `json:"started_at,omitempty"`
+	EndedAt       *time.Time `json:"ended_at,omitempty"`
+	CreatedAt     time.Time  `json:"created_at"`
+}
+
+type ReplicationObject struct {
+	CopyID    string    `json:"copy_id"`
+	ObjectKey string    `json:"object_key"`
+	SizeBytes int64     `json:"size_bytes"`
+	SHA256    string    `json:"sha256,omitempty"`
+	Status    string    `json:"status"`
+	Error     string    `json:"error,omitempty"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+type CatalogScan struct {
+	ID                string     `json:"id"`
+	StorageTargetID   string     `json:"storage_target_id"`
+	Status            RunStatus  `json:"status"`
+	TotalEntries      int        `json:"total_entries"`
+	ImportableEntries int        `json:"importable_entries"`
+	Error             string     `json:"error,omitempty"`
+	StartedAt         *time.Time `json:"started_at,omitempty"`
+	EndedAt           *time.Time `json:"ended_at,omitempty"`
+	CreatedAt         time.Time  `json:"created_at"`
+}
+
+type CatalogEntry struct {
+	ID             string     `json:"id"`
+	ScanID         string     `json:"scan_id"`
+	RunID          string     `json:"run_id,omitempty"`
+	RepoPath       string     `json:"repo_path"`
+	Status         string     `json:"status"`
+	ManifestSHA256 string     `json:"manifest_sha256,omitempty"`
+	Manifest       string     `json:"manifest,omitempty"`
+	Details        string     `json:"details,omitempty"`
+	ImportedAt     *time.Time `json:"imported_at,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
 }
 
 // BackupJobRun groups every VM/repository copy started by one scheduler tick
@@ -503,6 +630,7 @@ type BackupDisk struct {
 type VerifyRun struct {
 	ID       string     `json:"id"`
 	RunID    string     `json:"run_id"`
+	CopyID   string     `json:"copy_id,omitempty"`
 	Mode     VerifyMode `json:"mode"`
 	Status   RunStatus  `json:"status"`
 	Progress int        `json:"progress"`
@@ -531,6 +659,7 @@ const (
 type RestoreRun struct {
 	ID     string        `json:"id"`
 	RunID  string        `json:"run_id"`
+	CopyID string        `json:"copy_id,omitempty"`
 	Target RestoreTarget `json:"target"`
 	Status RunStatus     `json:"status"`
 

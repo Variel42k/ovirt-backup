@@ -249,6 +249,35 @@ func (c *Client) DeleteSnapshot(ctx context.Context, vmID, snapshotID string) er
 	return c.del(ctx, "/vms/"+vmID+"/snapshots/"+snapshotID)
 }
 
+// DeleteSnapshotWhenReady retries the transient 409 returned while the engine
+// is still unlocking the VM after an image transfer. Other errors are not
+// hidden: authentication, connectivity and invalid IDs require intervention.
+func (c *Client) DeleteSnapshotWhenReady(ctx context.Context, vmID, snapshotID string, timeout time.Duration) error {
+	return retryConflict(ctx, timeout, 5*time.Second, func() error {
+		return c.DeleteSnapshot(ctx, vmID, snapshotID)
+	})
+}
+
+func retryConflict(ctx context.Context, timeout, interval time.Duration, operation func() error) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		err := operation()
+		if err == nil || !IsConflict(err) {
+			return err
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("engine не снял блокировку за %s: %w", timeout, err)
+		}
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
 // WaitSnapshotGone polls until a deleted snapshot disappears from the VM.
 func (c *Client) WaitSnapshotGone(ctx context.Context, vmID, snapshotID string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)

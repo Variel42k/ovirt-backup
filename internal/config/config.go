@@ -18,15 +18,16 @@ const envPrefix = "JHV"
 
 // Config is the fully resolved runtime configuration.
 type Config struct {
-	Server    ServerConfig    `mapstructure:"server"`
-	Auth      AuthConfig      `mapstructure:"auth"`
-	Database  DatabaseConfig  `mapstructure:"database"`
-	Logging   LoggingConfig   `mapstructure:"logging"`
-	Secrets   SecretsConfig   `mapstructure:"secrets"`
-	Monitor   MonitorConfig   `mapstructure:"monitor"`
-	Metrics   MetricsConfig   `mapstructure:"metrics"`
-	Backup    BackupConfig    `mapstructure:"backup"`
-	Scheduler SchedulerConfig `mapstructure:"scheduler"`
+	Server           ServerConfig           `mapstructure:"server"`
+	Auth             AuthConfig             `mapstructure:"auth"`
+	Database         DatabaseConfig         `mapstructure:"database"`
+	Logging          LoggingConfig          `mapstructure:"logging"`
+	Secrets          SecretsConfig          `mapstructure:"secrets"`
+	Monitor          MonitorConfig          `mapstructure:"monitor"`
+	Metrics          MetricsConfig          `mapstructure:"metrics"`
+	Backup           BackupConfig           `mapstructure:"backup"`
+	Scheduler        SchedulerConfig        `mapstructure:"scheduler"`
+	DisasterRecovery DisasterRecoveryConfig `mapstructure:"disaster_recovery"`
 }
 
 type ServerConfig struct {
@@ -64,6 +65,14 @@ type AuthConfig struct {
 type MetricsConfig struct {
 	Enabled   bool   `mapstructure:"enabled"`
 	TokenFile string `mapstructure:"token_file"`
+}
+
+type DisasterRecoveryConfig struct {
+	Enabled             bool          `mapstructure:"enabled"`
+	PostgresDumpPath    string        `mapstructure:"postgres_dump_path"`
+	PostgresDumpMaxAge  time.Duration `mapstructure:"postgres_dump_max_age"`
+	SecretKeyBackupPath string        `mapstructure:"secret_key_backup_path"`
+	CheckInterval       time.Duration `mapstructure:"check_interval"`
 }
 
 // DatabaseConfig описывает подключение к PostgreSQL.
@@ -298,10 +307,11 @@ type RemediationConfig struct {
 }
 
 type BackupConfig struct {
-	Workers          int    `mapstructure:"workers"`
-	ChunkSize        int    `mapstructure:"chunk_size"`
-	Compression      string `mapstructure:"compression"`
-	CompressionLevel int    `mapstructure:"compression_level"`
+	Workers            int    `mapstructure:"workers"`
+	ReplicationWorkers int    `mapstructure:"replication_workers"`
+	ChunkSize          int    `mapstructure:"chunk_size"`
+	Compression        string `mapstructure:"compression"`
+	CompressionLevel   int    `mapstructure:"compression_level"`
 	// HeavyWorkers ограничивает число одновременных проверок и восстановлений.
 	// Обе операции читают цепочку целиком из хранилища, поэтому предел общий и
 	// отдельный от workers: бэкапы упираются в гипервизор, а эти — в хранилище.
@@ -417,6 +427,18 @@ func (c *Config) Validate() error {
 	}
 	if c.Backup.Workers < 1 {
 		return fmt.Errorf("backup.workers must be >= 1, got %d", c.Backup.Workers)
+	}
+	if c.Backup.ReplicationWorkers < 1 {
+		return fmt.Errorf("backup.replication_workers must be >= 1, got %d", c.Backup.ReplicationWorkers)
+	}
+	if c.DisasterRecovery.Enabled {
+		if strings.TrimSpace(c.DisasterRecovery.PostgresDumpPath) == "" ||
+			strings.TrimSpace(c.DisasterRecovery.SecretKeyBackupPath) == "" {
+			return fmt.Errorf("disaster_recovery.enabled requires postgres_dump_path and secret_key_backup_path")
+		}
+		if c.DisasterRecovery.PostgresDumpMaxAge <= 0 || c.DisasterRecovery.CheckInterval < time.Minute {
+			return fmt.Errorf("disaster_recovery: max age must be positive and check_interval at least 1m")
+		}
 	}
 	if c.Server.Port < 1 || c.Server.Port > 65535 {
 		return fmt.Errorf("server.port out of range: %d", c.Server.Port)
@@ -541,6 +563,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("monitor.remediation.allow_host_fence", false)
 
 	v.SetDefault("backup.workers", 2)
+	v.SetDefault("backup.replication_workers", 2)
 	v.SetDefault("backup.chunk_size", 4*1024*1024)
 	v.SetDefault("backup.compression", "zstd")
 	v.SetDefault("backup.compression_level", 3)
@@ -548,6 +571,12 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("backup.temp_dir", "./data/tmp")
 	v.SetDefault("backup.restore_dirs", []string{})
 	v.SetDefault("backup.qemu_img_path", "")
+
+	v.SetDefault("disaster_recovery.enabled", false)
+	v.SetDefault("disaster_recovery.postgres_dump_path", "")
+	v.SetDefault("disaster_recovery.postgres_dump_max_age", "24h")
+	v.SetDefault("disaster_recovery.secret_key_backup_path", "")
+	v.SetDefault("disaster_recovery.check_interval", "1h")
 	v.SetDefault("backup.transfer.prefer_proxy", false)
 	v.SetDefault("backup.transfer.inactivity_timeout", "60s")
 	v.SetDefault("backup.transfer.request_timeout", "10m")

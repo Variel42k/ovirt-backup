@@ -152,6 +152,8 @@ export interface BackupJob {
   schedule: string
   max_duration?: number
   storage_target_ids: string[]
+  replication_enabled: boolean
+  force_full_next: boolean
   retention: RetentionPolicy
   quiesce: boolean
   verify_after?: string
@@ -223,6 +225,98 @@ export interface BackupRun {
   created_at: string
   disks?: BackupDisk[]
   skipped_disks?: SkippedDisk[]
+  manifest_sha256?: string
+  imported?: boolean
+  copy_count: number
+  healthy_copy_count: number
+  protection_status: 'protected' | 'degraded' | 'unavailable' | 'unknown'
+  copies?: BackupCopy[]
+}
+
+export type BackupCopyStatus = 'pending' | 'copying' | 'verifying' | 'succeeded' | 'failed' | 'canceled' | 'locked' | 'deleted'
+
+export interface BackupCopy {
+  id: string
+  run_id: string
+  storage_target_id: string
+  storage_target_name: string
+  role: 'primary' | 'replica'
+  required: boolean
+  status: BackupCopyStatus
+  repo_path: string
+  source_copy_id?: string
+  manifest_sha256?: string
+  object_count: number
+  copied_objects: number
+  total_bytes: number
+  copied_bytes: number
+  attempt_count: number
+  next_retry_at?: string
+  last_error?: string
+  verified_at?: string
+  locked_until?: string
+  started_at?: string
+  ended_at?: string
+  created_at: string
+  updated_at: string
+}
+
+export interface ReplicationAttempt {
+  id: string
+  copy_id: string
+  source_copy_id?: string
+  status: RunStatus
+  attempt: number
+  object_count: number
+  copied_objects: number
+  total_bytes: number
+  copied_bytes: number
+  error?: string
+  started_at?: string
+  ended_at?: string
+  created_at: string
+}
+
+export interface ReplicationDetail {
+  copy: BackupCopy
+  attempts: ReplicationAttempt[]
+  objects: Record<string, { object_key: string; size_bytes: number; sha256?: string; status: string; error?: string }>
+}
+
+export interface CatalogScan {
+  id: string
+  storage_target_id: string
+  status: RunStatus
+  total_entries: number
+  importable_entries: number
+  error?: string
+  started_at?: string
+  ended_at?: string
+  created_at: string
+}
+
+export interface CatalogEntry {
+  id: string
+  scan_id: string
+  run_id?: string
+  repo_path: string
+  status: 'importable' | 'known' | 'additional_copy' | 'incomplete' | 'corrupt' | 'conflict' | 'unsupported' | 'missing_parent' | 'missing_object'
+  manifest_sha256?: string
+  details?: string
+  imported_at?: string
+  created_at: string
+}
+
+export interface CatalogScanDetail { scan: CatalogScan; entries: CatalogEntry[] }
+
+export interface DRReadiness {
+  enabled: boolean
+  ok: boolean
+  checked_at: string
+  postgres_dump: { path: string; ok: boolean; size_bytes: number; modified_at?: string; age_seconds?: number; mode?: string; error?: string }
+  secret_key_backup: { path: string; ok: boolean; size_bytes: number; modified_at?: string; mode?: string; error?: string }
+  key_matches: boolean
+  problems?: string[]
 }
 
 export type BackupQualityState = 'ok' | 'none' | 'failed' | 'overdue' | 'partial' | 'verify_overdue' | 'degraded'
@@ -292,6 +386,8 @@ export interface StorageCapacityPoint {
   capacity_known: boolean
   free_bytes: number
   used_bytes: number
+  object_lock_enabled: boolean
+  object_lock_days: number
 }
 
 export interface StorageCapacityItem {
@@ -333,6 +429,7 @@ export interface BackupJobRun {
 export interface VerifyRun {
   id: string
   run_id: string
+  copy_id?: string
   mode: string
   status: RunStatus
   progress: number
@@ -346,6 +443,7 @@ export interface VerifyRun {
 export interface RestoreRun {
   id: string
   run_id: string
+  copy_id?: string
   target: string
   status: RunStatus
   disk_ids?: string[]

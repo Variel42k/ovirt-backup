@@ -6,7 +6,7 @@ import { bytes, dateTime, elapsed, runStatus, statusColor } from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import HelpButton from '@/components/HelpButton.vue'
-import type { BackupDisk, BackupRun, BootReport, RestoreRun, StorageDomain, VerifyRun } from '@/api/types'
+import type { BackupCopy, BackupDisk, BackupRun, BootReport, ReplicationDetail, RestoreRun, StorageDomain, VerifyRun } from '@/api/types'
 
 const $q = useQuasar()
 const app = useAppStore()
@@ -21,9 +21,14 @@ const detail = ref<BackupRun | null>(null)
 const detailOpen = ref(false)
 const chain = ref<BackupRun[]>([])
 const verifications = ref<VerifyRun[]>([])
+const replications = ref<BackupCopy[]>([])
+const replicationsLoading = ref(false)
+const replicationOpen = ref(false)
+const replicationDetail = ref<ReplicationDetail | null>(null)
 
 const restoreOpen = ref(false)
 const restoreForm = ref({
+  copy_id: '',
   target: 'file',
   output_format: 'raw',
   output_dir: '',
@@ -104,6 +109,7 @@ const verifyTarget = ref<BackupRun | null>(null)
 const verifyDisks = ref<BackupDisk[]>([])
 const verifyBusy = ref(false)
 const verifyForm = ref({
+  copy_id: '',
   mode: 'manifest',
   boot_host_id: '',
   disk_id: '',
@@ -122,13 +128,18 @@ const needsHypervisor = computed(() => verifyMode.value?.needs_hypervisor === tr
 const bootHosts = computed(() => app.servers.filter((s) => s.kind === 'kvm' && s.enabled))
 
 async function verify(run: BackupRun) {
-  verifyTarget.value = run
+	let selected = run
+	if (!run.copies?.length) {
+		try { selected = await api.getRun(run.id) } catch { /* details are loaded below */ }
+	}
+	verifyTarget.value = selected
   verifyForm.value.mode = 'manifest'
+	verifyForm.value.copy_id = healthyCopies(selected)[0]?.id ?? ''
   verifyForm.value.disk_id = ''
   // Бэкап с KVM-хоста проверяется на нём же — это ожидаемый выбор по умолчанию.
   const own = app.servers.find((s) => s.id === run.server_id)
   verifyForm.value.boot_host_id = own?.kind === 'kvm' ? own.id : ''
-  verifyDisks.value = run.disks ?? []
+	verifyDisks.value = selected.disks ?? []
   verifyOpen.value = true
 
   if (!verifyDisks.value.length) {
@@ -146,8 +157,9 @@ async function submitVerify() {
 
   verifyBusy.value = true
   try {
-    const options = needsHypervisor.value
+	const options = needsHypervisor.value
       ? {
+				copy_id: verifyForm.value.copy_id,
           boot_host_id: verifyForm.value.boot_host_id,
           disk_id: verifyForm.value.disk_id,
           memory_mib: verifyForm.value.memory_mib,
@@ -155,7 +167,7 @@ async function submitVerify() {
           timeout_sec: verifyForm.value.timeout_sec,
           keep_on_failure: verifyForm.value.keep_on_failure,
         }
-      : {}
+			: { copy_id: verifyForm.value.copy_id }
     const result = await api.verifyRun(run.id, verifyForm.value.mode, options)
     verifyOpen.value = false
 
@@ -180,8 +192,13 @@ function bootReport(check: VerifyRun): BootReport | null {
 }
 
 async function openRestore(run: BackupRun) {
-  detail.value = run
+	try {
+		detail.value = run.copies?.length ? run : await api.getRun(run.id)
+	} catch {
+		detail.value = run
+	}
   restoreForm.value = {
+		copy_id: healthyCopies(detail.value)[0]?.id ?? '',
     target: 'file',
     output_format: 'raw',
     output_dir: '',
@@ -196,6 +213,67 @@ async function openRestore(run: BackupRun) {
     domains.value = []
   }
   restoreOpen.value = true
+}
+
+function healthyCopies(run: BackupRun | null): BackupCopy[] {
+	return (run?.copies ?? []).filter((copy) =>
+		copy.status === 'succeeded' || (copy.status === 'locked' && !!copy.locked_until),
+	)
+}
+
+function copyStatus(status: string): string {
+	return ({ pending: 'Ожидает', copying: 'Копируется', verifying: 'Проверяется', succeeded: 'Готова',
+		failed: 'Ошибка', canceled: 'Отменена', locked: 'Заблокирована', deleted: 'Удалена' } as Record<string, string>)[status] ?? status
+}
+
+function copyColor(status: string): string {
+	if (status === 'succeeded') return 'positive'
+	if (status === 'failed') return 'negative'
+	if (status === 'locked') return 'warning'
+	if (status === 'copying' || status === 'verifying') return 'primary'
+	return 'grey-7'
+}
+
+async function loadReplications() {
+	replicationsLoading.value = true
+	try {
+		replications.value = await api.listReplications({ limit: 200 })
+	} catch (err) {
+		notifyError(err, 'Не удалось загрузить очередь репликации')
+	} finally {
+		replicationsLoading.value = false
+	}
+}
+
+async function showReplication(copy: BackupCopy) {
+	try {
+		replicationDetail.value = await api.getReplication(copy.id)
+		replicationOpen.value = true
+	} catch (err) {
+		notifyError(err, 'Не удалось загрузить историю репликации')
+	}
+}
+
+async function retryCopy(copy: BackupCopy) {
+	try {
+		await api.retryBackupCopy(copy.id)
+		notifyOk('Повтор поставлен в очередь')
+		if (detail.value) await openDetail(detail.value)
+		if (tab.value === 'replications') await loadReplications()
+	} catch (err) {
+		notifyError(err, 'Не удалось повторить репликацию')
+	}
+}
+
+async function cancelCopy(copy: BackupCopy) {
+	try {
+		await api.cancelBackupCopy(copy.id)
+		notifyOk('Репликация отменена')
+		if (detail.value) await openDetail(detail.value)
+		if (tab.value === 'replications') await loadReplications()
+	} catch (err) {
+		notifyError(err, 'Не удалось отменить репликацию')
+	}
 }
 
 async function submitRestore() {
@@ -260,6 +338,7 @@ function parseDetails(raw?: string): Record<string, unknown> | null {
 
 watch(tab, (value) => {
   if (value === 'restores' && !restores.value.length) void loadRestores()
+	if (value === 'replications' && !replications.value.length) void loadReplications()
 })
 
 onMounted(async () => {
@@ -285,6 +364,15 @@ const columns = [
   { name: 'verify', label: 'Проверка', field: 'verify_status', align: 'center' as const },
   { name: 'actions', label: '', field: 'id', align: 'right' as const },
 ]
+
+const replicationColumns = [
+	{ name: 'storage', label: 'Назначение', field: 'storage_target_name', align: 'left' as const },
+	{ name: 'status', label: 'Статус', field: 'status', align: 'left' as const },
+	{ name: 'progress', label: 'Прогресс', field: 'copied_bytes', align: 'left' as const },
+	{ name: 'attempts', label: 'Попытки', field: 'attempt_count', align: 'right' as const },
+	{ name: 'retry', label: 'Следующая попытка', field: 'next_retry_at', align: 'left' as const },
+	{ name: 'actions', label: '', field: 'id', align: 'right' as const },
+]
 </script>
 
 <template>
@@ -297,13 +385,14 @@ const columns = [
         dense
         round
         icon="refresh"
-        :loading="tab === 'runs' ? loading : restoresLoading"
-        @click="tab === 'runs' ? load() : loadRestores()"
+		:loading="tab === 'runs' ? loading : tab === 'restores' ? restoresLoading : replicationsLoading"
+		@click="tab === 'runs' ? load() : tab === 'restores' ? loadRestores() : loadReplications()"
       />
     </div>
 
     <q-tabs v-model="tab" align="left" active-color="primary" indicator-color="primary" dense class="q-mb-md">
       <q-tab name="runs" label="Запуски" />
+		<q-tab name="replications" label="Репликация" />
       <q-tab name="restores" label="Восстановления" />
     </q-tabs>
 
@@ -362,6 +451,39 @@ const columns = [
         </template>
       </q-table>
     </template>
+
+	<template v-else-if="tab === 'replications'">
+		<q-table :rows="replications" :columns="replicationColumns" row-key="id" flat bordered
+			:loading="replicationsLoading" class="jhv-table" no-data-label="Реплик в очереди и истории нет">
+			<template #body-cell-storage="props">
+				<q-td :props="props">
+					{{ props.row.storage_target_name || app.storageName(props.row.storage_target_id) }}
+					<div class="text-caption text-grey-7">{{ props.row.required ? 'обязательная реплика' : 'дополнительная копия' }}</div>
+				</q-td>
+			</template>
+			<template #body-cell-status="props">
+				<q-td :props="props">
+					<q-chip dense :color="copyColor(props.row.status)" text-color="white">{{ copyStatus(props.row.status) }}</q-chip>
+					<div v-if="props.row.last_error" class="text-negative jhv-wrap" style="max-width: 360px">{{ props.row.last_error }}</div>
+				</q-td>
+			</template>
+			<template #body-cell-progress="props">
+				<q-td :props="props">
+					{{ props.row.copied_objects }} / {{ props.row.object_count }} объектов
+					<div class="text-caption text-grey-7">{{ bytes(props.row.copied_bytes) }} / {{ bytes(props.row.total_bytes) }}</div>
+					<q-linear-progress v-if="props.row.total_bytes" :value="props.row.copied_bytes / props.row.total_bytes" size="5px" />
+				</q-td>
+			</template>
+			<template #body-cell-retry="props"><q-td :props="props">{{ dateTime(props.row.next_retry_at) }}</q-td></template>
+			<template #body-cell-actions="props">
+				<q-td :props="props">
+					<q-btn flat dense round icon="history" @click="showReplication(props.row)"><q-tooltip>История попыток</q-tooltip></q-btn>
+					<q-btn v-if="auth.canWrite() && ['failed','canceled'].includes(props.row.status)" flat dense round icon="refresh" color="primary" @click="retryCopy(props.row)"><q-tooltip>Повторить сейчас</q-tooltip></q-btn>
+					<q-btn v-if="auth.canWrite() && ['pending','copying','verifying'].includes(props.row.status)" flat dense round icon="stop" color="negative" @click="cancelCopy(props.row)"><q-tooltip>Отменить</q-tooltip></q-btn>
+				</q-td>
+			</template>
+		</q-table>
+	</template>
 
     <template v-else>
     <q-card flat bordered class="q-mb-md">
@@ -563,6 +685,35 @@ const columns = [
             </div>
           </div>
 
+			<div class="text-subtitle2 q-mb-xs">Физические копии</div>
+			<q-list dense bordered separator class="q-mb-md">
+				<q-item v-for="copy in detail?.copies ?? []" :key="copy.id">
+					<q-item-section avatar>
+						<q-icon :name="copy.role === 'primary' ? 'storage' : 'content_copy'" :color="copyColor(copy.status)" />
+					</q-item-section>
+					<q-item-section>
+						<q-item-label>
+							{{ copy.storage_target_name || app.storageName(copy.storage_target_id) }}
+							<q-badge :color="copy.role === 'primary' ? 'primary' : 'grey-7'" class="q-ml-sm">
+								{{ copy.role === 'primary' ? 'Основное' : 'Реплика' }}
+							</q-badge>
+						</q-item-label>
+						<q-item-label caption>
+							{{ copyStatus(copy.status) }} · {{ copy.copied_objects }}/{{ copy.object_count }} объектов · {{ bytes(copy.copied_bytes) }}
+						</q-item-label>
+						<q-item-label v-if="copy.last_error" caption class="text-negative jhv-wrap">{{ copy.last_error }}</q-item-label>
+						<q-item-label v-if="copy.locked_until" caption>Object Lock до {{ dateTime(copy.locked_until) }}</q-item-label>
+					</q-item-section>
+					<q-item-section side>
+						<div class="row no-wrap">
+							<q-btn v-if="copy.role === 'replica'" flat dense round icon="history" @click="showReplication(copy)"><q-tooltip>История репликации</q-tooltip></q-btn>
+							<q-btn v-if="auth.canWrite() && copy.role === 'replica' && ['failed','canceled'].includes(copy.status)" flat dense round icon="refresh" color="primary" @click="retryCopy(copy)"><q-tooltip>Повторить</q-tooltip></q-btn>
+							<q-btn v-if="auth.canWrite() && copy.role === 'replica' && ['pending','copying','verifying'].includes(copy.status)" flat dense round icon="stop" color="negative" @click="cancelCopy(copy)"><q-tooltip>Отменить</q-tooltip></q-btn>
+						</div>
+					</q-item-section>
+				</q-item>
+			</q-list>
+
           <div class="text-subtitle2 q-mb-xs">Диски</div>
           <q-markup-table flat dense bordered class="q-mb-md">
             <thead>
@@ -751,6 +902,31 @@ const columns = [
       </q-card>
     </q-dialog>
 
+	<q-dialog v-model="replicationOpen">
+		<q-card style="width: 760px; max-width: 95vw">
+			<q-card-section class="text-h6">
+				История репликации
+				<div class="text-caption text-grey-7">{{ replicationDetail?.copy.storage_target_name }}</div>
+			</q-card-section>
+			<q-separator />
+			<q-card-section style="max-height: 70vh" class="scroll">
+				<q-list dense bordered separator>
+					<q-item v-for="attempt in replicationDetail?.attempts ?? []" :key="attempt.id">
+						<q-item-section avatar><q-icon name="sync" :color="statusColor(attempt.status)" /></q-item-section>
+						<q-item-section>
+							<q-item-label>Попытка {{ attempt.attempt }} · {{ runStatus(attempt.status) }}</q-item-label>
+							<q-item-label caption>{{ dateTime(attempt.created_at) }} · {{ attempt.copied_objects }}/{{ attempt.object_count }} объектов · {{ bytes(attempt.copied_bytes) }}</q-item-label>
+							<q-item-label v-if="attempt.error" caption class="text-negative jhv-wrap">{{ attempt.error }}</q-item-label>
+						</q-item-section>
+					</q-item>
+					<q-item v-if="!replicationDetail?.attempts.length"><q-item-section class="text-grey-7">Попыток ещё не было.</q-item-section></q-item>
+				</q-list>
+			</q-card-section>
+			<q-separator />
+			<q-card-actions align="right"><q-btn flat label="Закрыть" v-close-popup /></q-card-actions>
+		</q-card>
+	</q-dialog>
+
     <!-- Проверка -->
     <q-dialog v-model="verifyOpen">
       <q-card style="width: 680px; max-width: 95vw">
@@ -777,6 +953,12 @@ const columns = [
             Быстрая проверка и проверка цепочки отвечают сразу; остальные выполняются в фоне,
             результат появится в истории проверок.
           </div>
+			<q-select
+				v-model="verifyForm.copy_id"
+				:options="healthyCopies(verifyTarget).map((copy) => ({ label: `${copy.role === 'primary' ? 'Основное' : 'Реплика'} · ${copy.storage_target_name || app.storageName(copy.storage_target_id)}`, value: copy.id }))"
+				emit-value map-options label="Физическая копия" outlined dense
+				hint="Проверяется выбранное хранилище и вся цепочка в нём"
+			/>
 
           <template v-if="needsHypervisor">
             <q-banner v-if="!bootHosts.length" dense class="bg-orange-1">
@@ -875,6 +1057,12 @@ const columns = [
         <q-separator />
 
         <q-card-section class="q-gutter-md">
+			<q-select
+				v-model="restoreForm.copy_id"
+				:options="healthyCopies(detail).map((copy) => ({ label: `${copy.role === 'primary' ? 'Основное' : 'Реплика'} · ${copy.storage_target_name || app.storageName(copy.storage_target_id)}`, value: copy.id }))"
+				emit-value map-options label="Источник восстановления" outlined dense
+				hint="Можно выбрать реплику, даже если основное хранилище недоступно"
+			/>
           <q-option-group
             v-model="restoreForm.target"
             type="radio"

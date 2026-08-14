@@ -15,7 +15,8 @@ import (
 const jobColumns = `id, name, enabled, server_id, vm_ids, vm_name_regex, cluster_ids, tags,
 	exclude_vm_ids, exclude_disk_ids, type, full_every, fallback_type, schedule, max_duration_sec,
 	storage_target_ids, retention, quiesce, verify_after, verify_options, export_qcow2, encrypt, priority,
-	concurrency, last_run_at, last_status, next_run_at, created_at, updated_at`
+	concurrency, last_run_at, last_status, next_run_at, created_at, updated_at,
+	replication_enabled, force_full_next`
 
 // CreateBackupJob stores a new job definition.
 func (s *Store) CreateBackupJob(ctx context.Context, j *model.BackupJob) error {
@@ -32,7 +33,7 @@ func (s *Store) CreateBackupJob(ctx context.Context, j *model.BackupJob) error {
 	}
 
 	_, err := s.db.Exec(ctx, `INSERT INTO backup_jobs (`+jobColumns+`)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		j.ID, j.Name, j.Enabled, j.ServerID, encodeJSON(j.VMIDs), j.VMNameRegex,
 		encodeJSON(j.ClusterIDs), encodeJSON(j.Tags), encodeJSON(j.ExcludeVMIDs),
 		encodeJSON(j.ExcludeDiskIDs), string(j.Type), j.FullEvery, string(j.FallbackType),
@@ -40,7 +41,7 @@ func (s *Store) CreateBackupJob(ctx context.Context, j *model.BackupJob) error {
 		encodeJSON(j.Retention), j.Quiesce, string(j.VerifyAfter), encodeJSON(j.VerifyOptions),
 		j.ExportQcow2, j.Encrypt,
 		j.Priority, j.Concurrency, j.LastRunAt, string(j.LastStatus),
-		j.NextRunAt, j.CreatedAt, j.UpdatedAt)
+		j.NextRunAt, j.CreatedAt, j.UpdatedAt, j.ReplicationEnabled, j.ForceFullNext)
 	if err != nil {
 		return fmt.Errorf("insert backup job: %w", err)
 	}
@@ -58,12 +59,14 @@ func (s *Store) UpdateBackupJob(ctx context.Context, j *model.BackupJob) error {
 		name=?, enabled=?, server_id=?, vm_ids=?, vm_name_regex=?, cluster_ids=?, tags=?,
 		exclude_vm_ids=?, exclude_disk_ids=?, type=?, full_every=?, fallback_type=?, schedule=?,
 		max_duration_sec=?, storage_target_ids=?, retention=?, quiesce=?, verify_after=?,
-		verify_options=?, export_qcow2=?, encrypt=?, priority=?, concurrency=?, updated_at=? WHERE id=?`,
+		verify_options=?, export_qcow2=?, encrypt=?, priority=?, concurrency=?, updated_at=?,
+		replication_enabled=?, force_full_next=? WHERE id=?`,
 		j.Name, j.Enabled, j.ServerID, encodeJSON(j.VMIDs), j.VMNameRegex, encodeJSON(j.ClusterIDs),
 		encodeJSON(j.Tags), encodeJSON(j.ExcludeVMIDs), encodeJSON(j.ExcludeDiskIDs),
 		string(j.Type), j.FullEvery, string(j.FallbackType), j.Schedule, toSeconds(j.MaxDuration),
 		encodeJSON(j.StorageTargetIDs), encodeJSON(j.Retention), j.Quiesce, string(j.VerifyAfter), encodeJSON(j.VerifyOptions),
-		j.ExportQcow2, j.Encrypt, j.Priority, j.Concurrency, j.UpdatedAt, j.ID)
+		j.ExportQcow2, j.Encrypt, j.Priority, j.Concurrency, j.UpdatedAt,
+		j.ReplicationEnabled, j.ForceFullNext, j.ID)
 	if err != nil {
 		return fmt.Errorf("update backup job: %w", err)
 	}
@@ -141,7 +144,7 @@ func scanJob(row rowScanner) (*model.BackupJob, error) {
 		&tags, &excludeVMs, &excludeDisks, &typ, &j.FullEvery, &fallback, &j.Schedule,
 		&maxDurationSec, &targets, &retention, &j.Quiesce, &verifyAfter, &verifyOptions, &j.ExportQcow2,
 		&j.Encrypt, &j.Priority, &j.Concurrency, &lastRun, &lastStatus, &nextRun,
-		&createdAt, &updatedAt)
+		&createdAt, &updatedAt, &j.ReplicationEnabled, &j.ForceFullNext)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -167,4 +170,53 @@ func scanJob(row rowScanner) (*model.BackupJob, error) {
 	j.CreatedAt = utc(createdAt)
 	j.UpdatedAt = utc(updatedAt)
 	return &j, nil
+}
+
+// EnableJobReplication migrates a legacy job to one primary read followed by
+// repository copies. The next invocation is full so every destination starts
+// from an unambiguous chain root.
+func (s *Store) EnableJobReplication(ctx context.Context, id string) error {
+	res, err := s.db.Exec(ctx, `UPDATE backup_jobs SET replication_enabled=?, force_full_next=?, updated_at=?
+		WHERE id=?`, true, true, time.Now().UTC(), id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) ClearForceFullNext(ctx context.Context, id string) error {
+	_, err := s.db.Exec(ctx, `UPDATE backup_jobs SET force_full_next=?, updated_at=? WHERE id=?`,
+		false, time.Now().UTC(), id)
+	return err
+}
+
+// ChangeJobPrimary reorders an existing target list and forces a new chain
+// root. It deliberately does not add a target: the regular job editor owns
+// replica membership, while this operation only promotes an existing one.
+func (s *Store) ChangeJobPrimary(ctx context.Context, id, targetID string) (*model.BackupJob, error) {
+	job, err := s.GetBackupJob(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	index := -1
+	for i, candidate := range job.StorageTargetIDs {
+		if candidate == targetID {
+			index = i
+			break
+		}
+	}
+	if index < 0 {
+		return nil, fmt.Errorf("%w: хранилище не входит в задание", ErrNotFound)
+	}
+	if index > 0 {
+		job.StorageTargetIDs = append([]string{targetID}, append(job.StorageTargetIDs[:index], job.StorageTargetIDs[index+1:]...)...)
+	}
+	job.ForceFullNext = true
+	if err := s.UpdateBackupJob(ctx, job); err != nil {
+		return nil, err
+	}
+	return job, nil
 }

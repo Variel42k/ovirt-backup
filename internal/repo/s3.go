@@ -2,6 +2,7 @@ package repo
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 
@@ -18,11 +20,13 @@ import (
 // s3Backend stores backups in S3-compatible object storage: AWS S3, MinIO,
 // Ceph RGW and the Russian clouds that speak the same protocol.
 type s3Backend struct {
-	name         string
-	client       *minio.Client
-	bucket       string
-	prefix       string
-	storageClass string
+	name           string
+	client         *minio.Client
+	bucket         string
+	prefix         string
+	storageClass   string
+	endpoint       string
+	objectLockDays int
 }
 
 func newS3(ctx context.Context, target *model.StorageTarget) (Backend, error) {
@@ -67,6 +71,13 @@ func newS3(ctx context.Context, target *model.StorageTarget) (Backend, error) {
 		bucket:       target.Bucket,
 		prefix:       strings.Trim(target.Prefix, "/"),
 		storageClass: target.StorageClass,
+		endpoint:     endpoint,
+		objectLockDays: func() int {
+			if target.ObjectLockEnabled {
+				return target.ObjectLockDays
+			}
+			return 0
+		}(),
 	}, nil
 }
 
@@ -83,7 +94,16 @@ func (s *s3Backend) objectKey(key string) string {
 }
 
 func (s *s3Backend) Put(ctx context.Context, key string, r io.Reader, size int64) (int64, error) {
-	opts := minio.PutObjectOptions{ContentType: "application/octet-stream"}
+	if s.objectLockDays > 0 && strings.HasPrefix(strings.TrimLeft(key, "/"), repoDataPrefix()) {
+		return s.putLocked(ctx, key, r, size)
+	}
+	return s.put(ctx, key, r, size, minio.PutObjectOptions{})
+}
+
+func repoDataPrefix() string { return "jhvirt/" }
+
+func (s *s3Backend) put(ctx context.Context, key string, r io.Reader, size int64, opts minio.PutObjectOptions) (int64, error) {
+	opts.ContentType = "application/octet-stream"
 	if s.storageClass != "" {
 		opts.StorageClass = s.storageClass
 	}
@@ -98,6 +118,118 @@ func (s *s3Backend) Put(ctx context.Context, key string, r io.Reader, size int64
 		return 0, fmt.Errorf("запись %s в S3: %w", key, err)
 	}
 	return info.Size, nil
+}
+
+// putLocked uses an unlocked staging object so a failed upload never leaves an
+// immutable partial publication. Staging is read back before the final S3 copy.
+func (s *s3Backend) putLocked(ctx context.Context, key string, r io.Reader, size int64) (int64, error) {
+	stage := ".jhvirt/staging/" + uuid.NewString()
+	h := sha256.New()
+	n, err := s.put(ctx, stage, io.TeeReader(r, h), size, minio.PutObjectOptions{})
+	if err != nil {
+		return n, err
+	}
+	defer func() { _ = s.Delete(ctx, stage) }()
+
+	rc, err := s.Get(ctx, stage)
+	if err != nil {
+		return 0, fmt.Errorf("чтение staging %s: %w", key, err)
+	}
+	check := sha256.New()
+	_, readErr := io.Copy(check, rc)
+	closeErr := rc.Close()
+	if readErr != nil {
+		return 0, fmt.Errorf("проверка staging %s: %w", key, readErr)
+	}
+	if closeErr != nil {
+		return 0, closeErr
+	}
+	if fmt.Sprintf("%x", h.Sum(nil)) != fmt.Sprintf("%x", check.Sum(nil)) {
+		return 0, fmt.Errorf("контрольная сумма staging %s не совпала", key)
+	}
+
+	_, err = s.client.CopyObject(ctx, minio.CopyDestOptions{
+		Bucket: s.bucket, Object: s.objectKey(key),
+		Mode: minio.Governance, RetainUntilDate: time.Now().UTC().AddDate(0, 0, s.objectLockDays),
+	}, minio.CopySrcOptions{Bucket: s.bucket, Object: s.objectKey(stage)})
+	if err != nil {
+		return 0, fmt.Errorf("публикация заблокированного объекта %s: %w", key, err)
+	}
+	return n, nil
+}
+
+func (s *s3Backend) copyFrom(ctx context.Context, source Backend, key string, size int64) (int64, bool, error) {
+	src, ok := source.(*s3Backend)
+	if !ok || src.endpoint != s.endpoint {
+		return 0, false, nil
+	}
+	if s.objectLockDays > 0 {
+		stage := ".jhvirt/staging/" + uuid.NewString()
+		defer func() { _ = s.Delete(ctx, stage) }()
+		info, err := s.client.CopyObject(ctx,
+			minio.CopyDestOptions{Bucket: s.bucket, Object: s.objectKey(stage), Size: size},
+			minio.CopySrcOptions{Bucket: src.bucket, Object: src.objectKey(key)})
+		if err != nil {
+			// Different credentials on the same endpoint may not grant the
+			// destination account read access to the source bucket. Streaming
+			// through each backend's own credentials remains valid.
+			return 0, false, nil
+		}
+		sourceHash, err := hashS3Object(ctx, source, key)
+		if err != nil {
+			return 0, true, err
+		}
+		stageHash, err := hashS3Object(ctx, s, stage)
+		if err != nil {
+			return 0, true, err
+		}
+		if sourceHash != stageHash {
+			return 0, true, fmt.Errorf("SHA-256 staging объекта %s не совпал", key)
+		}
+		_, err = s.client.CopyObject(ctx, minio.CopyDestOptions{
+			Bucket: s.bucket, Object: s.objectKey(key), Size: size,
+			Mode: minio.Governance, RetainUntilDate: time.Now().UTC().AddDate(0, 0, s.objectLockDays),
+		}, minio.CopySrcOptions{Bucket: s.bucket, Object: s.objectKey(stage)})
+		if err != nil {
+			return 0, true, fmt.Errorf("публикация заблокированной копии %s: %w", key, err)
+		}
+		return info.Size, true, nil
+	}
+	dst := minio.CopyDestOptions{Bucket: s.bucket, Object: s.objectKey(key), Size: size}
+	info, err := s.client.CopyObject(ctx, dst, minio.CopySrcOptions{
+		Bucket: src.bucket, Object: src.objectKey(key),
+	})
+	if err != nil {
+		return 0, false, nil
+	}
+	return info.Size, true, nil
+}
+
+func hashS3Object(ctx context.Context, backend Backend, key string) (string, error) {
+	rc, err := backend.Get(ctx, key)
+	if err != nil {
+		return "", err
+	}
+	defer rc.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, rc); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", h.Sum(nil)), nil
+}
+
+func (s *s3Backend) CheckObjectLock(ctx context.Context) error {
+	if s.objectLockDays <= 0 {
+		return nil
+	}
+	enabled, _, _, _, err := s.client.GetObjectLockConfig(ctx, s.bucket)
+	if err != nil {
+		return fmt.Errorf("проверка Object Lock bucket %s: %w", s.bucket, err)
+	}
+	if !strings.EqualFold(enabled, "Enabled") {
+		return fmt.Errorf("Object Lock не включён для bucket %q", s.bucket)
+	}
+	return nil
 }
 
 func (s *s3Backend) Get(ctx context.Context, key string) (io.ReadCloser, error) {
@@ -138,6 +270,10 @@ func (s *s3Backend) Stat(ctx context.Context, key string) (ObjectInfo, error) {
 }
 
 func (s *s3Backend) Delete(ctx context.Context, key string) error {
+	if s.objectLockDays > 0 {
+		_, err := s.deleteVersions(ctx, key, true)
+		return err
+	}
 	err := s.client.RemoveObject(ctx, s.bucket, s.objectKey(key), minio.RemoveObjectOptions{})
 	if err != nil && !errors.Is(translateS3Error(key, err), ErrNotExist) {
 		return err
@@ -146,6 +282,9 @@ func (s *s3Backend) Delete(ctx context.Context, key string) error {
 }
 
 func (s *s3Backend) DeletePrefix(ctx context.Context, prefix string) (int, error) {
+	if s.objectLockDays > 0 {
+		return s.deleteVersions(ctx, prefix, false)
+	}
 	objects, err := s.List(ctx, prefix)
 	if err != nil {
 		return 0, err
@@ -176,6 +315,73 @@ func (s *s3Backend) DeletePrefix(ctx context.Context, prefix string) (int, error
 		return 0, firstErr
 	}
 	return len(objects), nil
+}
+
+func (s *s3Backend) lockProtected(key string) bool {
+	return strings.HasPrefix(strings.TrimLeft(key, "/"), repoDataPrefix())
+}
+
+// deleteVersions never issues an unversioned DELETE in an Object Lock bucket.
+// This applies to staging and health probes too: they are not retained, but an
+// unversioned delete would only hide their data behind a delete marker and
+// leak the old version forever. Retained repository objects are checked before
+// removal and Governance bypass is never requested.
+//
+// In an Object Lock
+// bucket that operation can succeed by creating a delete marker, hiding a
+// retained backup from ordinary reads even though the protected version still
+// exists.
+func (s *s3Backend) deleteVersions(ctx context.Context, key string, exact bool) (int, error) {
+	full := s.objectKey(key)
+	var versions []minio.ObjectInfo
+	unique := map[string]bool{}
+	for object := range s.client.ListObjects(ctx, s.bucket, minio.ListObjectsOptions{
+		Prefix: full, Recursive: true, WithVersions: true,
+	}) {
+		if object.Err != nil {
+			return 0, fmt.Errorf("перечисление версий %s: %w", key, object.Err)
+		}
+		if exact && object.Key != full {
+			continue
+		}
+		versions = append(versions, object)
+		if !object.IsDeleteMarker {
+			unique[object.Key] = true
+		}
+	}
+	if len(versions) == 0 {
+		return 0, nil
+	}
+
+	now := time.Now().UTC()
+	for _, object := range versions {
+		if object.IsDeleteMarker {
+			continue
+		}
+		relative := object.Key
+		if s.prefix != "" {
+			relative = strings.TrimPrefix(relative, s.prefix+"/")
+		}
+		if !s.lockProtected(relative) {
+			continue
+		}
+		_, until, err := s.client.GetObjectRetention(ctx, s.bucket, object.Key, object.VersionID)
+		if err != nil {
+			return 0, fmt.Errorf("проверка retention %s: %w", key, err)
+		}
+		if until != nil && until.After(now) {
+			return 0, fmt.Errorf("объект %s заблокирован Object Lock до %s",
+				key, until.UTC().Format(time.RFC3339))
+		}
+	}
+	for _, object := range versions {
+		if err := s.client.RemoveObject(ctx, s.bucket, object.Key, minio.RemoveObjectOptions{
+			VersionID: object.VersionID,
+		}); err != nil {
+			return 0, fmt.Errorf("удаление версии %s: %w", key, err)
+		}
+	}
+	return len(unique), nil
 }
 
 func (s *s3Backend) List(ctx context.Context, prefix string) ([]ObjectInfo, error) {
@@ -223,6 +429,9 @@ func (s *s3Backend) Check(ctx context.Context) error {
 	}
 	if !ok {
 		return fmt.Errorf("bucket %q не существует или недоступен под этими ключами", s.bucket)
+	}
+	if err := s.CheckObjectLock(ctx); err != nil {
+		return err
 	}
 	return runCheck(ctx, s)
 }

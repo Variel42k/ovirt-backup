@@ -56,6 +56,7 @@ const (
 	AlertVerifyFailed         = "verify_failed"
 	AlertStorageTargetDown    = "storage_target_unreachable"
 	AlertCBTUnavailable       = "cbt_unavailable"
+	AlertDRNotReady           = "disaster_recovery_not_ready"
 	// AlertStoragePathDegraded — путь до СХД теряет трафик: повторы RPC,
 	// таймауты NFS или разорванная сессия iSCSI. Диск при этом «исправен»:
 	// проблема сетевая, и по дисковым ошибкам её не увидеть.

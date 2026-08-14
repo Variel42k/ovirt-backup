@@ -21,6 +21,7 @@ import (
 	"adveng/jh_virt/internal/backup"
 	"adveng/jh_virt/internal/config"
 	"adveng/jh_virt/internal/dispatch"
+	drcheck "adveng/jh_virt/internal/dr"
 	"adveng/jh_virt/internal/events"
 	"adveng/jh_virt/internal/libvirtx"
 	"adveng/jh_virt/internal/logging"
@@ -28,6 +29,7 @@ import (
 	"adveng/jh_virt/internal/monitor"
 	"adveng/jh_virt/internal/ovirt"
 	"adveng/jh_virt/internal/quality"
+	"adveng/jh_virt/internal/replication"
 	"adveng/jh_virt/internal/scheduler"
 	"adveng/jh_virt/internal/secret"
 	"adveng/jh_virt/internal/store"
@@ -120,6 +122,17 @@ func run() error {
 		return fmt.Errorf("ключ шифрования секретов: %w", err)
 	}
 	st := store.New(db, cipher)
+	drChecker := drcheck.New(cfg.DisasterRecovery, cfg.Secrets.KeyFile, st)
+	drCtx, stopDR := context.WithCancel(ctx)
+	drDone := make(chan struct{})
+	go func() {
+		defer close(drDone)
+		drChecker.Run(drCtx)
+	}()
+	defer func() {
+		stopDR()
+		<-drDone
+	}()
 	runtimeSettings, err := st.RuntimeSettings(ctx)
 	if err != nil {
 		return fmt.Errorf("загрузка настроек времени выполнения: %w", err)
@@ -233,9 +246,17 @@ func run() error {
 	remediator := monitor.NewRemediator(st, pool, libvirtPool, cfg.Monitor.Remediation, bus, log)
 	mon := monitor.New(st, pool, libvirtPool, remediator, cfg.Monitor, bus, log)
 	qualityService := quality.New(st, cfg.Monitor.BackupQuality, cfg.Location())
+	replicator := replication.New(st, cfg.Backup.ReplicationWorkers, bus, log)
+	replicator.SetVerifier(func(ctx context.Context, runID, copyID string, mode model.VerifyMode, opts model.VerifyOptions) error {
+		_, err := dispatcher.VerifyCopy(ctx, runID, copyID, mode, opts)
+		return err
+	})
+	replicator.Start()
+	defer replicator.Close()
 
 	sched := scheduler.New(st, dispatcher, *cfg, bus, log)
 	sched.SetQualityService(qualityService)
+	sched.SetReplicator(replicator)
 	if err := sched.Start(ctx); err != nil {
 		return fmt.Errorf("запуск планировщика: %w", err)
 	}
@@ -256,7 +277,7 @@ func run() error {
 	apiServer := api.New(api.Deps{
 		Config: *cfg, BaseConfig: baseCfg, Store: st, Pool: pool, LibvirtPool: libvirtPool, Engine: dispatcher,
 		Scheduler: sched, Monitor: mon, Remediator: remediator, Bus: bus, Logger: log,
-		Logs: logs, Quality: qualityService,
+		Logs: logs, Quality: qualityService, Replicator: replicator, DR: drChecker,
 	})
 
 	httpServer := &http.Server{

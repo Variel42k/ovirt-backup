@@ -203,9 +203,43 @@ func (s *Service) Evaluate(ctx context.Context, serverID string) (*Summary, erro
 		verifyByRun[verify.RunID] = append(verifyByRun[verify.RunID], verify)
 	}
 	runsByKey := map[string][]*model.BackupRun{}
+	jobsByID := map[string]*model.BackupJob{}
+	for _, job := range jobs {
+		jobsByID[job.ID] = job
+	}
 	for _, run := range runs {
-		if run.JobID != "" {
+		if run.JobID == "" {
+			continue
+		}
+		job := jobsByID[run.JobID]
+		if job == nil || !job.ReplicationEnabled {
 			runsByKey[policyKey(run.JobID, run.VMID, run.StorageTargetID)] = append(runsByKey[policyKey(run.JobID, run.VMID, run.StorageTargetID)], run)
+			continue
+		}
+		copies, copyErr := s.store.ListBackupCopies(ctx, run.ID)
+		if copyErr != nil {
+			return nil, copyErr
+		}
+		for _, copy := range copies {
+			if copy.Status == model.CopyDeleted {
+				continue
+			}
+			physical := *run
+			physical.StorageTargetID = copy.StorageTargetID
+			physical.Copies = []model.BackupCopy{*copy}
+			physical.Error = copy.LastError
+			if !copy.Healthy() {
+				switch copy.Status {
+				case model.CopyCanceled:
+					physical.Status = model.RunCanceled
+				case model.CopyFailed, model.CopyLocked:
+					physical.Status = model.RunFailed
+				default:
+					physical.Status = model.RunPartial
+				}
+			}
+			runsByKey[policyKey(run.JobID, run.VMID, copy.StorageTargetID)] = append(
+				runsByKey[policyKey(run.JobID, run.VMID, copy.StorageTargetID)], &physical)
 		}
 	}
 	result := &Summary{GeneratedAt: now, Items: make([]Item, 0), ByState: map[State]int{}}
@@ -365,8 +399,13 @@ func evaluatePolicy(now, deadline time.Time, settings model.BackupQualitySetting
 	if job.VerifyAfter != "" {
 		verifyDeadline := now.Add(-time.Duration(settings.VerifyMaxAgeDays) * 24 * time.Hour)
 		for _, run := range runs {
+			copyID := ""
+			if len(run.Copies) == 1 {
+				copyID = run.Copies[0].ID
+			}
 			for _, verify := range verifications[run.ID] {
-				if verify.Mode == job.VerifyAfter && verify.Status == model.RunSucceeded {
+				copyMatches := verify.CopyID == copyID || (!job.ReplicationEnabled && verify.CopyID == "")
+				if copyMatches && verify.Mode == job.VerifyAfter && verify.Status == model.RunSucceeded {
 					at := verify.CreatedAt
 					if item.LastVerifiedAt == nil || at.After(*item.LastVerifiedAt) {
 						item.LastVerifiedAt = &at

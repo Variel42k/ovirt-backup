@@ -335,6 +335,11 @@ func (d *Dispatcher) writeRunManifest(ctx context.Context, backend repo.Backend,
 			DataSHA256:  m.DataSHA256,
 		})
 	}
+	hash, err := backup.RunManifestSHA256(doc)
+	if err != nil {
+		return err
+	}
+	run.ManifestSHA256 = hash
 	return backup.WriteRunManifest(ctx, backend, run.RepoPath, doc)
 }
 

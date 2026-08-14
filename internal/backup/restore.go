@@ -72,7 +72,8 @@ func withinRoot(path, root string) bool {
 
 // RestoreRequest describes what to restore and where.
 type RestoreRequest struct {
-	RunID string
+	RunID  string
+	CopyID string
 	// DiskIDs пуст — восстанавливать все диски точки.
 	DiskIDs []string
 	Target  model.RestoreTarget
@@ -99,7 +100,7 @@ type RestoreRequest struct {
 // have confirmed that with the operator; this function does not second-guess
 // an explicit target.
 func (e *Engine) Restore(ctx context.Context, req RestoreRequest) (*model.RestoreRun, error) {
-	set, err := e.LoadChain(ctx, req.RunID)
+	set, err := e.LoadChainCopy(ctx, req.RunID, req.CopyID)
 	if err != nil {
 		return nil, err
 	}
@@ -124,6 +125,7 @@ func (e *Engine) Restore(ctx context.Context, req RestoreRequest) (*model.Restor
 	record := &model.RestoreRun{
 		ID:             uuid.NewString(),
 		RunID:          req.RunID,
+		CopyID:         set.Copy.ID,
 		Target:         req.Target,
 		Status:         model.RunPending,
 		DiskIDs:        diskIDs,

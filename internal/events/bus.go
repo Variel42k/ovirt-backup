@@ -20,6 +20,7 @@ const (
 	KindRestoreRun    Kind = "restore_run"
 	KindStorageTarget Kind = "storage_target"
 	KindJob           Kind = "job"
+	KindReplication   Kind = "replication"
 )
 
 // Event is one notification.

@@ -15,7 +15,8 @@ import (
 const storageColumns = `id, name, kind, enabled, base_path, endpoint, region, bucket, prefix,
 	access_key, secret_key_enc, use_ssl, path_style, storage_class, host, port, username,
 	password_enc, private_key_enc, host_key, rate_limit, last_check_at, last_check_ok,
-	last_check_msg, free_bytes, used_bytes, created_at, updated_at`
+	last_check_msg, free_bytes, used_bytes, created_at, updated_at,
+	object_lock_enabled, object_lock_days`
 
 // CreateStorageTarget stores a new backup repository definition.
 func (s *Store) CreateStorageTarget(ctx context.Context, t *model.StorageTarget) error {
@@ -39,12 +40,12 @@ func (s *Store) CreateStorageTarget(ctx context.Context, t *model.StorageTarget)
 	}
 
 	_, err = s.db.Exec(ctx, `INSERT INTO storage_targets (`+storageColumns+`)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		t.ID, t.Name, string(t.Kind), t.Enabled, t.BasePath, t.Endpoint, t.Region, t.Bucket,
 		t.Prefix, t.AccessKey, secretKey, t.UseSSL, t.PathStyle, t.StorageClass, t.Host, t.Port,
 		t.Username, password, privateKey, t.HostKey, t.RateLimit, t.LastCheckAt,
 		t.LastCheckOK, t.LastCheckMsg, t.FreeBytes, t.UsedBytes, t.CreatedAt,
-		t.UpdatedAt)
+		t.UpdatedAt, t.ObjectLockEnabled, t.ObjectLockDays)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return fmt.Errorf("%w: хранилище %q", ErrConflict, t.Name)
@@ -88,11 +89,13 @@ func (s *Store) UpdateStorageTarget(ctx context.Context, t *model.StorageTarget)
 	_, err = s.db.Exec(ctx, `UPDATE storage_targets SET
 		name=?, kind=?, enabled=?, base_path=?, endpoint=?, region=?, bucket=?, prefix=?,
 		access_key=?, secret_key_enc=?, use_ssl=?, path_style=?, storage_class=?, host=?, port=?,
-		username=?, password_enc=?, private_key_enc=?, host_key=?, rate_limit=?, updated_at=?
+		username=?, password_enc=?, private_key_enc=?, host_key=?, rate_limit=?, updated_at=?,
+		object_lock_enabled=?, object_lock_days=?
 		WHERE id=?`,
 		t.Name, string(t.Kind), t.Enabled, t.BasePath, t.Endpoint, t.Region, t.Bucket, t.Prefix,
 		t.AccessKey, secretKey, t.UseSSL, t.PathStyle, t.StorageClass, t.Host, t.Port, t.Username,
-		password, privateKey, t.HostKey, t.RateLimit, t.UpdatedAt, t.ID)
+		password, privateKey, t.HostKey, t.RateLimit, t.UpdatedAt,
+		t.ObjectLockEnabled, t.ObjectLockDays, t.ID)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return fmt.Errorf("%w: хранилище %q", ErrConflict, t.Name)
@@ -152,8 +155,9 @@ func (s *Store) ListStorageTargets(ctx context.Context) ([]*model.StorageTarget,
 // CountRunsOnTarget reports how many live backup runs still reference a target.
 func (s *Store) CountRunsOnTarget(ctx context.Context, targetID string) (int, error) {
 	var n int
-	err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM backup_runs WHERE storage_target_id=? AND deleted=?`,
-		targetID, false).Scan(&n)
+	err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM backup_copies c
+		JOIN backup_runs r ON r.id=c.run_id
+		WHERE c.storage_target_id=? AND c.status<>'deleted' AND r.deleted=?`, targetID, false).Scan(&n)
 	return n, err
 }
 
@@ -192,7 +196,8 @@ func (s *Store) scanStorageTarget(row rowScanner) (*model.StorageTarget, error) 
 	err := row.Scan(&t.ID, &t.Name, &kind, &t.Enabled, &t.BasePath, &t.Endpoint, &t.Region,
 		&t.Bucket, &t.Prefix, &t.AccessKey, &secretKey, &t.UseSSL, &t.PathStyle, &t.StorageClass,
 		&t.Host, &t.Port, &t.Username, &password, &privateKey, &t.HostKey, &t.RateLimit,
-		&lastCheck, &t.LastCheckOK, &t.LastCheckMsg, &t.FreeBytes, &t.UsedBytes, &createdAt, &updatedAt)
+		&lastCheck, &t.LastCheckOK, &t.LastCheckMsg, &t.FreeBytes, &t.UsedBytes, &createdAt, &updatedAt,
+		&t.ObjectLockEnabled, &t.ObjectLockDays)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}

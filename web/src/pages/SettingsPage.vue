@@ -12,7 +12,7 @@ import { bytes, dateTime } from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import type { AuditEntry, BackupQualitySettings, LogStatus, RuntimeSettings, User } from '@/api/settings-types'
-import type { RemediationArchive, RemediationMode, RemediationPeriod } from '@/api/types'
+import type { DRReadiness, RemediationArchive, RemediationMode, RemediationPeriod } from '@/api/types'
 
 const $q = useQuasar()
 const app = useAppStore()
@@ -31,6 +31,8 @@ const filteredTimezoneOptions = ref([...timezoneOptions.value])
 const rotationBusy = ref(false)
 const rotationForm = ref({ max_size_mb: 100, max_backups: 7, max_age_days: 30 })
 const qualityBusy = ref(false)
+const drReadiness = ref<DRReadiness | null>(null)
+const drBusy = ref(false)
 const qualityForm = ref<BackupQualitySettings>({
   stale_intervals: 2,
   verify_max_age_days: 7,
@@ -87,18 +89,31 @@ async function load() {
   loading.value = true
   try {
     if (auth.canAdmin()) {
-      const [userList, auditList, runtime] = await Promise.all([
-        api.listUsers(), api.audit(300), api.runtimeSettings(),
+		const [userList, auditList, runtime, readiness] = await Promise.all([
+		api.listUsers(), api.audit(300), api.runtimeSettings(), api.drReadiness(),
       ])
       users.value = userList
       audit.value = auditList
       applyRuntimeSettings(runtime)
+		drReadiness.value = readiness
     }
   } catch (err) {
     notifyError(err, 'Не удалось загрузить настройки')
   } finally {
     loading.value = false
   }
+}
+
+async function checkDR() {
+	drBusy.value = true
+	try {
+		drReadiness.value = await api.checkDRReadiness()
+		notifyOk(drReadiness.value.ok ? 'Аварийная готовность подтверждена' : 'Проверка завершена: есть проблемы')
+	} catch (err) {
+		notifyError(err, 'Не удалось проверить аварийную готовность')
+	} finally {
+		drBusy.value = false
+	}
 }
 
 function applyRuntimeSettings(value: RuntimeSettings) {
@@ -425,13 +440,14 @@ onMounted(async () => {
       <q-tabs v-model="tab" align="left" active-color="primary" indicator-color="primary" dense>
         <q-tab name="system" label="Система" />
         <q-tab v-if="auth.canAdmin()" name="monitoring" label="Мониторинг" />
+		<q-tab v-if="auth.canAdmin()" name="dr" label="Аварийная готовность" />
         <q-tab v-if="auth.canAdmin()" name="users" :label="`Пользователи (${users.length})`" />
         <q-tab v-if="auth.canAdmin()" name="audit" label="Аудит" />
         <q-tab v-if="auth.canAdmin()" name="logs" label="Журнал" />
       </q-tabs>
       <q-separator />
 
-      <q-tab-panels v-model="tab" animated>
+      <q-tab-panels v-model="tab">
         <q-tab-panel name="system">
           <div class="row q-col-gutter-md">
             <div class="col-12 col-md-6">
@@ -723,6 +739,46 @@ onMounted(async () => {
             </div>
           </div>
         </q-tab-panel>
+
+		<q-tab-panel v-if="auth.canAdmin()" name="dr">
+			<div class="row items-center q-mb-md">
+				<div>
+					<div class="text-subtitle1">Внешние данные для восстановления службы</div>
+					<div class="text-caption text-grey-7">Последняя проверка: {{ dateTime(drReadiness?.checked_at) }}</div>
+				</div>
+				<q-space />
+				<q-btn color="primary" unelevated icon="fact_check" label="Проверить сейчас" :loading="drBusy" @click="checkDR" />
+			</div>
+			<q-banner v-if="drReadiness && !drReadiness.enabled" dense class="bg-grey-2 q-mb-md">
+				Контроль выключен. Задайте пути в <code>disaster_recovery</code> конфигурации службы.
+			</q-banner>
+			<q-banner v-else-if="drReadiness" dense :class="drReadiness.ok ? 'bg-green-1' : 'bg-red-1 text-negative'" class="q-mb-md">
+				<template #avatar><q-icon :name="drReadiness.ok ? 'verified' : 'gpp_bad'" :color="drReadiness.ok ? 'positive' : 'negative'" /></template>
+				{{ drReadiness.ok ? 'Дамп PostgreSQL и внешняя копия ключа готовы.' : 'Аварийное восстановление не готово.' }}
+				<div v-for="problem in drReadiness.problems ?? []" :key="problem" class="jhv-wrap">{{ problem }}</div>
+			</q-banner>
+			<div class="row q-col-gutter-md">
+				<div class="col-12 col-md-6">
+					<q-list bordered dense>
+						<q-item-label header>Дамп PostgreSQL</q-item-label>
+						<q-item><q-item-section>Состояние</q-item-section><q-item-section side><q-chip dense :color="drReadiness?.postgres_dump.ok ? 'positive' : 'negative'" text-color="white">{{ drReadiness?.postgres_dump.ok ? 'готов' : 'ошибка' }}</q-chip></q-item-section></q-item>
+						<q-item><q-item-section><q-item-label>Путь</q-item-label><q-item-label caption class="jhv-mono jhv-wrap">{{ drReadiness?.postgres_dump.path || '—' }}</q-item-label></q-item-section></q-item>
+						<q-item><q-item-section>Размер</q-item-section><q-item-section side>{{ bytes(drReadiness?.postgres_dump.size_bytes) }}</q-item-section></q-item>
+						<q-item><q-item-section>Изменён</q-item-section><q-item-section side>{{ dateTime(drReadiness?.postgres_dump.modified_at) }}</q-item-section></q-item>
+						<q-item v-if="drReadiness?.postgres_dump.error"><q-item-section class="text-negative jhv-wrap">{{ drReadiness.postgres_dump.error }}</q-item-section></q-item>
+					</q-list>
+				</div>
+				<div class="col-12 col-md-6">
+					<q-list bordered dense>
+						<q-item-label header>Внешняя копия secret.key</q-item-label>
+						<q-item><q-item-section>Состояние</q-item-section><q-item-section side><q-chip dense :color="drReadiness?.key_matches ? 'positive' : 'negative'" text-color="white">{{ drReadiness?.key_matches ? 'совпадает' : 'не готова' }}</q-chip></q-item-section></q-item>
+						<q-item><q-item-section><q-item-label>Путь</q-item-label><q-item-label caption class="jhv-mono jhv-wrap">{{ drReadiness?.secret_key_backup.path || '—' }}</q-item-label></q-item-section></q-item>
+						<q-item><q-item-section>Права</q-item-section><q-item-section side class="jhv-mono">{{ drReadiness?.secret_key_backup.mode || '—' }}</q-item-section></q-item>
+						<q-item v-if="drReadiness?.secret_key_backup.error"><q-item-section class="text-negative jhv-wrap">{{ drReadiness.secret_key_backup.error }}</q-item-section></q-item>
+					</q-list>
+				</div>
+			</div>
+		</q-tab-panel>
 
         <q-tab-panel name="users" class="q-pa-none">
           <div class="row items-center q-pa-md">

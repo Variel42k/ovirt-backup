@@ -3,9 +3,11 @@ package backup
 import (
 	"context"
 	"fmt"
+	"slices"
 	"time"
 
 	"adveng/jh_virt/internal/model"
+	"adveng/jh_virt/internal/ovirt"
 	"adveng/jh_virt/internal/repo"
 	"adveng/jh_virt/internal/retention"
 	"adveng/jh_virt/internal/store"
@@ -76,16 +78,6 @@ func (e *Engine) DeleteRunData(ctx context.Context, runID string) error {
 			runID, len(dependents), dependents[0])
 	}
 
-	target, err := e.store.GetStorageTarget(ctx, run.StorageTargetID)
-	if err != nil {
-		return fmt.Errorf("хранилище бэкапа: %w", err)
-	}
-	backend, err := repo.Open(ctx, target)
-	if err != nil {
-		return fmt.Errorf("открытие хранилища %q: %w", target.Name, err)
-	}
-	defer backend.Close()
-
 	if run.Type == model.BackupOVA {
 		// The artefact lives on a hypervisor host, outside any repository we
 		// control; only the record can be retired here.
@@ -95,12 +87,67 @@ func (e *Engine) DeleteRunData(ctx context.Context, runID string) error {
 		return e.store.MarkRunDeleted(ctx, runID)
 	}
 
-	removed, err := backend.DeletePrefix(ctx, run.RepoPath)
+	copies, err := e.store.ListBackupCopies(ctx, runID)
 	if err != nil {
-		return fmt.Errorf("удаление объектов бэкапа %s: %w", runID, err)
+		return err
 	}
-	e.log.Info().Str("run", runID).Str("vm", run.VMName).Int("объектов", removed).
-		Str("освобождено", humanBytes(run.StoredBytes)).Msg("бэкап удалён из хранилища")
+	for _, copy := range copies {
+		if copy.Role == model.CopyReplica && copy.Required && !copy.Healthy() &&
+			copy.Status != model.CopyDeleted {
+			return fmt.Errorf("бэкап %s нельзя удалить: обязательная реплика в %s ещё не завершена (%s)",
+				runID, copy.StorageTargetName, copy.Status)
+		}
+	}
+	// Replicas go first. If immutable storage refuses deletion, the primary is
+	// intentionally retained as a second recovery source until a later pass.
+	slices.SortStableFunc(copies, func(a, b *model.BackupCopy) int {
+		if a.Role == b.Role {
+			return 0
+		}
+		if a.Role == model.CopyPrimary {
+			return 1
+		}
+		return -1
+	})
+	for _, copy := range copies {
+		if copy.Status == model.CopyDeleted {
+			continue
+		}
+		if copy.LockedUntil != nil && copy.LockedUntil.After(time.Now().UTC()) {
+			copy.Status = model.CopyLocked
+			_ = e.store.UpdateBackupCopy(ctx, copy)
+			return fmt.Errorf("копия в %s заблокирована Object Lock до %s", copy.StorageTargetName,
+				copy.LockedUntil.Local().Format(time.RFC3339))
+		}
+		target, err := e.store.GetStorageTarget(ctx, copy.StorageTargetID)
+		if err != nil {
+			return fmt.Errorf("хранилище копии: %w", err)
+		}
+		backend, err := repo.Open(ctx, target)
+		if err != nil {
+			return fmt.Errorf("открытие хранилища %q: %w", target.Name, err)
+		}
+		removed, deleteErr := backend.DeletePrefix(ctx, copy.RepoPath)
+		_ = backend.Close()
+		if deleteErr != nil {
+			if target.ObjectLockEnabled {
+				copy.Status = model.CopyLocked
+				if copy.LockedUntil == nil {
+					until := time.Now().UTC().AddDate(0, 0, target.ObjectLockDays)
+					copy.LockedUntil = &until
+				}
+				_ = e.store.UpdateBackupCopy(ctx, copy)
+			}
+			return fmt.Errorf("удаление копии из %s: %w", target.Name, deleteErr)
+		}
+		now := time.Now().UTC()
+		copy.Status, copy.EndedAt = model.CopyDeleted, &now
+		if err := e.store.UpdateBackupCopy(ctx, copy); err != nil {
+			return err
+		}
+		e.log.Info().Str("run", runID).Str("хранилище", target.Name).Int("объектов", removed).
+			Msg("физическая копия удалена")
+	}
 
 	return e.store.MarkRunDeleted(ctx, runID)
 }
@@ -220,8 +267,13 @@ func (e *Engine) removeStaleSnapshot(ctx context.Context, run *model.BackupRun) 
 	cleanCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 	defer cancel()
 
-	if err := client.DeleteSnapshot(cleanCtx, run.VMID, run.SnapshotID); err != nil {
+	if err := client.DeleteSnapshotWhenReady(cleanCtx, run.VMID, run.SnapshotID, 10*time.Minute); err != nil && !ovirt.IsNotFound(err) {
 		e.log.Error().Err(err).Str("vm", run.VMName).Str("snapshot", run.SnapshotID).
 			Msg("временный снапшот не удалён — удалите его вручную, иначе цепочка дисков будет расти")
+		return
+	}
+	if err := client.WaitSnapshotGone(cleanCtx, run.VMID, run.SnapshotID, 20*time.Minute); err != nil {
+		e.log.Warn().Err(err).Str("vm", run.VMName).Str("snapshot", run.SnapshotID).
+			Msg("удаление временного снапшота запущено, но слияние ещё не завершилось")
 	}
 }

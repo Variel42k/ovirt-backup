@@ -4,6 +4,7 @@ import type { QNotifyCreateOptions } from 'quasar'
 import { ref } from 'vue'
 import type {
   Alert,
+  BackupCopy,
   BackupJob,
   BackupJobRun,
   BackupQualitySummary,
@@ -11,9 +12,12 @@ import type {
   BackupSeriesPoint,
   BootVerifyOptions,
   CoverageSummary,
+  CatalogScan,
+  CatalogScanDetail,
   Dashboard,
   Disk,
   DiskSample,
+  DRReadiness,
   HealthSample,
   Help,
   Host,
@@ -24,6 +28,7 @@ import type {
   RemediationArchive,
   RemediationMode,
   RemediationRecord,
+  ReplicationDetail,
   RestoreRun,
   RetentionPlan,
   RetentionPolicy,
@@ -272,6 +277,11 @@ export const api = {
   deleteStorage: (id: string, force = false) =>
     http.delete(`/storages/${id}${force ? '?force=true' : ''}`).then((r) => r.data),
   checkStorage: (id: string) => http.post(`/storages/${id}/check`, {}, { timeout: 90_000 }).then((r) => r.data),
+  startCatalogScan: (id: string) => http.post<CatalogScan>(`/storages/${id}/catalog-scans`, {}).then((r) => r.data),
+  listCatalogScans: (id: string) => http.get<ListResponse<CatalogScan>>(`/storages/${id}/catalog-scans`).then((r) => unwrap(r.data)),
+  getCatalogScan: (id: string) => http.get<CatalogScanDetail>(`/catalog-scans/${id}`).then((r) => r.data),
+  importCatalogEntries: (id: string, entryIds: string[]) =>
+    http.post(`/catalog-scans/${id}/import`, { entry_ids: entryIds }).then((r) => r.data),
 
   // Задания
   listJobs: (serverId?: string) =>
@@ -282,6 +292,9 @@ export const api = {
   deleteJob: (id: string) => http.delete(`/jobs/${id}`).then((r) => r.data),
   runJob: (id: string) => http.post(`/jobs/${id}/run`, {}).then((r) => r.data),
   previewJob: (id: string) => http.get<ListResponse<JobPreviewRow>>(`/jobs/${id}/preview`).then((r) => unwrap(r.data)),
+  enableJobReplication: (id: string) => http.post<BackupJob>(`/jobs/${id}/enable-replication`, {}).then((r) => r.data),
+  changeJobPrimary: (id: string, storageTargetId: string) =>
+    http.post<BackupJob>(`/jobs/${id}/change-primary`, { storage_target_id: storageTargetId }).then((r) => r.data),
 
   // Запуски
   listRuns: (params: Record<string, string | number | boolean> = {}) =>
@@ -291,9 +304,17 @@ export const api = {
   startBackup: (payload: Record<string, unknown>) => http.post('/backups', payload).then((r) => r.data),
   deleteRun: (id: string) => http.delete(`/backups/${id}`).then((r) => r.data),
   cancelRun: (id: string) => http.post(`/backups/${id}/cancel`, {}).then((r) => r.data),
+  listBackupCopies: (id: string) => http.get<ListResponse<BackupCopy>>(`/backups/${id}/copies`).then((r) => unwrap(r.data)),
+  createBackupCopy: (id: string, storageTargetId: string) =>
+    http.post(`/backups/${id}/copies`, { storage_target_id: storageTargetId }).then((r) => r.data),
+  retryBackupCopy: (id: string) => http.post(`/backup-copies/${id}/retry`, {}).then((r) => r.data),
+  cancelBackupCopy: (id: string) => http.post(`/backup-copies/${id}/cancel`, {}).then((r) => r.data),
+  listReplications: (params: Record<string, string | number> = {}) =>
+    http.get<ListResponse<BackupCopy>>('/replications', { params }).then((r) => unwrap(r.data)),
+  getReplication: (id: string) => http.get<ReplicationDetail>(`/replications/${id}`).then((r) => r.data),
 
   // Проверка и восстановление
-  verifyRun: (id: string, mode: string, options: Partial<BootVerifyOptions> = {}) =>
+  verifyRun: (id: string, mode: string, options: Partial<BootVerifyOptions> & { copy_id?: string } = {}) =>
     http.post<VerifyRun>(`/backups/${id}/verify`, { mode, ...options }, { timeout: 300_000 }).then((r) => r.data),
   listVerifications: (runId?: string) =>
     http.get<ListResponse<VerifyRun>>('/verifications', { params: runId ? { run_id: runId } : undefined }).then((r) => unwrap(r.data)),
@@ -339,6 +360,8 @@ export const api = {
     http.get<ListResponse<MountSample>>(`/servers/${serverId}/storage-paths`).then((r) => unwrap(r.data)),
   healthSamples: (params: Record<string, string | number>) =>
     http.get<ListResponse<HealthSample>>('/health-samples', { params }).then((r) => unwrap(r.data)),
+  drReadiness: () => http.get<DRReadiness>('/disaster-recovery/readiness').then((r) => r.data),
+  checkDRReadiness: () => http.post<DRReadiness>('/disaster-recovery/check', {}).then((r) => r.data),
 
   // Журнал службы
   logStatus: () =>

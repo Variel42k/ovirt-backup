@@ -16,12 +16,14 @@ import (
 
 	"adveng/jh_virt/internal/config"
 	"adveng/jh_virt/internal/dispatch"
+	drcheck "adveng/jh_virt/internal/dr"
 	"adveng/jh_virt/internal/events"
 	"adveng/jh_virt/internal/libvirtx"
 	"adveng/jh_virt/internal/logging"
 	"adveng/jh_virt/internal/monitor"
 	"adveng/jh_virt/internal/ovirt"
 	"adveng/jh_virt/internal/quality"
+	"adveng/jh_virt/internal/replication"
 	"adveng/jh_virt/internal/scheduler"
 	"adveng/jh_virt/internal/store"
 )
@@ -41,6 +43,8 @@ type Server struct {
 	log          zerolog.Logger
 	logs         *logging.Manager
 	quality      *quality.Service
+	replicator   *replication.Replicator
+	dr           *drcheck.Checker
 	metricsToken []byte
 	// logins притормаживает подбор пароля. В памяти, а не в базе: ограничение
 	// действует на процесс, переживать перезапуск ему не нужно, а запись в
@@ -66,6 +70,8 @@ type Deps struct {
 	Logger      zerolog.Logger
 	Logs        *logging.Manager
 	Quality     *quality.Service
+	Replicator  *replication.Replicator
+	DR          *drcheck.Checker
 }
 
 // New builds the API server.
@@ -85,7 +91,8 @@ func New(d Deps) *Server {
 	return &Server{
 		cfg: d.Config, baseCfg: base, store: d.Store, pool: d.Pool, libvirt: d.LibvirtPool, engine: d.Engine,
 		scheduler: d.Scheduler, monitor: d.Monitor, remediator: d.Remediator,
-		bus: d.Bus, log: d.Logger, logs: d.Logs, quality: d.Quality, metricsToken: metricsToken,
+		bus: d.Bus, log: d.Logger, logs: d.Logs, quality: d.Quality, replicator: d.Replicator,
+		dr: d.DR, metricsToken: metricsToken,
 		logins: newLoginLimiter(),
 	}
 }
@@ -160,6 +167,10 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /storages/{id}", s.admin(s.handleUpdateStorage))
 	mux.HandleFunc("DELETE /storages/{id}", s.admin(s.handleDeleteStorage))
 	mux.HandleFunc("POST /storages/{id}/check", s.writer(s.handleCheckStorage))
+	mux.HandleFunc("POST /storages/{id}/catalog-scans", s.admin(s.handleStartCatalogScan))
+	mux.HandleFunc("GET /storages/{id}/catalog-scans", s.admin(s.handleListCatalogScans))
+	mux.HandleFunc("GET /catalog-scans/{id}", s.admin(s.handleGetCatalogScan))
+	mux.HandleFunc("POST /catalog-scans/{id}/import", s.admin(s.handleImportCatalogScan))
 
 	// Задания бэкапа.
 	mux.HandleFunc("GET /jobs", s.handleListJobs)
@@ -169,6 +180,8 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /jobs/{id}", s.writer(s.handleDeleteJob))
 	mux.HandleFunc("POST /jobs/{id}/run", s.writer(s.handleRunJob))
 	mux.HandleFunc("GET /jobs/{id}/preview", s.handlePreviewJob)
+	mux.HandleFunc("POST /jobs/{id}/enable-replication", s.admin(s.handleEnableJobReplication))
+	mux.HandleFunc("POST /jobs/{id}/change-primary", s.admin(s.handleChangeJobPrimary))
 
 	// Запуски бэкапа.
 	mux.HandleFunc("POST /backups", s.writer(s.handleAdHocBackup))
@@ -177,6 +190,12 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /backups/{id}", s.writer(s.handleDeleteRun))
 	mux.HandleFunc("POST /backups/{id}/cancel", s.writer(s.handleCancelRun))
 	mux.HandleFunc("GET /backups/{id}/chain", s.handleRunChain)
+	mux.HandleFunc("GET /backups/{id}/copies", s.handleListBackupCopies)
+	mux.HandleFunc("POST /backups/{id}/copies", s.writer(s.handleCreateBackupCopy))
+	mux.HandleFunc("POST /backup-copies/{id}/retry", s.writer(s.handleRetryBackupCopy))
+	mux.HandleFunc("POST /backup-copies/{id}/cancel", s.writer(s.handleCancelBackupCopy))
+	mux.HandleFunc("GET /replications", s.handleListReplications)
+	mux.HandleFunc("GET /replications/{id}", s.handleGetReplication)
 
 	// Проверка и восстановление.
 	mux.HandleFunc("POST /backups/{id}/verify", s.writer(s.handleVerifyRun))
@@ -203,6 +222,8 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /monitoring/backup-series", s.handleBackupSeries)
 	mux.HandleFunc("GET /monitoring/storage-capacity", s.handleStorageCapacity)
 	mux.HandleFunc("GET /job-runs", s.handleListJobRuns)
+	mux.HandleFunc("GET /disaster-recovery/readiness", s.admin(s.handleDRReadiness))
+	mux.HandleFunc("POST /disaster-recovery/check", s.admin(s.handleDRCheck))
 	mux.HandleFunc("GET /health-samples", s.handleHealthSamples)
 	mux.HandleFunc("GET /disk-samples", s.handleDiskSamples)
 	mux.HandleFunc("GET /mount-samples", s.handleMountSamples)

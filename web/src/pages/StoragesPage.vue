@@ -1,11 +1,11 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useQuasar } from 'quasar'
 import { api, notify, notifyError, notifyOk } from '@/api/client'
 import { ago, bytes } from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
-import type { StorageTarget } from '@/api/types'
+import type { CatalogScanDetail, StorageTarget } from '@/api/types'
 
 const $q = useQuasar()
 const app = useAppStore()
@@ -15,6 +15,10 @@ const loading = ref(false)
 const dialog = ref(false)
 const editing = ref<StorageTarget | null>(null)
 const checking = ref<string | null>(null)
+const catalogOpen = ref(false)
+const catalogLoading = ref(false)
+const catalogDetail = ref<CatalogScanDetail | null>(null)
+const selectedCatalogEntries = ref<string[]>([])
 
 const emptyForm = () => ({
   name: '',
@@ -30,6 +34,8 @@ const emptyForm = () => ({
   use_ssl: true,
   path_style: false,
   storage_class: '',
+	object_lock_enabled: false,
+	object_lock_days: 0,
   host: '',
   port: 22,
   username: '',
@@ -40,6 +46,12 @@ const emptyForm = () => ({
 })
 
 const form = ref(emptyForm())
+const rateLimitMiB = computed({
+  get: () => Math.round((form.value.rate_limit / (1024 * 1024)) * 100) / 100,
+  set: (value: number) => {
+    form.value.rate_limit = Math.max(0, Math.round((Number(value) || 0) * 1024 * 1024))
+  },
+})
 
 async function load() {
   loading.value = true
@@ -66,11 +78,12 @@ function openEdit(target: StorageTarget) {
 
 async function save() {
   try {
+	const payload = { ...form.value, object_lock_days: form.value.object_lock_enabled ? form.value.object_lock_days : 0 }
     if (editing.value) {
-      await api.updateStorage(editing.value.id, form.value)
+		await api.updateStorage(editing.value.id, payload)
       notifyOk('Хранилище обновлено')
     } else {
-      await api.createStorage(form.value)
+		await api.createStorage(payload)
       notifyOk('Хранилище добавлено, выполняется проверка')
     }
     dialog.value = false
@@ -95,6 +108,50 @@ async function check(target: StorageTarget) {
   } finally {
     checking.value = null
   }
+}
+
+async function scanCatalog(target: StorageTarget) {
+	catalogOpen.value = true
+	catalogLoading.value = true
+	catalogDetail.value = null
+	selectedCatalogEntries.value = []
+	try {
+		const scan = await api.startCatalogScan(target.id)
+		for (let attempt = 0; attempt < 360; attempt++) {
+			const detail = await api.getCatalogScan(scan.id)
+			catalogDetail.value = detail
+			if (detail.scan.status === 'succeeded' || detail.scan.status === 'failed') break
+			await new Promise((resolve) => window.setTimeout(resolve, 2000))
+		}
+		if (catalogDetail.value?.scan.status === 'succeeded') {
+			selectedCatalogEntries.value = catalogDetail.value.entries
+				.filter((entry) => ['importable', 'additional_copy'].includes(entry.status))
+				.map((entry) => entry.id)
+		}
+	} catch (err) {
+		notifyError(err, 'Сканирование каталога не выполнено')
+	} finally {
+		catalogLoading.value = false
+	}
+}
+
+async function importCatalog() {
+	if (!catalogDetail.value || !selectedCatalogEntries.value.length) return
+	try {
+		const result = await api.importCatalogEntries(catalogDetail.value.scan.id, selectedCatalogEntries.value)
+		notifyOk(`Импортировано точек: ${result.count ?? selectedCatalogEntries.value.length}`)
+		catalogDetail.value = await api.getCatalogScan(catalogDetail.value.scan.id)
+		selectedCatalogEntries.value = []
+	} catch (err) {
+		notifyError(err, 'Импорт каталога не выполнен')
+	}
+}
+
+function catalogColor(status: string): string {
+	if (status === 'importable' || status === 'additional_copy') return 'positive'
+	if (status === 'known') return 'primary'
+	if (status === 'incomplete' || status === 'missing_parent' || status === 'missing_object') return 'warning'
+	return 'negative'
 }
 
 function confirmDelete(target: StorageTarget) {
@@ -190,6 +247,7 @@ function location(target: StorageTarget): string {
         <q-td :props="props">
           {{ props.row.name }}
           <q-badge v-if="!props.row.enabled" color="grey-7" class="q-ml-sm">выключено</q-badge>
+			<q-badge v-if="props.row.object_lock_enabled" color="warning" class="q-ml-sm">Object Lock {{ props.row.object_lock_days }} дн.</q-badge>
         </q-td>
       </template>
 
@@ -239,6 +297,9 @@ function location(target: StorageTarget): string {
           >
             <q-tooltip>Проверить доступность и запись</q-tooltip>
           </q-btn>
+			<q-btn v-if="auth.canAdmin()" flat dense round icon="manage_search" @click="scanCatalog(props.row)">
+				<q-tooltip>Просмотреть каталог и импортировать найденные точки</q-tooltip>
+			</q-btn>
           <q-btn v-if="auth.canAdmin()" flat dense round icon="edit" @click="openEdit(props.row)" />
           <q-btn v-if="auth.canAdmin()" flat dense round icon="delete" color="negative" @click="confirmDelete(props.row)" />
         </q-td>
@@ -318,6 +379,13 @@ function location(target: StorageTarget): string {
             <div class="col-12">
               <q-input v-model="form.storage_class" label="Класс хранения" hint="Например STANDARD_IA или GLACIER_IR" outlined dense />
             </div>
+			<div class="col-12">
+				<q-toggle v-model="form.object_lock_enabled" label="S3 Object Lock (Governance)" />
+				<div class="jhv-reason">Bucket должен быть создан с Object Lock. Объекты нельзя удалить до окончания срока; служба не использует обход Governance.</div>
+			</div>
+			<div v-if="form.object_lock_enabled" class="col-12 col-sm-6">
+				<q-input v-model.number="form.object_lock_days" type="number" min="1" max="36500" label="Срок блокировки, дней" outlined dense />
+			</div>
           </template>
 
           <template v-if="form.kind === 'sftp'">
@@ -366,6 +434,18 @@ function location(target: StorageTarget): string {
             </div>
           </template>
 
+          <div class="col-12 col-sm-6">
+            <q-input
+              v-model.number="rateLimitMiB"
+              type="number"
+              min="0"
+              step="1"
+              label="Ограничение записи, МиБ/с"
+              hint="0 — без ограничения; лимит общий для одновременных потоков"
+              outlined
+              dense
+            />
+          </div>
           <div class="col-12">
             <q-toggle v-model="form.enabled" label="Хранилище доступно для заданий" />
           </div>
@@ -378,5 +458,36 @@ function location(target: StorageTarget): string {
         </q-card-actions>
       </q-card>
     </q-dialog>
+
+	<q-dialog v-model="catalogOpen">
+		<q-card style="width: 900px; max-width: 96vw">
+			<q-card-section class="text-h6">Каталог хранилища</q-card-section>
+			<q-separator />
+			<q-card-section style="max-height: 70vh" class="scroll">
+				<q-linear-progress v-if="catalogLoading" indeterminate class="q-mb-md" />
+				<q-banner v-if="catalogDetail?.scan.error" dense class="bg-red-1 text-negative q-mb-md">{{ catalogDetail.scan.error }}</q-banner>
+				<q-list dense bordered separator>
+					<q-item v-for="entry in catalogDetail?.entries ?? []" :key="entry.id">
+						<q-item-section avatar>
+							<q-checkbox v-if="['importable','additional_copy'].includes(entry.status) && !entry.imported_at" v-model="selectedCatalogEntries" :val="entry.id" />
+							<q-icon v-else :name="entry.imported_at || entry.status === 'known' ? 'check_circle' : 'report_problem'" :color="catalogColor(entry.status)" />
+						</q-item-section>
+						<q-item-section>
+							<q-item-label>{{ entry.run_id || entry.repo_path }}</q-item-label>
+							<q-item-label caption class="jhv-wrap">{{ entry.details }}</q-item-label>
+							<q-item-label caption class="jhv-mono jhv-wrap">{{ entry.repo_path }}</q-item-label>
+						</q-item-section>
+						<q-item-section side><q-badge :color="catalogColor(entry.status)">{{ entry.imported_at ? 'импортировано' : entry.status }}</q-badge></q-item-section>
+					</q-item>
+					<q-item v-if="!catalogLoading && !catalogDetail?.entries.length"><q-item-section class="text-grey-7">Точки восстановления не найдены.</q-item-section></q-item>
+				</q-list>
+			</q-card-section>
+			<q-separator />
+			<q-card-actions align="right">
+				<q-btn flat label="Закрыть" v-close-popup />
+				<q-btn color="primary" unelevated icon="download" label="Импортировать" :disable="!selectedCatalogEntries.length" @click="importCatalog" />
+			</q-card-actions>
+		</q-card>
+	</q-dialog>
   </q-page>
 </template>

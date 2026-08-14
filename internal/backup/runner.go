@@ -3,6 +3,7 @@ package backup
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -615,7 +616,7 @@ func (e *Engine) runSnapshot(ctx context.Context, client *ovirt.Client, backend 
 		// behind grows the disk chain until the VM eventually stalls.
 		cleanCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Minute)
 		defer cancel()
-		if err := client.DeleteSnapshot(cleanCtx, vm.ID, snap.ID); err != nil {
+		if err := client.DeleteSnapshotWhenReady(cleanCtx, vm.ID, snap.ID, 10*time.Minute); err != nil {
 			e.log.Error().Err(err).Str("snapshot", snap.ID).Str("vm", vm.Name).
 				Msg("не удалось удалить временный снапшот — удалите его вручную")
 			return
@@ -1002,6 +1003,7 @@ func (e *Engine) writeRunManifest(ctx context.Context, backend repo.Backend, srv
 	if err != nil {
 		return err
 	}
+	run.ManifestSHA256 = fmt.Sprintf("%x", sha256.Sum256(encoded))
 	_, err = backend.Put(ctx, repo.RunManifestKey(run.RepoPath), bytesReader(encoded), int64(len(encoded)))
 	return err
 }

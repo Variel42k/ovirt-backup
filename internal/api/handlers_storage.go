@@ -19,15 +19,17 @@ type storagePayload struct {
 
 	BasePath string `json:"base_path"`
 
-	Endpoint     string `json:"endpoint"`
-	Region       string `json:"region"`
-	Bucket       string `json:"bucket"`
-	Prefix       string `json:"prefix"`
-	AccessKey    string `json:"access_key"`
-	SecretKey    string `json:"secret_key"`
-	UseSSL       *bool  `json:"use_ssl"`
-	PathStyle    bool   `json:"path_style"`
-	StorageClass string `json:"storage_class"`
+	Endpoint          string `json:"endpoint"`
+	Region            string `json:"region"`
+	Bucket            string `json:"bucket"`
+	Prefix            string `json:"prefix"`
+	AccessKey         string `json:"access_key"`
+	SecretKey         string `json:"secret_key"`
+	UseSSL            *bool  `json:"use_ssl"`
+	PathStyle         bool   `json:"path_style"`
+	StorageClass      string `json:"storage_class"`
+	ObjectLockEnabled bool   `json:"object_lock_enabled"`
+	ObjectLockDays    int    `json:"object_lock_days"`
 
 	Host       string `json:"host"`
 	Port       int    `json:"port"`
@@ -51,6 +53,8 @@ func (p storagePayload) apply(dst *model.StorageTarget) {
 	dst.SecretKey = p.SecretKey
 	dst.PathStyle = p.PathStyle
 	dst.StorageClass = p.StorageClass
+	dst.ObjectLockEnabled = p.ObjectLockEnabled
+	dst.ObjectLockDays = p.ObjectLockDays
 	dst.Host = p.Host
 	dst.Port = p.Port
 	dst.Username = p.Username
@@ -70,6 +74,9 @@ func (p storagePayload) validate(isNew bool) error {
 	if p.Name == "" {
 		return badRequest("не указано имя хранилища")
 	}
+	if p.RateLimit < 0 {
+		return badRequest("ограничение скорости не может быть отрицательным")
+	}
 	switch model.StorageKind(p.Kind) {
 	case model.StorageLocal:
 		if p.BasePath == "" {
@@ -82,6 +89,9 @@ func (p storagePayload) validate(isNew bool) error {
 		if isNew && (p.AccessKey == "" || p.SecretKey == "") {
 			return badRequest("для S3 нужны ключи доступа")
 		}
+		if p.ObjectLockEnabled && (p.ObjectLockDays < 1 || p.ObjectLockDays > 36500) {
+			return badRequest("для Object Lock укажите срок от 1 до 36500 дней")
+		}
 	case model.StorageSFTP:
 		if p.Host == "" || p.Username == "" {
 			return badRequest("для SFTP нужны хост и пользователь")
@@ -91,6 +101,12 @@ func (p storagePayload) validate(isNew bool) error {
 		}
 	default:
 		return badRequest("неизвестный тип хранилища: %q", p.Kind)
+	}
+	if model.StorageKind(p.Kind) != model.StorageS3 && p.ObjectLockEnabled {
+		return badRequest("Object Lock доступен только для S3")
+	}
+	if !p.ObjectLockEnabled && p.ObjectLockDays != 0 {
+		return badRequest("срок Object Lock должен быть 0, когда блокировка выключена")
 	}
 	return nil
 }
@@ -132,6 +148,11 @@ func (s *Server) handleCreateStorage(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
+	if err := ensureObjectLockUsable(r.Context(), target); err != nil {
+		s.audit(r, "storage.create", model.ScopeStorageTarget, target.Name, false, err.Error())
+		s.writeError(w, r, err)
+		return
+	}
 
 	if err := s.store.CreateStorageTarget(r.Context(), target); err != nil {
 		s.audit(r, "storage.create", model.ScopeStorageTarget, target.Name, false, err.Error())
@@ -164,9 +185,38 @@ func (s *Server) handleUpdateStorage(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
+	secretKey, password, privateKey := existing.SecretKey, existing.Password, existing.PrivateKey
+	objectLockWasEnabled := existing.ObjectLockEnabled
 	payload.apply(existing)
+	if payload.SecretKey == "" {
+		existing.SecretKey = secretKey
+	}
+	if payload.Password == "" {
+		existing.Password = password
+	}
+	if payload.PrivateKey == "" {
+		existing.PrivateKey = privateKey
+	}
+	if objectLockWasEnabled && !existing.ObjectLockEnabled {
+		count, countErr := s.store.CountRunsOnTarget(r.Context(), id)
+		if countErr != nil {
+			s.writeError(w, r, countErr)
+			return
+		}
+		if count > 0 {
+			s.writeError(w, r, badRequest(
+				"нельзя выключить Object Lock: в хранилище учтено %d физических копий; "+
+					"сначала дождитесь срока блокировки и удалите их", count))
+			return
+		}
+	}
 
 	if err := ensureLocalPathUsable(r.Context(), existing); err != nil {
+		s.audit(r, "storage.update", model.ScopeStorageTarget, id, false, err.Error())
+		s.writeError(w, r, err)
+		return
+	}
+	if err := ensureObjectLockUsable(r.Context(), existing); err != nil {
 		s.audit(r, "storage.update", model.ScopeStorageTarget, id, false, err.Error())
 		s.writeError(w, r, err)
 		return
@@ -205,6 +255,25 @@ func ensureLocalPathUsable(ctx context.Context, target *model.StorageTarget) err
 		return badRequest("%v", err)
 	}
 	return backend.Close()
+}
+
+func ensureObjectLockUsable(ctx context.Context, target *model.StorageTarget) error {
+	if !target.ObjectLockEnabled {
+		return nil
+	}
+	backend, err := repo.Open(ctx, target)
+	if err != nil {
+		return badRequest("Object Lock: %v", err)
+	}
+	defer backend.Close()
+	validator, ok := backend.(repo.ObjectLockValidator)
+	if !ok {
+		return badRequest("выбранное хранилище не поддерживает Object Lock")
+	}
+	if err := validator.CheckObjectLock(ctx); err != nil {
+		return badRequest("Object Lock: %v", err)
+	}
+	return nil
 }
 
 func (s *Server) handleDeleteStorage(w http.ResponseWriter, r *http.Request) {
@@ -250,11 +319,13 @@ func (s *Server) handleDeleteStorage(w http.ResponseWriter, r *http.Request) {
 
 // storageCheckResult reports whether a repository is usable.
 type storageCheckResult struct {
-	OK        bool   `json:"ok"`
-	Error     string `json:"error,omitempty"`
-	FreeBytes int64  `json:"free_bytes"`
-	UsedBytes int64  `json:"used_bytes"`
-	Latency   string `json:"latency"`
+	OK                bool   `json:"ok"`
+	Error             string `json:"error,omitempty"`
+	FreeBytes         int64  `json:"free_bytes"`
+	UsedBytes         int64  `json:"used_bytes"`
+	Latency           string `json:"latency"`
+	ObjectLockEnabled bool   `json:"object_lock_enabled"`
+	ObjectLockOK      bool   `json:"object_lock_ok"`
 }
 
 func (s *Server) handleCheckStorage(w http.ResponseWriter, r *http.Request) {
@@ -268,7 +339,7 @@ func (s *Server) handleCheckStorage(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	started := time.Now()
-	result := storageCheckResult{}
+	result := storageCheckResult{ObjectLockEnabled: target.ObjectLockEnabled}
 
 	backend, err := repo.Open(ctx, target)
 	if err != nil {
@@ -279,6 +350,14 @@ func (s *Server) handleCheckStorage(w http.ResponseWriter, r *http.Request) {
 			result.Error = err.Error()
 		} else {
 			result.OK = true
+			result.ObjectLockOK = !target.ObjectLockEnabled
+			if validator, ok := backend.(repo.ObjectLockValidator); ok && target.ObjectLockEnabled {
+				if lockErr := validator.CheckObjectLock(ctx); lockErr != nil {
+					result.OK, result.Error = false, lockErr.Error()
+				} else {
+					result.ObjectLockOK = true
+				}
+			}
 			result.FreeBytes, result.UsedBytes, _ = backend.Usage(ctx)
 		}
 	}

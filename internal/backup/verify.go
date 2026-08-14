@@ -119,6 +119,12 @@ func (e *Engine) RegisterVerifier(mode model.VerifyMode, fn ExternalVerifier) {
 //	qemu     — восстановленный образ проходит qemu-img check
 //	boot     — образ поднимается как ВМ и гость отвечает (внешний обработчик)
 func (e *Engine) Verify(ctx context.Context, runID string, mode model.VerifyMode, opts model.VerifyOptions) (*model.VerifyRun, error) {
+	return e.VerifyCopy(ctx, runID, "", mode, opts)
+}
+
+// VerifyCopy checks a specific physical copy. An empty copyID uses the normal
+// primary-then-replica selection rule.
+func (e *Engine) VerifyCopy(ctx context.Context, runID, copyID string, mode model.VerifyMode, opts model.VerifyOptions) (*model.VerifyRun, error) {
 	if mode == "" {
 		mode = model.VerifyManifest
 	}
@@ -129,6 +135,7 @@ func (e *Engine) Verify(ctx context.Context, runID string, mode model.VerifyMode
 	record := &model.VerifyRun{
 		ID:        uuid.NewString(),
 		RunID:     runID,
+		CopyID:    copyID,
 		Mode:      mode,
 		Status:    model.RunPending,
 		CreatedAt: time.Now().UTC(),
@@ -153,7 +160,7 @@ func (e *Engine) Verify(ctx context.Context, runID string, mode model.VerifyMode
 	_ = e.store.UpdateVerifyRun(ctx, record)
 	log.Info().Msg("проверка бэкапа запущена")
 
-	report, err := e.verify(ctx, runID, mode, opts, record)
+	report, err := e.verify(ctx, runID, copyID, mode, opts, record)
 	ended := time.Now().UTC()
 	record.EndedAt = &ended
 	if report != nil {
@@ -167,7 +174,7 @@ func (e *Engine) Verify(ctx context.Context, runID string, mode model.VerifyMode
 		record.Status = model.RunFailed
 		record.Error = err.Error()
 		_ = e.store.UpdateVerifyRun(context.WithoutCancel(ctx), record)
-		e.markRunVerified(ctx, runID, model.RunFailed)
+		e.markRunVerified(ctx, runID, copyID, model.RunFailed)
 		log.Warn().Err(err).Msg("проверка выявила проблему")
 		return record, err
 	}
@@ -177,12 +184,12 @@ func (e *Engine) Verify(ctx context.Context, runID string, mode model.VerifyMode
 	if err := e.store.UpdateVerifyRun(ctx, record); err != nil {
 		log.Warn().Err(err).Msg("не удалось сохранить результат проверки")
 	}
-	e.markRunVerified(ctx, runID, model.RunSucceeded)
+	e.markRunVerified(ctx, runID, record.CopyID, model.RunSucceeded)
 	log.Info().Dur("длительность", ended.Sub(started)).Msg("проверка пройдена")
 	return record, nil
 }
 
-func (e *Engine) markRunVerified(ctx context.Context, runID string, status model.RunStatus) {
+func (e *Engine) markRunVerified(ctx context.Context, runID, copyID string, status model.RunStatus) {
 	saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 
@@ -191,18 +198,23 @@ func (e *Engine) markRunVerified(ctx context.Context, runID string, status model
 		return
 	}
 	now := time.Now().UTC()
+	if copyID != "" && status == model.RunSucceeded {
+		_ = e.store.MarkBackupCopyVerified(saveCtx, copyID, now)
+	}
 	run.VerifyStatus = status
 	run.VerifiedAt = &now
 	_ = e.store.UpdateBackupRun(saveCtx, run)
 }
 
-func (e *Engine) verify(ctx context.Context, runID string, mode model.VerifyMode,
+func (e *Engine) verify(ctx context.Context, runID, copyID string, mode model.VerifyMode,
 	opts model.VerifyOptions, record *model.VerifyRun) (*VerifyReport, error) {
-	set, err := e.LoadChain(ctx, runID)
+	set, err := e.loadChainCopy(ctx, runID, copyID, copyID != "")
 	if err != nil {
 		return nil, err
 	}
 	defer set.Close()
+	record.CopyID = set.Copy.ID
+	_ = e.store.UpdateVerifyRun(ctx, record)
 
 	report := &VerifyReport{Mode: mode, RunID: runID}
 	for _, r := range set.Runs {

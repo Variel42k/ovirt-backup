@@ -578,6 +578,21 @@ onMounted(async () => {
                     {{ app.meta?.capabilities.auth_enabled ? 'включена' : 'выключена' }}
                   </q-item-section>
                 </q-item>
+                <q-item v-if="app.meta?.capabilities.auth_enabled">
+                  <q-item-section>
+                    <q-item-label>Внешний вход (OIDC)</q-item-label>
+                    <q-item-label v-if="app.meta?.capabilities.oidc_enabled" caption>
+                      {{
+                        app.meta?.capabilities.local_login
+                          ? 'вместе с входом по паролю'
+                          : 'вход по паролю отключён'
+                      }}
+                    </q-item-label>
+                  </q-item-section>
+                  <q-item-section side>
+                    {{ app.meta?.capabilities.oidc_enabled ? 'настроен' : 'не настроен' }}
+                  </q-item-section>
+                </q-item>
               </q-list>
             </div>
 

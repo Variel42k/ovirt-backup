@@ -12,20 +12,24 @@ import (
 	"adveng/jh_virt/internal/model"
 )
 
-const userColumns = `id, username, password_hash, role, disabled, last_login_at, created_at, updated_at`
+const userColumns = `id, username, password_hash, role, disabled, last_login_at, created_at, updated_at, provider, external_id`
 
-// CreateUser stores a new local account. The caller supplies an already hashed
-// password; the store never sees plaintext.
+// CreateUser stores a new account. The caller supplies an already hashed
+// password; the store never sees plaintext. Внешние записи приходят сюда без
+// хеша вовсе — у них его нет.
 func (s *Store) CreateUser(ctx context.Context, u *model.User) error {
 	if u.ID == "" {
 		u.ID = uuid.NewString()
 	}
+	if u.Provider == "" {
+		u.Provider = model.ProviderLocal
+	}
 	now := time.Now().UTC()
 	u.CreatedAt, u.UpdatedAt = now, now
 
-	_, err := s.db.Exec(ctx, `INSERT INTO users (`+userColumns+`) VALUES (?,?,?,?,?,?,?,?)`,
-		u.ID, u.Username, u.PasswordHash, string(u.Role), u.Disabled,
-		u.LastLoginAt, u.CreatedAt, u.UpdatedAt)
+	_, err := s.db.Exec(ctx, `INSERT INTO users (`+userColumns+`) VALUES (?,?,?,?,?,?,?,?,?,?)`,
+		u.ID, u.Username, nullString(u.PasswordHash), string(u.Role), u.Disabled,
+		u.LastLoginAt, u.CreatedAt, u.UpdatedAt, u.Provider, u.ExternalID)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return fmt.Errorf("%w: пользователь %q", ErrConflict, u.Username)
@@ -80,6 +84,41 @@ func (s *Store) GetUserByName(ctx context.Context, username string) (*model.User
 	return scanUser(row)
 }
 
+// GetUserByExternal loads the account linked to an identity at a provider.
+//
+// Пустой externalID отсекается до запроса: у локальных записей эта колонка
+// пуста, и запрос с пустым значением нашёл бы первую попавшуюся локальную —
+// то есть внешний вход сел бы в чужую учётную запись.
+func (s *Store) GetUserByExternal(ctx context.Context, provider, externalID string) (*model.User, error) {
+	if externalID == "" {
+		return nil, ErrNotFound
+	}
+	row := s.db.QueryRow(ctx, `SELECT `+userColumns+` FROM users WHERE provider=? AND external_id=?`,
+		provider, externalID)
+	return scanUser(row)
+}
+
+// SyncExternalUser applies to a linked account what the provider owns: the
+// visible name and the role derived from its groups.
+//
+// Флаг disabled не трогается намеренно. Это местный рубильник: администратор
+// закрывает доступ здесь, не имея прав в чужом каталоге, и очередной вход не
+// должен его отменять.
+func (s *Store) SyncExternalUser(ctx context.Context, u *model.User) error {
+	res, err := s.db.Exec(ctx, `UPDATE users SET username=?, role=?, updated_at=? WHERE id=?`,
+		u.Username, string(u.Role), time.Now().UTC(), u.ID)
+	if err != nil {
+		if isUniqueViolation(err) {
+			return fmt.Errorf("%w: пользователь %q", ErrConflict, u.Username)
+		}
+		return fmt.Errorf("sync external user: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // ListUsers returns all accounts ordered by name.
 func (s *Store) ListUsers(ctx context.Context) ([]*model.User, error) {
 	rows, err := s.db.Query(ctx, `SELECT `+userColumns+` FROM users ORDER BY username`)
@@ -116,19 +155,23 @@ func (s *Store) TouchUserLogin(ctx context.Context, id string) error {
 
 func scanUser(row rowScanner) (*model.User, error) {
 	var (
-		u                    model.User
-		role                 string
+		u    model.User
+		role string
+		// Хеш пароля стал необязательным вместе с внешними записями: у них его
+		// нет, и в колонке лежит NULL, который в string не сканируется.
+		hash                 sql.NullString
 		lastLogin            sql.NullTime
 		createdAt, updatedAt time.Time
 	)
-	err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &role, &u.Disabled, &lastLogin,
-		&createdAt, &updatedAt)
+	err := row.Scan(&u.ID, &u.Username, &hash, &role, &u.Disabled, &lastLogin,
+		&createdAt, &updatedAt, &u.Provider, &u.ExternalID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("scan user: %w", err)
 	}
+	u.PasswordHash = hash.String
 	u.Role = model.Role(role)
 	u.LastLoginAt = nullTime(lastLogin)
 	u.CreatedAt = utc(createdAt)

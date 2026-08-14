@@ -29,6 +29,31 @@ curl -b cookies.txt http://localhost:8080/api/v1/dashboard
 
 Роли: `admin` (всё), `operator` (управление ВМ и бэкапами), `viewer` (чтение).
 
+### Внешний вход (OIDC)
+
+Три точки, доступные без сессии:
+
+| Метод | Путь | Назначение |
+|---|---|---|
+| `GET` | `/auth/oidc/info` | `{"enabled":bool,"button_label":string,"local_login":bool}` — что показывать на странице входа |
+| `GET` | `/auth/oidc/start` | перенаправление к провайдеру; `?redirect=/путь` задаёт, куда вернуть после входа |
+| `GET` | `/auth/oidc/callback` | возврат от провайдера; при успехе выдаёт ту же `jhvirt_session` |
+
+Проходить их нужно браузером: это цепочка перенаправлений, и XHR отработает её
+молча и без результата. Ошибка возвращает на `/login?oidc_error=<причина>`,
+подробности остаются в журнале службы.
+
+`start` и `callback` защищены `state`, `nonce` и PKCE (S256); начатый вход
+живёт 10 минут и используется один раз. Подпись токена проверяется по JWKS
+провайдера.
+
+Когда `auth.oidc.allow_local_login: false`, `POST /auth/login` отвечает `403`
+с кодом `local_login_disabled`. Токены из `auth.api_tokens` при этом
+продолжают работать.
+
+Настройка провайдера и правила назначения ролей:
+[CONFIGURATION.md](CONFIGURATION.md#внешний-вход-oidc).
+
 ## Ошибки
 
 ```json
@@ -40,6 +65,8 @@ curl -b cookies.txt http://localhost:8080/api/v1/dashboard
 | `unauthorized` | 401 | нет сессии или она истекла |
 | `too_many_attempts` | 429 | слишком много неудачных входов подряд |
 | `forbidden` | 403 | роли недостаточно |
+| `local_login_disabled` | 403 | вход по паролю выключен, остаётся внешний провайдер |
+| `oidc_disabled` | 404 | внешний вход не настроен |
 | `bad_request` | 400 | некорректный запрос |
 | `not_found` | 404 | объект не найден |
 | `conflict` | 409 | нарушение уникальности |

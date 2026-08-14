@@ -46,6 +46,39 @@ auth:
   # Статические токены для интеграций: заголовок `Authorization: Bearer <token>`.
   api_tokens: []
 
+  # Вход через внешнего провайдера (OIDC): Keycloak, Red Virtualization SSO,
+  # ADFS, Authentik. Пароль пользователя служба не видит и не хранит.
+  oidc:
+    enabled: false
+    # Адрес провайдера; остальные точки берутся из его discovery-документа
+    # <issuer>/.well-known/openid-configuration.
+    issuer: ""
+    client_id: ""
+    client_secret: ""
+    # Должен совпадать с зарегистрированным у провайдера точно, вплоть до схемы:
+    # https://virt.example.org/api/v1/auth/oidc/callback
+    redirect_url: ""
+    scopes: ["openid", "profile", "email", "groups"]
+    # Надпись на кнопке страницы входа. Пусто — «Войти через провайдера».
+    button_label: ""
+    # Где в токене лежат группы. Допускается вложенность через точку,
+    # например resource_access.jhvirt.roles у Keycloak.
+    groups_claim: "groups"
+    # Группы в роли. Сопоставление без учёта регистра; если групп несколько,
+    # побеждает старшая роль.
+    role_mapping: {}
+    #  "virt-admins": "admin"
+    #  "virt-operators": "operator"
+    #  "virt-readers": "viewer"
+    # Роль для тех, чьи группы ни во что не отобразились. Пусто — таким вход
+    # запрещён, и это осознанное умолчание.
+    default_role: ""
+    # Вход по паролю рядом с внешним. Выключать не рекомендуется: локальная
+    # запись администратора — путь внутрь, когда провайдер недоступен, а
+    # недоступен он бывает ровно в той аварии, ради которой развёрнута система
+    # восстановления.
+    allow_local_login: true
+
 # Экспорт Prometheus использует отдельный токен и не принимает cookie или
 # auth.api_tokens. Установщик создаёт защищённый файл автоматически.
 metrics:

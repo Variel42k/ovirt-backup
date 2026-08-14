@@ -5,6 +5,10 @@ export interface User {
   username: string
   role: Role
   disabled: boolean
+  /** 'local' — пароль хранится здесь; иначе имя внешнего провайдера. */
+  provider: string
+  /** Идентификатор у провайдера. Пусто у локальных записей. */
+  external_id?: string
   last_login_at?: string
   created_at: string
   updated_at: string

@@ -24,6 +24,7 @@ import type {
   ListResponse,
   Meta,
   MountSample,
+  OidcInfo,
   Recommendation,
   RemediationArchive,
   RemediationMode,
@@ -219,6 +220,16 @@ export const api = {
     http.post('/auth/login', { username, password }).then((r) => r.data),
   logout: () => http.post('/auth/logout').then((r) => r.data),
   me: () => http.get('/auth/me').then((r) => r.data),
+  oidcInfo: () => http.get<OidcInfo>('/auth/oidc/info').then((r) => r.data),
+  /**
+   * Адрес начала внешнего входа.
+   *
+   * Переход по нему делается сменой адреса страницы, а не запросом: дальше
+   * идёт цепочка перенаправлений к провайдеру и обратно, и пройти её должен
+   * сам браузер — XHR отработал бы её молча и остался бы ни с чем.
+   */
+  oidcStartURL: (redirect: string) =>
+    `/api/v1/auth/oidc/start?redirect=${encodeURIComponent(redirect)}`,
 
   // Метаданные и дашборд
   meta: () => http.get<Meta>('/meta').then((r) => r.data),

@@ -42,6 +42,8 @@ type metaResponse struct {
 		RemediationOn     bool   `json:"remediation_enabled"`
 		RemediationDryRun bool   `json:"remediation_dry_run"`
 		AuthEnabled       bool   `json:"auth_enabled"`
+		OIDCEnabled       bool   `json:"oidc_enabled"`
+		LocalLogin        bool   `json:"local_login"`
 	} `json:"capabilities"`
 
 	DefaultRetention model.RetentionPolicy `json:"default_retention"`
@@ -115,6 +117,8 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 	// интерфейс должен показывать то, что действует сейчас.
 	resp.Capabilities.RemediationDryRun = s.remediator.DryRun()
 	resp.Capabilities.AuthEnabled = s.cfg.Auth.Enabled
+	resp.Capabilities.OIDCEnabled = s.oidc != nil
+	resp.Capabilities.LocalLogin = s.localLoginAllowed()
 
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -312,6 +316,14 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 	// storages endpoints treat their secrets.
 	user.PasswordHash = ""
 	if payload.Password != "" {
+		// Пароль внешней записи — это обход провайдера: у неё появилась бы
+		// вторая дверь, о которой каталог не знает и которую он не закроет
+		// вместе с остальным доступом.
+		if user.IsExternal() {
+			s.writeError(w, r, badRequest(
+				"учётная запись %q внешняя: пароль задаётся у провайдера", user.Username))
+			return
+		}
 		if len(payload.Password) < 10 {
 			s.writeError(w, r, badRequest("пароль должен быть не короче 10 символов"))
 			return

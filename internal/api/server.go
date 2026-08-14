@@ -50,6 +50,11 @@ type Server struct {
 	// действует на процесс, переживать перезапуск ему не нужно, а запись в
 	// базу на каждую неудачную попытку сама стала бы точкой приложения силы.
 	logins *loginLimiter
+	// oidc пуст, когда внешний вход выключен: по этому полю обработчики и
+	// страница входа узнают, есть ли вторая дверь.
+	oidc *oidcClient
+	// oidcLogins помнит начатые внешние входы до возврата от провайдера.
+	oidcLogins *oidcPending
 }
 
 // Deps bundles what the API needs, so adding a dependency does not change
@@ -88,13 +93,20 @@ func New(d Deps) *Server {
 		body, _ := os.ReadFile(d.Config.Metrics.TokenFile)
 		metricsToken = bytes.TrimSpace(body)
 	}
-	return &Server{
+	srv := &Server{
 		cfg: d.Config, baseCfg: base, store: d.Store, pool: d.Pool, libvirt: d.LibvirtPool, engine: d.Engine,
 		scheduler: d.Scheduler, monitor: d.Monitor, remediator: d.Remediator,
 		bus: d.Bus, log: d.Logger, logs: d.Logs, quality: d.Quality, replicator: d.Replicator,
 		dr: d.DR, metricsToken: metricsToken,
-		logins: newLoginLimiter(),
+		logins:     newLoginLimiter(),
+		oidcLogins: newOIDCPending(),
 	}
+	if d.Config.Auth.Enabled && d.Config.Auth.OIDC.Enabled {
+		// Проверка настроек уже прошла в config.Validate; здесь остаётся
+		// только запомнить их. К провайдеру обращаемся при первом входе.
+		srv.oidc = newOIDCClient(d.Config.Auth.OIDC)
+	}
+	return srv
 }
 
 // Handler builds the complete HTTP handler: API routes, then the SPA.
@@ -114,6 +126,11 @@ func (s *Server) Handler() http.Handler {
 	// Login must be reachable without a session.
 	mux.Handle("POST /api/v1/auth/login", http.HandlerFunc(s.handleLogin))
 	mux.Handle("POST /api/v1/auth/logout", http.HandlerFunc(s.handleLogout))
+	// Внешний вход — тоже до всякой сессии, ради неё он и затевается. Info
+	// отвечает всегда: странице входа нужно знать, рисовать ли кнопку.
+	mux.Handle("GET /api/v1/auth/oidc/info", http.HandlerFunc(s.handleOIDCInfo))
+	mux.Handle("GET /api/v1/auth/oidc/start", http.HandlerFunc(s.handleOIDCStart))
+	mux.Handle("GET /api/v1/auth/oidc/callback", http.HandlerFunc(s.handleOIDCCallback))
 
 	if s.cfg.Server.ServeSPA {
 		mux.Handle("/", s.spaHandler())

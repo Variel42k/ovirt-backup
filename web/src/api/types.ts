@@ -752,8 +752,18 @@ export interface Meta {
     remediation_enabled: boolean
     remediation_dry_run: boolean
     auth_enabled: boolean
+    oidc_enabled: boolean
+    local_login: boolean
   }
   default_retention: RetentionPolicy
+}
+
+/** Что странице входа нужно знать до входа: есть ли внешний провайдер. */
+export interface OidcInfo {
+  enabled: boolean
+  button_label: string
+  /** false — вход по паролю выключен, форму имени и пароля показывать нечего. */
+  local_login: boolean
 }
 
 export interface BackupOption {

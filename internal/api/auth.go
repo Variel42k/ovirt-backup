@@ -184,6 +184,17 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Вход по паролю может быть выключен целиком: тогда единственная дверь —
+	// провайдер, и форма имени с паролем на странице входа даже не рисуется.
+	if !s.localLoginAllowed() {
+		s.audit(r, "auth.login", model.ScopeServer, req.Username, false, "вход по паролю отключён")
+		writeJSON(w, http.StatusForbidden, errorResponse{
+			Error: "вход по паролю отключён; войдите через внешнего провайдера",
+			Code:  "local_login_disabled",
+		})
+		return
+	}
+
 	if ok, retryAfter := s.logins.Allow(req.Username); !ok {
 		s.audit(r, "auth.login", model.ScopeServer, req.Username, false,
 			fmt.Sprintf("слишком много неудачных попыток, пауза %s", retryAfter))
@@ -203,17 +214,26 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// несуществующее имя отвечало бы мгновенно, а существующее — после bcrypt,
 	// и разница во времени выдавала бы имена учётных записей, сколько бы
 	// одинаковым ни был текст ответа.
+	//
+	// Пустой хеш — это внешняя учётная запись: пароля у неё нет и быть не
+	// может, поэтому сверяется заглушка. Подставлять сюда пустую строку
+	// значило бы отвечать ей мгновенно и снова выдавать состав таблицы
+	// разницей во времени.
 	hash := dummyPasswordHash
-	if err == nil {
+	if err == nil && user.PasswordHash != "" {
 		hash = user.PasswordHash
 	}
 	passwordOK := bcrypt.CompareHashAndPassword([]byte(hash), []byte(req.Password)) == nil
 
-	if err != nil || user.Disabled || !passwordOK {
+	if err != nil || user.Disabled || user.PasswordHash == "" || !passwordOK {
 		reason := "неверные учётные данные"
-		if err == nil && user.Disabled {
+		switch {
+		case err != nil:
+		case user.Disabled:
 			reason = "учётная запись отключена"
-		} else if err == nil {
+		case user.PasswordHash == "":
+			reason = "внешняя учётная запись: вход только через провайдера"
+		default:
 			reason = "неверный пароль"
 		}
 		s.logins.Fail(req.Username)
@@ -227,10 +247,27 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	s.logins.Reset(req.Username)
 
-	token, err := newSessionToken()
+	session, err := s.issueSession(w, r, user)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
+	}
+	s.audit(r, "auth.login", model.ScopeServer, user.Username, true, "")
+	writeJSON(w, http.StatusOK, loginResponse{
+		Username: user.Username, Role: user.Role, ExpiresAt: session.ExpiresAt,
+	})
+}
+
+// issueSession creates the server-side session and hands the browser its cookie.
+//
+// Обе двери — пароль и внешний провайдер — ведут сюда, и дальше приложение не
+// различает, какой из них вошли: сессия одна и та же. Разведи это на две ветки
+// с собственными флагами куки, и однажды они разойдутся именно в том флаге,
+// который защищает.
+func (s *Server) issueSession(w http.ResponseWriter, r *http.Request, user *model.User) (*model.Session, error) {
+	token, err := newSessionToken()
+	if err != nil {
+		return nil, err
 	}
 	expires := time.Now().UTC().Add(s.cfg.Auth.SessionTTL)
 	session := &model.Session{
@@ -243,8 +280,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt: expires,
 	}
 	if err := s.store.CreateSession(r.Context(), session); err != nil {
-		s.writeError(w, r, err)
-		return
+		return nil, err
 	}
 	_ = s.store.TouchUserLogin(r.Context(), user.ID)
 
@@ -257,8 +293,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteLaxMode,
 		Expires:  expires,
 	})
-	s.audit(r, "auth.login", model.ScopeServer, user.Username, true, "")
-	writeJSON(w, http.StatusOK, loginResponse{Username: user.Username, Role: user.Role, ExpiresAt: expires})
+	return session, nil
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {

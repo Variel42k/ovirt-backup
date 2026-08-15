@@ -2,6 +2,7 @@ package quality
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,6 +18,29 @@ func qualityDefaults() model.BackupQualitySettings {
 		StorageWarningFreePct: 15, StorageCriticalFreePct: 5,
 		StorageWarningForecastDays: 30, StorageCriticalForecastDays: 7,
 		HistoryRetentionDays: 90,
+	}
+}
+
+// На стенде висело два с половиной десятка оповещений «копия задания «» в
+// хранилище «» просрочена». Так выглядела машина, которую не покрывает ни одно
+// задание: задания у неё нет, подставлять в текст нечего. Оповещение, из
+// которого не следует, что делать, — это шум, прячущий остальные.
+func TestStaleMessageNamesWhatIsWrong(t *testing.T) {
+	uncovered := Item{VMName: "Bootstrap-HEAD-dev", Reason: "нет активного задания с расписанием"}
+	got := staleMessage(uncovered)
+	if strings.Contains(got, "«»") {
+		t.Errorf("в тексте остались пустые кавычки: %q", got)
+	}
+	if !strings.Contains(got, uncovered.VMName) {
+		t.Errorf("в тексте не названа ВМ: %q", got)
+	}
+
+	covered := Item{VMName: "Bootstrap-HEAD-dev", JobID: "job-1", JobName: "Ночной", StorageName: "storage"}
+	got = staleMessage(covered)
+	for _, want := range []string{covered.VMName, covered.JobName, covered.StorageName} {
+		if !strings.Contains(got, want) {
+			t.Errorf("в тексте нет %q: %s", want, got)
+		}
 	}
 }
 

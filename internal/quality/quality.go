@@ -710,6 +710,21 @@ func capacityFor(target *model.StorageTarget, samples []*model.StorageUsageSampl
 	return item
 }
 
+// staleMessage describes a missing or overdue copy.
+//
+// Оценка заводится и на машины, которых не покрывает ни одно задание: у такой
+// записи нет ни задания, ни хранилища, и общий текст выходил с пустыми
+// кавычками — «копия задания «» в хранилище «» просрочена». На стенде таких
+// оповещений набралось два с половиной десятка, и понять по ним, что делать,
+// нельзя: сказано про копию задания, которого нет.
+func staleMessage(item Item) string {
+	if item.JobID == "" {
+		return fmt.Sprintf("ВМ %s не покрыта ни одним заданием бэкапа", item.VMName)
+	}
+	return fmt.Sprintf("ВМ %s: копия задания «%s» в хранилище «%s» просрочена",
+		item.VMName, item.JobName, item.StorageName)
+}
+
 func (s *Service) EvaluateAlerts(ctx context.Context) error {
 	summary, err := s.Evaluate(ctx, "")
 	if err != nil {
@@ -726,7 +741,7 @@ func (s *Service) EvaluateAlerts(ctx context.Context) error {
 			severity model.Severity
 			message  string
 		}{
-			{!item.FreshnessOK, model.AlertBackupStale, model.SeverityWarning, fmt.Sprintf("ВМ %s: копия задания «%s» в хранилище «%s» просрочена", item.VMName, item.JobName, item.StorageName)},
+			{!item.FreshnessOK, model.AlertBackupStale, model.SeverityWarning, staleMessage(item)},
 			{!item.ReplicaOK, model.AlertBackupReplicaFailed, model.SeverityCritical, fmt.Sprintf("ВМ %s: обязательная реплика задания «%s» в «%s» неполна", item.VMName, item.JobName, item.StorageName)},
 			{!item.VerificationOK, model.AlertBackupVerifyStale, model.SeverityWarning, fmt.Sprintf("ВМ %s: проверка %s для задания «%s» просрочена", item.VMName, item.VerifyMode.Title(), item.JobName)},
 			{!item.PerformanceOK, model.AlertBackupPerformance, model.SeverityWarning, fmt.Sprintf("ВМ %s: скорость задания «%s» снизилась более чем на установленный порог", item.VMName, item.JobName)},

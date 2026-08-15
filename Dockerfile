@@ -2,7 +2,7 @@
 # для локальной и серверной сборки Docker.
 
 # Сборка веб-интерфейса.
-FROM docker.io/library/node:22-alpine AS web
+FROM docker.io/library/node:24-alpine AS web
 WORKDIR /build/web
 COPY web/package.json web/package-lock.json* ./
 RUN npm ci --no-audit --no-fund || npm install --no-audit --no-fund

@@ -47,16 +47,17 @@ jobs:
           --health-retries 20
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           # Версия берётся из go.mod: разъехаться им нельзя.
           go-version-file: go.mod
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          # Действующая LTS-линия; та же, что в Dockerfile.
+          node-version: '24'
           cache: npm
           cache-dependency-path: web/package-lock.json
 
@@ -85,7 +86,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Сборка образа от обычного пользователя. Ровно так на стенде вылезло,
       # что в контекст попадают каталоги с примонтированными дисками: из-под

@@ -1,0 +1,94 @@
+# Проверки на каждый push и pull request.
+#
+# Гоняется та же самая `./run check`, что и на машине разработчика: fmt, vet,
+# тесты, проверка типов интерфейса. Отдельного набора команд для CI нет
+# намеренно — расходятся они молча, и тогда «на моей машине проходит» перестаёт
+# что-либо значить.
+#
+# За день работы дважды ломалось незаметно (кэш оболочки, стёртая
+# конфигурация), а ложное оповещение прожило пять дней. Это и есть то, ради
+# чего здесь автоматика.
+
+name: Проверки
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Незаконченный прогон устаревшего коммита никому не нужен.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Сборка, тесты, типы
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    services:
+      # Тестам хранилища нужна настоящая PostgreSQL: они заводят себе по базе
+      # на пакет и применяют миграции целиком. Версия и порт — те же, что
+      # поднимает `./run test-db start`, чтобы строка подключения совпадала
+      # с локальной.
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: jhvirt
+          POSTGRES_PASSWORD: jhvirt
+          POSTGRES_DB: jhvirt_test
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U jhvirt"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # Версия берётся из go.mod: разъехаться им нельзя.
+          go-version-file: go.mod
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      # Без node_modules `./run check` молча пропускает проверку типов.
+      - name: Зависимости интерфейса
+        working-directory: web
+        run: npm ci --no-audit --no-fund
+
+      - name: ./run check
+        env:
+          JHV_TEST_POSTGRES_DSN: host=localhost port=55432 user=jhvirt password=jhvirt dbname=jhvirt_test sslmode=disable
+        run: ./run check
+
+      # `./run check` форматирует код на месте (gofmt -w), а не жалуется на
+      # него. Поэтому неотформатированное ловится здесь: после проверок дерево
+      # обязано остаться прежним.
+      - name: Дерево не изменилось
+        run: git diff --exit-code
+
+      - name: Сборка интерфейса
+        working-directory: web
+        run: npm run build:fast
+
+  image:
+    name: Образ
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      # Сборка образа от обычного пользователя. Ровно так на стенде вылезло,
+      # что в контекст попадают каталоги с примонтированными дисками: из-под
+      # root это не проявлялось, и дефект жил незамеченным.
+      - name: docker build
+        run: docker build -t ovirt-backup:ci .

@@ -404,21 +404,38 @@ type storageDomainList struct {
 	StorageDomain []StorageDomain `json:"storage_domain"`
 }
 
-// EffectiveStatus picks whichever status field the engine populated.
+// EffectiveStatus reports whether the domain is attached and usable.
+//
+// В ответе движка два разных признака, и подставлять один вместо другого
+// нельзя. `status` (в списке доменов — `storage_domain_status` при
+// дата-центре) отвечает на вопрос «подключён ли домен»: active, inactive,
+// maintenance, unattached. А `external_status` отвечает на другой вопрос — как
+// домен оценивает система хранения: ok, info, warning, error, failure.
+//
+// Раньше второе подставлялось вместо первого, когда первое пусто. Исправный
+// домен приходил «в состоянии ok», с active это не совпадало — и висело
+// критическое оповещение «домен хранения в состоянии ok», которое нечем было
+// погасить: следующий опрос давал ровно то же самое. Оповещение, которое
+// нельзя ни погасить, ни понять, приучает не смотреть на список оповещений
+// вовсе.
 func (s *StorageDomain) EffectiveStatus() string {
-	switch {
-	case s.Status != "":
+	if s.Status != "" {
 		return s.Status
-	case s.ExternalStatus != "":
-		return s.ExternalStatus
-	case s.StorageDomainStatus != "":
-		return s.StorageDomainStatus
-	default:
-		// A domain attached to a data center with nothing wrong reports no
-		// status at all on some builds; treat that as active rather than
-		// raising a false alarm.
-		return "active"
 	}
+	if s.StorageDomainStatus != "" {
+		return s.StorageDomainStatus
+	}
+	// Оценка системы хранения подключение не заменяет, но плохую оценку терять
+	// нельзя — ради неё это поле и читают. Escalate только error и failure:
+	// warning и info описывают состояние, при котором домен работает, и
+	// критического оповещения о недоступности не заслуживают.
+	switch strings.ToLower(strings.TrimSpace(s.ExternalStatus)) {
+	case "error", "failure":
+		return strings.ToLower(strings.TrimSpace(s.ExternalStatus))
+	}
+	// Домен, подключённый к дата-центру и не имеющий замечаний, на части
+	// сборок не сообщает статус вовсе; это не повод поднимать тревогу.
+	return "active"
 }
 
 // Snapshot is a VM snapshot.

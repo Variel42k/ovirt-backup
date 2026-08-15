@@ -89,6 +89,65 @@ func TestUnparseableTimestampKeepsDocument(t *testing.T) {
 	}
 }
 
+// На стенде висело критическое оповещение «домен хранения в состоянии ok»:
+// движок не заполнил status, а external_status со значением ok подставлялся
+// вместо него. С active это не совпадало, оповещение поднималось на каждом
+// опросе и погасить его было нечем.
+//
+// Два признака отвечают на разные вопросы: подключён ли домен и что о нём
+// думает система хранения. Смешивать их нельзя ни в одну сторону.
+func TestStorageDomainStatusDoesNotMixTwoScales(t *testing.T) {
+	cases := []struct {
+		name   string
+		domain StorageDomain
+		want   string
+	}{
+		{
+			name:   "исправный домен без status",
+			domain: StorageDomain{ExternalStatus: "ok"},
+			want:   "active",
+		},
+		{
+			name:   "оценка хранилища не спорит с подключением",
+			domain: StorageDomain{Status: "maintenance", ExternalStatus: "ok"},
+			want:   "maintenance",
+		},
+		{
+			name:   "статус при дата-центре, когда верхний пуст",
+			domain: StorageDomain{StorageDomainStatus: "inactive", ExternalStatus: "ok"},
+			want:   "inactive",
+		},
+		{
+			name:   "отказ системы хранения не теряется",
+			domain: StorageDomain{ExternalStatus: "error"},
+			want:   "error",
+		},
+		{
+			name:   "FAILURE в другом регистре",
+			domain: StorageDomain{ExternalStatus: "FAILURE"},
+			want:   "failure",
+		},
+		{
+			name:   "замечание не выдаётся за недоступность",
+			domain: StorageDomain{ExternalStatus: "warning"},
+			want:   "active",
+		},
+		{
+			name:   "движок не сказал ничего",
+			domain: StorageDomain{},
+			want:   "active",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.domain.EffectiveStatus(); got != tc.want {
+				t.Errorf("состояние %q, ожидалось %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // Checkpoints and events carry the same kind of field, and both sit on the
 // backup path where a decode failure would surface as a failed backup.
 func TestCheckpointAndEventTimestamps(t *testing.T) {

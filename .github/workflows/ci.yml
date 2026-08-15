@@ -40,8 +40,13 @@ jobs:
           POSTGRES_DB: jhvirt_test
         ports:
           - 55432:5432
+        # Имя базы в проверке живости обязательно: без него pg_isready берёт
+        # базу по имени пользователя, её нет, и сервер каждые пять секунд
+        # пишет в журнал FATAL. Проверка при этом проходит — сервер ведь
+        # ответил, — а в журнале остаётся шум, среди которого настоящий сбой
+        # уже не разглядеть.
         options: >-
-          --health-cmd "pg_isready -U jhvirt"
+          --health-cmd "pg_isready -U jhvirt -d jhvirt_test"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20

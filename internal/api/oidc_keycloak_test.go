@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"html"
 	"io"
 	"net"
@@ -168,6 +169,55 @@ func TestOIDCAgainstKeycloak(t *testing.T) {
 	}
 	if len(users) != 1 || users[0].Provider != model.ProviderOIDC || users[0].PasswordHash != "" {
 		t.Errorf("после внешнего входа в базе %d записей: %+v", len(users), users)
+	}
+
+	// 6. Выход должен закрыть сессию и у провайдера. Проверяется это не тем,
+	// что мы построили адрес, а тем, что провайдер после перехода по нему
+	// снова спрашивает пароль: иначе «Выйти» защищает только на вид.
+	logout, err := client.Post(app.URL+"/api/v1/auth/logout", "application/json", nil)
+	if err != nil {
+		t.Fatalf("выход: %v", err)
+	}
+	var logoutBody map[string]string
+	if err := json.NewDecoder(logout.Body).Decode(&logoutBody); err != nil {
+		t.Fatalf("разбор ответа выхода: %v", err)
+	}
+	logout.Body.Close()
+
+	target := logoutBody["logout_url"]
+	if !strings.HasPrefix(target, issuer) {
+		t.Fatalf("адрес выхода не ведёт к провайдеру: %q", target)
+	}
+	atProvider, err := client.Get(target)
+	if err != nil {
+		t.Fatalf("выход у провайдера: %v", err)
+	}
+	atProvider.Body.Close()
+	if atProvider.StatusCode >= 400 {
+		t.Fatalf("провайдер отверг адрес выхода: статус %d", atProvider.StatusCode)
+	}
+
+	// Начинаем вход заново. Провайдер обязан снова показать форму: если сессия
+	// у него осталась жива, он молча вернул бы код, и человек, нажавший
+	// «Выйти», оказался бы внутри одним нажатием.
+	restart, err := client.Get(app.URL + "/api/v1/auth/oidc/start?redirect=/")
+	if err != nil {
+		t.Fatalf("повторное начало входа: %v", err)
+	}
+	restart.Body.Close()
+
+	afterLogout, err := client.Get(restart.Header.Get("Location"))
+	if err != nil {
+		t.Fatalf("повторный запрос к провайдеру: %v", err)
+	}
+	secondPage, err := io.ReadAll(afterLogout.Body)
+	afterLogout.Body.Close()
+	if err != nil {
+		t.Fatalf("чтение ответа провайдера: %v", err)
+	}
+	if afterLogout.StatusCode != http.StatusOK || !strings.Contains(string(secondPage), "kc-form-login") {
+		t.Errorf("после выхода провайдер не спросил пароль: статус %d, ответ %s",
+			afterLogout.StatusCode, shortText(string(secondPage), 200))
 	}
 }
 

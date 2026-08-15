@@ -51,8 +51,12 @@ type oidcClient struct {
 	cfg config.OIDCConfig
 
 	mu       sync.Mutex
+	provider *oidc.Provider
 	oauth    *oauth2.Config
 	verifier *oidc.IDTokenVerifier
+	// endSession — адрес выхода у провайдера. Библиотека его не разбирает,
+	// поэтому читаем из того же discovery-документа сами.
+	endSession string
 }
 
 func newOIDCClient(cfg config.OIDCConfig) *oidcClient {
@@ -85,6 +89,17 @@ func (c *oidcClient) connect(ctx context.Context) (*oauth2.Config, *oidc.IDToken
 		scopes = append([]string{oidc.ScopeOpenID}, scopes...)
 	}
 
+	// end_session_endpoint не входит в разобранные библиотекой поля, но лежит
+	// в том же документе.
+	var discovered struct {
+		EndSessionEndpoint string `json:"end_session_endpoint"`
+	}
+	if err := provider.Claims(&discovered); err != nil {
+		return nil, nil, fmt.Errorf("разбор настроек провайдера %s: %w", issuer, err)
+	}
+
+	c.provider = provider
+	c.endSession = discovered.EndSessionEndpoint
 	c.oauth = &oauth2.Config{
 		ClientID:     c.cfg.ClientID,
 		ClientSecret: c.cfg.ClientSecret,
@@ -94,6 +109,57 @@ func (c *oidcClient) connect(ctx context.Context) (*oauth2.Config, *oidc.IDToken
 	}
 	c.verifier = provider.Verifier(&oidc.Config{ClientID: c.cfg.ClientID})
 	return c.oauth, c.verifier, nil
+}
+
+// logoutURL строит адрес выхода у провайдера.
+//
+// Пустой ответ означает «провайдер выхода не предлагает» — тогда закрывается
+// только своя сессия, и это честнее, чем уводить браузер в никуда.
+func (c *oidcClient) logoutURL(idToken string) string {
+	c.mu.Lock()
+	endSession, redirect := c.endSession, strings.TrimSpace(c.cfg.PostLogoutRedirectURL)
+	c.mu.Unlock()
+
+	if endSession == "" || idToken == "" {
+		return ""
+	}
+	params := url.Values{"id_token_hint": {idToken}}
+	// Адрес возврата провайдер обязан иметь в списке разрешённых, поэтому
+	// передаётся только заданный оператором: незарегистрированный превращает
+	// выход в страницу ошибки.
+	if redirect != "" {
+		params.Set("post_logout_redirect_uri", redirect)
+		params.Set("client_id", c.cfg.ClientID)
+	}
+	separator := "?"
+	if strings.Contains(endSession, "?") {
+		separator = "&"
+	}
+	return endSession + separator + params.Encode()
+}
+
+// groupsFromUserInfo добирает группы у провайдера, когда в токене их нет.
+//
+// ADFS и Azure кладут членство не в id_token, а отдают его на /userinfo, и без
+// этого запроса вход у них отказывался бы всем подряд с формулировкой «группы
+// не отобразились».
+func (c *oidcClient) groupsFromUserInfo(ctx context.Context, token *oauth2.Token) []string {
+	c.mu.Lock()
+	provider, claim := c.provider, c.cfg.GroupsClaim
+	c.mu.Unlock()
+
+	if provider == nil || claim == "" {
+		return nil
+	}
+	info, err := provider.UserInfo(ctx, oauth2.StaticTokenSource(token))
+	if err != nil {
+		return nil
+	}
+	var claims map[string]any
+	if err := info.Claims(&claims); err != nil {
+		return nil
+	}
+	return claimStrings(lookupClaim(claims, claim))
 }
 
 // oidcInfoResponse — то, что странице входа нужно знать до входа.
@@ -262,6 +328,11 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	_ = idToken.Claims(&raw)
 
 	groups := claimStrings(lookupClaim(raw, s.cfg.Auth.OIDC.GroupsClaim))
+	if len(groups) == 0 {
+		// Часть провайдеров членство в токен не кладёт, но отдаёт на
+		// /userinfo. Без этого запроса им отказывали бы во входе всем.
+		groups = s.oidc.groupsFromUserInfo(ctx, token)
+	}
 	role, err := mapOIDCRole(s.cfg.Auth.OIDC, groups)
 	if err != nil {
 		// Причина уходит человеку целиком: в ней перечислены пришедшие группы,
@@ -276,7 +347,8 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := s.issueSession(w, r, user); err != nil {
+	// Токен личности остаётся при сессии: он понадобится провайдеру при выходе.
+	if _, err := s.issueSession(w, r, user, rawIDToken); err != nil {
 		s.oidcFailed(w, r, "не удалось завести сессию", err)
 		return
 	}

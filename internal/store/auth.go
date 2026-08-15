@@ -185,9 +185,9 @@ func (s *Store) CreateSession(ctx context.Context, sess *model.Session) error {
 		sess.CreatedAt = time.Now().UTC()
 	}
 	_, err := s.db.Exec(ctx, `INSERT INTO sessions (token, user_id, user_agent, remote_ip,
-		expires_at, created_at) VALUES (?,?,?,?,?,?)`,
+		expires_at, created_at, oidc_id_token) VALUES (?,?,?,?,?,?,?)`,
 		sess.Token, sess.UserID, sess.UserAgent, sess.RemoteIP, sess.ExpiresAt,
-		sess.CreatedAt)
+		sess.CreatedAt, nullString(sess.OIDCIDToken))
 	if err != nil {
 		return fmt.Errorf("insert session: %w", err)
 	}
@@ -198,17 +198,18 @@ func (s *Store) CreateSession(ctx context.Context, sess *model.Session) error {
 // expired sessions and disabled accounts.
 func (s *Store) GetSession(ctx context.Context, token string) (*model.Session, error) {
 	row := s.db.QueryRow(ctx, `SELECT s.token, s.user_id, s.user_agent, s.remote_ip, s.expires_at,
-		s.created_at, u.username, u.role, u.disabled
+		s.created_at, s.oidc_id_token, u.username, u.role, u.disabled
 		FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token=?`, token)
 
 	var (
 		sess                 model.Session
 		role                 string
+		idToken              sql.NullString
 		disabled             bool
 		expiresAt, createdAt time.Time
 	)
 	err := row.Scan(&sess.Token, &sess.UserID, &sess.UserAgent, &sess.RemoteIP, &expiresAt,
-		&createdAt, &sess.Username, &role, &disabled)
+		&createdAt, &idToken, &sess.Username, &role, &disabled)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -217,6 +218,7 @@ func (s *Store) GetSession(ctx context.Context, token string) (*model.Session, e
 	}
 
 	sess.Role = model.Role(role)
+	sess.OIDCIDToken = idToken.String
 	sess.ExpiresAt = utc(expiresAt)
 	sess.CreatedAt = utc(createdAt)
 

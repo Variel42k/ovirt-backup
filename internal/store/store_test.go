@@ -314,6 +314,53 @@ func TestAlertDeduplication(t *testing.T) {
 	}
 }
 
+// Отпечаток манифеста досчитывается только там, где его нет.
+//
+// Копии, снятые до появления этого поля, лежат с пустым значением, и разбор
+// каталога заполняет его из run.json. Но перезаписать уже сохранённый
+// отпечаток нельзя ни при каких условиях: расхождение с ним и есть тот самый
+// признак подмены, ради которого он хранится.
+func TestManifestFingerprintIsFilledOnlyWhenMissing(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	run := &model.BackupRun{
+		ServerID: "srv", VMID: "vm-1", VMName: "db-01", Type: model.BackupSnapshot,
+		Status: model.RunSucceeded, StorageTargetID: "tgt-1", CreatedAt: time.Now().UTC(),
+	}
+	if err := s.CreateBackupRun(ctx, run); err != nil {
+		t.Fatalf("создание точки: %v", err)
+	}
+
+	filled, err := s.SetRunManifestSHA256(ctx, run.ID, "отпечаток-из-хранилища")
+	if err != nil || !filled {
+		t.Fatalf("досчёт отпечатка: filled=%v err=%v", filled, err)
+	}
+	stored, err := s.GetBackupRun(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("чтение точки: %v", err)
+	}
+	if stored.ManifestSHA256 != "отпечаток-из-хранилища" {
+		t.Fatalf("отпечаток %q", stored.ManifestSHA256)
+	}
+
+	// Второй разбор с другим значением ничего не меняет: именно так выглядит
+	// подменённый манифест, и затирать прежний отпечаток недопустимо.
+	filled, err = s.SetRunManifestSHA256(ctx, run.ID, "чужой-отпечаток")
+	if err != nil {
+		t.Fatalf("повторный досчёт: %v", err)
+	}
+	if filled {
+		t.Error("существующий отпечаток был перезаписан")
+	}
+	if stored, err = s.GetBackupRun(ctx, run.ID); err != nil {
+		t.Fatalf("чтение точки: %v", err)
+	}
+	if stored.ManifestSHA256 != "отпечаток-из-хранилища" {
+		t.Errorf("отпечаток изменился на %q", stored.ManifestSHA256)
+	}
+}
+
 func TestBackupRunChainLookup(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)

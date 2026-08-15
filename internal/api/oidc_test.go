@@ -63,6 +63,7 @@ func newFakeProvider(t *testing.T) *fakeProvider {
 			"authorization_endpoint":                provider.server.URL + "/authorize",
 			"token_endpoint":                        provider.server.URL + "/token",
 			"jwks_uri":                              provider.server.URL + "/keys",
+			"end_session_endpoint":                  provider.server.URL + "/logout",
 			"id_token_signing_alg_values_supported": []string{"RS256"},
 		})
 	})
@@ -284,6 +285,38 @@ func TestOIDCLoginIssuesSessionAndCreatesAccount(t *testing.T) {
 	// которой провайдер не знает.
 	if user.PasswordHash != "" {
 		t.Error("у внешней учётной записи оказался хеш пароля")
+	}
+
+	// Выход обязан закрывать и сессию провайдера. Иначе «Выйти» защищает лишь
+	// на вид: следующее нажатие кнопки входа пустит обратно, ничего не
+	// спросив, — на общем компьютере это и есть вся разница.
+	logout, err := client.Post(app.URL+"/api/v1/auth/logout", "application/json", nil)
+	if err != nil {
+		t.Fatalf("выход: %v", err)
+	}
+	var logoutBody map[string]string
+	if err := json.NewDecoder(logout.Body).Decode(&logoutBody); err != nil {
+		t.Fatalf("разбор ответа выхода: %v", err)
+	}
+	logout.Body.Close()
+
+	target := logoutBody["logout_url"]
+	if !strings.HasPrefix(target, provider.server.URL+"/logout") {
+		t.Errorf("выход не ведёт к провайдеру: %q", target)
+	}
+	// id_token_hint избавляет человека от лишнего вопроса «точно выйти?», а
+	// часть провайдеров без него отказывает.
+	if parsed, parseErr := url.Parse(target); parseErr != nil {
+		t.Errorf("адрес выхода не разбирается: %v", parseErr)
+	} else if parsed.Query().Get("id_token_hint") == "" {
+		t.Errorf("в адресе выхода нет id_token_hint: %q", target)
+	}
+
+	if resp, meErr := client.Get(app.URL + "/api/v1/auth/me"); meErr == nil {
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("после выхода сессия жива: /auth/me вернул %d", resp.StatusCode)
+		}
 	}
 
 	// Тот же адрес возврата второй раз не должен работать: код одноразовый, и
@@ -542,6 +575,78 @@ func TestClaimStringsAcceptsWhatProvidersSend(t *testing.T) {
 	}
 	if got := claimStrings(map[string]any{"a": 1}); got != nil {
 		t.Errorf("объект вместо списка дал %v", got)
+	}
+}
+
+// Адрес выхода собирается по правилам провайдера, а не наугад.
+func TestOIDCLogoutURL(t *testing.T) {
+	client := &oidcClient{
+		cfg:        config.OIDCConfig{ClientID: "jhvirt"},
+		endSession: "https://idp.example/logout",
+	}
+
+	// Уводить браузер некуда: провайдер выхода не предлагает либо токена нет.
+	if got := (&oidcClient{}).logoutURL("токен"); got != "" {
+		t.Errorf("без end_session_endpoint получен адрес %q", got)
+	}
+	if got := client.logoutURL(""); got != "" {
+		t.Errorf("без токена получен адрес %q", got)
+	}
+
+	parsed, err := url.Parse(client.logoutURL("токен-личности"))
+	if err != nil {
+		t.Fatalf("адрес не разбирается: %v", err)
+	}
+	if parsed.Query().Get("id_token_hint") != "токен-личности" {
+		t.Errorf("id_token_hint не передан: %s", parsed)
+	}
+	// Адрес возврата не передаётся, пока оператор его не задал: у провайдера
+	// он должен быть в списке разрешённых, иначе выход станет страницей ошибки.
+	if parsed.Query().Has("post_logout_redirect_uri") {
+		t.Errorf("незаданный адрес возврата всё равно передан: %s", parsed)
+	}
+
+	client.cfg.PostLogoutRedirectURL = "https://virt.example.org/login"
+	parsed, err = url.Parse(client.logoutURL("токен-личности"))
+	if err != nil {
+		t.Fatalf("адрес не разбирается: %v", err)
+	}
+	if parsed.Query().Get("post_logout_redirect_uri") != "https://virt.example.org/login" ||
+		parsed.Query().Get("client_id") != "jhvirt" {
+		t.Errorf("адрес возврата передан неполно: %s", parsed)
+	}
+
+	// У провайдера в адресе выхода уже могут быть свои параметры.
+	withQuery := &oidcClient{cfg: config.OIDCConfig{}, endSession: "https://idp.example/logout?realm=infra"}
+	parsed, err = url.Parse(withQuery.logoutURL("токен"))
+	if err != nil {
+		t.Fatalf("адрес не разбирается: %v", err)
+	}
+	if parsed.Query().Get("realm") != "infra" || parsed.Query().Get("id_token_hint") != "токен" {
+		t.Errorf("свои параметры провайдера потеряны: %s", parsed)
+	}
+}
+
+// Роль пересчитывается при входе, но выданная сессия живёт своим сроком.
+// Поэтому у внешних входов он короче: столько времени и живут права,
+// отобранные в каталоге.
+func TestExternalSessionsExpireSooner(t *testing.T) {
+	s := &Server{}
+	s.cfg.Auth.SessionTTL = 12 * time.Hour
+	s.cfg.Auth.OIDC.SessionTTL = time.Hour
+
+	if got := s.sessionTTL(true); got != time.Hour {
+		t.Errorf("срок внешней сессии %v, ожидался час", got)
+	}
+	if got := s.sessionTTL(false); got != 12*time.Hour {
+		t.Errorf("срок местной сессии %v, ожидалось 12 часов", got)
+	}
+
+	// Не задан — берётся общий, а не ноль: сессия, истекающая сразу, хуже
+	// длинной.
+	s.cfg.Auth.OIDC.SessionTTL = 0
+	if got := s.sessionTTL(true); got != 12*time.Hour {
+		t.Errorf("без своей настройки срок %v, ожидался общий", got)
 	}
 }
 

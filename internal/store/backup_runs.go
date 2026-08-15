@@ -55,6 +55,30 @@ func (s *Store) CreateBackupRun(ctx context.Context, r *model.BackupRun) error {
 }
 
 // UpdateBackupRun persists the mutable state of a run while it executes.
+// SetRunManifestSHA256 records the manifest fingerprint of a point that has
+// none, and reports whether anything changed.
+//
+// Копии, снятые до появления отпечатка, лежат в базе с пустым полем: сверять
+// их при разборе каталога не с чем, и подменённый манифест прошёл бы как
+// «точка уже известна». Отпечаток досчитывается из того же run.json, который
+// разбор только что прочитал.
+//
+// Условие в запросе, а не в вызывающем коде, намеренно: перезаписать
+// существующий отпечаток нельзя ни при каких обстоятельствах — расхождение с
+// ним и есть тот признак, ради которого он хранится.
+func (s *Store) SetRunManifestSHA256(ctx context.Context, runID, hash string) (bool, error) {
+	if runID == "" || hash == "" {
+		return false, nil
+	}
+	res, err := s.db.Exec(ctx, `UPDATE backup_runs SET manifest_sha256=?
+		WHERE id=? AND (manifest_sha256 IS NULL OR manifest_sha256='')`, hash, runID)
+	if err != nil {
+		return false, fmt.Errorf("set run manifest sha256: %w", err)
+	}
+	changed, _ := res.RowsAffected()
+	return changed > 0, nil
+}
+
 func (s *Store) UpdateBackupRun(ctx context.Context, r *model.BackupRun) error {
 	res, err := s.db.Exec(ctx, `UPDATE backup_runs SET
 		status=?, parent_run_id=?, chain_id=?, chain_index=?, storage_target_id=?, repo_path=?,

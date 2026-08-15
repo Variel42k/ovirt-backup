@@ -247,7 +247,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	s.logins.Reset(req.Username)
 
-	session, err := s.issueSession(w, r, user)
+	session, err := s.issueSession(w, r, user, "")
 	if err != nil {
 		s.writeError(w, r, err)
 		return
@@ -264,20 +264,21 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 // различает, какой из них вошли: сессия одна и та же. Разведи это на две ветки
 // с собственными флагами куки, и однажды они разойдутся именно в том флаге,
 // который защищает.
-func (s *Server) issueSession(w http.ResponseWriter, r *http.Request, user *model.User) (*model.Session, error) {
+func (s *Server) issueSession(w http.ResponseWriter, r *http.Request, user *model.User, idToken string) (*model.Session, error) {
 	token, err := newSessionToken()
 	if err != nil {
 		return nil, err
 	}
-	expires := time.Now().UTC().Add(s.cfg.Auth.SessionTTL)
+	expires := time.Now().UTC().Add(s.sessionTTL(idToken != ""))
 	session := &model.Session{
-		Token:     token,
-		UserID:    user.ID,
-		Username:  user.Username,
-		Role:      user.Role,
-		UserAgent: r.UserAgent(),
-		RemoteIP:  clientIP(r),
-		ExpiresAt: expires,
+		Token:       token,
+		UserID:      user.ID,
+		Username:    user.Username,
+		Role:        user.Role,
+		UserAgent:   r.UserAgent(),
+		RemoteIP:    clientIP(r),
+		ExpiresAt:   expires,
+		OIDCIDToken: idToken,
 	}
 	if err := s.store.CreateSession(r.Context(), session); err != nil {
 		return nil, err
@@ -296,15 +297,42 @@ func (s *Server) issueSession(w http.ResponseWriter, r *http.Request, user *mode
 	return session, nil
 }
 
+// sessionTTL выбирает срок жизни сессии.
+//
+// Внешним входам он короче общего: роль пересчитывается при входе, но уже
+// выданная сессия живёт своим сроком, и человек, у которого в каталоге отобрали
+// группу, остаётся здесь администратором до её конца.
+func (s *Server) sessionTTL(external bool) time.Duration {
+	if external && s.cfg.Auth.OIDC.SessionTTL > 0 {
+		return s.cfg.Auth.OIDC.SessionTTL
+	}
+	return s.cfg.Auth.SessionTTL
+}
+
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	// Выход у провайдера — отдельное действие, и без него «Выйти» защищает
+	// только на вид: сессия провайдера остаётся, и следующее нажатие кнопки
+	// входа пускает обратно, ничего не спросив. На общем компьютере это и есть
+	// вся разница между «вышел» и «кажется, вышел».
+	logoutURL := ""
 	if cookie, err := r.Cookie(sessionCookie); err == nil {
+		if session, sessErr := s.store.GetSession(r.Context(), cookie.Value); sessErr == nil && s.oidc != nil {
+			logoutURL = s.oidc.logoutURL(session.OIDCIDToken)
+		}
 		_ = s.store.DeleteSession(r.Context(), cookie.Value)
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name: sessionCookie, Value: "", Path: "/", HttpOnly: true, MaxAge: -1,
 		Secure: s.secureCookies(), SameSite: http.SameSiteLaxMode,
 	})
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+
+	response := map[string]string{"status": "ok"}
+	if logoutURL != "" {
+		// Уводит браузер интерфейс: сюда пришёл запрос из кода страницы, и
+		// перенаправление в ответе на него никуда браузер не переведёт.
+		response["logout_url"] = logoutURL
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {

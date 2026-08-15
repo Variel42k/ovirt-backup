@@ -61,6 +61,10 @@ type Session struct {
 	RemoteIP  string    `json:"remote_ip,omitempty"`
 	ExpiresAt time.Time `json:"expires_at"`
 	CreatedAt time.Time `json:"created_at"`
+	// OIDCIDToken — токен личности, по которому эта сессия заведена. Нужен
+	// провайдеру при выходе как id_token_hint. Пуст у входов по паролю и
+	// наружу не отдаётся.
+	OIDCIDToken string `json:"-"`
 }
 
 // Expired reports whether the session is no longer valid at t.

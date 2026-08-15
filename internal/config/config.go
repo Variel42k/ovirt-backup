@@ -90,6 +90,21 @@ type OIDCConfig struct {
 	// DefaultRole получают те, чьи группы ни во что не отобразились. Пусто —
 	// вход запрещён: молча выдавать права тому, кого не ждали, нельзя.
 	DefaultRole string `mapstructure:"default_role"`
+	// PostLogoutRedirectURL — куда провайдер вернёт браузер после выхода.
+	//
+	// Пусто — параметр не передаётся вовсе, и человек остаётся на странице
+	// провайдера. Это умолчание намеренное: адрес возврата провайдер обязан
+	// иметь в списке разрешённых, и незарегистрированный превращает выход в
+	// страницу ошибки.
+	PostLogoutRedirectURL string `mapstructure:"post_logout_redirect_url"`
+	// SessionTTL — срок сессии, заведённой через провайдера. Пусто — общий
+	// auth.session_ttl.
+	//
+	// Смысл в отзыве доступа: роль пересчитывается при входе, но уже выданная
+	// сессия живёт своим сроком, и сотрудник, у которого отобрали группу,
+	// остаётся администратором до её конца. Час вместо полусуток — компромисс:
+	// мгновенного отзыва он не даёт, но и не растягивает права на смену.
+	SessionTTL time.Duration `mapstructure:"session_ttl"`
 	// AllowLocalLogin оставляет вход по паролю рядом с внешним.
 	//
 	// Выключать не рекомендуется: локальная запись администратора — это путь
@@ -594,6 +609,10 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("auth.oidc.groups_claim", "groups")
 	v.SetDefault("auth.oidc.role_mapping", map[string]string{})
 	v.SetDefault("auth.oidc.default_role", "")
+	v.SetDefault("auth.oidc.post_logout_redirect_url", "")
+	// Час: отобранная у провайдера группа перестаёт действовать здесь не позже
+	// чем через час, а не через полсуток общего срока сессии.
+	v.SetDefault("auth.oidc.session_ttl", time.Hour)
 	v.SetDefault("auth.oidc.allow_local_login", true)
 	v.SetDefault("metrics.enabled", false)
 	v.SetDefault("metrics.token_file", "")

@@ -153,6 +153,18 @@ func (s *Server) scanCatalog(ctx context.Context, scan *model.CatalogScan) error
 		case getErr == nil && existing.ManifestSHA256 != "" && existing.ManifestSHA256 != candidate.hash:
 			candidate.status, candidate.details = "conflict", "run_id уже зарегистрирован с другим манифестом"
 		case getErr == nil:
+			// Точка известна, но без отпечатка: так лежат копии, снятые до его
+			// появления. Досчитываем — иначе при следующем разборе сверять их
+			// будет не с чем, и подменённый манифест пройдёт как «уже знаем».
+			if existing.ManifestSHA256 == "" {
+				if filled, fillErr := s.store.SetRunManifestSHA256(ctx, doc.RunID, candidate.hash); fillErr != nil {
+					s.log.Warn().Err(fillErr).Str("точка", doc.RunID).
+						Msg("не удалось сохранить отпечаток манифеста")
+				} else if filled {
+					s.log.Info().Str("точка", doc.RunID).
+						Msg("отпечаток манифеста досчитан по хранилищу")
+				}
+			}
 			if _, copyErr := s.store.GetBackupCopyForTarget(ctx, doc.RunID, scan.StorageTargetID); copyErr == nil {
 				candidate.status, candidate.details = "known", "точка и эта физическая копия уже зарегистрированы"
 			} else if errors.Is(copyErr, store.ErrNotFound) {

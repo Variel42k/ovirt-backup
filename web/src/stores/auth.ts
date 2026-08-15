@@ -37,12 +37,20 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   async function logout(): Promise<void> {
+    let providerLogout = ''
     try {
-      await api.logout()
+      const result = await api.logout()
+      providerLogout = result?.logout_url ?? ''
     } finally {
       authenticated.value = false
       username.value = ''
       role.value = 'viewer'
+    }
+    // Своя сессия закрыта, но у провайдера она осталась: без этого перехода
+    // следующее нажатие «Войти через провайдера» пустит обратно, ничего не
+    // спросив, — и «Выйти» окажется защитой только на вид.
+    if (providerLogout) {
+      window.location.href = providerLogout
     }
   }
 

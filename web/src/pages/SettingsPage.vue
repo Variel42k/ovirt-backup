@@ -242,6 +242,13 @@ function settingSource(source?: string): string {
   return source === 'database' ? 'сохранено в БД' : 'конфигурация запуска'
 }
 
+/** Запись, которую ведёт внешний провайдер: пароля у неё нет. */
+function isExternal(user: User): boolean {
+  return !!user.provider && user.provider !== 'local'
+}
+
+const editingExternal = computed(() => !!editing.value && isExternal(editing.value))
+
 function openCreate() {
   editing.value = null
   form.value = { username: '', password: '', role: 'operator', disabled: false }
@@ -797,17 +804,26 @@ onMounted(async () => {
 
         <q-tab-panel name="users" class="q-pa-none">
           <div class="row items-center q-pa-md">
-            <div class="text-subtitle1">Локальные учётные записи</div>
+            <div class="text-subtitle1">Учётные записи</div>
             <q-space />
             <q-btn color="primary" unelevated icon="add" label="Добавить" @click="openCreate" />
           </div>
           <q-list separator dense>
             <q-item v-for="user in users" :key="user.id">
-              <q-item-section avatar><q-icon name="person" /></q-item-section>
+              <q-item-section avatar>
+                <q-icon :name="isExternal(user) ? 'badge' : 'person'" />
+              </q-item-section>
               <q-item-section>
                 <q-item-label>
                   {{ user.username }}
                   <q-badge v-if="user.disabled" color="grey-7" class="q-ml-sm">заблокирован</q-badge>
+                  <q-badge v-if="isExternal(user)" color="indigo-4" class="q-ml-sm">
+                    внешняя
+                    <q-tooltip>
+                      Личность подтверждает провайдер {{ user.provider }}. Пароля у записи нет,
+                      роль пересчитывается при каждом входе.
+                    </q-tooltip>
+                  </q-badge>
                 </q-item-label>
                 <q-item-label caption>
                   {{ app.meta?.roles.find((r) => r.value === user.role)?.title ?? user.role }} ·
@@ -1009,7 +1025,11 @@ onMounted(async () => {
         <q-separator />
         <q-card-section class="q-gutter-md">
           <q-input v-model="form.username" label="Имя пользователя" outlined dense :disable="!!editing" />
+          <!-- У внешней записи пароля нет и быть не может: сервер такую правку
+               отклоняет. Показывать поле значило бы предлагать действие, которое
+               заведомо не сработает. -->
           <q-input
+            v-if="!editingExternal"
             v-model="form.password"
             label="Пароль"
             type="password"
@@ -1017,6 +1037,11 @@ onMounted(async () => {
             outlined
             dense
           />
+          <q-banner v-else dense class="bg-blue-1">
+            <template #avatar><q-icon name="badge" color="indigo" /></template>
+            Личность подтверждает провайдер «{{ editing?.provider }}»: пароль задаётся там же.
+            Здесь можно изменить роль — до следующего входа, когда она снова будет взята из групп.
+          </q-banner>
           <q-select
             v-model="form.role"
             :options="(app.meta?.roles ?? []).map((r) => ({ label: r.title, value: r.value }))"

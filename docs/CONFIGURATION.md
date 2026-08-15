@@ -413,6 +413,26 @@ auth:
 `auth.api_tokens` продолжают работать — они и есть запасной путь для
 интеграций.
 
+### Keycloak: что нужно завести на его стороне
+
+- **Клиент** с секретом (`Client authentication: On`), включённым `Standard flow`
+  и точным `redirect_uri` — с точностью до порта и пути.
+- **Mapper групп.** Без него `groups` в токене не будет вовсе, все группы
+  придут пустыми, и войти не сможет никто: тип `Group Membership`,
+  `Token Claim Name: groups`, `Full group path: Off` (иначе группы приедут как
+  `/virt-admins` и не совпадут с настройкой), включённый `Add to ID token`.
+- **Заполненный профиль пользователя.** При пустых имени и фамилии Keycloak
+  требует действие `Verify Profile` и до возврата в службу дело не доходит.
+
+Проверка целиком, включая обмен кода и подпись, есть в тестах:
+
+```bash
+JHV_TEST_OIDC_ISSUER=http://localhost:8081/realms/jhvirt-check JHV_TEST_OIDC_CLIENT_SECRET=... JHV_TEST_OIDC_PASSWORD=... go test ./internal/api/ -run TestOIDCAgainstKeycloak -count=1
+```
+
+Без этих переменных тест пропускается; как поднять Keycloak в docker, написано
+в его заголовке (`internal/api/oidc_keycloak_test.go`).
+
 ### Проверка
 
 1. `GET /api/v1/auth/oidc/info` отвечает без аутентификации и показывает, видит

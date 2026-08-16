@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"slices"
 	"sort"
 	"sync"
@@ -21,6 +22,24 @@ import (
 	"adveng/jh_virt/internal/repo"
 	"adveng/jh_virt/internal/store"
 )
+
+// copyLease — на сколько worker забирает задачу.
+//
+// Пять минут выбраны из двух соображений: продление идёт втрое чаще, поэтому
+// одна потерянная попытка ничего не ломает; а задача упавшего worker-а
+// возвращается в очередь через приемлемое время, а не висит до перезапуска.
+const copyLease = 5 * time.Minute
+
+// workerID отличает worker-ов в журнале и в колонке locked_by. Имя хоста в
+// нём не случайно: когда экземпляров службы станет несколько, по этой колонке
+// будет видно, чья задача повисла.
+func (r *Replicator) workerID(index int) string {
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		host = "неизвестный-узел"
+	}
+	return fmt.Sprintf("%s/%d/%d", host, os.Getpid(), index)
+}
 
 var retryDelays = []time.Duration{
 	time.Minute, 5 * time.Minute, 15 * time.Minute, time.Hour,
@@ -225,7 +244,11 @@ func (r *Replicator) worker(index int) {
 		case <-ticker.C:
 		}
 		for {
-			copies, err := r.store.ListDueBackupCopies(r.ctx, 1)
+			// Задача забирается арендой, а не просто читается: worker-ов
+			// несколько, и без этого двое взялись бы за один перенос. Внутри
+			// процесса от этого спасала карта в памяти, между процессами —
+			// ничто.
+			copies, err := r.store.ClaimBackupCopies(r.ctx, r.workerID(index), 1, copyLease)
 			if err != nil {
 				r.log.Error().Err(err).Int("worker", index).Msg("очередь репликации недоступна")
 				break
@@ -247,9 +270,40 @@ func (r *Replicator) process(copy *model.BackupCopy) {
 		return
 	}
 	r.active[copy.ID] = cancel
+	worker := copy.LockedBy
 	r.mu.Unlock()
+
+	// Аренда продлевается, пока идёт перенос: он измеряется десятками минут, а
+	// аренда короче переноса означала бы, что задачу подхватит второй worker,
+	// пока первый ещё качает.
+	renewDone := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(copyLease / 3)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-renewDone:
+				return
+			case <-ticker.C:
+				if ok, err := r.store.RenewCopyLease(context.WithoutCancel(ctx), copy.ID, worker, copyLease); err != nil {
+					r.log.Debug().Err(err).Str("копия", copy.ID).Msg("не удалось продлить аренду задачи")
+				} else if !ok {
+					// Аренду отобрали: значит, задачу уже ведёт кто-то другой,
+					// и продолжать вторым потоком нельзя.
+					r.log.Warn().Str("копия", copy.ID).Msg("аренда задачи потеряна, перенос прерван")
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+
 	defer func() {
+		close(renewDone)
 		cancel()
+		// Аренда снимается, чем бы работа ни кончилась: статус к этому моменту
+		// уже выставлен, и держать задачу за собой незачем.
+		_ = r.store.ReleaseCopyLease(context.WithoutCancel(r.ctx), copy.ID, worker)
 		r.mu.Lock()
 		delete(r.active, copy.ID)
 		delete(r.manual, copy.ID)

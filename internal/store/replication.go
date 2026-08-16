@@ -16,7 +16,7 @@ const copyColumns = `c.id, c.run_id, c.storage_target_id, COALESCE(t.name, ''), 
 	c.required, c.status, c.repo_path, COALESCE(c.source_copy_id, ''), c.manifest_sha256,
 	c.object_count, c.copied_objects, c.total_bytes, c.copied_bytes, c.attempt_count,
 	c.next_retry_at, c.last_error, c.verified_at, c.locked_until, c.started_at, c.ended_at,
-	c.created_at, c.updated_at`
+	c.created_at, c.updated_at, c.locked_by`
 
 func (s *Store) EnsurePrimaryCopy(ctx context.Context, run *model.BackupRun) (*model.BackupCopy, error) {
 	status := model.CopyPending
@@ -141,6 +141,105 @@ func (s *Store) ListDueBackupCopies(ctx context.Context, limit int) ([]*model.Ba
 	return scanBackupCopies(rows)
 }
 
+// ClaimBackupCopies забирает готовые к работе задачи одному worker-у.
+//
+// FOR UPDATE … SKIP LOCKED — тот самый механизм, ради которого очередь и
+// оставлена в PostgreSQL: параллельные worker-ы разбирают строки, ни разу не
+// столкнувшись, и всё это в той же транзакции, что и остальное состояние
+// копии. Раньше защита была только внутри процесса — карта в памяти, — и
+// второй экземпляр службы переливал бы те же гигабайты второй раз.
+//
+// Аренда (locked_until) отвечает за упавший worker: его задача возвращается в
+// очередь сама, когда срок истёк, и не требует ни ручного вмешательства, ни
+// предположения «раз я перезапустился, всё выполнявшееся было моим».
+func (s *Store) ClaimBackupCopies(ctx context.Context, worker string, limit int, lease time.Duration) ([]*model.BackupCopy, error) {
+	if limit <= 0 {
+		limit = 1
+	}
+	if lease <= 0 {
+		lease = 5 * time.Minute
+	}
+	now := time.Now().UTC()
+	until := now.Add(lease)
+
+	rows, err := s.db.Query(ctx, `UPDATE backup_copies SET
+			status='copying', locked_until=?, locked_by=?, updated_at=?
+		WHERE id IN (
+			SELECT c.id FROM backup_copies c
+			LEFT JOIN storage_targets t ON t.id=c.storage_target_id
+			WHERE c.role='replica' AND c.required=TRUE
+			  AND COALESCE(t.enabled,FALSE)=TRUE
+			  AND (
+			        (c.status IN ('pending','failed')
+			         AND (c.next_retry_at IS NULL OR c.next_retry_at<=?))
+			     -- Задача в работе, но без живой аренды — брошенная. Так
+			     -- выглядит и упавший worker, и строка, оставшаяся от версии,
+			     -- которая аренду ещё не проставляла.
+			     OR (c.status IN ('copying','verifying')
+			         AND (c.locked_until IS NULL OR c.locked_until<=?))
+			  )
+			ORDER BY c.created_at
+			FOR UPDATE OF c SKIP LOCKED
+			LIMIT ?
+		)
+		RETURNING id`, until, worker, now, now, now, limit)
+	if err != nil {
+		return nil, fmt.Errorf("claim backup copies: %w", err)
+	}
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("claim backup copies: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	_ = rows.Close()
+
+	out := make([]*model.BackupCopy, 0, len(ids))
+	for _, id := range ids {
+		copyRecord, err := s.GetBackupCopy(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, copyRecord)
+	}
+	return out, nil
+}
+
+// RenewCopyLease продлевает аренду, пока перенос идёт.
+//
+// Переносы измеряются десятками минут, и аренда короче переноса означала бы,
+// что задачу подхватит второй worker, пока первый ещё качает. Продлевать
+// вправе только владелец: иначе тот, у кого аренду уже отобрали, вернул бы её
+// себе и появилась бы вторая передача.
+func (s *Store) RenewCopyLease(ctx context.Context, id, worker string, lease time.Duration) (bool, error) {
+	res, err := s.db.Exec(ctx, `UPDATE backup_copies SET locked_until=?, updated_at=?
+		WHERE id=? AND locked_by=?`,
+		time.Now().UTC().Add(lease), time.Now().UTC(), id, worker)
+	if err != nil {
+		return false, fmt.Errorf("renew copy lease: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// ReleaseCopyLease снимает аренду по окончании работы, чем бы она ни кончилась.
+func (s *Store) ReleaseCopyLease(ctx context.Context, id, worker string) error {
+	_, err := s.db.Exec(ctx, `UPDATE backup_copies SET locked_until=NULL, locked_by='', updated_at=?
+		WHERE id=? AND locked_by=?`, time.Now().UTC(), id, worker)
+	if err != nil {
+		return fmt.Errorf("release copy lease: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) ListReplicationCopies(ctx context.Context, status, targetID string, limit int) ([]*model.BackupCopy, error) {
 	query := `SELECT ` + copyColumns + ` FROM backup_copies c
 		LEFT JOIN storage_targets t ON t.id=c.storage_target_id WHERE c.role='replica'`
@@ -187,7 +286,8 @@ func scanBackupCopy(row rowScanner) (*model.BackupCopy, error) {
 	err := row.Scan(&c.ID, &c.RunID, &c.StorageTargetID, &c.StorageTargetName, &role,
 		&c.Required, &status, &c.RepoPath, &c.SourceCopyID, &c.ManifestSHA256,
 		&c.ObjectCount, &c.CopiedObjects, &c.TotalBytes, &c.CopiedBytes, &c.AttemptCount,
-		&nextRetry, &c.LastError, &verified, &locked, &started, &ended, &created, &updated)
+		&nextRetry, &c.LastError, &verified, &locked, &started, &ended, &created, &updated,
+		&c.LockedBy)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}

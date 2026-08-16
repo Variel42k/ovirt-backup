@@ -559,14 +559,16 @@ type BackupCopy struct {
 	TotalBytes        int64            `json:"total_bytes"`
 	CopiedBytes       int64            `json:"copied_bytes"`
 	AttemptCount      int              `json:"attempt_count"`
-	NextRetryAt       *time.Time       `json:"next_retry_at,omitempty"`
-	LastError         string           `json:"last_error,omitempty"`
-	VerifiedAt        *time.Time       `json:"verified_at,omitempty"`
-	LockedUntil       *time.Time       `json:"locked_until,omitempty"`
-	StartedAt         *time.Time       `json:"started_at,omitempty"`
-	EndedAt           *time.Time       `json:"ended_at,omitempty"`
-	CreatedAt         time.Time        `json:"created_at"`
-	UpdatedAt         time.Time        `json:"updated_at"`
+	// LockedBy — worker, держащий аренду задачи. Пусто у свободных.
+	LockedBy    string     `json:"locked_by,omitempty"`
+	NextRetryAt *time.Time `json:"next_retry_at,omitempty"`
+	LastError   string     `json:"last_error,omitempty"`
+	VerifiedAt  *time.Time `json:"verified_at,omitempty"`
+	LockedUntil *time.Time `json:"locked_until,omitempty"`
+	StartedAt   *time.Time `json:"started_at,omitempty"`
+	EndedAt     *time.Time `json:"ended_at,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
 }
 
 // Healthy reports whether the physical data can be read for verification,

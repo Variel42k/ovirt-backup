@@ -16,6 +16,14 @@
 #   ./install.sh --port 18080          порт наружу, если 8080 занят
 #   ./install.sh --database-url-file /root/jhvirt.dsn  внешняя PostgreSQL
 #   ./install.sh --no-start            подготовить, но не запускать
+#
+# Вход в систему (только для docker-вариантов):
+#   ./install.sh --oidc none           только по паролю (по умолчанию)
+#   ./install.sh --oidc keycloak       поднять Keycloak рядом и настроить
+#   ./install.sh --keycloak-port 8081  порт Keycloak наружу
+#   ./install.sh --oidc external --oidc-issuer https://kc/realms/infra \
+#                --oidc-client-id jhvirt --oidc-client-secret-file /root/kc.secret
+#                                      подключить существующий провайдер
 #   ./install.sh --uninstall           выбрать, что удалить (с терминалом)
 #   ./install.sh --uninstall=systemd   снять только systemd-службу
 #   ./install.sh --uninstall=docker    снять только контейнеры
@@ -41,6 +49,14 @@ LEGACY_CONFIG_NAME="virt-manager.yaml"
 
 MODE=""; URL=""; DATABASE_URL_FILE=""; UNINSTALL_TARGET=""; START=1; PORT=8080
 UNINSTALL_REMOVE_CONFIG=0; UNINSTALL_REMOVE_DATA=0
+# Внешний вход: none — только пароль, keycloak — поднять рядом, external —
+# подключить существующего провайдера.
+OIDC_MODE=""; OIDC_ISSUER=""; OIDC_CLIENT_ID=""; OIDC_CLIENT_SECRET_FILE=""
+KEYCLOAK_PORT=8081; KEYCLOAK_REALM="jhvirt"; KEYCLOAK_URL=""
+KEYCLOAK_ADMIN_USER="admin"; KEYCLOAK_ADMIN_PASSWORD=""; OIDC_CLIENT_SECRET=""
+# Имена групп допуска. Пользователь, не попавший ни в одну, в систему не
+# допускается: default_role остаётся пустым.
+GROUP_ADMIN="virt-admins"; GROUP_OPERATOR="virt-operators"; GROUP_VIEWER="virt-readers"
 
 die() { printf '\nошибка: %s\n' "$*" >&2; exit 1; }
 say() { printf '%s\n' "$*"; }
@@ -58,6 +74,20 @@ while [ $# -gt 0 ]; do
         --database-url-file) [ $# -ge 2 ] || die "--database-url-file требует путь"; DATABASE_URL_FILE="$2"; shift 2 ;;
         --database-url-file=*) DATABASE_URL_FILE="${1#--database-url-file=}"; shift ;;
         --no-start) START=0; shift ;;
+        --oidc) [ $# -ge 2 ] || die "--oidc требует значение"; OIDC_MODE="$2"; shift 2 ;;
+        --oidc=*) OIDC_MODE="${1#--oidc=}"; shift ;;
+        --oidc-issuer) [ $# -ge 2 ] || die "--oidc-issuer требует значение"; OIDC_ISSUER="$2"; shift 2 ;;
+        --oidc-issuer=*) OIDC_ISSUER="${1#--oidc-issuer=}"; shift ;;
+        --oidc-client-id) [ $# -ge 2 ] || die "--oidc-client-id требует значение"; OIDC_CLIENT_ID="$2"; shift 2 ;;
+        --oidc-client-id=*) OIDC_CLIENT_ID="${1#--oidc-client-id=}"; shift ;;
+        # Секрет — файлом, а не значением: аргументы командной строки видны в
+        # ps любому пользователю машины и оседают в истории оболочки.
+        --oidc-client-secret-file) [ $# -ge 2 ] || die "--oidc-client-secret-file требует путь"; OIDC_CLIENT_SECRET_FILE="$2"; shift 2 ;;
+        --oidc-client-secret-file=*) OIDC_CLIENT_SECRET_FILE="${1#--oidc-client-secret-file=}"; shift ;;
+        --keycloak-port) [ $# -ge 2 ] || die "--keycloak-port требует значение"; KEYCLOAK_PORT="$2"; shift 2 ;;
+        --keycloak-port=*) KEYCLOAK_PORT="${1#--keycloak-port=}"; shift ;;
+        --keycloak-url) [ $# -ge 2 ] || die "--keycloak-url требует значение"; KEYCLOAK_URL="$2"; shift 2 ;;
+        --keycloak-url=*) KEYCLOAK_URL="${1#--keycloak-url=}"; shift ;;
         --uninstall=*) MODE=uninstall; UNINSTALL_TARGET="${1#--uninstall=}"; shift ;;
         --uninstall) MODE=uninstall; shift ;;
         --remove-config) UNINSTALL_REMOVE_CONFIG=1; shift ;;
@@ -859,6 +889,247 @@ wait_ready() {
     return 1
 }
 
+# --- Внешний вход -----------------------------------------------------------
+
+# Спрашивается только для docker-вариантов: Keycloak поднимается тем же
+# compose. Для systemd остаётся вход по паролю — существующего провайдера там
+# подключают правкой конфигурации, отдельного вопроса это не стоит.
+choose_oidc() {
+    [ -z "$OIDC_MODE" ] || return 0
+    if [ "$MODE" = systemd ] || [ ! -t 0 ]; then
+        OIDC_MODE=none
+        return 0
+    fi
+
+    say ""
+    say "Как входить в систему?"
+    say ""
+    say "  1) только по паролю — учётные записи ведутся здесь (по умолчанию)"
+    say "  2) поднять Keycloak рядом — он же настраивается на домены и"
+    say "     второй фактор (FreeOTP и совместимые)"
+    say "  3) подключить существующий Keycloak или другой OIDC-провайдер"
+    say ""
+    say "Вход по паролю остаётся в любом случае: это путь внутрь, когда"
+    say "провайдер недоступен, а недоступен он бывает как раз в аварии."
+    say ""
+    while :; do
+        printf 'Номер [1]: '
+        read -r OIDC_CHOICE || OIDC_CHOICE=""
+        [ -n "$OIDC_CHOICE" ] || OIDC_CHOICE=1
+        case "$OIDC_CHOICE" in
+            1) OIDC_MODE=none; return 0 ;;
+            2) OIDC_MODE=keycloak; return 0 ;;
+            3) OIDC_MODE=external; return 0 ;;
+            *) say "Нет такого варианта." ;;
+        esac
+    done
+}
+
+ask_nonempty() {
+    ANSWER=""
+    while [ -z "$ANSWER" ]; do
+        printf '%s' "$1"
+        read -r ANSWER || ANSWER=""
+    done
+}
+
+# Проверяет, что для выбранного способа хватает данных, и добирает недостающее
+# вопросами. Без терминала недостающее — это ошибка, а не повод продолжить с
+# наполовину настроенным входом.
+prepare_oidc() {
+    case "$OIDC_MODE" in
+        ""|none) OIDC_MODE=none; return 0 ;;
+        keycloak|external) ;;
+        *) die "--oidc принимает none, keycloak или external" ;;
+    esac
+
+    [ "$MODE" = systemd ] && die "--oidc поддерживается только для docker-вариантов"
+    have curl || die "для настройки внешнего входа нужен curl"
+
+    if [ "$OIDC_MODE" = external ]; then
+        if [ -t 0 ]; then
+            [ -n "$OIDC_ISSUER" ] || { ask_nonempty "Адрес realm (issuer), например https://keycloak.example.org/realms/infra: "; OIDC_ISSUER="$ANSWER"; }
+            [ -n "$OIDC_CLIENT_ID" ] || { ask_nonempty "Идентификатор клиента [jhvirt]: "; OIDC_CLIENT_ID="$ANSWER"; }
+            if [ -z "$OIDC_CLIENT_SECRET_FILE" ] && [ -z "${OIDC_CLIENT_SECRET:-}" ]; then
+                ask_nonempty "Секрет клиента: "; OIDC_CLIENT_SECRET="$ANSWER"
+            fi
+        fi
+        [ -n "$OIDC_ISSUER" ] || die "--oidc external требует --oidc-issuer"
+        [ -n "$OIDC_CLIENT_ID" ] || OIDC_CLIENT_ID="jhvirt"
+        if [ -n "$OIDC_CLIENT_SECRET_FILE" ]; then
+            [ -f "$OIDC_CLIENT_SECRET_FILE" ] || die "нет файла с секретом: $OIDC_CLIENT_SECRET_FILE"
+            OIDC_CLIENT_SECRET="$(tr -d '\r\n' < "$OIDC_CLIENT_SECRET_FILE")"
+        fi
+        [ -n "${OIDC_CLIENT_SECRET:-}" ] || die "--oidc external требует --oidc-client-secret-file"
+    else
+        # Свой Keycloak: адрес складывается из внешнего адреса службы и порта
+        # Keycloak. Именно он попадёт в issuer, поэтому браузер и служба будут
+        # звать провайдера одинаково.
+        if [ -z "$KEYCLOAK_URL" ]; then
+            KC_SCHEME="${URL%%://*}"
+            KC_HOSTPORT="${URL#*://}"; KC_HOSTPORT="${KC_HOSTPORT%%/*}"
+            KEYCLOAK_URL="$KC_SCHEME://${KC_HOSTPORT%%:*}:$KEYCLOAK_PORT"
+        fi
+        validate_port "$KEYCLOAK_PORT" || die "--keycloak-port: нужен номер от 1 до 65535"
+        OIDC_ISSUER="$KEYCLOAK_URL/realms/$KEYCLOAK_REALM"
+        OIDC_CLIENT_ID="jhvirt"
+        OIDC_CLIENT_SECRET="$(gen_secret 24)"
+        KEYCLOAK_ADMIN_PASSWORD="$(gen_secret 18)"
+        [ -n "$OIDC_CLIENT_SECRET" ] && [ -n "$KEYCLOAK_ADMIN_PASSWORD" ] ||
+            die "не удалось сгенерировать секреты для Keycloak"
+    fi
+
+    if [ -t 0 ] && [ "$OIDC_MODE" != none ]; then
+        say ""
+        say "Группы допуска. Кто не попал ни в одну — в систему не допускается."
+        printf 'Группа администраторов [%s]: ' "$GROUP_ADMIN"
+        read -r ANSWER || ANSWER=""; [ -n "$ANSWER" ] && GROUP_ADMIN="$ANSWER"
+        printf 'Группа операторов [%s]: ' "$GROUP_OPERATOR"
+        read -r ANSWER || ANSWER=""; [ -n "$ANSWER" ] && GROUP_OPERATOR="$ANSWER"
+        printf 'Группа наблюдателей [%s]: ' "$GROUP_VIEWER"
+        read -r ANSWER || ANSWER=""; [ -n "$ANSWER" ] && GROUP_VIEWER="$ANSWER"
+    fi
+}
+
+# Соответствие групп ролям — словарь, а viper словари из переменных окружения
+# не собирает. Поэтому оно пишется в файл настроек, который compose монтирует
+# в контейнер.
+#
+# Файл делается из штатного образца заменой единственной строки role_mapping,
+# а не дописыванием секции в конец: второй ключ auth: в том же документе — это
+# дубликат, и разбор YAML откажет целиком.
+write_oidc_config() {
+    OIDC_CONFIG="$1"
+    OIDC_SAMPLE="$COMPOSE_DIR/../config/$CONFIG_NAME"
+    [ -f "$OIDC_SAMPLE" ] || OIDC_SAMPLE="$HERE/config/$CONFIG_NAME"
+    [ -f "$OIDC_SAMPLE" ] || die "не найден образец конфигурации $CONFIG_NAME"
+
+    awk -v a="$GROUP_ADMIN" -v o="$GROUP_OPERATOR" -v v="$GROUP_VIEWER" '
+        /^[[:space:]]*role_mapping: \{\}[[:space:]]*$/ {
+            print "    role_mapping:"
+            printf "      \"%s\": \"admin\"\n", a
+            printf "      \"%s\": \"operator\"\n", o
+            printf "      \"%s\": \"viewer\"\n", v
+            found = 1
+            next
+        }
+        { print }
+        END { if (!found) exit 3 }
+    ' "$OIDC_SAMPLE" > "$OIDC_CONFIG" ||
+        die "в образце $CONFIG_NAME не нашлась строка role_mapping: {} — впишите соответствие групп вручную"
+    chmod 644 "$OIDC_CONFIG"
+}
+
+# Настройки внешнего входа в .env. Секрет клиента живёт только здесь: файл
+# конфигурации лежит в репозитории установки, и секретам там не место.
+write_oidc_env() {
+    OIDC_ENV_FILE="$1"
+    [ "$OIDC_MODE" = none ] && return 0
+
+    write_oidc_config "$WORK/$CONFIG_NAME"
+
+    set_plain_env JHV_CONFIG_FILE "./$CONFIG_NAME" "$OIDC_ENV_FILE"
+    set_plain_env JHV_OIDC_ENABLED true "$OIDC_ENV_FILE"
+    set_plain_env JHV_OIDC_ISSUER "$OIDC_ISSUER" "$OIDC_ENV_FILE"
+    set_plain_env JHV_OIDC_CLIENT_ID "$OIDC_CLIENT_ID" "$OIDC_ENV_FILE"
+    set_plain_env JHV_OIDC_CLIENT_SECRET "$OIDC_CLIENT_SECRET" "$OIDC_ENV_FILE"
+    set_plain_env JHV_OIDC_REDIRECT_URL "$URL/api/v1/auth/oidc/callback" "$OIDC_ENV_FILE"
+    set_plain_env JHV_OIDC_POST_LOGOUT_URL "$URL/login" "$OIDC_ENV_FILE"
+
+    if [ "$OIDC_MODE" = keycloak ]; then
+        set_plain_env COMPOSE_PROFILES keycloak "$OIDC_ENV_FILE"
+        set_plain_env KEYCLOAK_PORT "$KEYCLOAK_PORT" "$OIDC_ENV_FILE"
+        set_plain_env KEYCLOAK_DB keycloak "$OIDC_ENV_FILE"
+        set_plain_env JHV_KEYCLOAK_URL "$KEYCLOAK_URL" "$OIDC_ENV_FILE"
+        set_plain_env KEYCLOAK_ADMIN_USER "$KEYCLOAK_ADMIN_USER" "$OIDC_ENV_FILE"
+        set_plain_env KEYCLOAK_ADMIN_PASSWORD "$KEYCLOAK_ADMIN_PASSWORD" "$OIDC_ENV_FILE"
+        set_plain_env JHV_OIDC_BUTTON_LABEL "Войти через Keycloak" "$OIDC_ENV_FILE"
+    fi
+}
+
+# --- Keycloak ---------------------------------------------------------------
+
+keycloak_token() {
+    curl -sS -m 20 --fail \
+        -d "grant_type=password" -d "client_id=admin-cli" \
+        -d "username=$KEYCLOAK_ADMIN_USER" --data-urlencode "password=$KEYCLOAK_ADMIN_PASSWORD" \
+        "$KEYCLOAK_URL/realms/master/protocol/openid-connect/token" 2>/dev/null |
+        sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p'
+}
+
+keycloak_post() {
+    curl -sS -m 30 -o /dev/null -w '%{http_code}' \
+        -H "Authorization: Bearer $KC_TOKEN" -H 'Content-Type: application/json' \
+        -X POST -d "$2" "$KEYCLOAK_URL/admin/realms$1" 2>/dev/null
+}
+
+# Первый запуск Keycloak с пустой базой — это миграция схемы, и три минуты там
+# не редкость.
+keycloak_wait() {
+    KC_TRY=0
+    while [ "$KC_TRY" -lt 90 ]; do
+        if curl -sS -m 5 -o /dev/null "$KEYCLOAK_URL/realms/master" 2>/dev/null; then
+            return 0
+        fi
+        KC_TRY=$((KC_TRY+1))
+        sleep 2
+    done
+    return 1
+}
+
+# Заводит realm, группы и клиента. Повторный запуск не ломается: уже
+# существующее Keycloak отвергает кодом 409, и это не ошибка установки.
+keycloak_bootstrap() {
+    KC_TOKEN="$(keycloak_token)"
+    [ -n "$KC_TOKEN" ] || die "Keycloak не принял пароль администратора — проверьте $KEYCLOAK_URL"
+
+    KC_CODE="$(keycloak_post "" "{\"realm\":\"$KEYCLOAK_REALM\",\"enabled\":true}")"
+    case "$KC_CODE" in
+        201|409) ;;
+        *) die "не удалось создать realm $KEYCLOAK_REALM (код $KC_CODE)" ;;
+    esac
+
+    for KC_GROUP in "$GROUP_ADMIN" "$GROUP_OPERATOR" "$GROUP_VIEWER"; do
+        KC_CODE="$(keycloak_post "/$KEYCLOAK_REALM/groups" "{\"name\":\"$KC_GROUP\"}")"
+        case "$KC_CODE" in
+            201|409) ;;
+            *) die "не удалось создать группу $KC_GROUP (код $KC_CODE)" ;;
+        esac
+    done
+
+    # Mapper обязателен: без него утверждения groups в токене нет вовсе, и
+    # войти не сможет никто. full.path=false — иначе группы приедут как
+    # /virt-admins и не совпадут с настройкой.
+    KC_CLIENT="{
+        \"clientId\":\"$OIDC_CLIENT_ID\",
+        \"enabled\":true,
+        \"publicClient\":false,
+        \"secret\":\"$OIDC_CLIENT_SECRET\",
+        \"standardFlowEnabled\":true,
+        \"redirectUris\":[\"$URL/api/v1/auth/oidc/callback\"],
+        \"webOrigins\":[\"+\"],
+        \"attributes\":{\"post.logout.redirect.uris\":\"$URL/login\"},
+        \"protocolMappers\":[{
+            \"name\":\"groups\",
+            \"protocol\":\"openid-connect\",
+            \"protocolMapper\":\"oidc-group-membership-mapper\",
+            \"config\":{
+                \"claim.name\":\"groups\",
+                \"full.path\":\"false\",
+                \"id.token.claim\":\"true\",
+                \"access.token.claim\":\"true\",
+                \"userinfo.token.claim\":\"true\"
+            }
+        }]
+    }"
+    KC_CODE="$(keycloak_post "/$KEYCLOAK_REALM/clients" "$KC_CLIENT")"
+    case "$KC_CODE" in
+        201) ;;
+        409) say "    клиент $OIDC_CLIENT_ID уже был заведён; секрет из .env должен совпадать с его" ;;
+        *) die "не удалось создать клиента $OIDC_CLIENT_ID (код $KC_CODE)" ;;
+    esac
+}
+
 # --- Контейнеры -------------------------------------------------------------
 
 install_containers() {
@@ -867,6 +1138,11 @@ install_containers() {
     if [ "$START" -eq 1 ] && ! have curl && ! have wget; then
         die "для проверки готовности нужен curl или wget"
     fi
+
+    # Спрашивается после адреса службы: из него складывается и адрес Keycloak,
+    # и адрес возврата, который провайдер сверяет побуквенно.
+    choose_oidc
+    prepare_oidc
 
     if [ "$BUNDLE" -eq 1 ]; then
         step "раскладка в $PREFIX"
@@ -897,6 +1173,7 @@ install_containers() {
         set_plain_env JHV_EXTERNAL_URL "$URL" "$WORK/.env"
 		set_plain_env JHV_PORT "$PORT" "$WORK/.env"
 		set_plain_env JHV_METRICS_ENABLED true "$WORK/.env"
+        write_oidc_env "$WORK/.env"
     else
         # Пароль базы задаётся один раз — при создании тома. Если том с прошлой
         # установки уцелел, а .env исчез, сгенерированный пароль базе не
@@ -1004,6 +1281,7 @@ PostgreSQL хранит пароль внутри тома и новый не п
 			printf 'JHV_METRICS_ENABLED=true\n'
             printf 'TZ=%s\n' "$(cat /etc/timezone 2>/dev/null || echo Europe/Moscow)"
         } > "$WORK/.env"
+        write_oidc_env "$WORK/.env"
         umask 022
         chmod 600 "$WORK/.env"
         say "    создан $WORK/.env, пароль базы сгенерирован"
@@ -1021,6 +1299,32 @@ PostgreSQL хранит пароль внутри тома и новый не п
         return
     fi
 
+    if [ "$OIDC_MODE" = keycloak ]; then
+        step "база для Keycloak"
+        # Заводится до его старта: без своей базы Keycloak не поднимется, а
+        # docker-entrypoint-initdb.d отрабатывает только на пустом томе — том
+        # же здесь чаще всего уже есть с прошлой установки.
+        # shellcheck disable=SC2086
+        (cd "$WORK" && $RUN up -d postgres) >/dev/null 2>&1 ||
+            die "не удалось запустить PostgreSQL"
+        KC_DB_TRY=0
+        while [ "$KC_DB_TRY" -lt 40 ]; do
+            # shellcheck disable=SC2086
+            (cd "$WORK" && $RUN exec -T postgres pg_isready -U jhvirt -q) >/dev/null 2>&1 && break
+            KC_DB_TRY=$((KC_DB_TRY+1)); sleep 2
+        done
+        # shellcheck disable=SC2086
+        if (cd "$WORK" && $RUN exec -T postgres psql -U jhvirt -d postgres -tAc \
+                "SELECT 1 FROM pg_database WHERE datname='keycloak'") 2>/dev/null | grep -q 1; then
+            say "    база keycloak уже есть"
+        else
+            # shellcheck disable=SC2086
+            (cd "$WORK" && $RUN exec -T postgres createdb -U jhvirt keycloak) >/dev/null 2>&1 ||
+                die "не удалось создать базу keycloak"
+            say "    база keycloak создана"
+        fi
+    fi
+
     step "сборка образа и запуск (в первый раз это несколько минут)"
     # shellcheck disable=SC2086
     (cd "$WORK" && $RUN up -d --build --remove-orphans) || die "запуск не удался; смотрите вывод выше"
@@ -1031,6 +1335,19 @@ PostgreSQL хранит пароль внутри тома и новый не п
         # shellcheck disable=SC2086
         (cd "$WORK" && $RUN logs --tail 30 "$COMPOSE_SERVICE" 2>/dev/null) || true
         die "за 3 минуты сервис не стал готов — последние строки журнала выше"
+    fi
+
+    if [ "$OIDC_MODE" = keycloak ]; then
+        step "настройка Keycloak"
+        keycloak_wait ||
+            die "Keycloak не ответил за три минуты по адресу $KEYCLOAK_URL.
+Журнал: cd $WORK && $RUN logs keycloak"
+        keycloak_bootstrap
+        say "    realm $KEYCLOAK_REALM, клиент $OIDC_CLIENT_ID и группы созданы"
+        # Пароль администратора Keycloak из файла стираем — как и пароль
+        # администратора самой службы: учётная запись заведена, дальше он в
+        # файле лишний.
+        set_plain_env KEYCLOAK_ADMIN_PASSWORD "" "$WORK/.env"
     fi
 
     # Пароль администратора: если .env создавали мы, он известен точно. Если
@@ -1055,8 +1372,35 @@ PostgreSQL хранит пароль внутри тома и новый не п
         say "  Забыли — задайте новый:"
         say "    cd $WORK && $RUN run --rm $COMPOSE_SERVICE -reset-password admin"
     fi
+    if [ "$OIDC_MODE" = keycloak ]; then
+        say ""
+        say "  Keycloak:      $KEYCLOAK_URL"
+        say "  администратор: $KEYCLOAK_ADMIN_USER"
+        say "  пароль:        $KEYCLOAK_ADMIN_PASSWORD"
+        say ""
+        say "  Запишите и его — из файла он тоже стёрт."
+    elif [ "$OIDC_MODE" = external ]; then
+        say ""
+        say "  внешний вход:  $OIDC_ISSUER"
+    fi
     say "════════════════════════════════════════════════════════════"
     say ""
+    if [ "$OIDC_MODE" != none ]; then
+        say "Внешний вход настроен, но пускать пока некого:"
+        say "  • заведите пользователей и включите их в группы допуска —"
+        say "    $GROUP_ADMIN, $GROUP_OPERATOR, $GROUP_VIEWER;"
+        say "  • кто не попал ни в одну, в систему не допускается: так и задумано;"
+        if [ "$OIDC_MODE" = keycloak ]; then
+            say "  • домены подключаются в Keycloak: realm $KEYCLOAK_REALM → User Federation;"
+            say "  • второй фактор — там же: Authentication → Required Actions → Configure OTP"
+            say "    (FreeOTP и совместимые);"
+        fi
+        say "  • соответствие групп ролям правится в $WORK/$CONFIG_NAME без пересборки:"
+        say "      cd $WORK && $RUN up -d"
+        say "  • вход по паролю остался: он не проходит через провайдера, и второй"
+        say "    фактор на него не распространяется — держите такие записи аварийными."
+        say ""
+    fi
     say "Дальше:"
     say "  • TLS не настроен — при необходимости поставьте обратный прокси перед портом $PORT."
     say "  • Скопируйте ключ шифрования отдельно от базы и не туда, где копии:"

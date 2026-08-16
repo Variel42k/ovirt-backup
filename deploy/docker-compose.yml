@@ -99,10 +99,49 @@ services:
       JHV_MONITOR_REMEDIATION_DRY_RUN: "${JHV_REMEDIATION_DRY_RUN:-true}"
       # Пароль первого администратора; пусто — будет сгенерирован и напечатан.
       JHV_AUTH_BOOTSTRAP_PASSWORD: "${JHV_ADMIN_PASSWORD:-}"
+      # Вход через внешнего провайдера (Keycloak и совместимые).
+      #
+      # Соответствие групп ролям — auth.oidc.role_mapping — здесь задать
+      # нельзя: это словарь, а viper не собирает словарь из переменной
+      # окружения. Он и всё прочее, чего нет в этом списке, задаётся в файле
+      # настроек (см. JHV_CONFIG_FILE ниже).
+      JHV_AUTH_OIDC_ENABLED: "${JHV_OIDC_ENABLED:-false}"
+      JHV_AUTH_OIDC_ISSUER: "${JHV_OIDC_ISSUER:-}"
+      JHV_AUTH_OIDC_CLIENT_ID: "${JHV_OIDC_CLIENT_ID:-}"
+      # Секрет — только через .env: файл настроек лежит в репозитории.
+      JHV_AUTH_OIDC_CLIENT_SECRET: "${JHV_OIDC_CLIENT_SECRET:-}"
+      # Задаётся целиком и обязателен при включённом внешнем входе: провайдер
+      # сверяет его побуквенно. Собирать его здесь из внешнего адреса нельзя —
+      # вложенная подстановка расходится между версиями Compose (см. выше про
+      # подключение к базе). Вид: https://virt.example.org/api/v1/auth/oidc/callback
+      JHV_AUTH_OIDC_REDIRECT_URL: "${JHV_OIDC_REDIRECT_URL:-}"
+      JHV_AUTH_OIDC_BUTTON_LABEL: "${JHV_OIDC_BUTTON_LABEL:-}"
+      JHV_AUTH_OIDC_GROUPS_CLAIM: "${JHV_OIDC_GROUPS_CLAIM:-groups}"
+      # Пусто — вошедшему без подходящей группы отказано во входе.
+      JHV_AUTH_OIDC_DEFAULT_ROLE: "${JHV_OIDC_DEFAULT_ROLE:-}"
+      JHV_AUTH_OIDC_POST_LOGOUT_REDIRECT_URL: "${JHV_OIDC_POST_LOGOUT_URL:-}"
+      JHV_AUTH_OIDC_SESSION_TTL: "${JHV_OIDC_SESSION_TTL:-1h}"
+      # Вход по паролю рядом с внешним. Выключать не рекомендуется: локальная
+      # запись администратора — путь внутрь, когда провайдер недоступен.
+      JHV_AUTH_OIDC_ALLOW_LOCAL_LOGIN: "${JHV_OIDC_ALLOW_LOCAL_LOGIN:-true}"
       JHV_METRICS_ENABLED: "${JHV_METRICS_ENABLED:-false}"
       JHV_METRICS_TOKEN_FILE: "/app/data/metrics.token"
       TZ: "${TZ:-Europe/Moscow}"
     volumes:
+      # Файл настроек. По умолчанию — тот же, что запечён в образ, поэтому
+      # умолчание ничего не меняет: подставляется ровно то, что и так было
+      # внутри.
+      #
+      # Нужен он затем, что не всякую настройку можно задать переменной
+      # окружения: auth.oidc.role_mapping — словарь, а viper словари из
+      # переменных не собирает. Через этот файл соответствие групп ролям
+      # меняется без пересборки образа — достаточно `docker compose up -d`.
+      #
+      # Файл читается поверх встроенных умолчаний, так что менять в нём нужно
+      # только свои настройки. Правка файла из репозитория поссорит его с
+      # `git pull`; чтобы этого избежать, положите свой экземпляр вне
+      # репозитория и укажите путь в JHV_CONFIG_FILE.
+      - ${JHV_CONFIG_FILE:-../config/ovirt-backup.yaml}:/app/config/ovirt-backup.yaml:ro
       # Ключ шифрования секретов и временные файлы. Терять нельзя: без
       # secret.key не расшифровать ни пароли подключений, ни копии.
       - jhvirt-data:/app/data

@@ -26,6 +26,7 @@ type Config struct {
 	Monitor          MonitorConfig          `mapstructure:"monitor"`
 	Metrics          MetricsConfig          `mapstructure:"metrics"`
 	Notifications    NotificationsConfig    `mapstructure:"notifications"`
+	Cluster          ClusterConfig          `mapstructure:"cluster"`
 	Backup           BackupConfig           `mapstructure:"backup"`
 	Scheduler        SchedulerConfig        `mapstructure:"scheduler"`
 	DisasterRecovery DisasterRecoveryConfig `mapstructure:"disaster_recovery"`
@@ -153,6 +154,22 @@ type EmailConfig struct {
 	Password string   `mapstructure:"password"`
 	From     string   `mapstructure:"from"`
 	To       []string `mapstructure:"to"`
+}
+
+// ClusterConfig — запуск нескольких экземпляров службы.
+//
+// Очередь переносов безопасна для нескольких процессов сама по себе: задачи
+// разбираются арендой. А вот планировщик, монитор и авто-восстановление — нет:
+// два экземпляра выполнили бы каждое задание дважды и подрались бы за действия
+// над ВМ. Поэтому они работают только у ведущего.
+type ClusterConfig struct {
+	// LeaderElection по умолчанию выключен: при одном экземпляре он ничего не
+	// добавляет, а поведение установки менять на ровном месте незачем.
+	// Включать обязательно до запуска второго экземпляра.
+	LeaderElection bool `mapstructure:"leader_election"`
+	// PollInterval — как часто ведомый проверяет, не освободилось ли место, а
+	// ведущий — что оно всё ещё за ним.
+	PollInterval time.Duration `mapstructure:"poll_interval"`
 }
 
 type MetricsConfig struct {
@@ -681,6 +698,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("auth.oidc.allow_local_login", true)
 	v.SetDefault("metrics.enabled", false)
 	v.SetDefault("metrics.token_file", "")
+	v.SetDefault("cluster.leader_election", false)
+	v.SetDefault("cluster.poll_interval", 15*time.Second)
 	v.SetDefault("notifications.enabled", false)
 	v.SetDefault("notifications.min_severity", "critical")
 	v.SetDefault("notifications.webhook.url", "")

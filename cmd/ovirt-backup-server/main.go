@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -266,10 +267,6 @@ func run() error {
 	sched := scheduler.New(st, dispatcher, *cfg, bus, log)
 	sched.SetQualityService(qualityService)
 	sched.SetReplicator(replicator)
-	if err := sched.Start(ctx); err != nil {
-		return fmt.Errorf("запуск планировщика: %w", err)
-	}
-	defer sched.Stop()
 
 	// The mode is stored, not configured: an operator halfway through observing
 	// the automation must not be dropped into live mode by a restart.
@@ -277,11 +274,25 @@ func run() error {
 		return fmt.Errorf("восстановление режима авто-восстановления: %w", err)
 	}
 
-	monitorDone := make(chan struct{})
-	go func() {
-		defer close(monitorDone)
-		mon.Run(ctx)
-	}()
+	// Планировщик и монитор — то, что нельзя выполнять дважды: задания
+	// запустились бы по два раза, а авто-восстановление подралось бы за
+	// действия над ВМ. Переносы в очереди этого не боятся, они разбираются
+	// арендой, и потому идут на всех экземплярах.
+	background := newBackgroundParts(sched, mon, log)
+
+	if cfg.Cluster.LeaderElection {
+		leaderDone := make(chan struct{})
+		go func() {
+			defer close(leaderDone)
+			superviseLeadership(ctx, st, cfg.Cluster.PollInterval, background, log)
+		}()
+		defer func() { <-leaderDone }()
+	} else {
+		if err := background.start(ctx); err != nil {
+			return fmt.Errorf("запуск планировщика: %w", err)
+		}
+	}
+	defer background.stop()
 
 	apiServer := api.New(api.Deps{
 		Config: *cfg, BaseConfig: baseCfg, Store: st, Pool: pool, LibvirtPool: libvirtPool, Engine: dispatcher,
@@ -335,9 +346,125 @@ func run() error {
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		log.Warn().Err(err).Msg("HTTP-сервер не завершился штатно")
 	}
-	<-monitorDone
+	background.stop()
 	log.Info().Msg("остановлено")
 	return nil
+}
+
+// backgroundParts — то, что должно работать ровно в одном экземпляре.
+//
+// Планировщик запустил бы каждое задание дважды, а авто-восстановление
+// подралось бы за действия над одной ВМ. Переносы в очереди сюда не входят:
+// они разбираются арендой и безопасны на всех экземплярах.
+type backgroundParts struct {
+	sched *scheduler.Scheduler
+	mon   *monitor.Monitor
+	log   zerolog.Logger
+
+	mu      sync.Mutex
+	cancel  context.CancelFunc
+	stopped chan struct{}
+}
+
+func newBackgroundParts(sched *scheduler.Scheduler, mon *monitor.Monitor, log zerolog.Logger) *backgroundParts {
+	return &backgroundParts{sched: sched, mon: mon, log: log}
+}
+
+func (b *backgroundParts) start(ctx context.Context) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.cancel != nil {
+		return nil
+	}
+
+	runCtx, cancel := context.WithCancel(ctx)
+	if err := b.sched.Start(runCtx); err != nil {
+		cancel()
+		return err
+	}
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		b.mon.Run(runCtx)
+	}()
+	b.cancel, b.stopped = cancel, stopped
+	return nil
+}
+
+// stop останавливает всё и ждёт остановки. Повторный вызов безопасен: путей к
+// завершению службы несколько.
+func (b *backgroundParts) stop() {
+	b.mu.Lock()
+	cancel, stopped := b.cancel, b.stopped
+	b.cancel, b.stopped = nil, nil
+	b.mu.Unlock()
+
+	if cancel == nil {
+		return
+	}
+	b.sched.Stop()
+	cancel()
+	<-stopped
+}
+
+// superviseLeadership держит место ведущего и включает по нему фоновые части.
+//
+// Место занимается консультативной блокировкой PostgreSQL: она живёт, пока
+// живо соединение, поэтому упавший экземпляр отпускает её сам — без сроков и
+// ожидания, пока истечёт аренда. Проверять её всё равно нужно: наполовину
+// закрытое TCP-соединение может выглядеть живым часами, и всё это время
+// ведущими считали бы себя оба.
+func superviseLeadership(ctx context.Context, st *store.Store, poll time.Duration,
+	parts *backgroundParts, log zerolog.Logger) {
+
+	if poll <= 0 {
+		poll = 15 * time.Second
+	}
+	ticker := time.NewTicker(poll)
+	defer ticker.Stop()
+
+	var leadership *store.Leadership
+	defer func() {
+		if leadership != nil {
+			leadership.Release(ctx)
+		}
+	}()
+
+	for {
+		switch {
+		case leadership == nil:
+			held, err := st.TryBecomeLeader(ctx)
+			if err != nil {
+				log.Warn().Err(err).Msg("не удалось проверить место ведущего")
+				break
+			}
+			if held == nil {
+				break // место занято другим экземпляром — это норма для ведомого
+			}
+			leadership = held
+			if err := parts.start(ctx); err != nil {
+				log.Error().Err(err).Msg("не удалось запустить планировщик, место отдаю")
+				leadership.Release(ctx)
+				leadership = nil
+				break
+			}
+			log.Info().Msg("экземпляр стал ведущим: планировщик и монитор работают здесь")
+
+		case !leadership.Alive(ctx):
+			// Продолжать нельзя: место, скорее всего, уже занял другой
+			// экземпляр, и задания пошли бы по второму разу.
+			log.Error().Msg("место ведущего потеряно, останавливаю планировщик и монитор")
+			parts.stop()
+			leadership.Release(ctx)
+			leadership = nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 // printCredentials writes an account's credentials to stderr as a block that

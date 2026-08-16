@@ -1,0 +1,302 @@
+{
+  "title": "ovirt-backup — обзор",
+  "uid": "jhvirt-overview",
+  "tags": ["jhvirt", "backup"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "1m",
+  "time": { "from": "now-24h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "DS_PROMETHEUS",
+        "label": "Prometheus",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "Защита",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+    },
+    {
+      "type": "stat",
+      "title": "ВМ под защитой",
+      "description": "Машины, у которых все реплики в состоянии ok.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 5, "w": 4, "x": 0, "y": 1 },
+      "targets": [
+        {
+          "expr": "count(count by (vm_id) (ovirt_backup_protection_state{state=\"ok\"} == 1))",
+          "legendFormat": "под защитой",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Не покрыто заданием",
+      "description": "Машины, которых не покрывает ни одно задание с расписанием.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 5, "w": 4, "x": 4, "y": 1 },
+      "targets": [
+        {
+          "expr": "count(count by (vm_id) (ovirt_backup_protection_state{state=\"none\"} == 1)) or vector(0)",
+          "legendFormat": "без задания",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Критические оповещения",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 5, "w": 4, "x": 8, "y": 1 },
+      "targets": [
+        {
+          "expr": "sum(ovirt_backup_alerts_open{severity=\"critical\"}) or vector(0)",
+          "legendFormat": "критические",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Аварийная готовность",
+      "description": "Внешний дамп PostgreSQL и копия secret.key на месте и свежие.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 5, "w": 4, "x": 12, "y": 1 },
+      "targets": [
+        { "expr": "ovirt_backup_disaster_recovery_ready", "legendFormat": "готовность", "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": { "text": "не готова", "color": "red", "index": 0 },
+                "1": { "text": "готова", "color": "green", "index": 1 }
+              }
+            }
+          ],
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "text", "value": null }] }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "piechart",
+      "title": "Состояния реплик",
+      "description": "ok — в норме, none — копий нет, overdue — просрочена, failed — последняя не удалась, partial — не все диски, verify_overdue — просрочена проверка, degraded — упала скорость.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 5, "w": 8, "x": 16, "y": 1 },
+      "targets": [
+        {
+          "expr": "sum by (state) (ovirt_backup_protection_state == 1)",
+          "legendFormat": "{{state}}",
+          "refId": "A"
+        }
+      ],
+      "options": { "legend": { "displayMode": "table", "placement": "right", "values": ["value"] } },
+      "fieldConfig": { "defaults": {}, "overrides": [] }
+    },
+    {
+      "type": "row",
+      "title": "Свежесть копий",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 6 }
+    },
+    {
+      "type": "table",
+      "title": "Возраст последней успешной копии",
+      "description": "Имена подставляются из ovirt_backup_vm_info — метрики с идентификаторами читать невозможно.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 7 },
+      "targets": [
+        {
+          "expr": "sort_desc(\n  (time() - max by (vm_id) (ovirt_backup_last_success_timestamp_seconds))\n  * on (vm_id) group_left(vm_name, server_name) max by (vm_id, vm_name, server_name) (ovirt_backup_vm_info)\n)",
+          "legendFormat": "{{vm_name}}",
+          "format": "table",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "transformations": [
+        { "id": "organize", "options": { "excludeByName": { "Time": true, "vm_id": true }, "renameByName": { "vm_name": "ВМ", "server_name": "Подключение", "Value": "Возраст" } } }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "s" },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Возраст" },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": { "type": "color-background", "mode": "gradient" }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    { "color": "green", "value": null },
+                    { "color": "orange", "value": 90000 },
+                    { "color": "red", "value": 172800 }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Длительность последней копии",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 9, "w": 6, "x": 12, "y": 7 },
+      "targets": [
+        {
+          "expr": "max by (vm_id) (ovirt_backup_last_duration_seconds)\n  * on (vm_id) group_left(vm_name) max by (vm_id, vm_name) (ovirt_backup_vm_info)",
+          "legendFormat": "{{vm_name}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "fillOpacity": 0 } }, "overrides": [] }
+    },
+    {
+      "type": "timeseries",
+      "title": "Скорость чтения",
+      "description": "Падение скорости — первый признак того, что копии скоро перестанут укладываться в окно.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 9, "w": 6, "x": 18, "y": 7 },
+      "targets": [
+        {
+          "expr": "max by (vm_id) (ovirt_backup_last_throughput_bytes_per_second)\n  * on (vm_id) group_left(vm_name) max by (vm_id, vm_name) (ovirt_backup_vm_info)",
+          "legendFormat": "{{vm_name}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "Bps", "custom": { "fillOpacity": 0 } }, "overrides": [] }
+    },
+    {
+      "type": "row",
+      "title": "Хранилища",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 16 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Свободно в хранилищах",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 17 },
+      "targets": [
+        {
+          "expr": "ovirt_backup_storage_free_bytes\n  * on (storage_target_id) group_left(storage_name) max by (storage_target_id, storage_name) (ovirt_backup_storage_info)",
+          "legendFormat": "{{storage_name}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] }
+    },
+    {
+      "type": "timeseries",
+      "title": "До заполнения, дней",
+      "description": "Прогноз по медианному приросту. Отрицательное значение или отсутствие линии — прироста нет либо квота неизвестна.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 17 },
+      "targets": [
+        {
+          "expr": "ovirt_backup_storage_forecast_days\n  * on (storage_target_id) group_left(storage_name) max by (storage_target_id, storage_name) (ovirt_backup_storage_info)",
+          "legendFormat": "{{storage_name}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "d",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "orange", "value": 7 },
+              { "color": "green", "value": 30 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "row",
+      "title": "Репликация",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 25 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Физические копии по состоянию",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 26 },
+      "targets": [
+        { "expr": "ovirt_backup_replication_copies", "legendFormat": "{{status}}", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "custom": { "fillOpacity": 20, "stacking": { "mode": "normal" } } }, "overrides": [] }
+    },
+    {
+      "type": "timeseries",
+      "title": "Отставание самой старой незавершённой реплики",
+      "description": "Растёт монотонно — репликация встала.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 26 },
+      "targets": [
+        { "expr": "ovirt_backup_replication_oldest_lag_seconds", "legendFormat": "отставание", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
+    }
+  ]
+}

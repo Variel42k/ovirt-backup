@@ -493,9 +493,18 @@ func (s *Scheduler) TriggerJob(ctx context.Context, jobID, triggeredBy string, s
 	var wg sync.WaitGroup
 
 	for _, vm := range vms {
+		// Какие хранилища получают данные напрямую от гипервизора:
+		//   copy      — только основное, остальные догоняет репликация;
+		//   parallel  — тоже только один запуск, но пишет он сразу во все;
+		//   separate  — по запуску на каждое, то есть диск читается заново.
 		targetIDs := job.StorageTargetIDs
-		if job.ReplicationEnabled {
+		var mirrorIDs []string
+		switch job.StorageMode {
+		case model.StorageModeCopy:
 			targetIDs = job.StorageTargetIDs[:1]
+		case model.StorageModeParallel:
+			targetIDs = job.StorageTargetIDs[:1]
+			mirrorIDs = job.StorageTargetIDs[1:]
 		}
 		for _, targetID := range targetIDs {
 			runType := job.Type
@@ -512,6 +521,7 @@ func (s *Scheduler) TriggerJob(ctx context.Context, jobID, triggeredBy string, s
 				FullEvery:       job.FullEvery,
 				FallbackType:    job.FallbackType,
 				StorageTargetID: targetID,
+				MirrorTargetIDs: mirrorIDs,
 				ExcludeDiskIDs:  job.ExcludeDiskIDs,
 				Quiesce:         job.Quiesce,
 				Encrypt:         job.Encrypt,

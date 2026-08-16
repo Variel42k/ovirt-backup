@@ -37,6 +37,7 @@ const emptyForm = () => ({
   schedule: '0 1 * * *',
   max_duration_minutes: 0,
   storage_target_ids: [] as string[],
+  storage_mode: 'copy' as 'copy' | 'parallel' | 'separate',
   retention: { keep_last: 3, keep_hourly: 0, keep_daily: 7, keep_weekly: 4, keep_monthly: 6, keep_yearly: 0, max_age: 0 },
   quiesce: true,
   verify_after: 'chain',
@@ -359,6 +360,30 @@ onMounted(async () => {
   await load()
 })
 
+/**
+ * Три способа доставки данных во второе и последующие хранилища.
+ *
+ * Разница между ними — не в удобстве, а в том, кто платит: гипервизор,
+ * основное хранилище или скорость самого медленного канала. Поэтому подсказка
+ * говорит об этом прямо, а не «выберите режим».
+ */
+const storageModes = [
+  { label: 'Копирование из основного', value: 'copy' },
+  { label: 'Параллельная запись', value: 'parallel' },
+  { label: 'Отдельный бэкап на каждое', value: 'separate' },
+]
+
+const storageModeHint = computed(() => {
+  switch (form.value.storage_mode) {
+    case 'parallel':
+      return 'Данные пишутся во все хранилища за один проход: диск читается один раз, копия появляется сразу везде. Скорость равна скорости самого медленного хранилища. Отказ зеркала бэкап не прервёт — точку дошлёт очередь репликации.'
+    case 'separate':
+      return 'На каждое хранилище выполняется свой бэкап: диск читается с гипервизора столько раз, сколько хранилищ. Нагрузку несут продуктивные ВМ. Выбирайте, только если копии обязаны быть полностью независимы.'
+    default:
+      return 'ВМ читается один раз в основное хранилище, оттуда данные копируются в остальные очередью с повторами. Гипервизор не нагружается повторно, но сохранённое читается второй раз, и копия появляется не сразу.'
+  }
+})
+
 const columns = [
   { name: 'name', label: 'Задание', field: 'name', align: 'left' as const, sortable: true },
   { name: 'server', label: 'Сервер', field: 'server_id', align: 'left' as const },
@@ -641,6 +666,19 @@ const columns = [
 				Основное: {{ app.storageName(form.storage_target_ids[0]) }}
 				<template v-if="form.storage_target_ids.length > 1"> · Реплики: {{ form.storage_target_ids.slice(1).map(app.storageName).join(', ') }}</template>
 			</div>
+          </div>
+
+          <div v-if="form.storage_target_ids.length > 1" class="col-12">
+            <q-select
+              v-model="form.storage_mode"
+              :options="storageModes"
+              emit-value
+              map-options
+              label="Как данные попадают в остальные хранилища"
+              outlined
+              dense
+            />
+            <div class="jhv-reason q-mt-sm">{{ storageModeHint }}</div>
           </div>
 
           <div class="col-12 row items-center">

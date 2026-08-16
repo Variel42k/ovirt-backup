@@ -152,6 +152,9 @@ export interface BackupJob {
   schedule: string
   max_duration?: number
   storage_target_ids: string[]
+  /** Как данные попадают в остальные хранилища: копией, параллельно или отдельным бэкапом. */
+  storage_mode: 'copy' | 'parallel' | 'separate'
+  /** Прежний двоичный вид того же выбора; сервер держит его согласованным с storage_mode. */
   replication_enabled: boolean
   force_full_next: boolean
   retention: RetentionPolicy

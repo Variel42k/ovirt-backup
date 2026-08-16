@@ -335,8 +335,11 @@ type BackupJob struct {
 
 	// Хранилища: первое — основное, остальные — копии (правило 3-2-1).
 	StorageTargetIDs []string `json:"storage_target_ids"`
-	// ReplicationEnabled означает новую модель: первый target получает данные
-	// от гипервизора, остальные копируются из опубликованного бэкапа.
+	// StorageMode — как данные попадают в остальные хранилища. См. StorageMode*.
+	StorageMode StorageMode `json:"storage_mode"`
+	// ReplicationEnabled — прежний двоичный вид того же выбора. Оставлен ради
+	// совместимости с API и хранимыми заданиями; правда живёт в StorageMode, и
+	// оба поля приводятся к согласию в NormalizeStorageMode.
 	ReplicationEnabled bool `json:"replication_enabled"`
 	// ForceFullNext устанавливается мастером перехода или смены primary.
 	ForceFullNext bool `json:"force_full_next"`
@@ -458,6 +461,65 @@ type BackupRun struct {
 	CopyCount        int          `json:"copy_count"`
 	HealthyCopyCount int          `json:"healthy_copy_count"`
 	ProtectionStatus string       `json:"protection_status"`
+}
+
+// StorageMode — способ доставки данных во второе и последующие хранилища.
+type StorageMode string
+
+const (
+	// StorageModeCopy — данные снимаются с гипервизора в основное хранилище, а
+	// оттуда копируются в остальные очередью репликации с повторами.
+	//
+	// Гипервизор читается один раз, зато сохранённое читается второй раз — и
+	// копия появляется не сразу, а когда очередь до неё дойдёт.
+	StorageModeCopy StorageMode = "copy"
+
+	// StorageModeParallel — данные пишутся во все хранилища одновременно, за
+	// один проход по диску.
+	//
+	// Копия во втором хранилище появляется вместе с первой, повторного чтения
+	// нет вовсе. Плата — скорость самого медленного из хранилищ; отвалившееся
+	// зеркало бэкап не роняет, точку дошлёт та же очередь репликации.
+	StorageModeParallel StorageMode = "parallel"
+
+	// StorageModeSeparate — на каждое хранилище выполняется свой бэкап.
+	//
+	// Это прежнее поведение при выключенной репликации, и выбирать его стоит
+	// только осознанно: диск читается с гипервизора столько раз, сколько
+	// хранилищ, и платят за это продуктивные ВМ. Смысл остаётся один — когда
+	// копии обязаны быть независимы вплоть до отдельного снапшота.
+	StorageModeSeparate StorageMode = "separate"
+)
+
+// Title возвращает название режима для интерфейса.
+func (m StorageMode) Title() string {
+	switch m {
+	case StorageModeParallel:
+		return "Параллельная запись"
+	case StorageModeSeparate:
+		return "Отдельный бэкап на каждое"
+	default:
+		return "Копирование из основного"
+	}
+}
+
+// NormalizeStorageMode приводит режим и старый флаг к согласию.
+//
+// Задания, сохранённые до появления режима, приходят только с флагом; API
+// прежней версии тоже шлёт его. Выводить режим из флага молча — единственный
+// способ не поменять поведение существующих заданий при обновлении.
+func (j *BackupJob) NormalizeStorageMode() {
+	switch j.StorageMode {
+	case StorageModeCopy, StorageModeParallel, StorageModeSeparate:
+	default:
+		if j.ReplicationEnabled {
+			j.StorageMode = StorageModeCopy
+		} else {
+			j.StorageMode = StorageModeSeparate
+		}
+	}
+	// Флаг остаётся ведомым: на него смотрят оценка качества и разбор копий.
+	j.ReplicationEnabled = j.StorageMode == StorageModeCopy
 }
 
 type BackupCopyRole string

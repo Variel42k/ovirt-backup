@@ -118,6 +118,9 @@ type RunRequest struct {
 	FallbackType model.BackupType
 
 	StorageTargetID string
+	// MirrorTargetIDs — хранилища, в которые те же данные пишутся за один
+	// проход вместе с основным. Пусто во всех режимах, кроме параллельного.
+	MirrorTargetIDs []string
 	ExcludeDiskIDs  []string
 
 	Quiesce       bool
@@ -239,6 +242,40 @@ func (e *Engine) Execute(ctx context.Context, req RunRequest) (*model.BackupRun,
 	}
 	defer backend.Close()
 
+	// Зеркала: те же данные уходят в них за один проход по диску.
+	//
+	// Недоступное зеркало не повод отменять бэкап — основное хранилище есть, и
+	// копия состоится. Такое зеркало просто не подключается, а точку потом
+	// дошлёт очередь репликации.
+	var (
+		mirror        *repo.Mirror
+		mirrorTargets []*model.StorageTarget
+	)
+	if len(req.MirrorTargetIDs) > 0 {
+		mirrors := make([]repo.Backend, 0, len(req.MirrorTargetIDs))
+		for _, id := range req.MirrorTargetIDs {
+			mirrorTarget, targetErr := e.store.GetStorageTarget(ctx, id)
+			if targetErr != nil || !mirrorTarget.Enabled {
+				log.Warn().Str("хранилище", id).Msg("зеркало недоступно, бэкап идёт без него")
+				continue
+			}
+			mirrorBackend, openErr := repo.Open(ctx, mirrorTarget)
+			if openErr != nil {
+				log.Warn().Err(openErr).Str("зеркало", mirrorTarget.Name).
+					Msg("зеркало не открылось, бэкап идёт без него")
+				continue
+			}
+			defer mirrorBackend.Close()
+			mirrors = append(mirrors, mirrorBackend)
+			mirrorTargets = append(mirrorTargets, mirrorTarget)
+		}
+		if len(mirrors) > 0 {
+			if combined, ok := repo.NewMirror(backend, mirrors...).(*repo.Mirror); ok {
+				backend, mirror = combined, combined
+			}
+		}
+	}
+
 	started := time.Now().UTC()
 	run.StartedAt = &started
 	run.Status = model.RunRunning
@@ -304,6 +341,10 @@ func (e *Engine) Execute(ctx context.Context, req RunRequest) (*model.BackupRun,
 		log.Error().Err(err).Msg("бэкап выполнен, но запись о нём не обновлена")
 	}
 
+	if mirror != nil {
+		e.registerMirrorCopies(ctx, run, mirrorTargets, mirror.Failed(), log)
+	}
+
 	log.Info().
 		Str("статус", string(run.Status)).
 		Str("прочитано", humanBytes(run.ReadBytes)).
@@ -312,6 +353,44 @@ func (e *Engine) Execute(ctx context.Context, req RunRequest) (*model.BackupRun,
 		Msg("бэкап завершён")
 
 	return run, nil
+}
+
+// registerMirrorCopies заводит записи о копиях в зеркалах.
+//
+// Байты, записанные в хранилище, о котором система не знает, — это мусор:
+// ретенция их не уберёт, каталог не найдёт, оценка качества не засчитает.
+// Поэтому удавшееся зеркало регистрируется сразу готовой копией, а
+// отвалившееся — заявкой для очереди репликации: она дошлёт точку тем же
+// путём, что и в режиме копирования из основного.
+func (e *Engine) registerMirrorCopies(ctx context.Context, run *model.BackupRun,
+	targets []*model.StorageTarget, failed map[string]error, log zerolog.Logger) {
+
+	for _, target := range targets {
+		copyRecord := &model.BackupCopy{
+			RunID:           run.ID,
+			StorageTargetID: target.ID,
+			Role:            model.CopyReplica,
+			Required:        true,
+			ManifestSHA256:  run.ManifestSHA256,
+			TotalBytes:      run.StoredBytes,
+		}
+
+		if err, broken := failed[target.Name]; broken {
+			copyRecord.Status = model.CopyPending
+			copyRecord.LastError = err.Error()
+			log.Warn().Err(err).Str("зеркало", target.Name).
+				Msg("зеркало не приняло данные: копию дошлёт очередь репликации")
+		} else {
+			copyRecord.Status = model.CopySucceeded
+			copyRecord.CopiedBytes = run.StoredBytes
+			copyRecord.EndedAt = run.EndedAt
+		}
+
+		if err := e.store.CreateBackupCopy(ctx, copyRecord); err != nil {
+			log.Warn().Err(err).Str("зеркало", target.Name).
+				Msg("не удалось записать сведения о копии в зеркале")
+		}
+	}
 }
 
 // plan is the resolved strategy for one run.

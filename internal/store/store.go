@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 
+	"adveng/jh_virt/internal/model"
 	"adveng/jh_virt/internal/secret"
 )
 
@@ -18,6 +19,9 @@ var ErrConflict = errors.New("объект с таким именем уже с�
 type Store struct {
 	db     *DB
 	cipher *secret.Cipher
+	// alertRaised вызывается, когда оповещение загорелось впервые или после
+	// того, как его погасили. Устанавливается через OnAlertRaised.
+	alertRaised func(model.Alert)
 }
 
 // New builds a Store over an open database handle.

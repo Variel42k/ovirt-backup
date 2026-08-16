@@ -27,6 +27,7 @@ import (
 	"adveng/jh_virt/internal/logging"
 	"adveng/jh_virt/internal/model"
 	"adveng/jh_virt/internal/monitor"
+	"adveng/jh_virt/internal/notify"
 	"adveng/jh_virt/internal/ovirt"
 	"adveng/jh_virt/internal/quality"
 	"adveng/jh_virt/internal/replication"
@@ -122,6 +123,14 @@ func run() error {
 		return fmt.Errorf("ключ шифрования секретов: %w", err)
 	}
 	st := store.New(db, cipher)
+
+	// Оповещения наружу. Подписка ставится до запуска монитора и планировщика:
+	// иначе первые же беды, найденные при старте, останутся без сообщения.
+	notifier := notify.New(cfg.Notifications, log)
+	defer notifier.Close()
+	if notifier != nil {
+		st.OnAlertRaised(notifier.Alert)
+	}
 	drChecker := drcheck.New(cfg.DisasterRecovery, cfg.Secrets.KeyFile, st)
 	drCtx, stopDR := context.WithCancel(ctx)
 	drDone := make(chan struct{})

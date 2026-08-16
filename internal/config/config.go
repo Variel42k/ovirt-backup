@@ -25,6 +25,7 @@ type Config struct {
 	Secrets          SecretsConfig          `mapstructure:"secrets"`
 	Monitor          MonitorConfig          `mapstructure:"monitor"`
 	Metrics          MetricsConfig          `mapstructure:"metrics"`
+	Notifications    NotificationsConfig    `mapstructure:"notifications"`
 	Backup           BackupConfig           `mapstructure:"backup"`
 	Scheduler        SchedulerConfig        `mapstructure:"scheduler"`
 	DisasterRecovery DisasterRecoveryConfig `mapstructure:"disaster_recovery"`
@@ -111,6 +112,47 @@ type OIDCConfig struct {
 	// внутрь, когда провайдер недоступен, а недоступен он бывает ровно в той
 	// аварии, ради которой и разворачивают систему восстановления.
 	AllowLocalLogin bool `mapstructure:"allow_local_login"`
+}
+
+// NotificationsConfig — доставка оповещений наружу.
+//
+// Внутри системы оповещения и так видны, но узнаёт о них только тот, кто в эту
+// минуту смотрит в интерфейс. Бэкапы идут ночью, и ночью же ломаются.
+type NotificationsConfig struct {
+	Enabled bool `mapstructure:"enabled"`
+	// MinSeverity — порог: critical (по умолчанию) либо warning.
+	//
+	// Умолчание выбрано так, чтобы наружу уходило только то, ради чего стоит
+	// будить человека. Предупреждений бывает много, и канал, по которому идёт
+	// поток «в целом всё в порядке», перестают читать целиком — вместе с тем
+	// единственным сообщением, ради которого он заводился.
+	MinSeverity string         `mapstructure:"min_severity"`
+	Webhook     WebhookConfig  `mapstructure:"webhook"`
+	Telegram    TelegramConfig `mapstructure:"telegram"`
+	Email       EmailConfig    `mapstructure:"email"`
+}
+
+// WebhookConfig — произвольный приёмник HTTP.
+type WebhookConfig struct {
+	URL string `mapstructure:"url"`
+	// Token уходит в заголовке Authorization: Bearer.
+	Token string `mapstructure:"token"`
+}
+
+// TelegramConfig — бот и получатель.
+type TelegramConfig struct {
+	BotToken string `mapstructure:"bot_token"`
+	ChatID   string `mapstructure:"chat_id"`
+}
+
+// EmailConfig — отправка через SMTP.
+type EmailConfig struct {
+	SMTPHost string   `mapstructure:"smtp_host"`
+	SMTPPort int      `mapstructure:"smtp_port"`
+	Username string   `mapstructure:"username"`
+	Password string   `mapstructure:"password"`
+	From     string   `mapstructure:"from"`
+	To       []string `mapstructure:"to"`
 }
 
 type MetricsConfig struct {
@@ -513,6 +555,29 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("auth.oidc.default_role: неизвестная роль %q", c.Auth.OIDC.DefaultRole)
 		}
 	}
+	if c.Notifications.Enabled {
+		switch c.Notifications.MinSeverity {
+		case "", "critical", "warning":
+		default:
+			return fmt.Errorf("notifications.min_severity: допустимы critical и warning, задано %q",
+				c.Notifications.MinSeverity)
+		}
+		// Включённые оповещения без единого канала — это молчание, которое
+		// выглядит как настроенная доставка. Лучше отказаться на старте.
+		if strings.TrimSpace(c.Notifications.Webhook.URL) == "" &&
+			strings.TrimSpace(c.Notifications.Telegram.BotToken) == "" &&
+			strings.TrimSpace(c.Notifications.Email.SMTPHost) == "" {
+			return fmt.Errorf("notifications.enabled задан, но не настроен ни один канал: " +
+				"webhook.url, telegram.bot_token либо email.smtp_host")
+		}
+		if strings.TrimSpace(c.Notifications.Email.SMTPHost) != "" && len(c.Notifications.Email.To) == 0 {
+			return fmt.Errorf("notifications.email.to: некому отправлять")
+		}
+		if strings.TrimSpace(c.Notifications.Telegram.BotToken) != "" &&
+			strings.TrimSpace(c.Notifications.Telegram.ChatID) == "" {
+			return fmt.Errorf("notifications.telegram.chat_id обязателен вместе с bot_token")
+		}
+	}
 	if c.Backup.ChunkSize < 64*1024 || c.Backup.ChunkSize%(64*1024) != 0 {
 		return fmt.Errorf("backup.chunk_size must be a multiple of 64 KiB and >= 64 KiB, got %d", c.Backup.ChunkSize)
 	}
@@ -616,6 +681,18 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("auth.oidc.allow_local_login", true)
 	v.SetDefault("metrics.enabled", false)
 	v.SetDefault("metrics.token_file", "")
+	v.SetDefault("notifications.enabled", false)
+	v.SetDefault("notifications.min_severity", "critical")
+	v.SetDefault("notifications.webhook.url", "")
+	v.SetDefault("notifications.webhook.token", "")
+	v.SetDefault("notifications.telegram.bot_token", "")
+	v.SetDefault("notifications.telegram.chat_id", "")
+	v.SetDefault("notifications.email.smtp_host", "")
+	v.SetDefault("notifications.email.smtp_port", 587)
+	v.SetDefault("notifications.email.username", "")
+	v.SetDefault("notifications.email.password", "")
+	v.SetDefault("notifications.email.from", "")
+	v.SetDefault("notifications.email.to", []string{})
 
 	// Пустое значение по умолчанию нужно, чтобы ключ существовал: привязка
 	// переменных окружения идёт по списку известных ключей, и без этой строки

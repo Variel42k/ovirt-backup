@@ -16,9 +16,24 @@ import (
 const alertColumns = `id, server_id, scope, object_id, object_name, kind, severity, message,
 	details, state, count, first_seen, last_seen, resolved_at, acked_by, acked_at`
 
+// OnAlertRaised registers a callback for the moment a problem starts burning:
+// либо оповещения не было вовсе, либо прежнее уже погасили.
+//
+// Через обратный вызов, а не прямым обращением к отправителю: хранилище не
+// должно знать ни про почту, ни про Telegram. Вызывается синхронно, поэтому
+// подписчик обязан возвращать управление сразу — иначе он затормозит опрос.
+func (s *Store) OnAlertRaised(fn func(model.Alert)) {
+	s.alertRaised = fn
+}
+
 // RaiseAlert reports a problem. Repeated reports of the same (object, kind)
 // pair bump the counter and the last-seen timestamp instead of creating a new
 // row; a previously resolved alert starts firing again.
+//
+// Возвращает признак «загорелось только что». Он нужен оповещениям наружу:
+// монитор сообщает об одной и той же беде каждые полминуты, и на стенде такие
+// повторы копились тысячами. Слать письмо на каждый — значит гарантированно
+// добиться того, что письма перестанут читать.
 func (s *Store) RaiseAlert(ctx context.Context, a *model.Alert) error {
 	if a.ID == "" {
 		a.ID = uuid.NewString()
@@ -32,7 +47,20 @@ func (s *Store) RaiseAlert(ctx context.Context, a *model.Alert) error {
 		a.State = model.AlertFiring
 	}
 
-	_, err := s.db.Exec(ctx, `INSERT INTO alerts (`+alertColumns+`)
+	// Прежнее состояние читается до вставки: RETURNING отдаёт новую строку, а
+	// узнать нужно, чем она была раньше. Гонка двух источников одного и того
+	// же оповещения теоретически даст два сообщения вместо одного — это
+	// дешевле, чем блокировка на каждый опрос.
+	var previous sql.NullString
+	err := s.db.QueryRow(ctx, `SELECT state FROM alerts
+		WHERE server_id=? AND scope=? AND object_id=? AND kind=?`,
+		a.ServerID, string(a.Scope), a.ObjectID, a.Kind).Scan(&previous)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("raise alert: %w", err)
+	}
+	started := !previous.Valid || previous.String == string(model.AlertResolved)
+
+	_, err = s.db.Exec(ctx, `INSERT INTO alerts (`+alertColumns+`)
 		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT (server_id, scope, object_id, kind) DO UPDATE SET
 			object_name=excluded.object_name,
@@ -48,6 +76,9 @@ func (s *Store) RaiseAlert(ctx context.Context, a *model.Alert) error {
 		a.ResolvedAt, a.AckedBy, a.AckedAt)
 	if err != nil {
 		return fmt.Errorf("raise alert: %w", err)
+	}
+	if started && s.alertRaised != nil {
+		s.alertRaised(*a)
 	}
 	return nil
 }

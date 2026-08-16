@@ -251,6 +251,48 @@ func TestSyncVMsPreservesOperatorIntent(t *testing.T) {
 	}
 }
 
+// Наружу оповещение уходит один раз — когда загорелось.
+//
+// Монитор сообщает об одной и той же беде каждые полминуты: на стенде такие
+// повторы дошли до тринадцати тысяч у одного оповещения. Отправка на каждый
+// повтор — это гарантированный способ добиться, чтобы канал перестали читать.
+// Повторно сообщать следует только о том, что погасло и загорелось снова.
+func TestAlertCallbackFiresOnlyWhenItStartsBurning(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	var raised []model.Alert
+	s.OnAlertRaised(func(a model.Alert) { raised = append(raised, a) })
+
+	raise := func() {
+		if err := s.RaiseAlert(ctx, &model.Alert{
+			ServerID: "srv", Scope: model.ScopeVM, ObjectID: "vm-1", ObjectName: "db-01",
+			Kind: model.AlertVMPaused, Severity: model.SeverityCritical, Message: "ВМ на паузе",
+		}); err != nil {
+			t.Fatalf("raise: %v", err)
+		}
+	}
+
+	raise()
+	raise()
+	raise()
+	if len(raised) != 1 {
+		t.Fatalf("сообщений наружу: %d, ожидалось одно на три повтора", len(raised))
+	}
+	if raised[0].ObjectName != "db-01" || raised[0].Severity != model.SeverityCritical {
+		t.Errorf("в сообщение попало не то: %+v", raised[0])
+	}
+
+	// Погасло и загорелось снова — это новая беда, и о ней сообщить нужно.
+	if err := s.ResolveAlert(ctx, "srv", model.ScopeVM, "vm-1", model.AlertVMPaused); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	raise()
+	if len(raised) != 2 {
+		t.Fatalf("после повторного возгорания сообщений: %d, ожидалось два", len(raised))
+	}
+}
+
 func TestAlertDeduplication(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)

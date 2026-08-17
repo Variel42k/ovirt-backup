@@ -9,7 +9,15 @@ import type { HelpArticle } from '@/api/types'
 const app = useAppStore()
 const query = ref<string | null>('')
 
-const categoryOrder = [
+/**
+ * Порядок разделов: сначала перечисленные, затем всё остальное.
+ *
+ * Раньше это был закрытый список, и статья с новой категорией со стороны
+ * сервера просто не появлялась на странице — не ошибкой, а исчезновением.
+ * Теперь список задаёт только порядок знакомых разделов, а незнакомые
+ * добавляются в конец в том порядке, в котором пришли.
+ */
+const preferredOrder = [
   'Архитектура бэкапа',
   'Типы и точки восстановления',
   'Хранение и проверка',
@@ -28,7 +36,15 @@ function matches(value: unknown): boolean {
 
 const visibleArticles = computed(() => (app.help?.articles ?? []).filter(matches))
 const visibleTypes = computed(() => (app.help?.backup_types ?? []).filter(matches))
-const groups = computed(() => categoryOrder
+/** Все категории, что пришли с сервера: знакомые в заданном порядке, остальные за ними. */
+const orderedCategories = computed(() => {
+  const seen = (app.help?.articles ?? []).map(categoryOf)
+  const extra = seen.filter((category, index) =>
+    !preferredOrder.includes(category) && seen.indexOf(category) === index)
+  return [...preferredOrder, ...extra]
+})
+
+const groups = computed(() => orderedCategories.value
   .map((category) => ({
     category,
     articles: visibleArticles.value.filter((article) => categoryOf(article) === category),

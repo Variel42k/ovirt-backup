@@ -49,6 +49,34 @@ type metaResponse struct {
 	DefaultRetention model.RetentionPolicy `json:"default_retention"`
 }
 
+// storageKindOptions describes the backup repositories this build can write to.
+//
+// Отдельная функция, а не литерал внутри обработчика: список проверяется
+// тестом. Тип хранилища, добавленный в модель и забытый здесь, попал бы в
+// интерфейс без названия — выпадающим пунктом «webdav» без объяснения, чем он
+// отличается от соседних.
+func storageKindOptions() []optionDescriptor {
+	descriptions := map[model.StorageKind]optionDescriptor{
+		model.StorageLocal: {Title: "Локальный каталог",
+			Description: "Локальный диск или примонтированная NFS/CIFS-шара."},
+		model.StorageS3: {Title: "S3-совместимое",
+			Description: "AWS S3, MinIO, Ceph RGW и совместимые. Единственный тип с Object Lock."},
+		model.StorageSMB: {Title: "SMB/CIFS",
+			Description: "Сетевая папка Windows, Samba, TrueNAS или Synology. Монтировать на хосте не нужно."},
+		model.StorageWebDAV: {Title: "WebDAV",
+			Description: "Nextcloud, ownCloud, WebDAV на NAS. Прерванная передача начинается заново."},
+		model.StorageSFTP: {Title: "SFTP",
+			Description: "Удалённый сервер по SSH."},
+	}
+	out := make([]optionDescriptor, 0, len(descriptions))
+	for _, kind := range model.AllStorageKinds() {
+		descriptor := descriptions[kind]
+		descriptor.Value = string(kind)
+		out = append(out, descriptor)
+	}
+	return out
+}
+
 func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 	resp := metaResponse{DefaultRetention: model.DefaultRetention()}
 
@@ -83,11 +111,7 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	resp.StorageKinds = []optionDescriptor{
-		{Value: string(model.StorageLocal), Title: "Локальный каталог", Description: "Локальный диск или примонтированная NFS/CIFS-шара."},
-		{Value: string(model.StorageS3), Title: "S3-совместимое", Description: "AWS S3, MinIO, Ceph RGW и совместимые."},
-		{Value: string(model.StorageSFTP), Title: "SFTP", Description: "Удалённый сервер по SSH."},
-	}
+	resp.StorageKinds = storageKindOptions()
 
 	for _, a := range []model.RemediationAction{model.ActionVMStart, model.ActionVMUnpause,
 		model.ActionVMReset, model.ActionHostActivate, model.ActionHostFence, model.ActionReconnect} {

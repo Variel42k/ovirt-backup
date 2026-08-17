@@ -10,10 +10,12 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -90,8 +92,14 @@ func usage() {
   -scratch   каталог на гипервизоре под scratch-файлы (по умолчанию /var/lib/libvirt/qemu)
 
 Хранилище (-repo):
-  /path/to/dir                     локальный каталог или примонтированная шара
-  s3://ключ:секрет@endpoint/bucket S3-совместимое хранилище
+  /path/to/dir                          локальный каталог или примонтированная шара
+  s3://ключ:секрет@endpoint/bucket      S3-совместимое хранилище
+  smb://логин:пароль@сервер/шара[/путь] сетевая папка SMB/CIFS
+  webdavs://логин:пароль@сервер/путь    коллекция WebDAV (webdav:// — без TLS)
+
+  Домен для SMB указывается перед логином через точку с запятой:
+  smb://ДОМЕН;логин:пароль@сервер/шара. Пароль с символами @ : / нужно
+  закодировать процентами (@ — %40).
 
 Примеры:
   jvbackup backup  -host kvm1 -user root -key ~/.ssh/id_ed25519 -domain db-01 -repo /backup
@@ -177,6 +185,22 @@ func openRepo(ctx context.Context, spec string) (repo.Backend, error) {
 		}
 		return repo.Open(ctx, target)
 	}
+	// Сетевые хранилища доступны и здесь: аварийное восстановление выполняется
+	// как раз тогда, когда службы нет, а копия лежит на шаре.
+	if strings.HasPrefix(spec, "smb://") {
+		target, err := parseSMB(spec)
+		if err != nil {
+			return nil, err
+		}
+		return repo.Open(ctx, target)
+	}
+	if strings.HasPrefix(spec, "webdav://") || strings.HasPrefix(spec, "webdavs://") {
+		target, err := parseWebDAV(spec)
+		if err != nil {
+			return nil, err
+		}
+		return repo.Open(ctx, target)
+	}
 
 	abs, err := filepath.Abs(spec)
 	if err != nil {
@@ -215,6 +239,70 @@ func parseS3(spec string) (*model.StorageTarget, error) {
 		target.Prefix = parts[2]
 	}
 	return target, nil
+}
+
+// parseSMB accepts smb://[DOMAIN;]user:password@host[:port]/share[/path].
+//
+// Домен отделяется точкой с запятой, а не обратной косой: в адресе она
+// потребовала бы кодирования процентами, а команду для аварийного
+// восстановления набирают руками и в спешке.
+func parseSMB(spec string) (*model.StorageTarget, error) {
+	parsed, err := url.Parse(spec)
+	if err != nil {
+		return nil, fmt.Errorf("формат: smb://[домен;]логин:пароль@сервер/шара[/путь]: %w", err)
+	}
+	user := parsed.User.Username()
+	password, _ := parsed.User.Password()
+	if parsed.Hostname() == "" || user == "" {
+		return nil, fmt.Errorf("формат: smb://[домен;]логин:пароль@сервер/шара[/путь]")
+	}
+
+	domain := ""
+	if semicolon := strings.Index(user, ";"); semicolon >= 0 {
+		domain, user = user[:semicolon], user[semicolon+1:]
+	}
+
+	parts := strings.SplitN(strings.TrimLeft(parsed.Path, "/"), "/", 2)
+	if parts[0] == "" {
+		return nil, fmt.Errorf("в адресе SMB не указана сетевая папка")
+	}
+	target := &model.StorageTarget{
+		Name: "cli", Kind: model.StorageSMB, Enabled: true,
+		Host: parsed.Hostname(), Share: parts[0], Domain: domain,
+		Username: user, Password: password,
+	}
+	if port := parsed.Port(); port != "" {
+		if target.Port, err = strconv.Atoi(port); err != nil {
+			return nil, fmt.Errorf("порт SMB: %w", err)
+		}
+	}
+	if len(parts) == 2 {
+		target.BasePath = parts[1]
+	}
+	return target, nil
+}
+
+// parseWebDAV accepts webdav://user:password@host/path and webdavs:// for TLS.
+func parseWebDAV(spec string) (*model.StorageTarget, error) {
+	parsed, err := url.Parse(spec)
+	if err != nil {
+		return nil, fmt.Errorf("формат: webdavs://логин:пароль@сервер/путь: %w", err)
+	}
+	password, _ := parsed.User.Password()
+	if parsed.Host == "" {
+		return nil, fmt.Errorf("формат: webdavs://логин:пароль@сервер/путь")
+	}
+
+	scheme := "https"
+	if parsed.Scheme == "webdav" {
+		scheme = "http"
+	}
+	endpoint := url.URL{Scheme: scheme, Host: parsed.Host, Path: parsed.Path}
+	return &model.StorageTarget{
+		Name: "cli", Kind: model.StorageWebDAV, Enabled: true,
+		Endpoint: endpoint.String(),
+		Username: parsed.User.Username(), Password: password,
+	}, nil
 }
 
 func newLogger(verbose bool) zerolog.Logger {

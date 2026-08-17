@@ -38,6 +38,10 @@ type storagePayload struct {
 	PrivateKey string `json:"private_key"`
 	HostKey    string `json:"host_key"`
 
+	Share       string `json:"share"`
+	Domain      string `json:"domain"`
+	InsecureTLS bool   `json:"insecure_tls"`
+
 	RateLimit int64 `json:"rate_limit"`
 }
 
@@ -61,6 +65,9 @@ func (p storagePayload) apply(dst *model.StorageTarget) {
 	dst.Password = p.Password
 	dst.PrivateKey = p.PrivateKey
 	dst.HostKey = p.HostKey
+	dst.Share = p.Share
+	dst.Domain = p.Domain
+	dst.InsecureTLS = p.InsecureTLS
 	dst.RateLimit = p.RateLimit
 	if p.Enabled != nil {
 		dst.Enabled = *p.Enabled
@@ -99,8 +106,41 @@ func (p storagePayload) validate(isNew bool) error {
 		if isNew && p.Password == "" && p.PrivateKey == "" {
 			return badRequest("для SFTP нужен пароль или приватный ключ")
 		}
+	case model.StorageSMB:
+		if p.Host == "" {
+			return badRequest("для SMB нужен адрес сервера")
+		}
+		if strings.Trim(p.Share, `\/ `) == "" {
+			return badRequest("для SMB нужно имя сетевой папки")
+		}
+		// Оператор копирует адрес целиком, в виде \\nas\backups, и вставляет его
+		// в поле имени папки. Отказ с объяснением дешевле, чем подключение,
+		// которое падает на невнятной ошибке сервера.
+		if strings.ContainsAny(strings.Trim(p.Share, `\/`), `\/`) {
+			return badRequest("в имени сетевой папки не должно быть разделителей: " +
+				"имя сервера задаётся отдельно, путь внутри папки — тоже")
+		}
+		if p.Username == "" {
+			return badRequest("для SMB нужен пользователь: анонимный доступ к шаре не поддерживается")
+		}
+		if isNew && p.Password == "" {
+			return badRequest("для SMB нужен пароль")
+		}
+	case model.StorageWebDAV:
+		if p.Endpoint == "" {
+			return badRequest("для WebDAV нужен адрес коллекции")
+		}
+		if p.Username == "" {
+			return badRequest("для WebDAV нужен пользователь")
+		}
+		if isNew && p.Password == "" {
+			return badRequest("для WebDAV нужен пароль")
+		}
 	default:
 		return badRequest("неизвестный тип хранилища: %q", p.Kind)
+	}
+	if p.InsecureTLS && model.StorageKind(p.Kind) != model.StorageWebDAV {
+		return badRequest("отключение проверки сертификата доступно только для WebDAV")
 	}
 	if model.StorageKind(p.Kind) != model.StorageS3 && p.ObjectLockEnabled {
 		return badRequest("Object Lock доступен только для S3")

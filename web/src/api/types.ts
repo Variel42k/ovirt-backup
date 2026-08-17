@@ -103,10 +103,12 @@ export interface StorageDomain {
   committed_size: number
 }
 
+export type StorageKind = 'local' | 's3' | 'smb' | 'webdav' | 'sftp'
+
 export interface StorageTarget {
   id: string
   name: string
-  kind: 'local' | 's3' | 'sftp'
+  kind: StorageKind
   enabled: boolean
   base_path?: string
   endpoint?: string
@@ -119,6 +121,9 @@ export interface StorageTarget {
   host?: string
   port?: number
   username?: string
+  share?: string
+  domain?: string
+  insecure_tls?: boolean
   last_check_at?: string
   last_check_ok: boolean
   last_check_msg?: string

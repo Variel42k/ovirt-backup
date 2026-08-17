@@ -2,10 +2,10 @@
 import { computed, onMounted, ref } from 'vue'
 import { useQuasar } from 'quasar'
 import { api, notify, notifyError, notifyOk } from '@/api/client'
-import { ago, bytes } from '@/api/format'
+import { ago, bytes, storageKindIcon } from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
-import type { CatalogScanDetail, StorageTarget } from '@/api/types'
+import type { CatalogScanDetail, StorageKind, StorageTarget } from '@/api/types'
 
 const $q = useQuasar()
 const app = useAppStore()
@@ -22,7 +22,7 @@ const selectedCatalogEntries = ref<string[]>([])
 
 const emptyForm = () => ({
   name: '',
-  kind: 'local' as 'local' | 's3' | 'sftp',
+  kind: 'local' as StorageKind,
   enabled: true,
   base_path: '',
   endpoint: '',
@@ -42,10 +42,26 @@ const emptyForm = () => ({
   password: '',
   private_key: '',
   host_key: '',
+  share: '',
+  domain: '',
+  insecure_tls: false,
   rate_limit: 0,
 })
 
 const form = ref(emptyForm())
+
+// Порт по умолчанию зависит от протокола: 22 у SFTP, 445 у SMB. Оставить чужой
+// порт молча — значит отправить оператора разбираться с отказом подключения,
+// причина которого в поле, которого он не трогал.
+const defaultPorts: Partial<Record<StorageKind, number>> = { sftp: 22, smb: 445 }
+
+function onKindChange(kind: StorageKind) {
+  const next = defaultPorts[kind]
+  if (!next) return
+  // Свой порт оператора не трогаем — только тот, что подставили мы сами.
+  const untouched = !form.value.port || Object.values(defaultPorts).includes(form.value.port)
+  if (untouched) form.value.port = next
+}
 const rateLimitMiB = computed({
   get: () => Math.round((form.value.rate_limit / (1024 * 1024)) * 100) / 100,
   set: (value: number) => {
@@ -202,6 +218,11 @@ const columns = [
   { name: 'actions', label: '', field: 'id', align: 'right' as const },
 ]
 
+/** Название типа берём с сервера: там же, где список типов и их описания. */
+function kindTitle(kind: string): string {
+  return (app.meta?.storage_kinds ?? []).find((k) => k.value === kind)?.title ?? kind
+}
+
 function location(target: StorageTarget): string {
   switch (target.kind) {
     case 'local':
@@ -210,6 +231,11 @@ function location(target: StorageTarget): string {
       return `${target.endpoint}/${target.bucket}${target.prefix ? '/' + target.prefix : ''}`
     case 'sftp':
       return `${target.username}@${target.host}:${target.port}${target.base_path ?? ''}`
+    case 'smb':
+      // Привычная для оператора запись: та же строка, что он вводит в проводнике.
+      return `\\\\${target.host}\\${target.share ?? ''}${target.base_path ? '\\' + target.base_path.replace(/\//g, '\\') : ''}`
+    case 'webdav':
+      return `${target.endpoint}${target.base_path ? '/' + target.base_path : ''}`
     default:
       return ''
   }
@@ -253,11 +279,8 @@ function location(target: StorageTarget): string {
 
       <template #body-cell-kind="props">
         <q-td :props="props">
-          <q-icon
-            :name="props.row.kind === 's3' ? 'cloud' : props.row.kind === 'sftp' ? 'lan' : 'folder'"
-            class="q-mr-xs"
-          />
-          {{ props.row.kind }}
+          <q-icon :name="storageKindIcon(props.row.kind)" class="q-mr-xs" />
+          {{ kindTitle(props.row.kind) }}
         </q-td>
       </template>
 
@@ -328,7 +351,11 @@ function location(target: StorageTarget): string {
               outlined
               dense
               :disable="!!editing"
+              @update:model-value="onKindChange"
             />
+            <div v-if="!editing" class="jhv-reason">
+              {{ (app.meta?.storage_kinds ?? []).find((k) => k.value === form.kind)?.description }}
+            </div>
           </div>
 
           <div v-if="form.kind === 'local'" class="col-12">
@@ -386,6 +413,114 @@ function location(target: StorageTarget): string {
 			<div v-if="form.object_lock_enabled" class="col-12 col-sm-6">
 				<q-input v-model.number="form.object_lock_days" type="number" min="1" max="36500" label="Срок блокировки, дней" outlined dense />
 			</div>
+          </template>
+
+          <template v-if="form.kind === 'smb'">
+            <div class="col-12 col-sm-8">
+              <q-input
+                v-model="form.host"
+                label="Сервер"
+                hint="Имя или адрес: nas.example.org либо 10.0.0.5"
+                outlined
+                dense
+              />
+            </div>
+            <div class="col-12 col-sm-4">
+              <q-input v-model.number="form.port" type="number" label="Порт" hint="445 обычно" outlined dense />
+            </div>
+            <div class="col-12 col-sm-6">
+              <q-input
+                v-model="form.share"
+                label="Сетевая папка"
+                hint="Только имя шары: backups, а не \\nas\backups"
+                outlined
+                dense
+              />
+            </div>
+            <div class="col-12 col-sm-6">
+              <q-input
+                v-model="form.domain"
+                label="Домен"
+                hint="Домен AD или рабочая группа; для локальной учётной записи NAS оставьте пустым"
+                outlined
+                dense
+              />
+            </div>
+            <div class="col-12 col-sm-6">
+              <q-input v-model="form.username" label="Пользователь" outlined dense />
+            </div>
+            <div class="col-12 col-sm-6">
+              <q-input
+                v-model="form.password"
+                label="Пароль"
+                type="password"
+                :hint="editing ? 'Пусто — оставить прежний' : ''"
+                outlined
+                dense
+              />
+            </div>
+            <div class="col-12">
+              <q-input
+                v-model="form.base_path"
+                label="Путь внутри папки"
+                hint="Необязательно. Позволяет делить одну шару с другими данными; каталог создаётся автоматически"
+                outlined
+                dense
+              />
+            </div>
+            <div class="col-12">
+              <div class="jhv-reason">
+                Служба подключается к шаре сама, монтировать её на хосте не нужно. Свободное место
+                шары видно в таблице хранилищ, как у локального каталога.
+              </div>
+            </div>
+          </template>
+
+          <template v-if="form.kind === 'webdav'">
+            <div class="col-12">
+              <q-input
+                v-model="form.endpoint"
+                label="Адрес коллекции"
+                hint="Полный адрес каталога: https://nas.example.org/remote.php/dav/files/backup"
+                outlined
+                dense
+              />
+            </div>
+            <div class="col-12 col-sm-6">
+              <q-input v-model="form.username" label="Пользователь" outlined dense />
+            </div>
+            <div class="col-12 col-sm-6">
+              <q-input
+                v-model="form.password"
+                label="Пароль"
+                type="password"
+                :hint="editing ? 'Пусто — оставить прежний' : 'В Nextcloud заведите пароль приложения'"
+                outlined
+                dense
+              />
+            </div>
+            <div class="col-12">
+              <q-input
+                v-model="form.base_path"
+                label="Каталог внутри коллекции"
+                hint="Необязательно; создаётся автоматически при проверке"
+                outlined
+                dense
+              />
+            </div>
+            <div class="col-12">
+              <q-toggle v-model="form.insecure_tls" label="Не проверять сертификат сервера" />
+              <div class="jhv-reason">
+                Нужно для NAS с самоподписанным сертификатом. Пока проверка отключена, соединение
+                можно подменить — для боевой установки лучше выпустить сертификат.
+              </div>
+            </div>
+            <div class="col-12">
+              <div class="jhv-reason">
+                Прерванная передача начинается заново: возобновления в WebDAV нет. Для больших дисков
+                надёжнее SMB, S3 или локальный каталог.
+              </div>
+            </div>
           </template>
 
           <template v-if="form.kind === 'sftp'">

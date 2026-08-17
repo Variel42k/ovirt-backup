@@ -169,3 +169,16 @@ export function percent(part: number, total: number): number {
   if (!total) return 0
   return Math.round((part / total) * 100)
 }
+
+const STORAGE_KIND_ICON: Record<string, string> = {
+  local: 'folder',
+  s3: 'cloud',
+  smb: 'folder_shared',
+  webdav: 'cloud_sync',
+  sftp: 'lan',
+}
+
+/** Иконка типа хранилища. Одна на всё приложение: список показывают и панель, и страница хранилищ. */
+export function storageKindIcon(kind?: string): string {
+  return STORAGE_KIND_ICON[kind ?? ''] ?? 'folder'
+}

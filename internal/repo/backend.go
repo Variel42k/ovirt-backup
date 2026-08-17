@@ -1,10 +1,10 @@
 // Package repo abstracts the places backups are written to: a local
 // filesystem (including anything mounted there, such as NFS), S3-compatible
-// object storage, and SFTP.
+// object storage, SMB/CIFS shares, WebDAV collections, and SFTP.
 //
 // The interface is deliberately narrow. Everything the backup engine needs is
 // "write an object", "read part of an object" and "list/delete by prefix" —
-// which is the intersection of what all three backends do well. Ranged reads
+// which is the intersection of what all the backends do well. Ranged reads
 // in particular are what makes verification and restore possible without
 // pulling a whole terabyte image down first.
 package repo
@@ -112,6 +112,10 @@ func Open(ctx context.Context, target *model.StorageTarget) (Backend, error) {
 		backend, err = newS3(ctx, target)
 	case model.StorageSFTP:
 		backend, err = newSFTP(target)
+	case model.StorageSMB:
+		backend, err = newSMB(target)
+	case model.StorageWebDAV:
+		backend, err = newWebDAV(target)
 	default:
 		return nil, errors.New("неизвестный тип хранилища: " + string(target.Kind))
 	}

@@ -49,7 +49,8 @@
             ▼            ▼           ▼            ▼
       движок oVirt   libvirt+SSH  хранилище    PostgreSQL
       443 / 54322    NBD          копий
-                                  local/S3/SFTP
+                                  local/S3/SMB/
+                                  WebDAV/SFTP
 ```
 
 `jvbackup` — отдельный бинарь, который подключается к тому же хранилищу копий
@@ -71,7 +72,7 @@
 | `internal/imageio` | клиент `ovirt-imageio`: extents, диапазонное чтение и запись |
 | `internal/libvirtx` | libvirt поверх SSH: инвентарь, действия, backup API, метрики |
 | `pkg/nbd` | клиент NBD: рукопожатие, чтение, контексты метаданных |
-| `internal/repo` | хранилища копий (local / S3 / SFTP) и раскладка объектов |
+| `internal/repo` | хранилища копий (local / S3 / SMB / WebDAV / SFTP) и раскладка объектов |
 | `internal/retention` | правила «дед-отец-сын» с учётом целостности цепочек |
 | `internal/backup` | формат, копирование, восстановление, проверки, рекомендатель |
 | `internal/kvm` | драйвер горячего бэкапа libvirt поверх формата `backup` |
@@ -272,7 +273,7 @@ JSON, — они хранились молча и годами могли бы �
     ├─ oVirt:   Backup API → checkpoint → imageio (54322/54323) → чанки
     └─ libvirt: DomainBackupBegin → NBD → чанки
                                           │
-                          io.Pipe → repo (local/S3/SFTP)
+                          io.Pipe → repo (local/S3/SMB/WebDAV/SFTP)
                                           │
                               манифест + объект данных
 ```

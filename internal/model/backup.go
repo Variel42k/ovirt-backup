@@ -98,10 +98,28 @@ func (s RunStatus) Terminal() bool {
 type StorageKind string
 
 const (
-	StorageLocal StorageKind = "local"
-	StorageS3    StorageKind = "s3"
-	StorageSFTP  StorageKind = "sftp"
+	StorageLocal  StorageKind = "local"
+	StorageS3     StorageKind = "s3"
+	StorageSFTP   StorageKind = "sftp"
+	StorageSMB    StorageKind = "smb"
+	StorageWebDAV StorageKind = "webdav"
 )
+
+// AllStorageKinds перечисляет типы хранилищ в порядке от самого простого к
+// самому специфичному.
+func AllStorageKinds() []StorageKind {
+	return []StorageKind{StorageLocal, StorageS3, StorageSMB, StorageWebDAV, StorageSFTP}
+}
+
+// KnownStorageKind сообщает, поддерживается ли тип хранилища.
+func KnownStorageKind(kind StorageKind) bool {
+	for _, k := range AllStorageKinds() {
+		if k == kind {
+			return true
+		}
+	}
+	return false
+}
 
 // StorageTarget is a configured backup repository. Secret fields are encrypted
 // at rest and never serialised back to the client.
@@ -129,13 +147,25 @@ type StorageTarget struct {
 	ObjectLockEnabled bool `json:"object_lock_enabled"`
 	ObjectLockDays    int  `json:"object_lock_days"`
 
-	// SFTP
+	// SFTP и SMB
 	Host       string `json:"host,omitempty"`
 	Port       int    `json:"port,omitempty"`
 	Username   string `json:"username,omitempty"`
 	Password   string `json:"-"`
 	PrivateKey string `json:"-"`
 	HostKey    string `json:"host_key,omitempty"`
+
+	// SMB/CIFS. Share — имя сетевой папки без \\сервер\, Domain — домен
+	// Active Directory или рабочая группа; для локальной учётной записи NAS
+	// остаётся пустым. Путь внутри шары задаётся BasePath.
+	Share  string `json:"share,omitempty"`
+	Domain string `json:"domain,omitempty"`
+
+	// WebDAV использует Endpoint как полный адрес коллекции, BasePath — как
+	// каталог внутри неё, а Username и Password — как Basic-аутентификацию.
+	// InsecureTLS отключает проверку сертификата: NAS часто отдают
+	// самоподписанный, и без этого подключиться к нему нельзя вовсе.
+	InsecureTLS bool `json:"insecure_tls"`
 
 	// Ограничение полосы, байт/с. 0 — без ограничения.
 	RateLimit int64 `json:"rate_limit"` // bytes/second for aggregate streaming writes; 0 means unlimited

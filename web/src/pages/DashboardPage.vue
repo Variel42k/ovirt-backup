@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { api, notifyError } from '@/api/client'
-import { ago, bytes, connState, dateTime, percent, runStatus, statusColor } from '@/api/format'
+import { ago, bytes, connState, dateTime, percent, runStatus, statusColor, storageKindIcon } from '@/api/format'
 import type { Dashboard } from '@/api/types'
 
 const data = ref<Dashboard | null>(null)
@@ -234,7 +234,7 @@ onBeforeUnmount(() => {
             <q-item v-for="storage in data?.storages ?? []" :key="storage.id">
               <q-item-section avatar>
                 <q-icon
-                  :name="storage.kind === 's3' ? 'cloud' : storage.kind === 'sftp' ? 'lan' : 'folder'"
+                  :name="storageKindIcon(storage.kind)"
                   :color="storage.last_check_ok ? 'positive' : 'negative'"
                 />
               </q-item-section>

@@ -1059,6 +1059,8 @@ func (e *Engine) writeRunManifest(ctx context.Context, backend repo.Backend, srv
 	if len(vmConfig) > 0 {
 		doc.ConfigKey = repo.VMConfigKey(run.RepoPath)
 		doc.ConfigFormat = "ovirt-vm-json"
+		// Тем же признаком считаются объекты основной копии: см. ConfigStored.
+		run.ConfigStored = true
 	}
 	for _, m := range manifests {
 		doc.Disks = append(doc.Disks, RunManifestDisk{

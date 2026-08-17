@@ -467,7 +467,16 @@ type BackupRun struct {
 	LogicalBytes int64         `json:"logical_bytes"` // сумма виртуальных размеров дисков
 	ReadBytes    int64         `json:"read_bytes"`    // сколько реально прочитано с движка
 	StoredBytes  int64         `json:"stored_bytes"`  // сколько записано в хранилище (после сжатия)
-	Progress     int           `json:"progress"`      // 0..100
+	// ConfigStored отмечает, что рядом с данными лежит vm-config.json.
+	//
+	// Нужно для счёта объектов основной копии: реплики считают их обходом
+	// префикса и получают четыре штуки на однодисковую точку, а основную пишет
+	// сам движок, и без этого признака она считалась бы по формуле «диски плюс
+	// run.json» и расходилась бы с репликами на единицу. Не хранится в базе:
+	// признак нужен ровно в момент, когда запуск завершается и копия
+	// синхронизируется, а состав объектов после этого не меняется.
+	ConfigStored bool `json:"-"`
+	Progress     int  `json:"progress"` // 0..100
 
 	Encrypted   bool   `json:"encrypted"`
 	Compression string `json:"compression"`

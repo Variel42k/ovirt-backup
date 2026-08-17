@@ -12,6 +12,28 @@ import (
 	"adveng/jh_virt/internal/model"
 )
 
+// runObjectCount — сколько объектов запуск кладёт в хранилище.
+//
+// На каждый диск приходятся манифест и данные, плюс общий run.json и, если
+// конфигурация ВМ сохранена, vm-config.json. Основную копию пишет сам движок
+// бэкапа, а не копировщик реплик, и без этого счёта она оставалась с нулём
+// объектов: в интерфейсе рядом с репликами «4 из 4» основная выглядела пустой,
+// а всё, что судит о полноте копии по этому числу, считало её недоделанной.
+//
+// Считаем по составу запуска, а не перечислением объектов в хранилище: во
+// внешнем хранилище это лишний обход по сети на каждое обновление статуса,
+// причём ради числа, которое и так известно заранее.
+func runObjectCount(run *model.BackupRun) int {
+	if run.DiskCount <= 0 {
+		return 0
+	}
+	count := run.DiskCount*2 + 1
+	if run.ConfigStored {
+		count++
+	}
+	return count
+}
+
 const copyColumns = `c.id, c.run_id, c.storage_target_id, COALESCE(t.name, ''), c.role,
 	c.required, c.status, c.repo_path, COALESCE(c.source_copy_id, ''), c.manifest_sha256,
 	c.object_count, c.copied_objects, c.total_bytes, c.copied_bytes, c.attempt_count,
@@ -30,10 +52,16 @@ func (s *Store) EnsurePrimaryCopy(ctx context.Context, run *model.BackupRun) (*m
 	case model.RunCanceled:
 		status = model.CopyCanceled
 	}
+	objects := runObjectCount(run)
+	copied := 0
+	if status == model.CopySucceeded {
+		copied = objects
+	}
 	copy := &model.BackupCopy{
 		ID: uuid.NewString(), RunID: run.ID, StorageTargetID: run.StorageTargetID,
 		Role: model.CopyPrimary, Required: true, Status: status, RepoPath: run.RepoPath,
-		ManifestSHA256: run.ManifestSHA256, TotalBytes: run.StoredBytes, CopiedBytes: run.StoredBytes,
+		ManifestSHA256: run.ManifestSHA256, ObjectCount: objects, CopiedObjects: copied,
+		TotalBytes: run.StoredBytes, CopiedBytes: run.StoredBytes,
 		StartedAt: run.StartedAt, EndedAt: run.EndedAt,
 	}
 	if err := s.CreateBackupCopy(ctx, copy); err != nil {
@@ -57,11 +85,21 @@ func (s *Store) SyncPrimaryCopy(ctx context.Context, run *model.BackupRun) error
 	case model.RunCanceled:
 		status = model.CopyCanceled
 	}
+	objects := runObjectCount(run)
+	copied := 0
+	if status == model.CopySucceeded {
+		copied = objects
+	}
+	// GREATEST по числу объектов: запуск, перечитанный из базы, теряет
+	// ConfigStored — признак не хранится, — и посчитал бы на один объект
+	// меньше. Уменьшать уже записанное число из-за этого не следует.
 	_, err := s.db.Exec(ctx, `UPDATE backup_copies SET status=?, repo_path=?,
-		manifest_sha256=?, total_bytes=?, copied_bytes=?, started_at=?, ended_at=?,
+		manifest_sha256=?, object_count=GREATEST(object_count, ?),
+		copied_objects=GREATEST(copied_objects, ?),
+		total_bytes=?, copied_bytes=?, started_at=?, ended_at=?,
 		last_error=?, updated_at=? WHERE run_id=? AND role='primary'`, string(status),
-		run.RepoPath, run.ManifestSHA256, run.StoredBytes, run.StoredBytes, run.StartedAt,
-		run.EndedAt, run.Error, time.Now().UTC(), run.ID)
+		run.RepoPath, run.ManifestSHA256, objects, copied, run.StoredBytes, run.StoredBytes,
+		run.StartedAt, run.EndedAt, run.Error, time.Now().UTC(), run.ID)
 	return err
 }
 

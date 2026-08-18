@@ -219,6 +219,10 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /verifications", s.handleListVerifications)
 	mux.HandleFunc("GET /verifications/{id}", s.handleGetVerification)
 	mux.HandleFunc("POST /backups/{id}/restore", s.writer(s.handleRestore))
+	// Предпросмотр ничего не создаёт, но читает состав копии и место в домене
+	// хранения, поэтому закрыт теми же правами, что и сама сборка.
+	mux.HandleFunc("POST /backups/{id}/restore-vm/plan", s.writer(s.handlePlanRestoreVM))
+	mux.HandleFunc("POST /backups/{id}/restore-vm", s.writer(s.handleRestoreVM))
 	mux.HandleFunc("GET /restores", s.handleListRestores)
 	mux.HandleFunc("GET /restores/{id}", s.handleGetRestore)
 

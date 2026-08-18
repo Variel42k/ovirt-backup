@@ -90,6 +90,14 @@ type RestoreRequest struct {
 	AttachToVMID string
 	// NewDiskSuffix отличает восстановленный диск от исходного по имени.
 	NewDiskSuffix string
+	// DiskBuses задаёт шину подключения для каждого диска: идентификатор диска
+	// в бэкапе — имя шины у исходной машины.
+	//
+	// Нужно при сборке машины целиком. Подключить диск не на ту шину — значит
+	// сменить имя устройства в госте: то, что было /dev/sda, станет /dev/vda,
+	// и система не смонтирует то, что записано в fstab по имени. Пусто —
+	// прежнее поведение, virtio_scsi для всех.
+	DiskBuses map[string]string
 
 	TriggeredBy string
 }
@@ -423,7 +431,8 @@ func (e *Engine) restoreToEngine(ctx context.Context, set *ChainSet, reader *Cha
 	success = true
 
 	if req.AttachToVMID != "" {
-		if err := client.AttachDisk(ctx, req.AttachToVMID, targetDiskID, "virtio_scsi", leaf.Bootable); err != nil {
+		iface := ovirt.DiskInterfaceForBus(req.DiskBuses[diskID])
+		if err := client.AttachDisk(ctx, req.AttachToVMID, targetDiskID, iface, leaf.Bootable); err != nil {
 			return fmt.Errorf("подключение диска к ВМ: %w", err)
 		}
 	}

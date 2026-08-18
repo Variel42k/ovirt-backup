@@ -6,7 +6,7 @@ import { bytes, dateTime, elapsed, runStatus, statusColor } from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import HelpButton from '@/components/HelpButton.vue'
-import type { BackupCopy, BackupDisk, BackupRun, BootReport, ReplicationDetail, RestoreRun, StorageDomain, VerifyRun } from '@/api/types'
+import type { BackupCopy, BackupDisk, BackupRun, BootReport, ReplicationDetail, RestoreRun, RestoreVMPlan, StorageDomain, VerifyRun } from '@/api/types'
 
 const $q = useQuasar()
 const app = useAppStore()
@@ -38,6 +38,13 @@ const restoreForm = ref({
   disk_ids: [] as string[],
 })
 const domains = ref<StorageDomain[]>([])
+
+// План сборки машины целиком. Запрашивается отдельно и до запуска: он ничего
+// не создаёт, а показывает объём и последствия — сколько дисков, сколько
+// места, как будет называться машина и что с сетью.
+const vmPlan = ref<RestoreVMPlan | null>(null)
+const vmPlanLoading = ref(false)
+const vmForm = ref({ name: '', cluster_id: '', network: 'detached', start: false, confirm: false })
 
 async function load() {
   loading.value = true
@@ -207,6 +214,8 @@ async function openRestore(run: BackupRun) {
     attach_to_vm_id: '',
     disk_ids: [],
   }
+  vmPlan.value = null
+  vmForm.value = { name: '', cluster_id: '', network: 'detached', start: false, confirm: false }
   try {
     domains.value = await api.listStorageDomains(run.server_id)
   } catch {
@@ -274,6 +283,45 @@ async function cancelCopy(copy: BackupCopy) {
 	} catch (err) {
 		notifyError(err, 'Не удалось отменить репликацию')
 	}
+}
+
+/** Переключатель сети хранит строку, а не флаг: у режима есть имя в API. */
+function setRestoreNetwork(attached: boolean) {
+  vmForm.value.network = attached ? 'attached' : 'detached'
+  vmPlan.value = null
+}
+
+async function loadVMPlan() {
+  if (!detail.value) return
+  vmPlanLoading.value = true
+  try {
+    vmPlan.value = await api.planRestoreVM(detail.value.id, {
+      copy_id: restoreForm.value.copy_id,
+      storage_domain_id: restoreForm.value.target_domain_id,
+      ...vmForm.value,
+    })
+  } catch (err) {
+    vmPlan.value = null
+    notifyError(err, 'Не удалось построить план')
+  } finally {
+    vmPlanLoading.value = false
+  }
+}
+
+async function submitRestoreVM() {
+  if (!detail.value) return
+  try {
+    await api.restoreVM(detail.value.id, {
+      copy_id: restoreForm.value.copy_id,
+      storage_domain_id: restoreForm.value.target_domain_id,
+      ...vmForm.value,
+    })
+    notifyOk('Сборка машины запущена — ход виден на вкладке «Восстановления»')
+    restoreOpen.value = false
+    await loadRestores()
+  } catch (err) {
+    notifyError(err, 'Не удалось запустить сборку машины')
+  }
 }
 
 async function submitRestore() {
@@ -1067,11 +1115,160 @@ const replicationColumns = [
             v-model="restoreForm.target"
             type="radio"
             :options="[
+              { label: 'Собрать машину целиком: создать ВМ, диски и подключить их', value: 'new_vm' },
               { label: 'Собрать образ в файл на сервере бэкапов', value: 'file' },
               { label: 'Создать новый диск в oVirt и залить в него', value: 'new_disk' },
               { label: 'Записать поверх существующего диска', value: 'disk' },
             ]"
+            @update:model-value="vmPlan = null"
           />
+
+          <!-- Сборка машины целиком -->
+          <template v-if="restoreForm.target === 'new_vm'">
+            <div class="col-12 col-sm-7">
+              <q-input
+                v-model="vmForm.name"
+                label="Имя новой машины"
+                hint="Пусто — имя исходной с датой восстановления"
+                outlined
+                dense
+                @update:model-value="vmPlan = null"
+              />
+            </div>
+            <div class="col-12 col-sm-5">
+              <q-input
+                v-model="vmForm.cluster_id"
+                label="Кластер"
+                hint="Идентификатор кластера движка"
+                outlined
+                dense
+                @update:model-value="vmPlan = null"
+              />
+            </div>
+            <div class="col-12">
+              <q-select
+                v-model="restoreForm.target_domain_id"
+                :options="domains.filter((d) => d.type === 'data').map((d) => ({ label: d.name, value: d.id }))"
+                emit-value
+                map-options
+                label="Домен хранения для дисков"
+                outlined
+                dense
+                @update:model-value="vmPlan = null"
+              />
+            </div>
+
+            <div class="col-12">
+              <q-toggle
+                :model-value="vmForm.network === 'attached'"
+                label="Подключить сеть как у исходной машины"
+                color="negative"
+                @update:model-value="setRestoreNetwork"
+              />
+              <!--
+                Умолчание — сеть отключена, и это не перестраховка. Восстановленная
+                машина несёт то же имя хоста, те же адреса и те же ключи, что
+                оригинал. Поднятая рядом с работающим оригиналом, она в лучшем
+                случае устроит конфликт адресов, а в худшем начнёт вторым
+                экземпляром писать в общую базу и разбирать ту же очередь.
+              -->
+              <div class="jhv-reason" :class="vmForm.network === 'attached' ? 'text-negative' : ''">
+                <template v-if="vmForm.network === 'attached'">
+                  Машина окажется в сети с теми же адресами и именем, что у оригинала.
+                  Включайте, только если оригинала больше нет или сеть изолирована.
+                </template>
+                <template v-else>
+                  Интерфейсы будут созданы, но отключены — подключите их сами, когда
+                  убедитесь, что оригинал не работает.
+                </template>
+              </div>
+            </div>
+
+            <div class="col-12">
+              <q-toggle
+                v-model="vmForm.start"
+                label="Запустить сразу после сборки"
+                @update:model-value="vmPlan = null"
+              />
+            </div>
+
+            <div v-if="detail?.status === 'partial'" class="col-12">
+              <q-toggle
+                v-model="vmForm.confirm"
+                color="negative"
+                label="Копия неполная — согласен собрать машину с пустыми дисками"
+                @update:model-value="vmPlan = null"
+              />
+            </div>
+
+            <div class="col-12">
+              <q-btn
+                outline
+                color="primary"
+                icon="fact_check"
+                label="Показать план"
+                :loading="vmPlanLoading"
+                @click="loadVMPlan"
+              />
+              <span class="jhv-reason q-ml-sm">План ничего не создаёт: он показывает, что будет сделано.</span>
+            </div>
+
+            <div v-if="vmPlan" class="col-12">
+              <q-card flat bordered>
+                <q-card-section class="q-pb-none">
+                  <div class="text-subtitle2">{{ vmPlan.new_name }}</div>
+                  <div class="jhv-reason">
+                    из копии машины {{ vmPlan.vm_name }} · дисков {{ vmPlan.disks.length }} ·
+                    потребуется {{ bytes(vmPlan.total_bytes) }}
+                    <template v-if="vmPlan.free_bytes >= 0"> · свободно {{ bytes(vmPlan.free_bytes) }}</template>
+                  </div>
+                </q-card-section>
+
+                <q-card-section>
+                  <q-markup-table flat dense class="jhv-table">
+                    <thead>
+                      <tr>
+                        <th class="text-left">Диск</th>
+                        <th class="text-left">Устройство</th>
+                        <th class="text-left">Шина</th>
+                        <th class="text-right">Размер</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="d in vmPlan.disks" :key="d.disk_id">
+                        <td>
+                          {{ d.alias }}
+                          <q-badge v-if="d.bootable" color="primary" class="q-ml-sm">загрузочный</q-badge>
+                        </td>
+                        <td class="jhv-mono">{{ d.target || '—' }}</td>
+                        <td class="jhv-mono">{{ d.bus || 'по умолчанию' }}</td>
+                        <td class="text-right">{{ bytes(d.virtual_size) }}</td>
+                      </tr>
+                    </tbody>
+                  </q-markup-table>
+                </q-card-section>
+
+                <q-card-section v-if="vmPlan.blockers?.length" class="q-pt-none">
+                  <q-banner dense class="bg-red-1">
+                    <template #avatar><q-icon name="block" color="negative" /></template>
+                    <div class="text-weight-medium">Восстановление не начнётся:</div>
+                    <ul class="q-my-none q-pl-md">
+                      <li v-for="(b, i) in vmPlan.blockers" :key="i" class="jhv-wrap">{{ b }}</li>
+                    </ul>
+                  </q-banner>
+                </q-card-section>
+
+                <q-card-section v-if="vmPlan.warnings?.length" class="q-pt-none">
+                  <q-banner dense class="bg-orange-1">
+                    <template #avatar><q-icon name="warning" color="warning" /></template>
+                    <ul class="q-my-none q-pl-md">
+                      <li v-for="(w, i) in vmPlan.warnings" :key="i" class="jhv-wrap">{{ w }}</li>
+                    </ul>
+                  </q-banner>
+                </q-card-section>
+              </q-card>
+            </div>
+          </template>
 
           <template v-if="restoreForm.target === 'file'">
             <q-input v-model="restoreForm.output_dir" label="Каталог" hint="Пусто — временный каталог сервиса" outlined dense />
@@ -1125,7 +1322,23 @@ const replicationColumns = [
         <q-separator />
         <q-card-actions align="right">
           <q-btn flat label="Отмена" v-close-popup />
-          <q-btn color="primary" unelevated label="Восстановить" @click="submitRestore" />
+          <!--
+            Сборка машины требует показанного плана: она создаёт машину и диски
+            в движке и длится десятки минут. Нажать её вслепую нельзя — сначала
+            надо увидеть объём и предупреждения.
+          -->
+          <q-btn
+            v-if="restoreForm.target === 'new_vm'"
+            color="primary"
+            unelevated
+            label="Собрать машину"
+            :disable="!vmPlan || !!vmPlan.blockers?.length"
+            @click="submitRestoreVM"
+          >
+            <q-tooltip v-if="!vmPlan">Сначала посмотрите план</q-tooltip>
+            <q-tooltip v-else-if="vmPlan.blockers?.length">Сначала устраните то, что мешает</q-tooltip>
+          </q-btn>
+          <q-btn v-else color="primary" unelevated label="Восстановить" @click="submitRestore" />
         </q-card-actions>
       </q-card>
     </q-dialog>

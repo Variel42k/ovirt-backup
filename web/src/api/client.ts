@@ -31,6 +31,7 @@ import type {
   RemediationRecord,
   ReplicationDetail,
   RestoreRun,
+  RestoreVMPlan,
   RetentionPlan,
   RetentionPolicy,
   Server,
@@ -330,6 +331,10 @@ export const api = {
   listVerifications: (runId?: string) =>
     http.get<ListResponse<VerifyRun>>('/verifications', { params: runId ? { run_id: runId } : undefined }).then((r) => unwrap(r.data)),
   restore: (id: string, payload: Record<string, unknown>) => http.post(`/backups/${id}/restore`, payload).then((r) => r.data),
+  planRestoreVM: (id: string, payload: Record<string, unknown>) =>
+    http.post<RestoreVMPlan>(`/backups/${id}/restore-vm/plan`, payload).then((r) => r.data),
+  restoreVM: (id: string, payload: Record<string, unknown>) =>
+    http.post(`/backups/${id}/restore-vm`, payload).then((r) => r.data),
   listRestores: (runId?: string) =>
     http.get<ListResponse<RestoreRun>>('/restores', { params: runId ? { run_id: runId } : undefined }).then((r) => unwrap(r.data)),
 

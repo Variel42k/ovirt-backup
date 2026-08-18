@@ -864,3 +864,31 @@ export interface ListResponse<T> {
   items: T[]
   total: number
 }
+
+/** План восстановления машины целиком: что будет сделано, до того как оно сделано. */
+export interface RestoreVMPlan {
+  run_id: string
+  vm_name: string
+  new_name: string
+  server_id: string
+  created_at: string
+  disks: RestoreVMPlanDisk[]
+  total_bytes: number
+  /** -1 — движок не сообщил свободное место. */
+  free_bytes: number
+  network: 'detached' | 'attached'
+  start: boolean
+  /** Не мешает начать, но должно быть прочитано. */
+  warnings?: string[]
+  /** Из-за этого восстановление не начнётся. */
+  blockers?: string[]
+}
+
+export interface RestoreVMPlanDisk {
+  disk_id: string
+  alias: string
+  target: string
+  bus: string
+  bootable: boolean
+  virtual_size: number
+}

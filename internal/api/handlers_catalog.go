@@ -393,7 +393,11 @@ func (s *Server) importCatalogEntry(ctx context.Context, scan *model.CatalogScan
 		ToCheckpointID: doc.ToCheckpointID, SnapshotID: doc.SnapshotID, DiskCount: len(doc.Disks),
 		LogicalBytes: doc.LogicalBytes, ReadBytes: doc.LogicalBytes, StoredBytes: doc.StoredBytes,
 		Progress: 100, Encrypted: doc.Encrypted, Compression: doc.Compression,
-		StartedAt: &started, EndedAt: &ended, CreatedAt: started,
+		// Конфигурация ВМ — такой же объект хранилища, как манифест и данные.
+		// Без этого признака импортированная копия считалась бы на объект
+		// меньше, чем та же самая точка, зарегистрированная при бэкапе.
+		ConfigStored: doc.ConfigKey != "",
+		StartedAt:    &started, EndedAt: &ended, CreatedAt: started,
 		ManifestSHA256: entry.ManifestSHA256, Imported: true}
 	disks := make([]model.BackupDisk, 0, len(doc.Disks))
 	for _, disk := range doc.Disks {

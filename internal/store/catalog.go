@@ -235,7 +235,7 @@ func (s *Store) ImportCatalogRun(ctx context.Context, entryID string, run *model
 			 manifest_sha256=EXCLUDED.manifest_sha256, repo_path=EXCLUDED.repo_path,
 			 status='succeeded', updated_at=EXCLUDED.updated_at`), uuid.NewString(), run.ID,
 			run.StorageTargetID, string(role), required, run.RepoPath, run.ManifestSHA256,
-			run.DiskCount*2+1, run.DiskCount*2+1, run.StoredBytes, run.StoredBytes,
+			runObjectCount(run), runObjectCount(run), run.StoredBytes, run.StoredBytes,
 			&now, run.StartedAt, run.EndedAt, run.CreatedAt, now)
 		if err != nil {
 			return err

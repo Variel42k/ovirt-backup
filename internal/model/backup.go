@@ -756,7 +756,19 @@ const (
 	RestoreToDisk RestoreTarget = "disk"
 	// RestoreToNewDisk — создать новый диск в выбранном домене и залить в него.
 	RestoreToNewDisk RestoreTarget = "new_disk"
+	// RestoreToNewVM — собрать машину целиком: создать её, создать диски,
+	// залить образы и подключить в исходном порядке загрузки.
+	RestoreToNewVM RestoreTarget = "new_vm"
 )
+
+// KnownRestoreTarget сообщает, поддерживается ли цель восстановления.
+func KnownRestoreTarget(t RestoreTarget) bool {
+	switch t {
+	case RestoreToFile, RestoreToDisk, RestoreToNewDisk, RestoreToNewVM:
+		return true
+	}
+	return false
+}
 
 // RestoreRun is one restore operation.
 type RestoreRun struct {

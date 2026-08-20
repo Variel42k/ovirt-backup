@@ -1000,6 +1000,7 @@ func (s *Scheduler) finishJob(ctx context.Context, job *model.BackupJob, jobRun 
 	jobRun.SucceededCount, jobRun.PartialCount, jobRun.FailedCount, jobRun.CanceledCount = 0, 0, 0, 0
 	status := model.RunSucceeded
 	primaryFailed := false
+	waitingCopies := 0
 	targets := make(map[string]struct{}, len(job.StorageTargetIDs))
 	for _, targetID := range job.StorageTargetIDs {
 		targets[targetID] = struct{}{}
@@ -1025,7 +1026,13 @@ func (s *Scheduler) finishJob(ctx context.Context, job *model.BackupJob, jobRun 
 					case model.CopyCanceled:
 						jobRun.CanceledCount++
 					case model.CopyPending, model.CopyCopying, model.CopyVerifying:
-						jobRun.PartialCount++
+						waitingCopies++
+					case model.CopyFailed:
+						if copy.NextRetryAt != nil {
+							waitingCopies++
+						} else {
+							jobRun.FailedCount++
+						}
 					default:
 						jobRun.FailedCount++
 					}
@@ -1047,13 +1054,15 @@ func (s *Scheduler) finishJob(ctx context.Context, job *model.BackupJob, jobRun 
 			jobRun.FailedCount++
 		}
 	}
-	accounted := jobRun.SucceededCount + jobRun.PartialCount + jobRun.FailedCount + jobRun.CanceledCount
+	accounted := jobRun.SucceededCount + jobRun.PartialCount + jobRun.FailedCount + jobRun.CanceledCount + waitingCopies
 	if accounted < jobRun.ReplicaCount {
 		jobRun.FailedCount += jobRun.ReplicaCount - accounted
 	}
 	switch {
 	case primaryFailed:
 		status = model.RunFailed
+	case waitingCopies > 0:
+		status = model.RunWaitingCopies
 	case jobRun.FailedCount > 0 && jobRun.SucceededCount == 0 && jobRun.PartialCount == 0:
 		// If no VM/copy produced a usable result, the whole job failed.  This
 		// also covers a worker that failed before it could create a BackupRun:
@@ -1068,7 +1077,12 @@ func (s *Scheduler) finishJob(ctx context.Context, job *model.BackupJob, jobRun 
 	}
 
 	now := time.Now().UTC()
-	jobRun.Status, jobRun.EndedAt = status, &now
+	jobRun.Status = status
+	if status.Terminal() {
+		jobRun.EndedAt = &now
+	} else {
+		jobRun.EndedAt = nil
+	}
 	if err := s.store.UpdateBackupJobRun(ctx, jobRun); err != nil {
 		s.log.Warn().Err(err).Str("запуск", jobRun.ID).Msg("не удалось сохранить итог пакетного запуска")
 	}
@@ -1092,7 +1106,7 @@ func (s *Scheduler) finishJob(ctx context.Context, job *model.BackupJob, jobRun 
 	}
 	s.bus.Publish(events.Event{
 		Kind: events.KindJob, ServerID: job.ServerID, ObjectID: jobRun.ID, Payload: jobRun,
-		Message: fmt.Sprintf("задание «%s» завершено: %s", job.Name, status),
+		Message: fmt.Sprintf("задание «%s»: %s", job.Name, status),
 	})
 }
 

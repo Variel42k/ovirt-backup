@@ -131,13 +131,12 @@ func run() error {
 
 	// Оповещения наружу. Подписка ставится до запуска монитора и планировщика:
 	// иначе первые же беды, найденные при старте, останутся без сообщения.
-	notifier := notify.New(cfg.Notifications, log)
+	notifier := notify.NewSender(cfg.Notifications, log)
 	defer notifier.Close()
 	if notifier != nil {
 		if err := notifier.SetTimezone(cfg.Scheduler.Timezone); err != nil {
 			return err
 		}
-		st.OnAlertRaised(notifier.Alert)
 	}
 	drChecker := drcheck.New(cfg.DisasterRecovery, cfg.Secrets.KeyFile, st)
 	drCtx, stopDR := context.WithCancel(ctx)
@@ -249,6 +248,9 @@ func run() error {
 	defer libvirtPool.Close()
 
 	bus := events.NewBus(128)
+	notificationManager := notify.NewManager(st, cfg.Notifications, notifier, bus, log)
+	st.OnAlertRaised(func(model.Alert) { notificationManager.Wake() })
+	go notificationManager.Run(ctx)
 	engine := backup.NewEngine(st, pool, cfg.Backup, cipher, log)
 	// The dispatcher adds the libvirt path on top of the oVirt engine; it
 	// cannot live inside the backup package because the KVM driver builds on
@@ -314,7 +316,8 @@ func run() error {
 	apiServer := api.New(api.Deps{
 		Config: *cfg, BaseConfig: baseCfg, Store: st, Pool: pool, LibvirtPool: libvirtPool, Engine: dispatcher,
 		Scheduler: sched, Monitor: mon, Remediator: remediator, Bus: bus, Logger: log,
-		Logs: logs, Quality: qualityService, Replicator: replicator, Notifier: notifier, DR: drChecker,
+		Logs: logs, Quality: qualityService, Replicator: replicator, Notifier: notifier,
+		Notifications: notificationManager, DR: drChecker,
 		FileBackup: fileBackupEngine,
 	})
 

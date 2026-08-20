@@ -735,13 +735,17 @@ func (s *Service) EvaluateAlerts(ctx context.Context) error {
 	for _, item := range summary.Items {
 		objectID := strings.Join([]string{item.JobID, item.VMID, item.StorageTargetID}, "/")
 		currentObjects[objectID] = true
+		freshnessKind := model.AlertBackupStale
+		if item.JobID == "" {
+			freshnessKind = model.AlertBackupUnprotected
+		}
 		checks := []struct {
 			bad      bool
 			kind     string
 			severity model.Severity
 			message  string
 		}{
-			{!item.FreshnessOK, model.AlertBackupStale, model.SeverityWarning, staleMessage(item)},
+			{!item.FreshnessOK, freshnessKind, model.SeverityWarning, staleMessage(item)},
 			{!item.ReplicaOK, model.AlertBackupReplicaFailed, model.SeverityCritical, fmt.Sprintf("ВМ %s: обязательная реплика задания «%s» в «%s» неполна", item.VMName, item.JobName, item.StorageName)},
 			{!item.VerificationOK, model.AlertBackupVerifyStale, model.SeverityWarning, fmt.Sprintf("ВМ %s: проверка %s для задания «%s» просрочена", item.VMName, item.VerifyMode.Title(), item.JobName)},
 			{!item.PerformanceOK, model.AlertBackupPerformance, model.SeverityWarning, fmt.Sprintf("ВМ %s: скорость задания «%s» снизилась более чем на установленный порог", item.VMName, item.JobName)},
@@ -763,7 +767,7 @@ func (s *Service) EvaluateAlerts(ctx context.Context) error {
 		}
 	}
 	managedQualityKind := map[string]bool{
-		model.AlertBackupStale: true, model.AlertBackupReplicaFailed: true,
+		model.AlertBackupUnprotected: true, model.AlertBackupStale: true, model.AlertBackupReplicaFailed: true,
 		model.AlertBackupVerifyStale: true, model.AlertBackupPerformance: true,
 	}
 	openAlerts, err := s.store.ListAlerts(ctx, store.AlertFilter{

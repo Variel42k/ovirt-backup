@@ -91,3 +91,45 @@ export interface BackupQualitySettings {
   storage_critical_forecast_days: number
   history_retention_days: number
 }
+
+export interface NotificationSettings {
+  enabled: boolean
+  min_severity: 'info' | 'warning' | 'critical'
+  default_repeat_minutes: number
+  notify_on_resolved: boolean
+  ack_stops_repeats: boolean
+  max_repeats: number
+  configured_channels: string[]
+  source: 'config' | 'database'
+}
+
+export interface NotificationPolicy {
+  kind: string
+  enabled: boolean
+  repeat_minutes: number
+  notify_resolved: boolean
+  stop_on_ack: boolean
+  max_repeats: number
+  channels: string[]
+}
+
+export interface NotificationSettingsResponse {
+  settings: NotificationSettings
+  policies: NotificationPolicy[]
+  known_kinds: string[]
+}
+
+export interface NotificationDelivery {
+  id: string
+  alert_id: string
+  event: 'opened' | 'reminder' | 'resolved'
+  sequence: number
+  channel: string
+  status: 'queued' | 'sending' | 'sent' | 'failed'
+  attempts: number
+  max_attempts: number
+  scheduled_at: string
+  last_error?: string
+  created_at: string
+  sent_at?: string
+}

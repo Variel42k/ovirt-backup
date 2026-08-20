@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"adveng/jh_virt/internal/events"
 	"adveng/jh_virt/internal/model"
 	"adveng/jh_virt/internal/monitor"
 	"adveng/jh_virt/internal/store"
@@ -48,6 +49,9 @@ func (s *Server) handleAckAlert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.audit(r, "alert.ack", model.ScopeServer, id, true, "")
+	if s.bus != nil {
+		s.bus.Publish(events.Event{Kind: events.KindAlert, ObjectID: id, Message: "alert acknowledged"})
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "acked"})
 }
 

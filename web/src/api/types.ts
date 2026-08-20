@@ -754,6 +754,11 @@ export interface Alert {
   first_seen: string
   last_seen: string
   acked_by?: string
+  notifications_muted: boolean
+  notifications_muted_until?: string
+  notification_count: number
+  last_notified_at?: string
+  next_notification_at?: string
 }
 
 export interface RemediationRecord {

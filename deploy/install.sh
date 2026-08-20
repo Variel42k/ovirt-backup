@@ -65,6 +65,7 @@ UNINSTALL_REMOVE_CONFIG=0; UNINSTALL_REMOVE_DATA=0
 MIGRATION_ACTION=""; MIGRATION_EXPORT_FILE=""; MIGRATION_IMPORT_FILE=""
 MIGRATION_TMP=""; MIGRATION_ACTIVE=0; MIGRATION_SOURCE_MODE=""
 MIGRATION_SOURCE_PREFIX=""; MIGRATION_SOURCE_USER=""; MIGRATION_DATABASE_KIND=""
+MIGRATION_SOURCE_UID=""; MIGRATION_SOURCE_GID=""; MIGRATION_MARKER=""; MIGRATION_RESUME=0
 MIGRATION_TLS_AVAILABLE=0
 MIGRATION_KEEP_SOURCE=0; MIGRATION_SOURCE_STOPPED=""; MIGRATION_EXPORT_COMMITTED=0
 TLS_MODE=""; TLS_CERT_FILE=""; TLS_KEY_FILE=""
@@ -384,6 +385,58 @@ validate_install_identity() {
 
 validate_install_identity
 
+ensure_service_user() {
+    have getent && have groupadd && have useradd ||
+        die "для создания системного пользователя нужны getent, groupadd и useradd"
+    ESU_PRESERVE=0; ESU_GROUP_CREATED=0
+    if [ "$MIGRATION_ACTIVE" -eq 1 ] && [ "$MIGRATION_SOURCE_MODE" = systemd ] &&
+            [ -n "$MIGRATION_SOURCE_UID" ] && [ -n "$MIGRATION_SOURCE_GID" ]; then
+        ESU_PRESERVE=1
+    fi
+
+    # Unit всегда использует одинаковые User= и Group=. Создаём группу даже
+    # для уже существующего локального пользователя, иначе systemd отвергнет
+    # корректный UID из-за отсутствующего имени группы.
+    if ! getent group "$USER_NAME" >/dev/null 2>&1; then
+        if [ "$ESU_PRESERVE" -eq 1 ] && ! getent group "$MIGRATION_SOURCE_GID" >/dev/null 2>&1; then
+            groupadd --system --gid "$MIGRATION_SOURCE_GID" "$USER_NAME" ||
+                die "не удалось создать группу $USER_NAME с GID $MIGRATION_SOURCE_GID"
+        else
+            groupadd --system "$USER_NAME" || die "не удалось создать группу $USER_NAME"
+        fi
+        ESU_GROUP_CREATED=1
+    fi
+
+    if ! id "$USER_NAME" >/dev/null 2>&1; then
+        if [ "$ESU_PRESERVE" -eq 1 ] && ! getent passwd "$MIGRATION_SOURCE_UID" >/dev/null 2>&1; then
+            if ! { useradd --system --uid "$MIGRATION_SOURCE_UID" --gid "$USER_NAME" \
+                        --home-dir "$PREFIX" --shell /usr/sbin/nologin "$USER_NAME" 2>/dev/null ||
+                    useradd --system --uid "$MIGRATION_SOURCE_UID" --gid "$USER_NAME" \
+                        --home-dir "$PREFIX" --shell /sbin/nologin "$USER_NAME" 2>/dev/null; }; then
+                [ "$ESU_GROUP_CREATED" -eq 0 ] || groupdel "$USER_NAME" >/dev/null 2>&1 || true
+                die "не удалось создать пользователя $USER_NAME с UID $MIGRATION_SOURCE_UID"
+            fi
+        elif ! { useradd --system --gid "$USER_NAME" --home-dir "$PREFIX" \
+                    --shell /usr/sbin/nologin "$USER_NAME" 2>/dev/null ||
+                useradd --system --gid "$USER_NAME" --home-dir "$PREFIX" \
+                    --shell /sbin/nologin "$USER_NAME" 2>/dev/null; }; then
+            [ "$ESU_GROUP_CREATED" -eq 0 ] || groupdel "$USER_NAME" >/dev/null 2>&1 || true
+            die "не удалось создать пользователя $USER_NAME"
+        fi
+    fi
+
+    if [ "$ESU_PRESERVE" -eq 1 ]; then
+        ESU_ACTUAL_UID="$(id -u "$USER_NAME")"
+        ESU_ACTUAL_GID="$(getent group "$USER_NAME" | awk -F: '{print $3}')"
+        if [ "$ESU_ACTUAL_UID:$ESU_ACTUAL_GID" = "$MIGRATION_SOURCE_UID:$MIGRATION_SOURCE_GID" ]; then
+            say "    права службы сохранены: UID:GID $ESU_ACTUAL_UID:$ESU_ACTUAL_GID"
+        else
+            say "    предупреждение: UID:GID службы изменились: $MIGRATION_SOURCE_UID:$MIGRATION_SOURCE_GID -> $ESU_ACTUAL_UID:$ESU_ACTUAL_GID"
+            say "    внешние NFS/локальные каталоги должны разрешать запись новым UID:GID"
+        fi
+    fi
+}
+
 # --- Удаление ---------------------------------------------------------------
 
 docker_bundle_present() {
@@ -616,6 +669,8 @@ migration_write_manifest() {
         printf 'source_mode=%s\n' "$MWM_MODE"
         printf 'source_prefix=%s\n' "$MWM_PREFIX"
         printf 'source_user=%s\n' "$USER_NAME"
+        printf 'source_uid=%s\n' "$(id -u "$USER_NAME" 2>/dev/null || true)"
+        printf 'source_gid=%s\n' "$(id -g "$USER_NAME" 2>/dev/null || true)"
         printf 'database_kind=%s\n' "$MWM_DB"
         printf 'keycloak=%s\n' "$MWM_KEYCLOAK"
         printf 'created_at=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
@@ -724,7 +779,8 @@ migration_export_systemd() {
             ;;
     esac
     if [ -f "$UNIT" ]; then
-        sed -n 's/^ReadWritePaths=//p' "$UNIT" > "$ME_DIR/systemd-write-paths"
+        sed -n 's/^ReadWritePaths=//p' "$UNIT" | tr '\n' ' ' |
+            sed 's/[[:space:]]*$//' > "$ME_DIR/systemd-write-paths"
     fi
     migration_write_manifest "$ME_DIR" systemd "$PREFIX" "$ME_DATABASE_KIND" 0
 }
@@ -761,6 +817,11 @@ migration_export() {
     esac
     chmod 600 "$MIGRATION_TMP/data/"* "$MIGRATION_TMP/tls/"* \
         "$MIGRATION_TMP/environment/"* "$MIGRATION_TMP/database/"* 2>/dev/null || true
+    have sha256sum || die "для контроля целостности пакета нужен sha256sum"
+    (cd "$MIGRATION_TMP" && find . -type f ! -name checksums.sha256 -print | LC_ALL=C sort |
+        xargs sha256sum) > "$MIGRATION_TMP/checksums.sha256" ||
+        die "не удалось вычислить контрольные суммы пакета"
+    chmod 600 "$MIGRATION_TMP/checksums.sha256"
     umask 077
     tar czf "$MIGRATION_EXPORT_FILE.tmp.$$" -C "$MIGRATION_TMP" . ||
         die "не удалось упаковать данные миграции"
@@ -788,6 +849,34 @@ migration_manifest_value() {
     sed -n "s/^${MMV_KEY}=//p" "$MIGRATION_TMP/manifest" | tail -n 1
 }
 
+# Проверяет SAN/CN переносимого сертификата против нового внешнего адреса.
+# В неинтерактивном cutover молча сохранить сертификат от прежнего hostname —
+# значит получить формально успешную установку, которую браузеры не откроют.
+migration_tls_matches_url() {
+    [ -s "$MIGRATION_TMP/tls/server.crt" ] || return 1
+    have openssl || return 1
+    MTU_HOSTPORT="${URL#*://}"; MTU_HOSTPORT="${MTU_HOSTPORT%%/*}"
+    case "$MTU_HOSTPORT" in
+        \[*\]*) MTU_HOST="${MTU_HOSTPORT#\[}"; MTU_HOST="${MTU_HOST%%\]*}" ;;
+        *) MTU_HOST="${MTU_HOSTPORT%%:*}" ;;
+    esac
+    [ -n "$MTU_HOST" ] || return 1
+    case "$MTU_HOST" in
+        *:*)
+            openssl x509 -in "$MIGRATION_TMP/tls/server.crt" -noout -checkip "$MTU_HOST" >/dev/null 2>&1
+            ;;
+        *[!0-9.]*)
+            openssl x509 -in "$MIGRATION_TMP/tls/server.crt" -noout -checkhost "$MTU_HOST" >/dev/null 2>&1
+            ;;
+        *.*)
+            openssl x509 -in "$MIGRATION_TMP/tls/server.crt" -noout -checkip "$MTU_HOST" >/dev/null 2>&1
+            ;;
+        *)
+            openssl x509 -in "$MIGRATION_TMP/tls/server.crt" -noout -checkhost "$MTU_HOST" >/dev/null 2>&1
+            ;;
+    esac
+}
+
 migration_validate_archive() {
     [ -f "$MIGRATION_IMPORT_FILE" ] && [ -r "$MIGRATION_IMPORT_FILE" ] ||
         die "пакет миграции недоступен: $MIGRATION_IMPORT_FILE"
@@ -804,7 +893,7 @@ migration_validate_archive() {
     while IFS= read -r MVA_ENTRY; do
         MVA_ENTRY="${MVA_ENTRY#./}"; MVA_ENTRY="${MVA_ENTRY%/}"
         case "$MVA_ENTRY" in
-            ""|manifest|systemd-write-paths|config|config/ovirt-backup.yaml|environment|environment/docker.env|environment/systemd.env|database|database/jhvirt.dump|database/keycloak.dump|data|data/secret.key|data/metrics.token|tls|tls/server.crt|tls/server.key) ;;
+            ""|manifest|checksums.sha256|systemd-write-paths|config|config/ovirt-backup.yaml|environment|environment/docker.env|environment/systemd.env|database|database/jhvirt.dump|database/keycloak.dump|data|data/secret.key|data/metrics.token|tls|tls/server.crt|tls/server.key) ;;
             *) die "в пакете миграции найден неожиданный путь: $MVA_ENTRY" ;;
         esac
     done < "$MIGRATION_TMP/archive.list"
@@ -817,6 +906,17 @@ migration_validate_archive() {
     [ -s "$MIGRATION_TMP/data/secret.key" ] || die "в пакете нет secret.key"
     [ -f "$MIGRATION_TMP/manifest" ] && [ ! -L "$MIGRATION_TMP/manifest" ] ||
         die "manifest пакета имеет недопустимый тип"
+    if [ -s "$MIGRATION_TMP/checksums.sha256" ]; then
+        have sha256sum || die "для проверки целостности пакета нужен sha256sum"
+        (cd "$MIGRATION_TMP" && sha256sum -c checksums.sha256 >/dev/null) ||
+            die "контрольная сумма пакета миграции не совпала"
+    else
+        say "    предупреждение: пакет прежнего формата без контрольных сумм"
+    fi
+    have base64 || die "для проверки secret.key нужна утилита base64"
+    MSK_BYTES="$(tr -d '[:space:]' < "$MIGRATION_TMP/data/secret.key" |
+        base64 -d 2>/dev/null | wc -c | tr -d ' ')"
+    [ "$MSK_BYTES" = 32 ] || die "secret.key в пакете повреждён: ожидается ключ AES-256"
     rm -f "$MIGRATION_TMP/archive.list" "$MIGRATION_TMP/archive.types"
 }
 
@@ -831,9 +931,14 @@ migration_prepare_import() {
     MIGRATION_SOURCE_MODE="$(migration_manifest_value source_mode)"
     MIGRATION_SOURCE_PREFIX="$(migration_manifest_value source_prefix)"
     MIGRATION_SOURCE_USER="$(migration_manifest_value source_user)"
+    MIGRATION_SOURCE_UID="$(migration_manifest_value source_uid)"
+    MIGRATION_SOURCE_GID="$(migration_manifest_value source_gid)"
     MIGRATION_DATABASE_KIND="$(migration_manifest_value database_kind)"
     case "$MIGRATION_SOURCE_MODE" in docker|systemd) ;; *) die "неизвестный source_mode в пакете" ;; esac
     case "$MIGRATION_DATABASE_KIND" in embedded|external) ;; *) die "неизвестный database_kind в пакете" ;; esac
+    case "$MIGRATION_SOURCE_UID:$MIGRATION_SOURCE_GID" in
+        :|*[!0-9:]*) MIGRATION_SOURCE_UID=""; MIGRATION_SOURCE_GID="" ;;
+    esac
     [ -f "$MIGRATION_TMP/config/$CONFIG_NAME" ] || die "в пакете нет конфигурации"
     if [ "$MIGRATION_SOURCE_MODE" = docker ]; then
         [ -f "$MIGRATION_TMP/environment/docker.env" ] || die "в пакете нет Docker env"
@@ -861,13 +966,26 @@ migration_prepare_import() {
         *) die "смена способа запуска при миграции не поддерживается: $MIGRATION_SOURCE_MODE -> $MODE" ;;
     esac
 
+    have sha256sum || die "для безопасного возобновления импорта нужен sha256sum"
+    MI_ARCHIVE_SHA="$(sha256sum "$MIGRATION_IMPORT_FILE" | awk '{print $1}')"
+    MIGRATION_MARKER="$PREFIX/.migration-in-progress"
+    if [ -f "$MIGRATION_MARKER" ]; then
+        if [ "$(sed -n '1p' "$MIGRATION_MARKER")" = "$MI_ARCHIVE_SHA" ]; then
+            MIGRATION_RESUME=1
+            say "    найден незавершённый импорт того же пакета; операция будет продолжена идемпотентно"
+        else
+            die "в $PREFIX остался незавершённый импорт другого пакета; не смешивайте состояния"
+        fi
+    fi
     if [ -e "$PREFIX/compose/.env" ] || [ -e "$PREFIX/config/jhvirt.env" ] || systemd_install_present; then
-        die "в $PREFIX уже есть установка; импорт разрешён только в пустую цель"
+        if [ "$MIGRATION_RESUME" -eq 0 ]; then
+            die "в $PREFIX уже есть установка; импорт разрешён только в пустую цель"
+        fi
     fi
     if [ "$MIGRATION_SOURCE_MODE" = docker ]; then
         MI_ENV="$MIGRATION_TMP/environment/docker.env"
         MI_PROJECT="$(env_file_value "$MI_ENV" COMPOSE_PROJECT_NAME)"; [ -n "$MI_PROJECT" ] || MI_PROJECT=ovirt-backup
-        if have docker && { volume_exists "${MI_PROJECT}_postgres-data" || volume_exists "${MI_PROJECT}_jhvirt-data"; }; then
+        if [ "$MIGRATION_RESUME" -eq 0 ] && have docker && { volume_exists "${MI_PROJECT}_postgres-data" || volume_exists "${MI_PROJECT}_jhvirt-data"; }; then
             die "на новом сервере уже есть тома проекта $MI_PROJECT; выберите пустой PREFIX/проект"
         fi
         [ "$URL_EXPLICIT" -eq 1 ] || URL="$(env_file_value "$MI_ENV" JHV_EXTERNAL_URL)"
@@ -888,6 +1006,9 @@ migration_prepare_import() {
             READY_SCHEME=https
         fi
     fi
+    mkdir -p "$PREFIX"
+    printf '%s\n' "$MI_ARCHIVE_SHA" > "$MIGRATION_MARKER"
+    chmod 600 "$MIGRATION_MARKER"
     MIGRATION_ACTIVE=1
     say ""
     say "Пакет миграции: $MIGRATION_SOURCE_MODE из $MIGRATION_SOURCE_PREFIX"
@@ -1492,6 +1613,8 @@ prepare_tls() {
             fi
             [ -s "$MIGRATION_TMP/tls/server.crt" ] && [ -s "$MIGRATION_TMP/tls/server.key" ] ||
                 die "в пакете включён TLS, но нет сертификата или ключа"
+            migration_tls_matches_url || die "сертификат из пакета не подходит к адресу $URL.
+Выберите новый самоподписанный сертификат, укажите PEM-пару либо выключите собственный TLS."
             ;;
         self-signed|files) ;;
         *) die "--tls принимает none, self-signed или files" ;;
@@ -2113,10 +2236,17 @@ prepare_docker_data_paths() {
         fi
         mkdir -p "$PDP_PATH" || die "не удалось создать каталог $PDP_PATH"
         # Меняется только сам корень, не содержимое подключённого хранилища.
-        docker run --rm --network none --user root -v "$PDP_PATH:/target" \
-            docker.io/library/postgres:17-alpine \
-            sh -c 'chown 10001:10001 /target && chmod u+rwx /target && test -w /target' >/dev/null ||
-            die "контейнерный UID 10001 не получил право записи в $PDP_PATH"
+        if ! docker run --rm --network none --user 10001:10001 -v "$PDP_PATH:/target" \
+                docker.io/library/postgres:17-alpine test -w /target >/dev/null 2>&1; then
+            # Для пустого локального каталога установщик может исправить сам
+            # корень. Содержимое и ACL подключённого хранилища не меняются.
+            docker run --rm --network none --user root -v "$PDP_PATH:/target" \
+                docker.io/library/postgres:17-alpine \
+                sh -c 'chown 10001:10001 /target && chmod u+rwx /target' >/dev/null 2>&1 || true
+            docker run --rm --network none --user 10001:10001 -v "$PDP_PATH:/target" \
+                docker.io/library/postgres:17-alpine test -w /target >/dev/null 2>&1 ||
+                die "контейнерный UID 10001 не получил право записи в $PDP_PATH"
+        fi
     done
 }
 
@@ -2138,9 +2268,7 @@ install_containers() {
 
     if [ "$BUNDLE" -eq 1 ]; then
         step "раскладка в $PREFIX"
-        id "$USER_NAME" >/dev/null 2>&1 || \
-            useradd --system --home-dir "$PREFIX" --shell /usr/sbin/nologin "$USER_NAME" 2>/dev/null || \
-            useradd --system --home-dir "$PREFIX" --shell /sbin/nologin "$USER_NAME"
+        ensure_service_user
         mkdir -p "$PREFIX/compose" "$PREFIX/config" "$PREFIX/data" "$PREFIX/logs" \
                  "$PREFIX/docs" "$PREFIX/backups" "$PREFIX/restores"
         rm -rf "${PREFIX:?}/bin" "${PREFIX:?}/web"
@@ -2608,6 +2736,10 @@ migration_apply_systemd_files() {
     rewrite_prefix_file "$PREFIX/config/jhvirt.env" "$MIGRATION_SOURCE_PREFIX" "$PREFIX"
     set_env JHV_SERVER_EXTERNAL_URL "$URL" "$PREFIX/config/jhvirt.env"
     set_env JHV_SERVER_PORT "$PORT" "$PREFIX/config/jhvirt.env"
+    if [ "$(env_file_value "$PREFIX/config/jhvirt.env" JHV_AUTH_OIDC_ENABLED)" = true ]; then
+        set_env JHV_AUTH_OIDC_REDIRECT_URL "$URL/api/v1/auth/oidc/callback" "$PREFIX/config/jhvirt.env"
+        set_env JHV_AUTH_OIDC_POST_LOGOUT_REDIRECT_URL "$URL/login" "$PREFIX/config/jhvirt.env"
+    fi
     set_env JHV_AUTH_BOOTSTRAP_PASSWORD "" "$PREFIX/config/jhvirt.env"
     set_env JHV_METRICS_TOKEN_FILE "$PREFIX/config/metrics.token" "$PREFIX/config/jhvirt.env"
     say "    YAML, env, secret.key и runtime-настройки восстановлены из пакета"
@@ -2700,9 +2832,7 @@ install_systemd() {
         step "установка службой systemd в $PREFIX"
     fi
 
-    id "$USER_NAME" >/dev/null 2>&1 || \
-        useradd --system --home-dir "$PREFIX" --shell /usr/sbin/nologin "$USER_NAME" 2>/dev/null || \
-        useradd --system --home-dir "$PREFIX" --shell /sbin/nologin "$USER_NAME"
+    ensure_service_user
     mkdir -p "$PREFIX/bin" "$PREFIX/web" "$PREFIX/config" "$PREFIX/data" "$PREFIX/logs" "$PREFIX/docs"
 
     WAS_ACTIVE=0
@@ -2741,7 +2871,7 @@ install_systemd() {
         read_external_database_url
         set_env JHV_DATABASE_URL "$DATABASE_URL" "$ENV_FILE"
     elif [ "$MIGRATION_ACTIVE" -eq 1 ] && [ "$MIGRATION_DATABASE_KIND" = embedded ]; then
-        if have runuser && id postgres >/dev/null 2>&1 &&
+        if [ "$MIGRATION_RESUME" -eq 0 ] && have runuser && id postgres >/dev/null 2>&1 &&
                 runuser -u postgres -- psql -d jhvirt -Atc \
                     "select to_regclass('public.users') is not null" 2>/dev/null | grep -q t; then
             die "локальная база jhvirt на новом сервере уже содержит данные; импорт остановлен"
@@ -2861,3 +2991,7 @@ case "$MODE" in
     docker|docker-compose) install_containers ;;
     systemd)               install_systemd ;;
 esac
+
+if [ "$MIGRATION_ACTIVE" -eq 1 ] && [ -n "$MIGRATION_MARKER" ]; then
+    rm -f "$MIGRATION_MARKER"
+fi

@@ -46,6 +46,9 @@ func (w *webhookChannel) Send(ctx context.Context, m Message) error {
 		"message":  m.Text,
 		"details":  m.Details,
 		"at":       m.At.Format(time.RFC3339),
+		"alert_id": m.AlertID,
+		"event":    m.Event,
+		"sequence": m.Sequence,
 	})
 	if err != nil {
 		return err

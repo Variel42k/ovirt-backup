@@ -639,8 +639,10 @@ func (r *Replicator) recalculateJobRun(ctx context.Context, runID, changedTarget
 		return
 	}
 	var targets map[string]struct{}
+	var job *model.BackupJob
 	if run.JobID != "" {
-		if job, jobErr := r.store.GetBackupJob(ctx, run.JobID); jobErr == nil {
+		if loaded, jobErr := r.store.GetBackupJob(ctx, run.JobID); jobErr == nil {
+			job = loaded
 			targets = make(map[string]struct{}, len(job.StorageTargetIDs))
 			for _, targetID := range job.StorageTargetIDs {
 				targets[targetID] = struct{}{}
@@ -656,6 +658,7 @@ func (r *Replicator) recalculateJobRun(ctx context.Context, runID, changedTarget
 	}
 	jobRun.SucceededCount, jobRun.PartialCount, jobRun.FailedCount, jobRun.CanceledCount = 0, 0, 0, 0
 	primaryFailed := false
+	waitingCopies := 0
 	for _, item := range runs {
 		copies, listErr := r.store.ListBackupCopies(ctx, item.ID)
 		if listErr != nil {
@@ -677,7 +680,13 @@ func (r *Replicator) recalculateJobRun(ctx context.Context, runID, changedTarget
 				case model.CopyCanceled:
 					jobRun.CanceledCount++
 				case model.CopyPending, model.CopyCopying, model.CopyVerifying:
-					jobRun.PartialCount++
+					waitingCopies++
+				case model.CopyFailed:
+					if c.NextRetryAt != nil {
+						waitingCopies++
+					} else {
+						jobRun.FailedCount++
+					}
 				default:
 					jobRun.FailedCount++
 				}
@@ -687,9 +696,15 @@ func (r *Replicator) recalculateJobRun(ctx context.Context, runID, changedTarget
 			}
 		}
 	}
+	accounted := jobRun.SucceededCount + jobRun.PartialCount + jobRun.FailedCount + jobRun.CanceledCount + waitingCopies
+	if accounted < jobRun.ReplicaCount {
+		jobRun.FailedCount += jobRun.ReplicaCount - accounted
+	}
 	switch {
 	case primaryFailed:
 		jobRun.Status = model.RunFailed
+	case waitingCopies > 0:
+		jobRun.Status = model.RunWaitingCopies
 	case jobRun.SucceededCount == jobRun.ReplicaCount:
 		jobRun.Status = model.RunSucceeded
 	case jobRun.SucceededCount > 0 || jobRun.PartialCount > 0:
@@ -699,9 +714,21 @@ func (r *Replicator) recalculateJobRun(ctx context.Context, runID, changedTarget
 	default:
 		jobRun.Status = model.RunFailed
 	}
-	now := time.Now().UTC()
-	jobRun.EndedAt = &now
+	if jobRun.Status.Terminal() {
+		now := time.Now().UTC()
+		jobRun.EndedAt = &now
+	} else {
+		jobRun.EndedAt = nil
+	}
 	_ = r.store.UpdateBackupJobRun(ctx, jobRun)
+	if job != nil && jobRun.Status.Terminal() {
+		_ = r.store.SetJobLastStatus(ctx, job.ID, jobRun.Status)
+	}
+	if r.bus != nil {
+		r.bus.Publish(events.Event{Kind: events.KindJob, ServerID: jobRun.ServerID,
+			ObjectID: jobRun.ID, Payload: jobRun,
+			Message: fmt.Sprintf("задание «%s»: %s", jobRun.JobName, jobRun.Status)})
+	}
 }
 
 func min(a, b int) int {

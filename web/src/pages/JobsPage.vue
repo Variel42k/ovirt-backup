@@ -513,6 +513,9 @@ const columns = [
       <template #body-cell-schedule="props">
         <q-td :props="props">
           <span class="jhv-mono">{{ props.row.schedule || 'вручную' }}</span>
+		  <div class="text-caption text-grey-7">
+			приоритет {{ props.row.priority ?? 0 }} · параллельно ВМ: {{ props.row.concurrency ?? 1 }}
+		  </div>
         </q-td>
       </template>
 
@@ -719,7 +722,7 @@ const columns = [
             </div>
           </template>
 
-          <div class="col-12 col-sm-7">
+          <div class="col-12 col-sm-6">
             <q-input v-model="form.schedule" label="Расписание (cron)" outlined dense class="jhv-mono">
               <template #append>
                 <q-btn-dropdown flat dense icon="event" auto-close>
@@ -744,7 +747,7 @@ const columns = [
               Системный часовой пояс: {{ app.meta?.capabilities.timezone || app.meta?.capabilities.scheduler_timezone }}.
             </div>
           </div>
-          <div class="col-12 col-sm-5">
+          <div class="col-12 col-sm-2">
             <q-input
               v-model.number="form.max_duration_minutes"
               type="number"
@@ -753,6 +756,14 @@ const columns = [
               outlined
               dense
             />
+          </div>
+          <div class="col-6 col-sm-2">
+            <q-input v-model.number="form.priority" type="number" min="-1000" max="1000"
+              label="Приоритет" hint="Выше — раньше в очереди" outlined dense />
+          </div>
+          <div class="col-6 col-sm-2">
+            <q-input v-model.number="form.concurrency" type="number" min="1" max="128"
+              label="Параллельно ВМ" hint="Поверх общего лимита" outlined dense />
           </div>
 
           <template v-if="form.type === 'ova'">

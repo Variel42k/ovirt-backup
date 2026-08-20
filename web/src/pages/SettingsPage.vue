@@ -11,7 +11,16 @@ import {
 import { bytes, dateTime } from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
-import type { AuditEntry, BackupQualitySettings, LogStatus, RuntimeSettings, User } from '@/api/settings-types'
+import type {
+  AuditEntry,
+  BackupQualitySettings,
+  LogStatus,
+  NotificationDelivery,
+  NotificationPolicy,
+  NotificationSettingsResponse,
+  RuntimeSettings,
+  User,
+} from '@/api/settings-types'
 import type { DRReadiness, RemediationArchive, RemediationMode, RemediationPeriod } from '@/api/types'
 
 const $q = useQuasar()
@@ -31,6 +40,10 @@ const filteredTimezoneOptions = ref([...timezoneOptions.value])
 const rotationBusy = ref(false)
 const rotationForm = ref({ max_size_mb: 100, max_backups: 7, max_age_days: 30 })
 const qualityBusy = ref(false)
+const notificationConfig = ref<NotificationSettingsResponse | null>(null)
+const notificationBusy = ref(false)
+const notificationKind = ref<string | null>(null)
+const notificationDeliveries = ref<NotificationDelivery[]>([])
 const drReadiness = ref<DRReadiness | null>(null)
 const drBusy = ref(false)
 const qualityForm = ref<BackupQualitySettings>({
@@ -89,13 +102,16 @@ async function load() {
   loading.value = true
   try {
     if (auth.canAdmin()) {
-		const [userList, auditList, runtime, readiness] = await Promise.all([
+      const [userList, auditList, runtime, readiness, notifications, deliveries] = await Promise.all([
 		api.listUsers(), api.audit(300), api.runtimeSettings(), api.drReadiness(),
+		api.notificationSettings(), api.notificationDeliveries(50),
       ])
       users.value = userList
       audit.value = auditList
       applyRuntimeSettings(runtime)
 		drReadiness.value = readiness
+		notificationConfig.value = notifications
+		notificationDeliveries.value = deliveries
     }
   } catch (err) {
     notifyError(err, 'Не удалось загрузить настройки')
@@ -240,6 +256,100 @@ async function resetQuality() {
 
 function settingSource(source?: string): string {
   return source === 'database' ? 'сохранено в БД' : 'конфигурация запуска'
+}
+
+const availableNotificationKinds = computed(() => {
+  const used = new Set(notificationConfig.value?.policies.map((policy) => policy.kind) ?? [])
+  return (notificationConfig.value?.known_kinds ?? []).filter((kind) => !used.has(kind))
+})
+
+const NOTIFICATION_KIND_RU: Record<string, string> = {
+  engine_unreachable: 'Engine недоступен',
+  host_non_responsive: 'Хост не отвечает',
+  host_down: 'Хост выключен',
+  host_unexpected_maintenance: 'Хост неожиданно в maintenance',
+  vm_down_but_desired_up: 'ВМ выключена вопреки политике',
+  vm_paused: 'ВМ приостановлена',
+  vm_unknown_state: 'Неизвестное состояние ВМ',
+  storage_domain_inactive: 'Storage Domain неактивен',
+  storage_domain_low_space: 'Мало места в Storage Domain',
+  backup_failed: 'Ошибка бэкапа',
+  backup_unprotected: 'ВМ не защищена заданием',
+  backup_stale: 'Бэкап просрочен',
+  backup_replica_failed: 'Нет обязательной копии',
+  backup_verification_stale: 'Проверка бэкапа просрочена',
+  backup_performance_degraded: 'Скорость бэкапа снизилась',
+  backup_schedule_missed: 'Запуск по расписанию пропущен',
+  storage_capacity_low: 'Мало места в репозитории',
+  storage_capacity_forecast: 'Репозиторий скоро заполнится',
+  verify_failed: 'Ошибка проверки',
+  storage_target_unreachable: 'Хранилище недоступно',
+  cbt_unavailable: 'CBT недоступен',
+  disaster_recovery_not_ready: 'Аварийное восстановление не готово',
+  storage_path_degraded: 'Путь к хранилищу деградировал',
+  disk_io_errors: 'Ошибки ввода-вывода диска',
+}
+
+const NOTIFICATION_EVENT_RU: Record<string, string> = {
+  opened: 'первичное', reminder: 'повтор', resolved: 'устранение',
+}
+const NOTIFICATION_STATUS_RU: Record<string, string> = {
+  queued: 'в очереди', sending: 'отправляется', sent: 'доставлено', failed: 'ошибка',
+}
+
+function notificationKindLabel(kind: string): string {
+  return NOTIFICATION_KIND_RU[kind] ?? kind
+}
+
+function addNotificationPolicy() {
+  const kind = notificationKind.value
+  const config = notificationConfig.value
+  if (!kind || !config) return
+  const settings = config.settings
+  config.policies.push({
+    kind,
+    enabled: true,
+    repeat_minutes: settings.default_repeat_minutes,
+    notify_resolved: settings.notify_on_resolved,
+    stop_on_ack: settings.ack_stops_repeats,
+    max_repeats: settings.max_repeats,
+    channels: [],
+  })
+  notificationKind.value = null
+}
+
+function removeNotificationPolicy(policy: NotificationPolicy) {
+  if (!notificationConfig.value) return
+  notificationConfig.value.policies = notificationConfig.value.policies.filter((item) => item !== policy)
+}
+
+async function saveNotifications() {
+  if (!notificationConfig.value) return
+  notificationBusy.value = true
+  try {
+    notificationConfig.value = await api.setNotificationSettings({
+      settings: notificationConfig.value.settings,
+      policies: notificationConfig.value.policies,
+    })
+    notificationDeliveries.value = await api.notificationDeliveries(50)
+    notifyOk('Политика внешних уведомлений сохранена')
+  } catch (err) {
+    notifyError(err, 'Не удалось сохранить уведомления')
+  } finally {
+    notificationBusy.value = false
+  }
+}
+
+async function resetNotifications() {
+  notificationBusy.value = true
+  try {
+    notificationConfig.value = await api.resetNotificationSettings()
+    notifyOk('Настройки уведомлений возвращены к конфигурации запуска')
+  } catch (err) {
+    notifyError(err, 'Не удалось сбросить уведомления')
+  } finally {
+    notificationBusy.value = false
+  }
 }
 
 /** Запись, которую ведёт внешний провайдер: пароля у неё нет. */
@@ -447,6 +557,7 @@ onMounted(async () => {
       <q-tabs v-model="tab" align="left" active-color="primary" indicator-color="primary" dense>
         <q-tab name="system" label="Система" />
         <q-tab v-if="auth.canAdmin()" name="monitoring" label="Мониторинг" />
+		<q-tab v-if="auth.canAdmin()" name="notifications" label="Уведомления" />
 		<q-tab v-if="auth.canAdmin()" name="dr" label="Аварийная готовность" />
         <q-tab v-if="auth.canAdmin()" name="users" :label="`Пользователи (${users.length})`" />
         <q-tab v-if="auth.canAdmin()" name="audit" label="Аудит" />
@@ -761,6 +872,73 @@ onMounted(async () => {
             </div>
           </div>
         </q-tab-panel>
+
+		<q-tab-panel v-if="auth.canAdmin()" name="notifications">
+		  <div v-if="notificationConfig" class="row q-col-gutter-lg">
+			<div class="col-12 col-lg-5">
+			  <div class="text-subtitle1">Общая политика</div>
+			  <div class="text-caption text-grey-7 q-mb-md">
+				{{ settingSource(notificationConfig.settings.source) }}. Учётные данные каналов остаются в YAML/окружении.
+			  </div>
+			  <q-banner v-if="!notificationConfig.settings.configured_channels.length" dense class="bg-orange-1 text-warning q-mb-md">
+				Не настроен ни один внешний канал. Задайте email, Telegram или webhook в конфигурации службы.
+			  </q-banner>
+			  <q-list bordered separator>
+				<q-item tag="label" clickable>
+				  <q-item-section><q-item-label>Внешняя доставка</q-item-label><q-item-label caption>Независимо от показа оповещений в web</q-item-label></q-item-section>
+				  <q-item-section side><q-toggle v-model="notificationConfig.settings.enabled" /></q-item-section>
+				</q-item>
+				<q-item>
+				  <q-item-section><q-select v-model="notificationConfig.settings.min_severity" outlined dense label="Минимальная важность" :options="[{label:'Информация',value:'info'},{label:'Предупреждение',value:'warning'},{label:'Критично',value:'critical'}]" emit-value map-options /></q-item-section>
+				</q-item>
+				<q-item>
+				  <q-item-section><q-input v-model.number="notificationConfig.settings.default_repeat_minutes" type="number" min="0" outlined dense label="Повторять через, минут"><q-tooltip>0 — не повторять одну и ту же проблему</q-tooltip></q-input></q-item-section>
+				</q-item>
+				<q-item>
+				  <q-item-section><q-input v-model.number="notificationConfig.settings.max_repeats" type="number" min="0" outlined dense label="Максимум повторов"><q-tooltip>0 — без ограничения; первое сообщение не считается повтором</q-tooltip></q-input></q-item-section>
+				</q-item>
+				<q-item tag="label" clickable><q-item-section><q-item-label>Сообщать об устранении</q-item-label></q-item-section><q-item-section side><q-toggle v-model="notificationConfig.settings.notify_on_resolved" /></q-item-section></q-item>
+				<q-item tag="label" clickable><q-item-section><q-item-label>Останавливать повторы после «Принять»</q-item-label></q-item-section><q-item-section side><q-toggle v-model="notificationConfig.settings.ack_stops_repeats" /></q-item-section></q-item>
+			  </q-list>
+			  <div class="text-caption q-mt-sm">Каналы: {{ notificationConfig.settings.configured_channels.join(', ') || 'нет' }}</div>
+			  <div class="row q-gutter-sm q-mt-md">
+				<q-btn color="primary" unelevated icon="save" label="Сохранить" :loading="notificationBusy" @click="saveNotifications" />
+				<q-btn v-if="notificationConfig.settings.source === 'database'" flat icon="restart_alt" label="Сбросить" :disable="notificationBusy" @click="resetNotifications" />
+			  </div>
+			</div>
+
+			<div class="col-12 col-lg-7">
+			  <div class="text-subtitle1 q-mb-xs">Исключения по типам</div>
+			  <div class="text-caption text-grey-7 q-mb-md">Например, «ВМ не защищена» можно отключить или повторять реже, не подавляя ошибки бэкапов.</div>
+			  <div class="row q-col-gutter-sm q-mb-md">
+				<div class="col"><q-select v-model="notificationKind" outlined dense clearable label="Тип оповещения" :options="availableNotificationKinds.map(kind => ({label: notificationKindLabel(kind), value: kind}))" emit-value map-options /></div>
+				<div class="col-auto"><q-btn color="primary" outline icon="add" label="Добавить правило" :disable="!notificationKind" @click="addNotificationPolicy" /></div>
+			  </div>
+			  <q-card v-for="policy in notificationConfig.policies" :key="policy.kind" flat bordered class="q-mb-sm">
+				<q-card-section class="row items-center q-pb-sm">
+				  <div><div class="text-subtitle2">{{ notificationKindLabel(policy.kind) }}</div><div class="text-caption text-grey-7">{{ policy.kind }}</div></div>
+				  <q-space /><q-toggle v-model="policy.enabled" label="Отправлять" /><q-btn flat round dense icon="delete_outline" @click="removeNotificationPolicy(policy)" />
+				</q-card-section>
+				<q-card-section class="row q-col-gutter-sm q-pt-none">
+				  <div class="col-6 col-sm-3"><q-input v-model.number="policy.repeat_minutes" type="number" min="0" outlined dense label="Повтор, мин" /></div>
+				  <div class="col-6 col-sm-3"><q-input v-model.number="policy.max_repeats" type="number" min="0" outlined dense label="Макс. повторов" /></div>
+				  <div class="col-6 col-sm-3"><q-toggle v-model="policy.notify_resolved" label="Об устранении" /></div>
+				  <div class="col-6 col-sm-3"><q-toggle v-model="policy.stop_on_ack" label="Стоп после принятия" /></div>
+				  <div class="col-12"><q-select v-model="policy.channels" multiple use-chips clearable outlined dense label="Только каналы (пусто — все)" :options="notificationConfig.settings.configured_channels" /></div>
+				</q-card-section>
+			  </q-card>
+
+			  <div class="text-subtitle1 q-mt-lg q-mb-sm">Последние доставки</div>
+			  <q-list bordered separator dense>
+				<q-item v-for="delivery in notificationDeliveries" :key="delivery.id">
+				  <q-item-section><q-item-label>{{ delivery.channel }} · {{ NOTIFICATION_EVENT_RU[delivery.event] ?? delivery.event }}</q-item-label><q-item-label v-if="delivery.last_error" caption class="text-negative jhv-wrap">{{ delivery.last_error }}</q-item-label><q-item-label caption>{{ dateTime(delivery.created_at) }} · попыток {{ delivery.attempts }}/{{ delivery.max_attempts }}</q-item-label></q-item-section>
+				  <q-item-section side><q-chip dense :color="delivery.status === 'sent' ? 'positive' : delivery.status === 'failed' ? 'negative' : 'warning'" text-color="white">{{ NOTIFICATION_STATUS_RU[delivery.status] ?? delivery.status }}</q-chip></q-item-section>
+				</q-item>
+				<q-item v-if="!notificationDeliveries.length"><q-item-section class="text-grey-7">Доставок пока нет.</q-item-section></q-item>
+			  </q-list>
+			</div>
+		  </div>
+		</q-tab-panel>
 
 		<q-tab-panel v-if="auth.canAdmin()" name="dr">
 			<div class="row items-center q-mb-md">

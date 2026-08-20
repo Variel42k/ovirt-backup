@@ -310,6 +310,82 @@ func TestCancelActiveReplicationStaysCanceled(t *testing.T) {
 	}
 }
 
+func TestRequiredReplicaKeepsJobRunWaitingUntilItFinishes(t *testing.T) {
+	ctx := context.Background()
+	st := storetest.New(t)
+	primary := &model.StorageTarget{ID: "waiting-primary", Name: "primary", Kind: model.StorageLocal,
+		BasePath: t.TempDir(), Enabled: true}
+	replica := &model.StorageTarget{ID: "waiting-replica", Name: "replica", Kind: model.StorageLocal,
+		BasePath: t.TempDir(), Enabled: true}
+	for _, target := range []*model.StorageTarget{primary, replica} {
+		if err := st.CreateStorageTarget(ctx, target); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server := &model.Server{ID: "waiting-server", Name: "KVM", Kind: model.KindKVM,
+		Username: "root", SSHHost: "kvm.example", Password: "secret", Enabled: true}
+	if err := st.CreateServer(ctx, server); err != nil {
+		t.Fatal(err)
+	}
+	job := &model.BackupJob{ID: "waiting-job", Name: "waiting", ServerID: server.ID,
+		Type: model.BackupFull, StorageTargetIDs: []string{primary.ID, replica.ID},
+		VerifyAfter: model.VerifyManifest}
+	if err := st.CreateBackupJob(ctx, job); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	jobRun := &model.BackupJobRun{ID: "waiting-job-run", JobID: job.ID, JobName: job.Name,
+		ServerID: server.ID, Status: model.RunRunning, VMCount: 1, ReplicaCount: 2,
+		StartedAt: &now, CreatedAt: now}
+	if err := st.CreateBackupJobRun(ctx, jobRun); err != nil {
+		t.Fatal(err)
+	}
+	run := &model.BackupRun{ID: "waiting-run", JobID: job.ID, JobRunID: jobRun.ID,
+		ServerID: server.ID, VMID: "vm", VMName: "vm", Type: model.BackupFull,
+		Status: model.RunSucceeded, ChainID: "waiting-run", StorageTargetID: primary.ID,
+		RepoPath: "jhvirt/server/vm/waiting-run/", StartedAt: &now, EndedAt: &now, CreatedAt: now}
+	if err := st.CreateBackupRun(ctx, run); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.EnsurePrimaryCopy(ctx, run); err != nil {
+		t.Fatal(err)
+	}
+	replicaCopy := &model.BackupCopy{ID: "waiting-copy", RunID: run.ID,
+		StorageTargetID: replica.ID, Role: model.CopyReplica, Required: true,
+		Status: model.CopyPending, RepoPath: run.RepoPath}
+	if err := st.CreateBackupCopy(ctx, replicaCopy); err != nil {
+		t.Fatal(err)
+	}
+
+	worker := New(st, 1, events.NewBus(8), zerolog.Nop())
+	worker.recalculateJobRun(ctx, run.ID, replica.ID)
+	waiting, err := st.GetBackupJobRun(ctx, jobRun.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if waiting.Status != model.RunWaitingCopies || waiting.EndedAt != nil || waiting.SucceededCount != 1 {
+		t.Fatalf("job did not wait for required replica: %+v", waiting)
+	}
+
+	replicaCopy.Status = model.CopySucceeded
+	replicaCopy.EndedAt = &now
+	if err := st.UpdateBackupCopy(ctx, replicaCopy); err != nil {
+		t.Fatal(err)
+	}
+	worker.recalculateJobRun(ctx, run.ID, replica.ID)
+	completed, err := st.GetBackupJobRun(ctx, jobRun.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed.Status != model.RunSucceeded || completed.EndedAt == nil || completed.SucceededCount != 2 {
+		t.Fatalf("job was not finalised after replica: %+v", completed)
+	}
+	updatedJob, err := st.GetBackupJob(ctx, job.ID)
+	if err != nil || updatedJob.LastStatus != model.RunSucceeded {
+		t.Fatalf("job status was not finalised: %+v, err=%v", updatedJob, err)
+	}
+}
+
 func TestReplicatorFallsBackToHealthyReplicaSource(t *testing.T) {
 	ctx := context.Background()
 	st := storetest.New(t)

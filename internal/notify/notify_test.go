@@ -114,6 +114,9 @@ func TestWebhookSendsJSON(t *testing.T) {
 		Kind     string `json:"kind"`
 		Object   string `json:"object"`
 		Message  string `json:"message"`
+		AlertID  string `json:"alert_id"`
+		Event    string `json:"event"`
+		Sequence int    `json:"sequence"`
 	}
 	got := make(chan payload, 1)
 	auth := make(chan string, 1)
@@ -133,7 +136,8 @@ func TestWebhookSendsJSON(t *testing.T) {
 	}
 	err := channel.Send(context.Background(), Message{
 		Severity: model.SeverityCritical, Kind: "backup_failed",
-		Object: "db-01", Text: "копия не удалась", At: time.Now(),
+		Object: "db-01", Text: "копия не удалась", At: time.Now(), AlertID: "alert-1",
+		Event: model.NotificationReminder, Sequence: 2,
 	})
 	if err != nil {
 		t.Fatalf("отправка: %v", err)
@@ -145,6 +149,9 @@ func TestWebhookSendsJSON(t *testing.T) {
 	p := <-got
 	if p.Severity != "critical" || p.Kind != "backup_failed" || p.Object != "db-01" {
 		t.Errorf("получено %+v", p)
+	}
+	if p.AlertID != "alert-1" || p.Event != "reminder" || p.Sequence != 2 {
+		t.Errorf("идентификатор дедупликации потерян: %+v", p)
 	}
 }
 

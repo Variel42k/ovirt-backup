@@ -14,7 +14,9 @@ import (
 )
 
 const alertColumns = `id, server_id, scope, object_id, object_name, kind, severity, message,
-	details, state, count, first_seen, last_seen, resolved_at, acked_by, acked_at`
+	details, state, count, first_seen, last_seen, resolved_at, acked_by, acked_at,
+	notifications_muted, notifications_muted_until, notification_count,
+	last_notified_at, next_notification_at`
 
 // OnAlertRaised registers a callback for the moment a problem starts burning:
 // либо оповещения не было вовсе, либо прежнее уже погасили.
@@ -61,7 +63,7 @@ func (s *Store) RaiseAlert(ctx context.Context, a *model.Alert) error {
 	started := !previous.Valid || previous.String == string(model.AlertResolved)
 
 	_, err = s.db.Exec(ctx, `INSERT INTO alerts (`+alertColumns+`)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT (server_id, scope, object_id, kind) DO UPDATE SET
 			object_name=excluded.object_name,
 			severity=excluded.severity,
@@ -70,10 +72,16 @@ func (s *Store) RaiseAlert(ctx context.Context, a *model.Alert) error {
 			count=alerts.count+1,
 			last_seen=excluded.last_seen,
 			state=CASE WHEN alerts.state='acked' THEN 'acked' ELSE 'firing' END,
-			resolved_at=NULL`,
+			resolved_at=NULL,
+			notification_count=CASE WHEN alerts.state='resolved' THEN 0 ELSE alerts.notification_count END,
+			last_notified_at=CASE WHEN alerts.state='resolved' THEN NULL ELSE alerts.last_notified_at END,
+			next_notification_at=CASE WHEN alerts.state='resolved' THEN excluded.last_seen ELSE alerts.next_notification_at END,
+			resolution_notification_pending=FALSE,
+			notifications_muted=CASE WHEN alerts.state='resolved' THEN FALSE ELSE alerts.notifications_muted END,
+			notifications_muted_until=CASE WHEN alerts.state='resolved' THEN NULL ELSE alerts.notifications_muted_until END`,
 		a.ID, a.ServerID, string(a.Scope), a.ObjectID, a.ObjectName, a.Kind, string(a.Severity),
 		a.Message, a.Details, string(a.State), 1, a.FirstSeen, a.LastSeen,
-		a.ResolvedAt, a.AckedBy, a.AckedAt)
+		a.ResolvedAt, a.AckedBy, a.AckedAt, false, nil, 0, nil, now)
 	if err != nil {
 		return fmt.Errorf("raise alert: %w", err)
 	}
@@ -86,7 +94,8 @@ func (s *Store) RaiseAlert(ctx context.Context, a *model.Alert) error {
 // ResolveAlert closes an alert if it is currently open. It is safe to call for
 // an object that never had one.
 func (s *Store) ResolveAlert(ctx context.Context, serverID string, scope model.Scope, objectID, kind string) error {
-	_, err := s.db.Exec(ctx, `UPDATE alerts SET state=?, resolved_at=?
+	_, err := s.db.Exec(ctx, `UPDATE alerts SET state=?, resolved_at=?, next_notification_at=NULL,
+		resolution_notification_pending=(notification_count > 0)
 		WHERE server_id=? AND scope=? AND object_id=? AND kind=? AND state<>?`,
 		string(model.AlertResolved), time.Now().UTC(),
 		serverID, string(scope), objectID, kind, string(model.AlertResolved))
@@ -99,8 +108,9 @@ func (s *Store) ResolveAlert(ctx context.Context, serverID string, scope model.S
 // AckAlert marks an alert as acknowledged so it stops being counted as new
 // while the underlying problem is being worked on.
 func (s *Store) AckAlert(ctx context.Context, id, by string) error {
-	res, err := s.db.Exec(ctx, `UPDATE alerts SET state=?, acked_by=?, acked_at=? WHERE id=?`,
-		string(model.AlertAcked), by, time.Now().UTC(), id)
+	res, err := s.db.Exec(ctx, `UPDATE alerts SET state=?, acked_by=?, acked_at=?,
+		next_notification_at=? WHERE id=?`,
+		string(model.AlertAcked), by, time.Now().UTC(), time.Now().UTC(), id)
 	if err != nil {
 		return fmt.Errorf("ack alert: %w", err)
 	}
@@ -169,14 +179,15 @@ func (s *Store) ListAlerts(ctx context.Context, f AlertFilter) ([]*model.Alert, 
 	var out []*model.Alert
 	for rows.Next() {
 		var (
-			a                   model.Alert
-			scope, severity, st string
-			resolvedAt, ackedAt sql.NullTime
-			firstSeen, lastSeen time.Time
+			a                                                               model.Alert
+			scope, severity, st                                             string
+			resolvedAt, ackedAt, mutedUntil, lastNotified, nextNotification sql.NullTime
+			firstSeen, lastSeen                                             time.Time
 		)
 		if err := rows.Scan(&a.ID, &a.ServerID, &scope, &a.ObjectID, &a.ObjectName, &a.Kind,
 			&severity, &a.Message, &a.Details, &st, &a.Count, &firstSeen, &lastSeen,
-			&resolvedAt, &a.AckedBy, &ackedAt); err != nil {
+			&resolvedAt, &a.AckedBy, &ackedAt, &a.NotificationsMuted, &mutedUntil,
+			&a.NotificationCount, &lastNotified, &nextNotification); err != nil {
 			return nil, fmt.Errorf("scan alert: %w", err)
 		}
 		a.Scope = model.Scope(scope)
@@ -186,6 +197,9 @@ func (s *Store) ListAlerts(ctx context.Context, f AlertFilter) ([]*model.Alert, 
 		a.LastSeen = utc(lastSeen)
 		a.ResolvedAt = nullTime(resolvedAt)
 		a.AckedAt = nullTime(ackedAt)
+		a.NotificationsMutedUntil = nullTime(mutedUntil)
+		a.LastNotifiedAt = nullTime(lastNotified)
+		a.NextNotificationAt = nullTime(nextNotification)
 		out = append(out, &a)
 	}
 	return out, rows.Err()

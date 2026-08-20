@@ -171,6 +171,23 @@ func (e *Engine) execute(ctx context.Context, job *model.FileBackupJob, run *mod
 	if err != nil {
 		return fail(err)
 	}
+	if job.StorageMode == model.StorageModeParallel && len(job.StorageTargetIDs) > 1 {
+		mirrors := make([]repo.Backend, 0, len(job.StorageTargetIDs)-1)
+		for _, targetID := range job.StorageTargetIDs[1:] {
+			mirrorTarget, targetErr := e.store.GetStorageTarget(ctx, targetID)
+			if targetErr != nil || !mirrorTarget.Enabled {
+				continue // finishCopies will retry/fill it from the primary
+			}
+			mirrorBackend, openErr := repo.Open(ctx, mirrorTarget)
+			if openErr != nil {
+				e.log.Warn().Err(openErr).Str("storage", targetID).
+					Msg("file backup mirror unavailable; it will be filled from primary")
+				continue
+			}
+			mirrors = append(mirrors, mirrorBackend)
+		}
+		backend = repo.NewMirror(backend, mirrors...)
+	}
 	defer backend.Close()
 
 	prefix := fmt.Sprintf("%s/files/%s/%s/%s/", repo.Root, repo.Segment(job.RootID), run.CreatedAt.Format("2006/01/02"), repo.Segment(run.ID))

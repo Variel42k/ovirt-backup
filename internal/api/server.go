@@ -32,24 +32,25 @@ import (
 
 // Server holds the API dependencies.
 type Server struct {
-	cfg          config.Config
-	baseCfg      config.Config
-	store        *store.Store
-	pool         *ovirt.Pool
-	libvirt      *libvirtx.Pool
-	engine       *dispatch.Dispatcher
-	scheduler    *scheduler.Scheduler
-	monitor      *monitor.Monitor
-	remediator   *monitor.Remediator
-	bus          *events.Bus
-	log          zerolog.Logger
-	logs         *logging.Manager
-	quality      *quality.Service
-	replicator   *replication.Replicator
-	notifier     *notify.Notifier
-	dr           *drcheck.Checker
-	fileBackup   *filebackup.Engine
-	metricsToken []byte
+	cfg           config.Config
+	baseCfg       config.Config
+	store         *store.Store
+	pool          *ovirt.Pool
+	libvirt       *libvirtx.Pool
+	engine        *dispatch.Dispatcher
+	scheduler     *scheduler.Scheduler
+	monitor       *monitor.Monitor
+	remediator    *monitor.Remediator
+	bus           *events.Bus
+	log           zerolog.Logger
+	logs          *logging.Manager
+	quality       *quality.Service
+	replicator    *replication.Replicator
+	notifier      *notify.Notifier
+	notifications *notify.Manager
+	dr            *drcheck.Checker
+	fileBackup    *filebackup.Engine
+	metricsToken  []byte
 	// logins притормаживает подбор пароля. В памяти, а не в базе: ограничение
 	// действует на процесс, переживать перезапуск ему не нужно, а запись в
 	// базу на каждую неудачную попытку сама стала бы точкой приложения силы.
@@ -67,22 +68,23 @@ type Deps struct {
 	Config config.Config
 	// BaseConfig is the YAML/environment value before database overrides. It
 	// is the target of the runtime-settings reset endpoints.
-	BaseConfig  config.Config
-	Store       *store.Store
-	Pool        *ovirt.Pool
-	LibvirtPool *libvirtx.Pool
-	Engine      *dispatch.Dispatcher
-	Scheduler   *scheduler.Scheduler
-	Monitor     *monitor.Monitor
-	Remediator  *monitor.Remediator
-	Bus         *events.Bus
-	Logger      zerolog.Logger
-	Logs        *logging.Manager
-	Quality     *quality.Service
-	Replicator  *replication.Replicator
-	Notifier    *notify.Notifier
-	DR          *drcheck.Checker
-	FileBackup  *filebackup.Engine
+	BaseConfig    config.Config
+	Store         *store.Store
+	Pool          *ovirt.Pool
+	LibvirtPool   *libvirtx.Pool
+	Engine        *dispatch.Dispatcher
+	Scheduler     *scheduler.Scheduler
+	Monitor       *monitor.Monitor
+	Remediator    *monitor.Remediator
+	Bus           *events.Bus
+	Logger        zerolog.Logger
+	Logs          *logging.Manager
+	Quality       *quality.Service
+	Replicator    *replication.Replicator
+	Notifier      *notify.Notifier
+	Notifications *notify.Manager
+	DR            *drcheck.Checker
+	FileBackup    *filebackup.Engine
 }
 
 // New builds the API server.
@@ -103,7 +105,8 @@ func New(d Deps) *Server {
 		cfg: d.Config, baseCfg: base, store: d.Store, pool: d.Pool, libvirt: d.LibvirtPool, engine: d.Engine,
 		scheduler: d.Scheduler, monitor: d.Monitor, remediator: d.Remediator,
 		bus: d.Bus, log: d.Logger, logs: d.Logs, quality: d.Quality, replicator: d.Replicator, notifier: d.Notifier,
-		dr: d.DR, metricsToken: metricsToken,
+		notifications: d.Notifications,
+		dr:            d.DR, metricsToken: metricsToken,
 		fileBackup: d.FileBackup,
 		logins:     newLoginLimiter(),
 		oidcLogins: newOIDCPending(),
@@ -243,6 +246,11 @@ func (s *Server) routes(mux *http.ServeMux) {
 	// Мониторинг.
 	mux.HandleFunc("GET /alerts", s.handleListAlerts)
 	mux.HandleFunc("POST /alerts/{id}/ack", s.writer(s.handleAckAlert))
+	mux.HandleFunc("POST /alerts/{id}/notifications", s.writer(s.handleAlertNotifications))
+	mux.HandleFunc("GET /settings/notifications", s.admin(s.handleGetNotificationSettings))
+	mux.HandleFunc("PUT /settings/notifications", s.admin(s.handleSetNotificationSettings))
+	mux.HandleFunc("DELETE /settings/notifications", s.admin(s.handleResetNotificationSettings))
+	mux.HandleFunc("GET /notification-deliveries", s.admin(s.handleListNotificationDeliveries))
 	mux.HandleFunc("GET /remediations", s.handleListRemediations)
 	mux.HandleFunc("GET /remediation/mode", s.handleGetRemediationMode)
 	mux.HandleFunc("PUT /remediation/mode", s.admin(s.handleSetRemediationMode))

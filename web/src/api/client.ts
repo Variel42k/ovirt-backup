@@ -50,7 +50,15 @@ import type {
   VerifyRun,
   VM,
 } from './types'
-import type { AuditEntry, BackupQualitySettings, LogStatus, RuntimeSettings, User } from './settings-types'
+import type {
+  AuditEntry,
+  BackupQualitySettings,
+  LogStatus,
+  NotificationDelivery,
+  NotificationSettingsResponse,
+  RuntimeSettings,
+  User,
+} from './settings-types'
 
 /** Строка предпросмотра отбора задания: попадает ли ВМ под условия и почему. */
 export interface JobPreviewRow {
@@ -397,6 +405,8 @@ export const api = {
   listAlerts: (params: Record<string, string | number | boolean> = {}) =>
     http.get<ListResponse<Alert>>('/alerts', { params }).then((r) => unwrap(r.data)),
   ackAlert: (id: string) => http.post(`/alerts/${id}/ack`, {}).then((r) => r.data),
+  setAlertNotifications: (id: string, payload: { action: 'mute' | 'snooze' | 'unmute'; until?: string; reason?: string }) =>
+    http.post(`/alerts/${id}/notifications`, payload).then((r) => r.data),
   listRemediations: (serverId?: string) =>
     http
       .get<ListResponse<RemediationRecord>>('/remediations', { params: serverId ? { server_id: serverId } : undefined })
@@ -454,6 +464,14 @@ export const api = {
     http.put<RuntimeSettings>('/settings/runtime/backup-quality', payload).then((r) => r.data),
   resetRuntimeBackupQuality: () =>
     http.delete<RuntimeSettings>('/settings/runtime/backup-quality').then((r) => r.data),
+  notificationSettings: () =>
+    http.get<NotificationSettingsResponse>('/settings/notifications').then((r) => r.data),
+  setNotificationSettings: (payload: Omit<NotificationSettingsResponse, 'known_kinds'>) =>
+    http.put<NotificationSettingsResponse>('/settings/notifications', payload).then((r) => r.data),
+  resetNotificationSettings: () =>
+    http.delete<NotificationSettingsResponse>('/settings/notifications').then((r) => r.data),
+  notificationDeliveries: (limit = 100) =>
+    http.get<ListResponse<NotificationDelivery>>('/notification-deliveries', { params: { limit } }).then((r) => unwrap(r.data)),
 
   // Пользователи
   listUsers: () => http.get<ListResponse<User>>('/users').then((r) => unwrap(r.data)),

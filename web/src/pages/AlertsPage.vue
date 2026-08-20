@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { useQuasar } from 'quasar'
 import { api, notify, notifyError, notifyOk } from '@/api/client'
 import { ago, dateTime } from '@/api/format'
@@ -16,6 +16,8 @@ const alerts = ref<Alert[]>([])
 const remediations = ref<RemediationRecord[]>([])
 const loading = ref(false)
 const includeResolved = ref(false)
+let liveSource: EventSource | null = null
+let fallbackPoll: number | undefined
 
 const SEVERITY_RU: Record<string, string> = { critical: 'критично', warning: 'предупреждение', info: 'информация' }
 const STATE_RU: Record<string, string> = { firing: 'активно', acked: 'принято в работу', resolved: 'закрыто' }
@@ -52,6 +54,42 @@ async function ack(alert: Alert) {
   } catch (err) {
     notifyError(err, 'Не удалось изменить статус')
   }
+}
+
+function notificationAction(alert: Alert) {
+  const currentlyMuted = alert.notifications_muted || !!alert.notifications_muted_until
+  $q.dialog({
+    title: `Внешние уведомления: «${alert.object_name}»`,
+    message: 'Оповещение останется в интерфейсе. Меняется только отправка в email, Telegram и webhook.',
+    options: {
+      type: 'radio',
+      model: currentlyMuted ? 'unmute' : 'snooze_60',
+      items: [
+        { label: 'Не повторять 1 час', value: 'snooze_60' },
+        { label: 'Не повторять 24 часа', value: 'snooze_1440' },
+        { label: 'Отключить для этого случая', value: 'mute' },
+        ...(currentlyMuted ? [{ label: 'Возобновить уведомления', value: 'unmute' }] : []),
+      ],
+    },
+    cancel: { label: 'Отмена', flat: true },
+    ok: { label: 'Применить', color: 'primary' },
+  }).onOk(async (choice: string) => {
+    try {
+      if (choice.startsWith('snooze_')) {
+        const minutes = Number(choice.substring('snooze_'.length))
+        await api.setAlertNotifications(alert.id, {
+          action: 'snooze',
+          until: new Date(Date.now() + minutes * 60_000).toISOString(),
+        })
+      } else {
+        await api.setAlertNotifications(alert.id, { action: choice as 'mute' | 'unmute' })
+      }
+      notifyOk(choice === 'unmute' ? 'Внешние уведомления возобновлены' : 'Повторы уведомления приостановлены')
+      await load()
+    } catch (err) {
+      notifyError(err, 'Не удалось изменить уведомления')
+    }
+  })
 }
 
 /** Ручной запуск того же действия, что выполнил бы мониторинг. */
@@ -107,6 +145,14 @@ function remediate(alert: Alert) {
 onMounted(async () => {
   await app.bootstrap()
   await load()
+  liveSource = new EventSource('/api/v1/events', { withCredentials: true })
+  liveSource.addEventListener('alert', () => void load())
+  fallbackPoll = window.setInterval(() => void load(), 15_000)
+})
+
+onBeforeUnmount(() => {
+  liveSource?.close()
+  if (fallbackPoll) window.clearInterval(fallbackPoll)
 })
 </script>
 
@@ -149,6 +195,14 @@ onMounted(async () => {
                   повторов {{ alert.count }}
                   <template v-if="alert.acked_by"> · принял: {{ alert.acked_by }}</template>
                 </q-item-label>
+                <q-item-label v-if="alert.notifications_muted || alert.notifications_muted_until" caption class="text-warning">
+                  Внешние уведомления
+                  {{ alert.notifications_muted ? 'отключены для этого случая' : `приостановлены до ${dateTime(alert.notifications_muted_until)}` }}
+                </q-item-label>
+                <q-item-label v-else-if="alert.notification_count" caption>
+                  циклов внешней доставки: {{ alert.notification_count }}
+                  <template v-if="alert.next_notification_at"> · следующий повтор {{ dateTime(alert.next_notification_at) }}</template>
+                </q-item-label>
               </q-item-section>
               <q-item-section side top>
                 <q-chip
@@ -169,6 +223,15 @@ onMounted(async () => {
                     size="sm"
                     label="Принять"
                     @click="ack(alert)"
+                  />
+                  <q-btn
+                    v-if="auth.canWrite() && alert.state !== 'resolved'"
+                    flat
+                    dense
+                    size="sm"
+                    icon="notifications_paused"
+                    label="Уведомления"
+                    @click="notificationAction(alert)"
                   />
                   <q-btn
                     v-if="auth.canWrite() && ['vm', 'host'].includes(alert.scope)"

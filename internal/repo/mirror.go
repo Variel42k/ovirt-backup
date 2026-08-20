@@ -106,14 +106,17 @@ func (m *Mirror) Put(ctx context.Context, key string, r io.Reader, size int64) (
 		err     error
 	}
 
-	writers := make([]io.Writer, 0, len(targets))
-	closers := make([]*io.PipeWriter, 0, len(targets))
+	type pipeTarget struct {
+		backend Backend
+		writer  *io.PipeWriter
+		active  bool
+	}
+	pipes := make([]*pipeTarget, 0, len(targets))
 	results := make(chan result, len(targets))
 
 	for _, backend := range targets {
 		pr, pw := io.Pipe()
-		writers = append(writers, pw)
-		closers = append(closers, pw)
+		pipes = append(pipes, &pipeTarget{backend: backend, writer: pw, active: true})
 
 		go func(b Backend, source *io.PipeReader) {
 			written, err := b.Put(ctx, key, source, size)
@@ -124,9 +127,48 @@ func (m *Mirror) Put(ctx context.Context, key string, r io.Reader, size int64) (
 		}(backend, pr)
 	}
 
-	_, copyErr := io.Copy(io.MultiWriter(writers...), r)
-	for _, pw := range closers {
-		_ = pw.CloseWithError(copyErr)
+	// io.MultiWriter cannot be used here: it stops at the first failed mirror
+	// and would truncate the primary as well. Feed each pipe explicitly and
+	// retire only the failed mirror; a primary failure still aborts the source.
+	buf := make([]byte, 256<<10)
+	var copyErr error
+	for {
+		n, readErr := r.Read(buf)
+		if n > 0 {
+			for _, pipe := range pipes {
+				if !pipe.active {
+					continue
+				}
+				written, writeErr := pipe.writer.Write(buf[:n])
+				if writeErr == nil && written == n {
+					continue
+				}
+				if writeErr == nil {
+					writeErr = io.ErrShortWrite
+				}
+				pipe.active = false
+				_ = pipe.writer.CloseWithError(writeErr)
+				if pipe.backend == m.primary {
+					copyErr = writeErr
+					break
+				}
+				m.note(pipe.backend.Name(), writeErr)
+			}
+		}
+		if copyErr != nil {
+			break
+		}
+		if readErr != nil {
+			if readErr != io.EOF {
+				copyErr = readErr
+			}
+			break
+		}
+	}
+	for _, pipe := range pipes {
+		if pipe.active {
+			_ = pipe.writer.CloseWithError(copyErr)
+		}
 	}
 
 	var (

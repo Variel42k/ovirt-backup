@@ -46,6 +46,7 @@ const (
 	AlertStorageDomainDown    = "storage_domain_inactive"
 	AlertStorageDomainFull    = "storage_domain_low_space"
 	AlertBackupFailed         = "backup_failed"
+	AlertBackupUnprotected    = "backup_unprotected"
 	AlertBackupStale          = "backup_stale"
 	AlertBackupReplicaFailed  = "backup_replica_failed"
 	AlertBackupVerifyStale    = "backup_verification_stale"
@@ -84,6 +85,13 @@ type Alert struct {
 	ResolvedAt *time.Time `json:"resolved_at,omitempty"`
 	AckedBy    string     `json:"acked_by,omitempty"`
 	AckedAt    *time.Time `json:"acked_at,omitempty"`
+	// Notification fields describe external delivery, independently from the
+	// alert lifecycle shown in the UI. Muting an email must not hide the alert.
+	NotificationsMuted      bool       `json:"notifications_muted"`
+	NotificationsMutedUntil *time.Time `json:"notifications_muted_until,omitempty"`
+	NotificationCount       int        `json:"notification_count"`
+	LastNotifiedAt          *time.Time `json:"last_notified_at,omitempty"`
+	NextNotificationAt      *time.Time `json:"next_notification_at,omitempty"`
 }
 
 // RemediationAction names a corrective operation the service can perform.

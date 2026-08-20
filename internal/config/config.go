@@ -123,7 +123,7 @@ type OIDCConfig struct {
 // минуту смотрит в интерфейс. Бэкапы идут ночью, и ночью же ломаются.
 type NotificationsConfig struct {
 	Enabled bool `mapstructure:"enabled"`
-	// MinSeverity — порог: critical (по умолчанию) либо warning.
+	// MinSeverity — порог: critical (по умолчанию), warning либо info.
 	//
 	// Умолчание выбрано так, чтобы наружу уходило только то, ради чего стоит
 	// будить человека. Предупреждений бывает много, и канал, по которому идёт
@@ -597,9 +597,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Notifications.Enabled {
 		switch c.Notifications.MinSeverity {
-		case "", "critical", "warning":
+		case "", "critical", "warning", "info":
 		default:
-			return fmt.Errorf("notifications.min_severity: допустимы critical и warning, задано %q",
+			return fmt.Errorf("notifications.min_severity: допустимы critical, warning и info, задано %q",
 				c.Notifications.MinSeverity)
 		}
 		// Включённые оповещения без единого канала — это молчание, которое

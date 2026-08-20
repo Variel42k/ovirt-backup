@@ -88,6 +88,15 @@ func (s *Store) SetJobSchedulingState(ctx context.Context, jobID string, lastRun
 	return err
 }
 
+// SetJobLastStatus finalises the status after asynchronous required copies
+// complete without disturbing the next cron occurrence calculated earlier by
+// the scheduler.
+func (s *Store) SetJobLastStatus(ctx context.Context, jobID string, status model.RunStatus) error {
+	_, err := s.db.Exec(ctx, `UPDATE backup_jobs SET last_status=?, updated_at=? WHERE id=?`,
+		string(status), time.Now().UTC(), jobID)
+	return err
+}
+
 // DeleteBackupJob removes a job definition. Runs it produced are kept.
 func (s *Store) DeleteBackupJob(ctx context.Context, id string) error {
 	res, err := s.db.Exec(ctx, `DELETE FROM backup_jobs WHERE id=?`, id)

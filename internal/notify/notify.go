@@ -28,11 +28,13 @@ type Message struct {
 	Text     string
 	Details  string
 	At       time.Time
+	AlertID  string
+	Event    model.NotificationEvent
+	Sequence int
 }
 
-// Channel — способ доставки. Ошибку возвращает, чтобы её записали в журнал:
-// отправитель не пытается повторять — оповещение живёт в системе и никуда не
-// денется, а очередь повторов породила бы лавину при недоступном SMTP.
+// Channel — способ одной попытки доставки. Ошибку возвращает durable manager:
+// он сохраняет её и планирует ограниченный повтор именно этого канала.
 type Channel interface {
 	Name() string
 	Send(ctx context.Context, m Message) error
@@ -71,7 +73,19 @@ type Notifier struct {
 // выключены или не настроен ни один канал: пустой отправитель ничем не лучше
 // отсутствующего, а проверять на nil вызывающему всё равно придётся.
 func New(cfg config.NotificationsConfig, log zerolog.Logger) *Notifier {
-	if !cfg.Enabled {
+	return newNotifier(cfg, log, true)
+}
+
+// NewSender builds configured channels even when runtime delivery is disabled
+// in YAML. The durable manager applies the effective database override before
+// sending; without this constructor the UI could enable a configured channel
+// only after a process restart.
+func NewSender(cfg config.NotificationsConfig, log zerolog.Logger) *Notifier {
+	return newNotifier(cfg, log, false)
+}
+
+func newNotifier(cfg config.NotificationsConfig, log zerolog.Logger, requireEnabled bool) *Notifier {
+	if requireEnabled && !cfg.Enabled {
 		return nil
 	}
 
@@ -86,7 +100,9 @@ func New(cfg config.NotificationsConfig, log zerolog.Logger) *Notifier {
 		channels = append(channels, ch)
 	}
 	if len(channels) == 0 {
-		log.Warn().Msg("оповещения включены, но не настроен ни один канал")
+		if cfg.Enabled {
+			log.Warn().Msg("оповещения включены, но не настроен ни один канал")
+		}
 		return nil
 	}
 
@@ -110,9 +126,43 @@ func New(cfg config.NotificationsConfig, log zerolog.Logger) *Notifier {
 	for _, ch := range channels {
 		names = append(names, ch.Name())
 	}
-	log.Info().Strs("каналы", names).Str("порог", string(severity)).
-		Msg("оповещения наружу включены")
+	message := "каналы внешних уведомлений подготовлены"
+	if cfg.Enabled {
+		message = "оповещения наружу включены"
+	}
+	log.Info().Strs("каналы", names).Str("порог", string(severity)).Msg(message)
 	return n
+}
+
+// ChannelNames lists configured delivery mechanisms without exposing their
+// credentials through the API.
+func (n *Notifier) ChannelNames() []string {
+	if n == nil {
+		return nil
+	}
+	out := make([]string, 0, len(n.channels))
+	for _, ch := range n.channels {
+		out = append(out, ch.Name())
+	}
+	return out
+}
+
+// SendChannel performs one synchronous outbox attempt. Retries and their
+// persistence belong to Manager; the transport stays deliberately simple.
+func (n *Notifier) SendChannel(ctx context.Context, name string, m Message) error {
+	if n == nil {
+		return fmt.Errorf("каналы уведомлений не настроены")
+	}
+	for _, ch := range n.channels {
+		if ch.Name() != name {
+			continue
+		}
+		sendCtx, cancel := context.WithTimeout(ctx, sendTimeout)
+		err := ch.Send(sendCtx, m)
+		cancel()
+		return err
+	}
+	return fmt.Errorf("канал %q не настроен", name)
 }
 
 // Alert принимает загоревшееся оповещение. Не блокирует: очередь конечна, и
@@ -238,5 +288,10 @@ func body(m Message) string {
 	if m.Details != "" {
 		text += "\n\n" + m.Details
 	}
-	return text + "\n\nтип: " + m.Kind + "\nвремя: " + m.At.Format(time.RFC3339)
+	text += "\n\nтип: " + m.Kind + "\nвремя: " + m.At.Format(time.RFC3339)
+	if m.AlertID != "" {
+		text += fmt.Sprintf("\nalert_id: %s\nсобытие: %s\nпоследовательность: %d",
+			m.AlertID, m.Event, m.Sequence)
+	}
+	return text
 }

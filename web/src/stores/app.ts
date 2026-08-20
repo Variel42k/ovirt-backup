@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { api } from '@/api/client'
+import { setSystemTimezone } from '@/api/format'
 import type { BackupTypeHelp, Help, HelpArticle, Meta, Server, StorageTarget } from '@/api/types'
 
 /**
@@ -43,12 +44,14 @@ export const useAppStore = defineStore('app', () => {
   async function loadMeta(): Promise<void> {
     if (meta.value) return
     meta.value = await api.meta()
+    setSystemTimezone(meta.value.capabilities.timezone || meta.value.capabilities.scheduler_timezone)
   }
 
   // Перечитывает возможности принудительно: часть из них (режим
   // авто-восстановления) меняется на ходу, и кэш тогда врёт.
   async function reloadMeta(): Promise<void> {
     meta.value = await api.meta()
+    setSystemTimezone(meta.value.capabilities.timezone || meta.value.capabilities.scheduler_timezone)
   }
 
   async function loadHelp(): Promise<void> {

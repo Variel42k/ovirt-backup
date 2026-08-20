@@ -60,3 +60,55 @@
 .jhv-notification-control-tooltip {
   z-index: 9600 !important;
 }
+
+// Semantic surfaces used by the application. Quasar components follow
+// body--dark themselves; these aliases cover legacy utility classes until
+// individual screens are migrated to the semantic names.
+:root {
+  color-scheme: light;
+  --jhv-surface-panel: #ffffff;
+  --jhv-surface-muted: #f1f5f9;
+  --jhv-surface-info: #e8f1fb;
+  --jhv-surface-success: #e8f5ee;
+  --jhv-surface-warning: #fff3e0;
+  --jhv-surface-danger: #fdecec;
+  --jhv-text-muted: #4a5568;
+  --jhv-text-subtle: #5f6b7a;
+  --jhv-border: #d5dbe3;
+  --jhv-chart-grid: #e6e9ed;
+}
+
+body.body--dark {
+  color-scheme: dark;
+  --jhv-surface-panel: #1f2632;
+  --jhv-surface-muted: #242b38;
+  --jhv-surface-info: #203750;
+  --jhv-surface-success: #1d3d31;
+  --jhv-surface-warning: #49331d;
+  --jhv-surface-danger: #49262b;
+  --jhv-text-muted: #c8d0dc;
+  --jhv-text-subtle: #aeb8c7;
+  --jhv-border: #526071;
+  --jhv-chart-grid: #465264;
+}
+
+.jhv-nav-active {
+  color: var(--q-primary) !important;
+  background: var(--jhv-surface-info) !important;
+}
+
+body.body--dark {
+  .bg-grey-1,
+  .bg-grey-2 { background: var(--jhv-surface-muted) !important; }
+  .bg-blue-1 { background: var(--jhv-surface-info) !important; }
+  .bg-green-1 { background: var(--jhv-surface-success) !important; }
+  .bg-orange-1 { background: var(--jhv-surface-warning) !important; }
+  .bg-red-1 { background: var(--jhv-surface-danger) !important; }
+
+  .text-grey-5,
+  .text-grey-6,
+  .text-grey-7,
+  .text-grey-8 { color: var(--jhv-text-muted) !important; }
+  .text-green-10 { color: #8ee0b5 !important; }
+  .text-orange { color: #ffbf73 !important; }
+}

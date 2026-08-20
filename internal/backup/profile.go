@@ -7,7 +7,7 @@ import (
 	"adveng/jh_virt/internal/model"
 )
 
-const VMProfileVersion = 1
+const VMProfileVersion = 2
 
 func bootOrder(bootable bool) int {
 	if bootable {
@@ -103,6 +103,17 @@ func ProfileFromOVirtConfig(raw []byte, vm *model.VM, manifests []*DiskManifest)
 		OS struct {
 			Type string `json:"type"`
 		} `json:"os"`
+		NICs struct {
+			NIC []struct {
+				ID        string `json:"id"`
+				Name      string `json:"name"`
+				Interface string `json:"interface"`
+				MAC       struct {
+					Address string `json:"address"`
+				} `json:"mac"`
+				Profile struct{ ID, Name string } `json:"vnic_profile"`
+			} `json:"nic"`
+		} `json:"nics"`
 	}
 
 	var doc configDocument
@@ -149,6 +160,12 @@ func ProfileFromOVirtConfig(raw []byte, vm *model.VM, manifests []*DiskManifest)
 		MemoryMiB: memoryMiB, VCPUs: vcpus,
 	}
 	profile.Disks = profileDisks(manifests)
+	for _, nic := range doc.NICs.NIC {
+		profile.NICs = append(profile.NICs, VMProfileNIC{
+			ID: nic.ID, Name: nic.Name, Model: nic.Interface, MAC: nic.MAC.Address,
+			Network: nic.Profile.Name, SourceProfile: nic.Profile.ID, SourceKind: "vnic_profile",
+		})
+	}
 	return profile
 }
 

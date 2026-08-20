@@ -34,6 +34,39 @@ type CreateVMRequest struct {
 	Firmware string
 }
 
+type CreateNICRequest struct {
+	Name          string
+	Interface     string
+	VNICProfileID string
+	Connected     bool
+}
+
+// CreateNIC adds a NIC without copying the source MAC. Omitting mac lets
+// oVirt allocate a fresh address and prevents the restored VM from colliding
+// with the production machine.
+func (c *Client) CreateNIC(ctx context.Context, vmID string, req CreateNICRequest) error {
+	if strings.TrimSpace(vmID) == "" {
+		return errors.New("не указана ВМ для сетевого интерфейса")
+	}
+	if strings.TrimSpace(req.VNICProfileID) == "" {
+		return errors.New("не указан целевой vNIC profile")
+	}
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		name = "nic1"
+	}
+	model := strings.TrimSpace(req.Interface)
+	if model == "" {
+		model = "virtio"
+	}
+	body := map[string]any{
+		"name": name, "interface": model,
+		"vnic_profile": map[string]string{"id": req.VNICProfileID},
+		"linked":       req.Connected, "on_boot": req.Connected,
+	}
+	return c.post(ctx, fmt.Sprintf("/vms/%s/nics", vmID), body, nil)
+}
+
 // blankTemplateID is the built-in empty template of every oVirt installation.
 const blankTemplateID = "00000000-0000-0000-0000-000000000000"
 

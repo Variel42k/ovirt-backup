@@ -61,13 +61,20 @@ func (e *Engine) LoadChain(ctx context.Context, runID string) (*ChainSet, error)
 // LoadChainCopy resolves every link from one physical storage target. An empty
 // copyID prefers a successful primary copy, then the first successful replica.
 func (e *Engine) LoadChainCopy(ctx context.Context, runID, copyID string) (*ChainSet, error) {
-	return e.loadChainCopy(ctx, runID, copyID, false)
+	return e.loadChainCopy(ctx, runID, copyID, false, false)
+}
+
+// LoadVMChainCopy resolves the data and configuration needed to assemble a
+// complete VM. Unlike a disk restore it admits config-only points: they have a
+// run manifest and a VM profile, but deliberately contain no disk chain.
+func (e *Engine) LoadVMChainCopy(ctx context.Context, runID, copyID string) (*ChainSet, error) {
+	return e.loadChainCopy(ctx, runID, copyID, false, true)
 }
 
 // loadChainCopy may admit the explicitly selected leaf while it is being
 // verified. That exception is private to VerifyCopy: restore and replication
 // continue to see only healthy copies.
-func (e *Engine) loadChainCopy(ctx context.Context, runID, copyID string, allowVerifying bool) (*ChainSet, error) {
+func (e *Engine) loadChainCopy(ctx context.Context, runID, copyID string, allowVerifying, allowConfig bool) (*ChainSet, error) {
 	leaf, err := e.store.GetBackupRunFull(ctx, runID)
 	if err != nil {
 		return nil, err
@@ -78,7 +85,7 @@ func (e *Engine) loadChainCopy(ctx context.Context, runID, copyID string, allowV
 	if leaf.Type == model.BackupOVA {
 		return nil, fmt.Errorf("бэкап типа OVA хранится на хосте гипервизора и не восстанавливается этим механизмом")
 	}
-	if leaf.Type == model.BackupConfig {
+	if leaf.Type == model.BackupConfig && !allowConfig {
 		return nil, fmt.Errorf("бэкап типа «только конфигурация» не содержит данных дисков")
 	}
 	selected, target, err := e.selectHealthyCopy(ctx, leaf, copyID, allowVerifying)
@@ -117,7 +124,8 @@ func (e *Engine) loadChainCopy(ctx context.Context, runID, copyID string, allowV
 	}
 	slices.Reverse(runs) // теперь от корня к листу
 
-	if root := runs[0]; root.Type != model.BackupFull && root.Type != model.BackupSnapshot {
+	if root := runs[0]; root.Type != model.BackupFull && root.Type != model.BackupSnapshot &&
+		!(allowConfig && root.Type == model.BackupConfig) {
 		return nil, fmt.Errorf("корень цепочки %s имеет тип %q — полной точки для восстановления нет",
 			root.ID, root.Type)
 	}
@@ -191,7 +199,7 @@ func (e *Engine) loadChainCopy(ctx context.Context, runID, copyID string, allowV
 				diskID, root.RunID)
 		}
 	}
-	if len(set.DiskOrder) == 0 {
+	if len(set.DiskOrder) == 0 && !(allowConfig && leaf.Type == model.BackupConfig) {
 		backend.Close()
 		return nil, fmt.Errorf("в бэкапе %s нет успешно сохранённых дисков", runID)
 	}

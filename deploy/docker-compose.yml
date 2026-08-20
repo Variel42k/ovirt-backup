@@ -51,6 +51,13 @@ services:
       # http://localhost означало бы куку без Secure в боевой установке за
       # обратным прокси — ровно там, где она нужнее всего.
       JHV_SERVER_EXTERNAL_URL: "${JHV_EXTERNAL_URL:?задайте в deploy/.env, например https://virt.example.org}"
+      # Собственный TLS приложения. Сертификат и ключ установщик хранит внутри
+      # jhvirt-data с владельцем UID 10001, поэтому закрытый ключ не приходится
+      # делать доступным всем пользователям хоста. При reverse proxy оставьте
+      # false: внешний URL при этом всё равно может быть https://.
+      JHV_SERVER_TLS_ENABLED: "${JHV_TLS_ENABLED:-false}"
+      JHV_SERVER_TLS_CERT_FILE: "${JHV_TLS_CERT_FILE:-/app/data/tls/server.crt}"
+      JHV_SERVER_TLS_KEY_FILE: "${JHV_TLS_KEY_FILE:-/app/data/tls/server.key}"
       # Подключение к базе задаётся раздельными переменными, а не собранной
       # здесь строкой: вложенная подстановка вида ${A:-…${B:?…}…} расходится
       # между Compose v1 и v2. Раздельные переменные понимают обе версии, и
@@ -93,7 +100,7 @@ services:
       # тем, что в самом файле список пуст. Заполнять, только если интерфейс
       # раздаётся с другого адреса.
       JHV_SERVER_CORS_ORIGINS: "${JHV_CORS_ORIGINS:-}"
-      JHV_SCHEDULER_TIMEZONE: "${TZ:-Europe/Moscow}"
+      JHV_SCHEDULER_TIMEZONE: "${TZ:-UTC}"
       # Авто-восстановление по умолчанию только фиксирует намеченные действия.
       # Отключите dry_run, когда убедитесь по журналу, что решения верные.
       JHV_MONITOR_REMEDIATION_DRY_RUN: "${JHV_REMEDIATION_DRY_RUN:-true}"
@@ -126,7 +133,7 @@ services:
       JHV_AUTH_OIDC_ALLOW_LOCAL_LOGIN: "${JHV_OIDC_ALLOW_LOCAL_LOGIN:-true}"
       JHV_METRICS_ENABLED: "${JHV_METRICS_ENABLED:-false}"
       JHV_METRICS_TOKEN_FILE: "/app/data/metrics.token"
-      TZ: "${TZ:-Europe/Moscow}"
+      TZ: "${TZ:-UTC}"
     volumes:
       # Файл настроек. По умолчанию — тот же, что запечён в образ, поэтому
       # умолчание ничего не меняет: подставляется ровно то, что и так было
@@ -159,7 +166,14 @@ services:
         soft: 65536
         hard: 65536
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      test:
+        - CMD-SHELL
+        - >-
+          if [ "${JHV_TLS_ENABLED:-false}" = "true" ]; then
+            wget --no-check-certificate -qO- https://127.0.0.1:8080/healthz;
+          else
+            wget -qO- http://127.0.0.1:8080/healthz;
+          fi
       interval: 30s
       timeout: 5s
       retries: 3
@@ -233,7 +247,7 @@ services:
       # .env — как и пароль администратора самой службы.
       KC_BOOTSTRAP_ADMIN_USERNAME: "${KEYCLOAK_ADMIN_USER:-admin}"
       KC_BOOTSTRAP_ADMIN_PASSWORD: "${KEYCLOAK_ADMIN_PASSWORD:-}"
-      TZ: "${TZ:-Europe/Moscow}"
+      TZ: "${TZ:-UTC}"
     ports:
       - "${KEYCLOAK_PORT:-8081}:8080"
     depends_on:

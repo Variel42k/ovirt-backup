@@ -7,6 +7,7 @@ export default defineConfig({
   reporter: [['list'], ['html', { outputFolder: 'playwright-report', open: 'never' }]],
   use: {
     baseURL: process.env.JHV_E2E_URL ?? 'http://127.0.0.1:58080',
+    ignoreHTTPSErrors: process.env.JHV_E2E_INSECURE_TLS === 'true',
     screenshot: 'only-on-failure',
     trace: 'retain-on-failure',
   },

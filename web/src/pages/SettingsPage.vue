@@ -138,7 +138,7 @@ async function saveTimezone() {
   try {
     applyRuntimeSettings(await api.setRuntimeTimezone(timezone))
     await app.reloadMeta()
-    notifyOk(`Часовой пояс расписаний: ${timezone}`)
+    notifyOk(`Системный часовой пояс: ${timezone}`)
   } catch (err) {
     notifyError(err, 'Не удалось изменить часовой пояс')
   } finally {
@@ -528,7 +528,7 @@ onMounted(async () => {
                 </q-item>
                 <q-item class="items-start">
                   <q-item-section>
-                    <q-item-label>Часовой пояс расписаний</q-item-label>
+                    <q-item-label>Системный часовой пояс</q-item-label>
                     <q-item-label v-if="auth.canAdmin()" caption>
                       {{ settingSource(runtimeSettings?.timezone.source) }}
                     </q-item-label>
@@ -547,7 +547,7 @@ onMounted(async () => {
                         new-value-mode="add-unique"
                         :loading="timezoneBusy"
                         :disable="timezoneBusy"
-                        aria-label="Часовой пояс расписаний"
+                        aria-label="Системный часовой пояс"
                         @filter="filterTimezones"
                       />
                       <q-btn

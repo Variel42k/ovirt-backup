@@ -221,7 +221,8 @@ type RunManifest struct {
 	ConfigKey    string     `json:"config_key,omitempty"`
 	ConfigFormat string     `json:"config_format,omitempty"`
 
-	Disks []RunManifestDisk `json:"disks"`
+	Disks     []RunManifestDisk     `json:"disks"`
+	Artifacts []RunManifestArtifact `json:"artifacts,omitempty"`
 }
 
 // RunManifestDisk is the per-disk summary inside the run document.
@@ -241,9 +242,24 @@ type RunManifestDisk struct {
 	DataSHA256  string `json:"data_sha256"`
 }
 
-// VMProfile is a host-independent domain description. It deliberately omits
-// network interfaces, host devices, source paths, UUIDs and NVRAM paths: a
-// verification must boot the copied disks without touching production state.
+type RunManifestArtifact struct {
+	ID           string `json:"id"`
+	DiskID       string `json:"disk_id"`
+	DiskAlias    string `json:"disk_alias"`
+	Kind         string `json:"kind"`
+	ManifestKey  string `json:"manifest_key"`
+	DataKey      string `json:"data_key"`
+	SizeBytes    int64  `json:"size_bytes"`
+	StoredBytes  int64  `json:"stored_bytes"`
+	SHA256       string `json:"sha256"`
+	StoredSHA256 string `json:"stored_sha256"`
+	Encrypted    bool   `json:"encrypted"`
+}
+
+// VMProfile is a host-independent domain description. Version 2 records NIC
+// intent but never source paths, UUIDs or NVRAM paths. Restores map every NIC
+// explicitly and generate new MAC addresses; isolated verification ignores
+// NICs completely.
 type VMProfile struct {
 	Version      int             `json:"version"`
 	Source       string          `json:"source"`
@@ -255,6 +271,17 @@ type VMProfile struct {
 	MemoryMiB    int             `json:"memory_mib,omitempty"`
 	VCPUs        int             `json:"vcpus,omitempty"`
 	Disks        []VMProfileDisk `json:"disks"`
+	NICs         []VMProfileNIC  `json:"nics,omitempty"`
+}
+
+type VMProfileNIC struct {
+	ID            string `json:"id,omitempty"`
+	Name          string `json:"name,omitempty"`
+	Model         string `json:"model,omitempty"`
+	MAC           string `json:"mac,omitempty"`
+	Network       string `json:"network,omitempty"`
+	SourceProfile string `json:"source_profile,omitempty"`
+	SourceKind    string `json:"source_kind,omitempty"` // vnic_profile | network | bridge
 }
 
 // VMProfileDisk maps a stored disk id to its guest-visible attachment.

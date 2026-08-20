@@ -9,6 +9,7 @@ import './css/app.scss'
 
 import App from './App.vue'
 import { router } from './router'
+import { initialiseTheme } from './theme'
 
 const app = createApp(App)
 
@@ -27,5 +28,7 @@ app.use(Quasar, {
     notify: { position: 'top-right', closeBtn: '✕' },
   },
 })
+
+initialiseTheme()
 
 app.mount('#app')

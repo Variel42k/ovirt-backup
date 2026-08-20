@@ -268,7 +268,10 @@ type VM struct {
 		} `json:"reported_device"`
 	} `json:"reported_devices,omitempty"`
 	DiskAttachments *diskAttachmentList `json:"disk_attachments,omitempty"`
-	Snapshots       *snapshotList       `json:"snapshots,omitempty"`
+	Tags            *struct {
+		Tag []Ref `json:"tag"`
+	} `json:"tags,omitempty"`
+	Snapshots       *snapshotList `json:"snapshots,omitempty"`
 	PlacementPolicy struct {
 		Affinity string `json:"affinity"`
 	} `json:"placement_policy"`
@@ -305,6 +308,20 @@ func (v *VM) IPs() []string {
 // HasGuestAgent reports whether the guest agent is responding, which decides
 // whether filesystem freeze (quiesce) is possible.
 func (v *VM) HasGuestAgent() bool { return v.GuestOperatingSystem != nil }
+
+// TagNames returns the provider labels attached to the VM.
+func (v *VM) TagNames() []string {
+	if v.Tags == nil {
+		return nil
+	}
+	out := make([]string, 0, len(v.Tags.Tag))
+	for _, tag := range v.Tags.Tag {
+		if tag.Name != "" {
+			out = append(out, tag.Name)
+		}
+	}
+	return out
+}
 
 // Disk is a virtual disk.
 type Disk struct {

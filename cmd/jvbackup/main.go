@@ -33,6 +33,41 @@ import (
 )
 
 var version = "dev"
+var cliLocation = time.UTC
+
+func defaultTimezone() string {
+	// The application setting is the first choice when the CLI is launched
+	// from the same environment as the service. TZ then represents the host or
+	// container zone. Invalid inherited values must not make unrelated CLI
+	// commands unusable; an explicit --timezone is still validated strictly.
+	for _, key := range []string{"JHV_SCHEDULER_TIMEZONE", "TZ"} {
+		if name := strings.TrimSpace(os.Getenv(key)); name != "" {
+			if _, err := time.LoadLocation(name); err == nil {
+				return name
+			}
+		}
+	}
+	if name := time.Local.String(); name != "" && name != "Local" {
+		if _, err := time.LoadLocation(name); err == nil {
+			return name
+		}
+	}
+	return "UTC"
+}
+
+func timezoneFlag(fs *flag.FlagSet) *string {
+	return fs.String("timezone", defaultTimezone(), "IANA-часовой пояс вывода (например, UTC или Europe/Moscow)")
+}
+
+func applyTimezone(name string) error {
+	loc, err := time.LoadLocation(strings.TrimSpace(name))
+	if err != nil {
+		return fmt.Errorf("часовой пояс %q: %w", name, err)
+	}
+	cliLocation = loc
+	zerolog.TimestampFunc = func() time.Time { return time.Now().In(cliLocation) }
+	return nil
+}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -316,6 +351,7 @@ func newLogger(verbose bool) zerolog.Logger {
 
 func cmdBackup(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("backup", flag.ExitOnError)
+	timezone := timezoneFlag(fs)
 	var h hostFlags
 	h.register(fs)
 
@@ -334,6 +370,9 @@ func cmdBackup(ctx context.Context, args []string) error {
 	compressionLevel := fs.Int("compression-level", 3, "уровень сжатия 1..9; для none не используется")
 	verbose := fs.Bool("v", false, "подробный вывод")
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := applyTimezone(*timezone); err != nil {
 		return err
 	}
 	if *domain == "" {
@@ -499,9 +538,13 @@ func cmdBackup(ctx context.Context, args []string) error {
 
 func cmdList(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
+	timezone := timezoneFlag(fs)
 	repoSpec := fs.String("repo", "", "хранилище копий")
 	vm := fs.String("domain", "", "показать только этот домен")
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := applyTimezone(*timezone); err != nil {
 		return err
 	}
 
@@ -540,7 +583,7 @@ func cmdList(ctx context.Context, args []string) error {
 		}
 		fmt.Printf("%-38s %-16s %-14s %-20s %10s  %s\n",
 			m.RunID, truncate(m.VMName, 16), string(m.Type),
-			m.CreatedAt.Local().Format("2006-01-02 15:04:05"),
+			m.CreatedAt.In(cliLocation).Format("2006-01-02 15:04:05"),
 			humanBytes(m.StoredBytes), chain)
 	}
 	return nil
@@ -548,10 +591,14 @@ func cmdList(ctx context.Context, args []string) error {
 
 func cmdInspect(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("inspect", flag.ExitOnError)
+	timezone := timezoneFlag(fs)
 	var h hostFlags
 	h.register(fs)
 	domain := fs.String("domain", "", "имя домена")
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := applyTimezone(*timezone); err != nil {
 		return err
 	}
 

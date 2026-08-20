@@ -39,11 +39,13 @@ type metaResponse struct {
 		ChunkSize         int    `json:"chunk_size"`
 		DatabaseType      string `json:"database_type"`
 		SchedulerTZ       string `json:"scheduler_timezone"`
+		Timezone          string `json:"timezone"`
 		RemediationOn     bool   `json:"remediation_enabled"`
 		RemediationDryRun bool   `json:"remediation_dry_run"`
 		AuthEnabled       bool   `json:"auth_enabled"`
 		OIDCEnabled       bool   `json:"oidc_enabled"`
 		LocalLogin        bool   `json:"local_login"`
+		FileBackup        bool   `json:"file_backup"`
 	} `json:"capabilities"`
 
 	DefaultRetention model.RetentionPolicy `json:"default_retention"`
@@ -136,11 +138,13 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 	resp.Capabilities.ChunkSize = s.cfg.Backup.ChunkSize
 	resp.Capabilities.DatabaseType = "postgres"
 	resp.Capabilities.SchedulerTZ = s.schedulerTimezone()
+	resp.Capabilities.Timezone = resp.Capabilities.SchedulerTZ
 	resp.Capabilities.RemediationOn = s.cfg.Monitor.Remediation.Enabled
 	// Живое значение, а не настройка: режим переключается на ходу, и
 	// интерфейс должен показывать то, что действует сейчас.
 	resp.Capabilities.RemediationDryRun = s.remediator.DryRun()
 	resp.Capabilities.AuthEnabled = s.cfg.Auth.Enabled
+	resp.Capabilities.FileBackup = s.cfg.FileBackup.Enabled
 	resp.Capabilities.OIDCEnabled = s.oidc != nil
 	resp.Capabilities.LocalLogin = s.localLoginAllowed()
 

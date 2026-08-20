@@ -52,6 +52,43 @@ func TestSetLevelChangesVerbosityAtRuntime(t *testing.T) {
 	}
 }
 
+func TestSetTimezoneChangesTimestampSourceAtomically(t *testing.T) {
+	m, _ := testManager(t)
+	if err := m.SetTimezone("Asia/Yekaterinburg"); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.Timezone(); got != "Asia/Yekaterinburg" {
+		t.Fatalf("timezone = %q", got)
+	}
+	_, offset := m.Now().Zone()
+	if offset != 5*60*60 {
+		t.Fatalf("timestamp offset = %d", offset)
+	}
+	if err := m.SetTimezone("Mars/Olympus"); err == nil {
+		t.Fatal("invalid timezone was accepted")
+	}
+	if got := m.Timezone(); got != "Asia/Yekaterinburg" {
+		t.Fatalf("invalid update changed timezone to %q", got)
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				if index%2 == 0 {
+					_ = m.SetTimezone("UTC")
+				} else {
+					_ = m.SetTimezone("Asia/Yekaterinburg")
+				}
+				_ = m.Now()
+			}
+		}(i)
+	}
+	wg.Wait()
+}
+
 // Хвост нужен как раз тогда, когда файл большой; читать его целиком ради
 // последних строк — верный способ съесть память на боевом сервере.
 func TestTailReturnsLastLinesOnly(t *testing.T) {

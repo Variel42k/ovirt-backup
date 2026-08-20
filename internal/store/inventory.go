@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -92,9 +93,9 @@ func (s *Store) SyncVMs(ctx context.Context, serverID string, items []*model.VM)
 	err := s.db.InTx(ctx, func(tx *sql.Tx) error {
 		q := s.db.Rebind(`INSERT INTO vms (id, server_id, name, description, cluster_id, cluster_name,
 				host_id, host_name, status, pause_status, memory_bytes, cpu_cores, os_type,
-				ha_enabled, guest_agent, ip_addresses, disk_count, desired_state,
+				ha_enabled, guest_agent, ip_addresses, provider_tags, local_tags, disk_count, desired_state,
 				remediation_opt_out, failure_count, sync_gen, seen_at)
-			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 			ON CONFLICT (server_id, id) DO UPDATE SET
 				name=excluded.name, description=excluded.description, cluster_id=excluded.cluster_id,
 				cluster_name=excluded.cluster_name, host_id=excluded.host_id,
@@ -102,7 +103,8 @@ func (s *Store) SyncVMs(ctx context.Context, serverID string, items []*model.VM)
 				pause_status=excluded.pause_status, memory_bytes=excluded.memory_bytes,
 				cpu_cores=excluded.cpu_cores, os_type=excluded.os_type,
 				ha_enabled=excluded.ha_enabled, guest_agent=excluded.guest_agent,
-				ip_addresses=excluded.ip_addresses, disk_count=excluded.disk_count,
+				ip_addresses=excluded.ip_addresses, provider_tags=excluded.provider_tags,
+				disk_count=excluded.disk_count,
 				sync_gen=excluded.sync_gen, seen_at=excluded.seen_at`)
 		for _, v := range items {
 			desired := v.DesiredState
@@ -112,6 +114,7 @@ func (s *Store) SyncVMs(ctx context.Context, serverID string, items []*model.VM)
 			if _, err := tx.ExecContext(ctx, q, v.ID, serverID, v.Name, v.Description, v.ClusterID,
 				v.ClusterName, v.HostID, v.HostName, v.Status, v.PauseStatus, v.MemoryBytes,
 				v.CPUCores, v.OSType, v.HAEnabled, v.GuestAgent, encodeJSON(v.IPAddresses),
+				encodeJSON(normalizeTags(v.Tags)), encodeJSON(normalizeTags(v.LocalTags)),
 				v.DiskCount, string(desired), false, 0, gen, at); err != nil {
 				return err
 			}
@@ -273,7 +276,7 @@ func (s *Store) ListHosts(ctx context.Context, serverID string) ([]*model.Host, 
 
 const vmColumns = `id, server_id, name, description, cluster_id, cluster_name, host_id, host_name,
 	status, pause_status, memory_bytes, cpu_cores, os_type, ha_enabled, guest_agent, ip_addresses,
-	disk_count, desired_state, remediation_opt_out, failure_count, seen_at`
+	provider_tags, local_tags, disk_count, desired_state, remediation_opt_out, failure_count, seen_at`
 
 // ListVMs returns the cached VMs of a server, or of every server when serverID
 // is empty.
@@ -311,14 +314,16 @@ func (s *Store) GetVM(ctx context.Context, serverID, id string) (*model.VM, erro
 
 func scanVM(row rowScanner) (*model.VM, error) {
 	var (
-		vm      model.VM
-		ips     string
-		desired string
-		seen    time.Time
+		vm           model.VM
+		ips          string
+		providerTags string
+		localTags    string
+		desired      string
+		seen         time.Time
 	)
 	err := row.Scan(&vm.ID, &vm.ServerID, &vm.Name, &vm.Description, &vm.ClusterID, &vm.ClusterName,
 		&vm.HostID, &vm.HostName, &vm.Status, &vm.PauseStatus, &vm.MemoryBytes, &vm.CPUCores,
-		&vm.OSType, &vm.HAEnabled, &vm.GuestAgent, &ips, &vm.DiskCount, &desired,
+		&vm.OSType, &vm.HAEnabled, &vm.GuestAgent, &ips, &providerTags, &localTags, &vm.DiskCount, &desired,
 		&vm.RemediationOptOut, &vm.FailureCount, &seen)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -327,9 +332,43 @@ func scanVM(row rowScanner) (*model.VM, error) {
 		return nil, fmt.Errorf("scan vm: %w", err)
 	}
 	vm.IPAddresses = decodeStrings(ips)
+	provider := decodeStrings(providerTags)
+	vm.LocalTags = decodeStrings(localTags)
+	vm.Tags = normalizeTags(append(provider, vm.LocalTags...))
 	vm.DesiredState = model.VMDesiredState(desired)
 	vm.SeenAt = utc(seen)
 	return &vm, nil
+}
+
+// SetVMLocalTags stores operator-owned labels without modifying provider tags.
+func (s *Store) SetVMLocalTags(ctx context.Context, serverID, vmID string, tags []string) error {
+	res, err := s.db.Exec(ctx, `UPDATE vms SET local_tags=? WHERE server_id=? AND id=?`,
+		encodeJSON(normalizeTags(tags)), serverID, vmID)
+	if err != nil {
+		return fmt.Errorf("set VM tags: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func normalizeTags(tags []string) []string {
+	out := make([]string, 0, len(tags))
+	seen := make(map[string]struct{}, len(tags))
+	for _, tag := range tags {
+		tag = strings.TrimSpace(tag)
+		if tag == "" {
+			continue
+		}
+		if _, ok := seen[tag]; ok {
+			continue
+		}
+		seen[tag] = struct{}{}
+		out = append(out, tag)
+	}
+	slices.Sort(out)
+	return out
 }
 
 const diskColumns = `id, server_id, alias, description, vm_ids, provisioned_size, actual_size,

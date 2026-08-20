@@ -95,6 +95,14 @@ type Disk struct {
 	Transient bool
 }
 
+type NetworkInterface struct {
+	Alias  string
+	Model  string
+	MAC    string
+	Kind   string
+	Source string
+}
+
 // SupportsCBT reports whether QEMU can track changed blocks for this disk.
 // Persistent dirty bitmaps live inside the qcow2 header, so any other format
 // can only ever be copied in full.
@@ -155,6 +163,7 @@ type Domain struct {
 	SecureBoot  bool
 	ClockOffset string
 	Disks       []Disk
+	Interfaces  []NetworkInterface
 	// GuestAgent — объявлен ли канал qemu-guest-agent. Это необходимое, но не
 	// достаточное условие: агент может быть не установлен внутри гостя.
 	GuestAgent bool
@@ -253,6 +262,22 @@ type domainXML struct {
 				Name string `xml:"name,attr"`
 			} `xml:"target"`
 		} `xml:"channel"`
+		Interfaces []struct {
+			Type string `xml:"type,attr"`
+			MAC  struct {
+				Address string `xml:"address,attr"`
+			} `xml:"mac"`
+			Model struct {
+				Type string `xml:"type,attr"`
+			} `xml:"model"`
+			Source struct {
+				Network string `xml:"network,attr"`
+				Bridge  string `xml:"bridge,attr"`
+			} `xml:"source"`
+			Alias struct {
+				Name string `xml:"name,attr"`
+			} `xml:"alias"`
+		} `xml:"interface"`
 	} `xml:"devices"`
 }
 
@@ -335,6 +360,17 @@ func ParseDomainXML(raw string) (*Domain, error) {
 		if strings.HasPrefix(ch.Target.Name, "org.qemu.guest_agent") {
 			d.GuestAgent = true
 		}
+	}
+	for _, nic := range doc.Devices.Interfaces {
+		source := nic.Source.Network
+		kind := "network"
+		if nic.Source.Bridge != "" {
+			source, kind = nic.Source.Bridge, "bridge"
+		}
+		d.Interfaces = append(d.Interfaces, NetworkInterface{
+			Alias: nic.Alias.Name, Model: nic.Model.Type, MAC: nic.MAC.Address,
+			Kind: kind, Source: source,
+		})
 	}
 	return d, nil
 }

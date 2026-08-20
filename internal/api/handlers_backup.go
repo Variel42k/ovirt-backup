@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"adveng/jh_virt/internal/backup"
+	"adveng/jh_virt/internal/events"
 	"adveng/jh_virt/internal/model"
 	"adveng/jh_virt/internal/retention"
 	"adveng/jh_virt/internal/scheduler"
@@ -36,6 +37,9 @@ type jobPayload struct {
 	MaxDurationMinutes int `json:"max_duration_minutes"`
 
 	StorageTargetIDs []string              `json:"storage_target_ids"`
+	StorageMode      string                `json:"storage_mode"`
+	OVAHostID        string                `json:"ova_host_id"`
+	OVADirectory     string                `json:"ova_directory"`
 	Retention        model.RetentionPolicy `json:"retention"`
 
 	Quiesce       bool                `json:"quiesce"`
@@ -62,6 +66,11 @@ func (p jobPayload) apply(dst *model.BackupJob) {
 	dst.Schedule = p.Schedule
 	dst.MaxDuration = time.Duration(p.MaxDurationMinutes) * time.Minute
 	dst.StorageTargetIDs = p.StorageTargetIDs
+	dst.OVAHostID = strings.TrimSpace(p.OVAHostID)
+	dst.OVADirectory = strings.TrimSpace(p.OVADirectory)
+	if p.StorageMode != "" {
+		dst.StorageMode = model.StorageMode(p.StorageMode)
+	}
 	dst.Retention = p.Retention
 	dst.Quiesce = p.Quiesce
 	dst.VerifyAfter = model.VerifyMode(p.VerifyAfter)
@@ -101,6 +110,14 @@ func (s *Server) validateJob(ctx context.Context, job *model.BackupJob) error {
 		}
 		if _, err := scheduler.ValidateSchedule(job.Schedule, loc); err != nil {
 			return badRequest("%v", err)
+		}
+	}
+	if job.ExportQcow2 {
+		if job.Type == model.BackupConfig || job.Type == model.BackupOVA {
+			return badRequest("export_qcow2 is only available for backups containing disks")
+		}
+		if _, err := backup.FindQemuImg(s.cfg.Backup.QemuImgPath); err != nil {
+			return badRequest("export_qcow2: %v", err)
 		}
 	}
 	if job.VerifyAfter != "" {
@@ -145,9 +162,16 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		ReplicationEnabled: true}
 	payload.apply(job)
 	if job.Type == model.BackupOVA {
+		job.StorageMode = model.StorageModeSeparate
 		job.ReplicationEnabled = false
+		job.StorageTargetIDs = nil
+		job.Retention = model.RetentionPolicy{}
+		job.VerifyAfter = ""
+		job.ExportQcow2 = false
+	} else {
+		job.NormalizeStorageMode()
 	}
-	if job.Retention.Empty() {
+	if job.Type != model.BackupOVA && job.Retention.Empty() {
 		job.Retention = model.DefaultRetention()
 	}
 	if err := s.validateJob(r.Context(), job); err != nil {
@@ -186,6 +210,16 @@ func (s *Server) handleUpdateJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	payload.apply(job)
+	if job.Type == model.BackupOVA {
+		job.StorageMode = model.StorageModeSeparate
+		job.ReplicationEnabled = false
+		job.StorageTargetIDs = nil
+		job.Retention = model.RetentionPolicy{}
+		job.VerifyAfter = ""
+		job.ExportQcow2 = false
+	} else {
+		job.NormalizeStorageMode()
+	}
 	if job.ReplicationEnabled && previousPrimary != "" && len(job.StorageTargetIDs) > 0 &&
 		job.StorageTargetIDs[0] != previousPrimary {
 		s.writeError(w, r, badRequest("основное хранилище меняется отдельным действием change-primary"))
@@ -272,22 +306,15 @@ func (s *Server) handlePreviewJob(w http.ResponseWriter, r *http.Request) {
 		Reason   string `json:"reason"`
 	}
 
-	selectorEmpty := len(job.VMIDs) == 0 && job.VMNameRegex == "" && len(job.ClusterIDs) == 0
+	selector, err := model.NewVMSelector(job)
+	if err != nil {
+		s.writeError(w, r, badRequest("%v", err))
+		return
+	}
 	out := make([]preview, 0, len(vms))
 	for _, vm := range vms {
 		p := preview{VMID: vm.ID, VMName: vm.Name, Status: vm.Status, Disks: vm.DiskCount}
-		switch {
-		case contains(job.ExcludeVMIDs, vm.ID):
-			p.Reason = "исключена явно"
-		case selectorEmpty:
-			p.Included, p.Reason = true, "отбор не задан — берутся все ВМ сервера"
-		case contains(job.VMIDs, vm.ID):
-			p.Included, p.Reason = true, "выбрана явно"
-		case contains(job.ClusterIDs, vm.ClusterID):
-			p.Included, p.Reason = true, "входит в выбранный кластер"
-		default:
-			p.Reason = "не подходит под условия отбора"
-		}
+		p.Included, p.Reason = selector.Match(vm)
 		out = append(out, p)
 	}
 	writeList(w, out)
@@ -316,8 +343,8 @@ func (s *Server) handleAdHocBackup(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
-	if req.ServerID == "" || req.VMID == "" || req.StorageTargetID == "" {
-		s.writeError(w, r, badRequest("нужны server_id, vm_id и storage_target_id"))
+	if req.ServerID == "" || req.VMID == "" || (req.Type != string(model.BackupOVA) && req.StorageTargetID == "") {
+		s.writeError(w, r, badRequest("нужны server_id, vm_id и storage_target_id (для OVA — host и directory)"))
 		return
 	}
 	if req.Type == "" {
@@ -530,6 +557,10 @@ func (s *Server) handleVerifyRun(w http.ResponseWriter, r *http.Request) {
 		defer cancel()
 
 		record, err := s.engine.VerifyCopy(ctx, id, req.CopyID, mode, opts)
+		if s.bus != nil && record != nil {
+			s.bus.Publish(events.Event{Kind: events.KindVerifyRun, ObjectID: record.ID,
+				Message: "verification finished", Payload: record})
+		}
 		s.audit(r, "backup.verify", model.ScopeBackup, id, err == nil, string(mode))
 		if err != nil {
 			// A failed verification is a valid answer, not a broken request:
@@ -544,8 +575,13 @@ func (s *Server) handleVerifyRun(w http.ResponseWriter, r *http.Request) {
 	s.audit(r, "backup.verify", model.ScopeBackup, id, true, string(mode))
 	go func() {
 		ctx := context.WithoutCancel(r.Context())
-		if _, err := s.engine.VerifyCopy(ctx, id, req.CopyID, mode, opts); err != nil {
+		record, err := s.engine.VerifyCopy(ctx, id, req.CopyID, mode, opts)
+		if err != nil {
 			s.log.Warn().Err(err).Str("run", id).Str("режим", string(mode)).Msg("проверка не пройдена")
+		}
+		if s.bus != nil && record != nil {
+			s.bus.Publish(events.Event{Kind: events.KindVerifyRun, ObjectID: record.ID,
+				Message: "verification finished", Payload: record})
 		}
 	}()
 	writeJSON(w, http.StatusAccepted, map[string]string{
@@ -725,8 +761,13 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 
 	go func() {
 		ctx := context.WithoutCancel(r.Context())
-		if _, err := s.engine.Restore(ctx, restoreReq); err != nil {
+		record, err := s.engine.Restore(ctx, restoreReq)
+		if err != nil {
 			s.log.Error().Err(err).Str("run", id).Msg("восстановление не выполнено")
+		}
+		if s.bus != nil && record != nil {
+			s.bus.Publish(events.Event{Kind: events.KindRestoreRun, ObjectID: record.ID,
+				Message: "restore finished", Payload: record})
 		}
 	}()
 

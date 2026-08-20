@@ -52,6 +52,28 @@ defineProps<{ article: HelpArticle }>()
         </template>
       </div>
 
+      <div v-else-if="block.kind === 'layers'" class="doc-layers q-my-md">
+        <div
+          v-for="(layer, j) in block.steps ?? []"
+          :key="j"
+          class="doc-layers__row"
+        >
+          <div class="doc-layers__index" aria-hidden="true">{{ j + 1 }}</div>
+          <q-icon :name="layer.icon ?? 'layers'" size="25px" color="primary" />
+          <div class="doc-layers__copy">
+            <div class="text-weight-medium">{{ layer.title }}</div>
+            <div class="text-caption text-grey-8 jhv-wrap">{{ layer.detail }}</div>
+          </div>
+          <q-icon
+            v-if="j < (block.steps?.length ?? 0) - 1"
+            name="south"
+            size="20px"
+            color="primary"
+            class="doc-layers__arrow"
+          />
+        </div>
+      </div>
+
       <q-banner v-else-if="block.kind === 'note'" dense class="bg-blue-1 q-my-sm">
         <template #avatar><q-icon name="info" color="primary" /></template>
         <span class="jhv-wrap">{{ block.text }}</span>
@@ -82,9 +104,9 @@ defineProps<{ article: HelpArticle }>()
   min-width: 124px;
   flex: 1 1 124px;
   padding: 10px;
-  border: 1px solid #d5dbe3;
+  border: 1px solid var(--jhv-border);
   border-radius: 6px;
-  background: #f8fafc;
+  background: var(--jhv-surface-muted);
 }
 
 .doc-flow__copy {
@@ -93,6 +115,59 @@ defineProps<{ article: HelpArticle }>()
 
 .doc-flow__arrow {
   align-self: center;
+}
+
+.doc-layers {
+  display: grid;
+  max-width: 920px;
+}
+
+.doc-layers__row {
+  position: relative;
+  display: grid;
+  grid-template-columns: 28px 28px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  min-height: 72px;
+  padding: 12px 44px 12px 12px;
+  border: 1px solid var(--jhv-border);
+  border-bottom-width: 0;
+  background: var(--jhv-surface-muted);
+}
+
+.doc-layers__row:first-child {
+  border-radius: 8px 8px 0 0;
+}
+
+.doc-layers__row:last-child {
+  border-bottom-width: 1px;
+  border-radius: 0 0 8px 8px;
+}
+
+.doc-layers__index {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  color: var(--q-primary);
+  background: var(--jhv-surface-panel);
+  border: 1px solid var(--jhv-border);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.doc-layers__copy {
+  min-width: 0;
+}
+
+.doc-layers__arrow {
+  position: absolute;
+  z-index: 1;
+  right: 13px;
+  bottom: -11px;
+  border-radius: 50%;
+  background: var(--jhv-surface-panel);
 }
 
 @media (max-width: 700px) {
@@ -110,6 +185,11 @@ defineProps<{ article: HelpArticle }>()
   .doc-flow__arrow {
     align-self: center;
     transform: rotate(90deg);
+  }
+
+  .doc-layers__row {
+    grid-template-columns: 26px 24px minmax(0, 1fr);
+    padding-right: 38px;
   }
 }
 </style>

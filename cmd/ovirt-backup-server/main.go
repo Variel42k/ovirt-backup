@@ -24,6 +24,7 @@ import (
 	"adveng/jh_virt/internal/dispatch"
 	drcheck "adveng/jh_virt/internal/dr"
 	"adveng/jh_virt/internal/events"
+	"adveng/jh_virt/internal/filebackup"
 	"adveng/jh_virt/internal/libvirtx"
 	"adveng/jh_virt/internal/logging"
 	"adveng/jh_virt/internal/model"
@@ -88,6 +89,9 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	if err := logs.SetTimezone(cfg.Scheduler.Timezone); err != nil {
+		return err
+	}
 	// Суточная смена файла поверх ротации по размеру: на тихой установке файл
 	// может никогда не дорасти до предела, а значит и не смениться — и тогда
 	// max_age_days к нему не применяется, потому что чистит он архивы.
@@ -130,6 +134,9 @@ func run() error {
 	notifier := notify.New(cfg.Notifications, log)
 	defer notifier.Close()
 	if notifier != nil {
+		if err := notifier.SetTimezone(cfg.Scheduler.Timezone); err != nil {
+			return err
+		}
 		st.OnAlertRaised(notifier.Alert)
 	}
 	drChecker := drcheck.New(cfg.DisasterRecovery, cfg.Secrets.KeyFile, st)
@@ -153,8 +160,16 @@ func run() error {
 			return fmt.Errorf("часовой пояс в runtime_settings %q: %w", timezone, err)
 		}
 		cfg.Scheduler.Timezone = timezone
+		if err := logs.SetTimezone(timezone); err != nil {
+			return err
+		}
+		if notifier != nil {
+			if err := notifier.SetTimezone(timezone); err != nil {
+				return err
+			}
+		}
 		log.Info().Str("часовой пояс", timezone).
-			Msg("часовой пояс расписаний загружен из базы данных")
+			Msg("системный часовой пояс загружен из базы данных")
 	}
 	if runtimeSettings.BackupCompression != nil {
 		if !backup.KnownCompression(*runtimeSettings.BackupCompression) {
@@ -239,6 +254,7 @@ func run() error {
 	// cannot live inside the backup package because the KVM driver builds on
 	// that package's storage format.
 	dispatcher := dispatch.New(engine, st, libvirtPool, cfg.Backup, cipher, log)
+	fileBackupEngine := filebackup.New(st, *cfg, cipher, log)
 
 	if backup.QemuImgAvailable(cfg.Backup.QemuImgPath) {
 		log.Info().Msg("qemu-img найден: доступны экспорт в qcow2 и проверка qemu-img check")
@@ -267,6 +283,7 @@ func run() error {
 	sched := scheduler.New(st, dispatcher, *cfg, bus, log)
 	sched.SetQualityService(qualityService)
 	sched.SetReplicator(replicator)
+	sched.SetFileBackupEngine(fileBackupEngine)
 
 	// The mode is stored, not configured: an operator halfway through observing
 	// the automation must not be dropped into live mode by a restart.
@@ -297,7 +314,8 @@ func run() error {
 	apiServer := api.New(api.Deps{
 		Config: *cfg, BaseConfig: baseCfg, Store: st, Pool: pool, LibvirtPool: libvirtPool, Engine: dispatcher,
 		Scheduler: sched, Monitor: mon, Remediator: remediator, Bus: bus, Logger: log,
-		Logs: logs, Quality: qualityService, Replicator: replicator, DR: drChecker,
+		Logs: logs, Quality: qualityService, Replicator: replicator, Notifier: notifier, DR: drChecker,
+		FileBackup: fileBackupEngine,
 	})
 
 	httpServer := &http.Server{

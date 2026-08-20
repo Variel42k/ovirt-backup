@@ -208,7 +208,7 @@ func (e *Engine) markRunVerified(ctx context.Context, runID, copyID string, stat
 
 func (e *Engine) verify(ctx context.Context, runID, copyID string, mode model.VerifyMode,
 	opts model.VerifyOptions, record *model.VerifyRun) (*VerifyReport, error) {
-	set, err := e.loadChainCopy(ctx, runID, copyID, copyID != "")
+	set, err := e.loadChainCopy(ctx, runID, copyID, copyID != "", false)
 	if err != nil {
 		return nil, err
 	}
@@ -241,6 +241,14 @@ func (e *Engine) verify(ctx context.Context, runID, copyID string, mode model.Ve
 			break
 		}
 		err = fn(ctx, ExternalVerifyRequest{Set: set, Report: report, Record: record, Options: opts})
+	}
+	if err != nil {
+		return report, err
+	}
+	if mode == model.VerifyQuick {
+		err = e.verifyArtifactsQuick(ctx, runID, set.Backend)
+	} else {
+		err = e.VerifyArtifacts(ctx, runID, set.Backend)
 	}
 	if err != nil {
 		return report, err

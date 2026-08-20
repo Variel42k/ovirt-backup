@@ -147,6 +147,9 @@ type UploadOptions struct {
 	// Compressed означает, что src уже сжат gzip и на той стороне поток надо
 	// пропустить через распаковщик.
 	Compressed bool
+	// KeepOnFailure leaves cleanup to the caller. Managed libvirt volumes must
+	// be removed through the storage API, not unlinked behind libvirt's back.
+	KeepOnFailure bool
 }
 
 // RemoteHasGzip reports whether the hypervisor can decompress a gzip stream.
@@ -178,7 +181,9 @@ func (d *Driver) UploadImage(ctx context.Context, src io.Reader, remotePath stri
 	}
 
 	if err := d.conn.RunWithStdin(ctx, cmd, src); err != nil {
-		d.RemoveRemote(context.WithoutCancel(ctx), remotePath)
+		if !opt.KeepOnFailure {
+			d.RemoveRemote(context.WithoutCancel(ctx), remotePath)
+		}
 		return fmt.Errorf("передача образа на %s: %w", d.conn.Host(), err)
 	}
 	return nil

@@ -7,7 +7,7 @@ import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import BackupOptionsPicker from '@/components/BackupOptionsPicker.vue'
 import HelpButton from '@/components/HelpButton.vue'
-import type { BackupJob, BackupOption, Recommendation, VM } from '@/api/types'
+import type { BackupJob, BackupOption, Disk, Host, Recommendation, VM } from '@/api/types'
 
 const $q = useQuasar()
 const app = useAppStore()
@@ -18,6 +18,8 @@ const loading = ref(false)
 const dialog = ref(false)
 const editing = ref<BackupJob | null>(null)
 const vmsOfServer = ref<VM[]>([])
+const disksOfServer = ref<Disk[]>([])
+const hostsOfServer = ref<Host[]>([])
 const backupOptions = ref<BackupOption[]>([])
 const backupOptionsLoading = ref(false)
 const backupOptionsError = ref('')
@@ -30,7 +32,11 @@ const emptyForm = () => ({
   enabled: true,
   server_id: '',
   vm_ids: [] as string[],
+  vm_name_regex: '',
+  cluster_ids: [] as string[],
+  tags: [] as string[],
   exclude_vm_ids: [] as string[],
+  exclude_disk_ids: [] as string[],
   type: '',
   full_every: 7,
   fallback_type: 'snapshot',
@@ -38,6 +44,8 @@ const emptyForm = () => ({
   max_duration_minutes: 0,
   storage_target_ids: [] as string[],
   storage_mode: 'copy' as 'copy' | 'parallel' | 'separate',
+  ova_host_id: '',
+  ova_directory: '',
   retention: { keep_last: 3, keep_hourly: 0, keep_daily: 7, keep_weekly: 4, keep_monthly: 6, keep_yearly: 0, max_age: 0 },
   quiesce: true,
   verify_after: 'chain',
@@ -73,13 +81,43 @@ const usesCBT = computed(() => ['full', 'incremental', 'differential'].includes(
 const bootHosts = computed(() => app.servers.filter((s) => s.kind === 'kvm' && s.enabled))
 const selectedVMs = computed(() => {
   const excluded = new Set(form.value.exclude_vm_ids)
-  if (!form.value.vm_ids.length) return vmsOfServer.value.filter((vm) => !excluded.has(vm.id))
   const selected = new Set(form.value.vm_ids)
-  return vmsOfServer.value.filter((vm) => selected.has(vm.id) && !excluded.has(vm.id))
+  const clusters = new Set(form.value.cluster_ids)
+  const tags = new Set(form.value.tags)
+  let nameRE: RegExp | null = null
+  try {
+    nameRE = form.value.vm_name_regex ? new RegExp(form.value.vm_name_regex) : null
+  } catch {
+    nameRE = null
+  }
+  const empty = !selected.size && !clusters.size && !tags.size && !form.value.vm_name_regex
+  return vmsOfServer.value.filter((vm) => {
+    if (excluded.has(vm.id)) return false
+    return empty || selected.has(vm.id) || clusters.has(vm.cluster_id ?? '') ||
+      Boolean(nameRE?.test(vm.name)) || (vm.tags ?? []).some((tag) => tags.has(tag))
+  })
 })
+const clusterOptions = computed(() => Array.from(new Map(vmsOfServer.value
+  .filter((vm) => vm.cluster_id)
+  .map((vm) => [vm.cluster_id, vm.cluster_name || vm.cluster_id])).entries())
+  .map(([value, label]) => ({ value, label })))
+const tagOptions = computed(() => Array.from(new Set(vmsOfServer.value.flatMap((vm) => vm.tags ?? []))).sort())
+const diskOptions = computed(() => disksOfServer.value.map((disk) => ({
+  value: disk.id,
+  label: `${disk.alias || disk.id}${disk.vm_ids?.length ? ` · ${disk.vm_ids.map((id) => vmsOfServer.value.find((vm) => vm.id === id)?.name ?? id).join(', ')}` : ''}`,
+})))
 const selectedBackupOption = computed(() =>
   backupOptions.value.find((option) => option.type === form.value.type),
 )
+const regexError = computed(() => {
+  if (!form.value.vm_name_regex) return false
+  try {
+    new RegExp(form.value.vm_name_regex)
+    return false
+  } catch {
+    return true
+  }
+})
 
 function aggregateOptions(entries: Array<{ vm: VM; recommendation: Recommendation }>): BackupOption[] {
   if (entries.length === 1) return entries[0].recommendation.options
@@ -130,17 +168,25 @@ async function loadVMs() {
   backupOptionsError.value = ''
   if (!form.value.server_id) {
     vmsOfServer.value = []
+    disksOfServer.value = []
+    hostsOfServer.value = []
     backupOptionsLoading.value = false
     return
   }
   try {
-    const vms = await api.listVMs(serverID)
+    const [vms, disks, hosts] = await Promise.all([
+      api.listVMs(serverID), api.listDisks(serverID), api.listHosts(serverID),
+    ])
     if (sequence !== vmLoadSequence || serverID !== form.value.server_id) return
     vmsOfServer.value = vms
+    disksOfServer.value = disks
+    hostsOfServer.value = hosts
     await loadBackupOptions()
   } catch {
     if (sequence !== vmLoadSequence) return
     vmsOfServer.value = []
+    disksOfServer.value = []
+    hostsOfServer.value = []
     backupOptionsLoading.value = false
     backupOptionsError.value = 'Не удалось загрузить ВМ и проверить доступные типы бэкапа.'
   }
@@ -201,7 +247,13 @@ function changeServer(serverID: string) {
   if (serverID === form.value.server_id) return
   form.value.server_id = serverID
   form.value.vm_ids = []
+  form.value.vm_name_regex = ''
+  form.value.cluster_ids = []
+  form.value.tags = []
   form.value.exclude_vm_ids = []
+  form.value.exclude_disk_ids = []
+  form.value.ova_host_id = ''
+  form.value.ova_directory = ''
   const source = app.servers.find((server) => server.id === serverID)
   form.value.verify_options.boot_host_id = source?.kind === 'kvm' ? source.id : ''
 }
@@ -225,7 +277,10 @@ function openEdit(job: BackupJob) {
     ...emptyForm(),
     ...job,
     vm_ids: job.vm_ids ?? [],
+    cluster_ids: job.cluster_ids ?? [],
+    tags: job.tags ?? [],
     exclude_vm_ids: job.exclude_vm_ids ?? [],
+    exclude_disk_ids: job.exclude_disk_ids ?? [],
     max_duration_minutes: job.max_duration ? Math.round(job.max_duration / 60_000_000_000) : 0,
     verify_after: job.verify_after ?? '',
     verify_options: { ...emptyForm().verify_options, ...(job.verify_options ?? {}) },
@@ -354,6 +409,10 @@ watch(() => form.value.server_id, (serverID) => {
   }
 })
 watch(() => [...form.value.vm_ids], () => void loadBackupOptions())
+watch(() => form.value.vm_name_regex, () => void loadBackupOptions())
+watch(() => [...form.value.cluster_ids], () => void loadBackupOptions())
+watch(() => [...form.value.tags], () => void loadBackupOptions())
+watch(() => [...form.value.exclude_vm_ids], () => void loadBackupOptions())
 watch(() => form.value.storage_target_ids[0] ?? '', () => void loadBackupOptions())
 onMounted(async () => {
   await app.bootstrap()
@@ -428,7 +487,9 @@ const columns = [
           {{ props.row.name }}
           <q-badge v-if="!props.row.enabled" color="grey-7" class="q-ml-sm">выключено</q-badge>
           <div class="text-caption text-grey-7">
-            <template v-if="props.row.vm_ids?.length">ВМ: {{ props.row.vm_ids.length }}</template>
+            <template v-if="props.row.vm_ids?.length || props.row.cluster_ids?.length || props.row.vm_name_regex || props.row.tags?.length">
+              селекторы: {{ (props.row.vm_ids?.length ?? 0) + (props.row.cluster_ids?.length ?? 0) + (props.row.tags?.length ?? 0) + (props.row.vm_name_regex ? 1 : 0) }}
+            </template>
             <template v-else>все ВМ сервера</template>
             <template v-if="props.row.quiesce"> · заморозка ФС</template>
             <template v-if="props.row.encrypt"> · шифрование</template>
@@ -548,6 +609,51 @@ const columns = [
             />
           </div>
 
+          <div class="col-12 col-sm-6">
+            <q-select
+              v-model="form.cluster_ids"
+              :options="clusterOptions"
+              emit-value map-options multiple use-chips clearable
+              label="Кластеры" hint="Совпадение с любым выбранным кластером"
+              outlined dense
+            />
+          </div>
+          <div class="col-12 col-sm-6">
+            <q-select
+              v-model="form.tags"
+              :options="tagOptions"
+              multiple use-chips clearable use-input new-value-mode="add-unique"
+              label="Теги VM" hint="Совпадение с любым выбранным тегом"
+              outlined dense
+            />
+          </div>
+          <div class="col-12">
+            <q-input
+              v-model="form.vm_name_regex"
+              label="Имя VM — регулярное выражение"
+              hint="Например: ^db-; объединяется с остальными условиями через ИЛИ"
+              outlined dense clearable
+              :error="regexError"
+              error-message="Некорректное регулярное выражение"
+            />
+          </div>
+          <div class="col-12 col-sm-6">
+            <q-select
+              v-model="form.exclude_vm_ids"
+              :options="vmsOfServer.map((v) => ({ label: v.name, value: v.id }))"
+              emit-value map-options multiple use-chips clearable
+              label="Исключить VM" outlined dense
+            />
+          </div>
+          <div class="col-12 col-sm-6">
+            <q-select
+              v-model="form.exclude_disk_ids"
+              :options="diskOptions"
+              emit-value map-options multiple use-chips clearable
+              label="Исключить диски" outlined dense
+            />
+          </div>
+
           <div class="col-12 row items-center">
             <div class="text-subtitle2">Что и как копировать</div>
             <HelpButton article="hot-backup" label="Останавливается ли ВМ" />
@@ -635,7 +741,7 @@ const columns = [
             </q-input>
             <div class="jhv-reason">
               Пять полей: минуты, часы, день месяца, месяц, день недели. Пусто — только ручной запуск.
-              Часовой пояс: {{ app.meta?.capabilities.scheduler_timezone }}.
+              Системный часовой пояс: {{ app.meta?.capabilities.timezone || app.meta?.capabilities.scheduler_timezone }}.
             </div>
           </div>
           <div class="col-12 col-sm-5">
@@ -649,6 +755,31 @@ const columns = [
             />
           </div>
 
+          <template v-if="form.type === 'ova'">
+            <div class="col-12">
+              <q-banner dense class="bg-orange-1">
+                <template #avatar><q-icon name="warning" color="warning" /></template>
+                OVA сохраняется как внешний артефакт на выбранном гипервизоре. Обычная репликация и retention к нему не применяются; очистка выполняется отдельно.
+              </q-banner>
+            </div>
+            <div class="col-12 col-sm-6">
+              <q-select
+                v-model="form.ova_host_id"
+                :options="hostsOfServer.map((host) => ({ label: host.name, value: host.id }))"
+                emit-value map-options label="Хост для OVA" outlined dense
+              />
+            </div>
+            <div class="col-12 col-sm-6">
+              <q-input
+                v-model="form.ova_directory"
+                label="Каталог OVA на хосте"
+                hint="Абсолютный путь, доступный vdsm"
+                outlined dense
+              />
+            </div>
+          </template>
+
+          <template v-else>
           <div class="col-12">
             <q-select
               v-model="form.storage_target_ids"
@@ -680,6 +811,7 @@ const columns = [
             />
             <div class="jhv-reason q-mt-sm">{{ storageModeHint }}</div>
           </div>
+          </template>
 
           <div class="col-12 row items-center">
             <div class="text-subtitle2">Хранение копий</div>
@@ -734,8 +866,22 @@ const columns = [
                 <HelpButton article="quiesce" label="Что делает заморозка" />
               </span>
               <q-toggle v-model="form.encrypt" label="Шифрование" />
+							<q-toggle
+								v-if="form.type !== 'ova' && form.type !== 'config'"
+								v-model="form.export_qcow2"
+								label="Артефакты QCOW2"
+								:disable="!app.meta?.capabilities.qemu_img"
+							>
+								<q-tooltip v-if="!app.meta?.capabilities.qemu_img">qemu-img не найден на сервере</q-tooltip>
+							</q-toggle>
             </div>
           </div>
+					<div v-if="form.export_qcow2" class="col-12">
+						<q-banner dense class="bg-blue-1">
+							Для каждого диска будет создан проверенный QCOW2-артефакт. Он входит в репликацию,
+							проверку и retention; при включённом шифровании хранится в зашифрованном чанковом потоке.
+						</q-banner>
+					</div>
 
           <template v-if="form.verify_after === 'boot'">
             <div v-if="!bootHosts.length" class="col-12">

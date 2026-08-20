@@ -2,7 +2,7 @@
 // клиентом: генератор из OpenAPI добавил бы шаг сборки ради десятка структур.
 
 export type ConnState = 'unknown' | 'online' | 'degraded' | 'offline'
-export type RunStatus = 'pending' | 'running' | 'succeeded' | 'partial' | 'failed' | 'canceled' | 'missed'
+export type RunStatus = 'pending' | 'running' | 'waiting_copies' | 'succeeded' | 'partial' | 'failed' | 'canceled' | 'missed'
 export type Severity = 'info' | 'warning' | 'critical'
 export type AlertState = 'firing' | 'acked' | 'resolved'
 export type DesiredState = 'as_is' | 'up' | 'down'
@@ -53,11 +53,22 @@ export interface Host {
   seen_at: string
 }
 
+export interface Cluster {
+  id: string
+  server_id: string
+  name: string
+  description?: string
+  cpu_type?: string
+  data_center_name?: string
+  seen_at: string
+}
+
 export interface VM {
   id: string
   server_id: string
   name: string
   description?: string
+  cluster_id?: string
   cluster_name?: string
   host_name?: string
   status: string
@@ -68,6 +79,8 @@ export interface VM {
   ha_enabled: boolean
   guest_agent: boolean
   ip_addresses?: string[]
+  tags?: string[]
+  local_tags?: string[]
   disk_count: number
   desired_state: DesiredState
   remediation_opt_out: boolean
@@ -101,6 +114,15 @@ export interface StorageDomain {
   available_size: number
   used_size: number
   committed_size: number
+}
+
+export interface RestoreNetworkTarget {
+  id: string
+  server_id: string
+  name: string
+  kind: 'vnic_profile' | 'network'
+  network?: string
+  status?: string
 }
 
 export type StorageKind = 'local' | 's3' | 'smb' | 'webdav' | 'sftp'
@@ -149,6 +171,7 @@ export interface BackupJob {
   vm_ids: string[]
   vm_name_regex?: string
   cluster_ids?: string[]
+  tags?: string[]
   exclude_vm_ids?: string[]
   exclude_disk_ids?: string[]
   type: string
@@ -159,6 +182,8 @@ export interface BackupJob {
   storage_target_ids: string[]
   /** Как данные попадают в остальные хранилища: копией, параллельно или отдельным бэкапом. */
   storage_mode: 'copy' | 'parallel' | 'separate'
+  ova_host_id?: string
+  ova_directory?: string
   /** Прежний двоичный вид того же выбора; сервер держит его согласованным с storage_mode. */
   replication_enabled: boolean
   force_full_next: boolean
@@ -458,10 +483,129 @@ export interface RestoreRun {
   output_path?: string
   output_format?: string
   target_disk_id?: string
+  target_vm_id?: string
+  target_vm_name?: string
+  phase?: string
+  cleanup_errors?: string[]
   progress: number
   error?: string
   created_at: string
   ended_at?: string
+}
+
+export interface EngineConfigRun {
+  id: string
+  job_id?: string
+  server_id: string
+  storage_target_id: string
+  status: RunStatus
+  repo_key?: string
+  size_bytes: number
+  sha256?: string
+  encrypted: boolean
+  section_count: number
+  missing_count: number
+  error?: string
+  started_at?: string
+  ended_at?: string
+  created_at: string
+}
+
+export interface EngineConfigJob {
+  id: string
+  name: string
+  enabled: boolean
+  server_id: string
+  storage_target_id: string
+  encrypt: boolean
+  schedule?: string
+  retention: RetentionPolicy
+  created_at: string
+  updated_at: string
+}
+
+export interface RepositoryArtifact {
+  id: string
+  run_id: string
+  disk_id: string
+  disk_alias: string
+  kind: string
+  storage_target_id: string
+  status: RunStatus
+  manifest_key?: string
+  data_key?: string
+  size_bytes: number
+  stored_bytes: number
+  sha256?: string
+  stored_sha256?: string
+  encrypted: boolean
+  error?: string
+  started_at?: string
+  ended_at?: string
+  created_at: string
+}
+
+export interface FileBackupRoot {
+  id: string
+  name: string
+  restore_root_count: number
+}
+
+export interface FileBackupJob {
+  id: string
+  name: string
+  enabled: boolean
+  root_id: string
+  include_paths: string[]
+  exclude_globs: string[]
+  storage_target_ids: string[]
+  storage_mode: 'copy' | 'parallel' | 'separate'
+  incremental: boolean
+  encrypt: boolean
+  schedule?: string
+  retention: RetentionPolicy
+  created_at: string
+  updated_at: string
+}
+
+export interface FileBackupRun {
+  id: string
+  job_id: string
+  root_id: string
+  storage_target_id: string
+  parent_run_id?: string
+  status: RunStatus
+  manifest_key?: string
+  file_count: number
+  directory_count: number
+  logical_bytes: number
+  stored_bytes: number
+  unstable_paths?: string[]
+  error?: string
+  started_at?: string
+  ended_at?: string
+  created_at: string
+}
+
+export interface FileBackupEntry {
+  path: string
+  type: 'file' | 'directory' | 'symlink' | 'hardlink'
+  size?: number
+  mode?: number
+  uid?: number
+  gid?: number
+  mod_time?: string
+  link_target?: string
+}
+
+export interface FileBackupManifest {
+  format: string
+  version: number
+  run_id: string
+  parent_run_id?: string
+  root_id: string
+  created_at: string
+  entries: FileBackupEntry[]
 }
 
 /** Насколько защищена одна ВМ. */
@@ -702,7 +846,7 @@ export interface BootReport {
 
 /** Один отрисовываемый кусок статьи справки. */
 export interface HelpBlock {
-  kind: 'text' | 'list' | 'table' | 'flow' | 'note' | 'warning'
+  kind: 'text' | 'list' | 'table' | 'flow' | 'layers' | 'note' | 'warning'
   heading?: string
   text?: string
   items?: string[]
@@ -757,11 +901,13 @@ export interface Meta {
     chunk_size: number
     database_type: string
     scheduler_timezone: string
+    timezone: string
     remediation_enabled: boolean
     remediation_dry_run: boolean
     auth_enabled: boolean
     oidc_enabled: boolean
     local_login: boolean
+    file_backup: boolean
   }
   default_retention: RetentionPolicy
 }
@@ -873,6 +1019,7 @@ export interface RestoreVMPlan {
   server_id: string
   created_at: string
   disks: RestoreVMPlanDisk[]
+  nics?: RestoreVMPlanNIC[]
   total_bytes: number
   /** -1 — движок не сообщил свободное место. */
   free_bytes: number
@@ -884,11 +1031,23 @@ export interface RestoreVMPlan {
   blockers?: string[]
 }
 
+export interface RestoreVMPlanNIC {
+  nic_id: string
+  name?: string
+  model?: string
+  source_mac?: string
+  target_id?: string
+  target_kind?: string
+  excluded?: boolean
+  connected?: boolean
+}
+
 export interface RestoreVMPlanDisk {
   disk_id: string
   alias: string
   target: string
   bus: string
+  boot_order?: number
   bootable: boolean
   virtual_size: number
 }

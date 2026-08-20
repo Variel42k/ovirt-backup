@@ -61,6 +61,11 @@ func (d *Dispatcher) Execute(ctx context.Context, req backup.RunRequest) (*model
 
 // executeLibvirt runs a hot backup against a bare libvirt host.
 func (d *Dispatcher) executeLibvirt(ctx context.Context, srv *model.Server, req backup.RunRequest) (*model.BackupRun, error) {
+	if req.ExportQcow2 {
+		if _, err := backup.FindQemuImg(d.cfg.QemuImgPath); err != nil {
+			return nil, fmt.Errorf("export_qcow2: %w", err)
+		}
+	}
 	vm, err := d.store.GetVM(ctx, req.ServerID, req.VMID)
 	if err != nil {
 		return nil, fmt.Errorf("ВМ: %w", err)
@@ -258,6 +263,13 @@ func (d *Dispatcher) executeLibvirt(ctx context.Context, srv *model.Server, req 
 			log.Warn().Err(err).Msg("не удалось сохранить запись о диске бэкапа")
 		}
 	}
+	if req.ExportQcow2 && len(result.Manifests) > 0 {
+		stored, err := d.Engine.ExportQcow2Artifacts(execCtx, backend, run, result.Manifests)
+		if err != nil {
+			return d.failRun(ctx, run, err)
+		}
+		run.StoredBytes += stored
+	}
 
 	if err := d.writeRunManifest(execCtx, backend, srv, vm, run, result); err != nil {
 		return d.failRun(ctx, run, fmt.Errorf("запись манифеста запуска: %w", err))
@@ -335,6 +347,11 @@ func (d *Dispatcher) writeRunManifest(ctx context.Context, backend repo.Backend,
 			DataSHA256:  m.DataSHA256,
 		})
 	}
+	artifacts, err := d.Engine.ManifestArtifacts(ctx, run.ID)
+	if err != nil {
+		return err
+	}
+	doc.Artifacts = artifacts
 	hash, err := backup.RunManifestSHA256(doc)
 	if err != nil {
 		return err

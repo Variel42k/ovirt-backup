@@ -28,7 +28,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=@PREFIX@/data @PREFIX@/logs
+ReadWritePaths=@READ_WRITE_PATHS@
 
 # Восстановление и проверка держат много открытых объектов хранилища.
 LimitNOFILE=65536

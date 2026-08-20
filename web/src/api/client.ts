@@ -14,10 +14,17 @@ import type {
   CoverageSummary,
   CatalogScan,
   CatalogScanDetail,
+  Cluster,
   Dashboard,
   Disk,
   DiskSample,
   DRReadiness,
+  EngineConfigRun,
+  EngineConfigJob,
+	FileBackupJob,
+	FileBackupManifest,
+	FileBackupRoot,
+	FileBackupRun,
   HealthSample,
   Help,
   Host,
@@ -30,7 +37,9 @@ import type {
   RemediationMode,
   RemediationRecord,
   ReplicationDetail,
+	RepositoryArtifact,
   RestoreRun,
+  RestoreNetworkTarget,
   RestoreVMPlan,
   RetentionPlan,
   RetentionPolicy,
@@ -254,6 +263,7 @@ export const api = {
 
   // Инвентарь
   listHosts: (serverId: string) => http.get<ListResponse<Host>>(`/servers/${serverId}/hosts`).then((r) => unwrap(r.data)),
+  listClusters: (serverId: string) => http.get<ListResponse<Cluster>>(`/servers/${serverId}/clusters`).then((r) => unwrap(r.data)),
   listVMs: (serverId: string, params?: Record<string, string>) =>
     http.get<ListResponse<VM>>(`/servers/${serverId}/vms`, { params }).then((r) => unwrap(r.data)),
   getVM: (serverId: string, vmId: string) => http.get<VM>(`/servers/${serverId}/vms/${vmId}`).then((r) => r.data),
@@ -262,12 +272,51 @@ export const api = {
   listDisks: (serverId: string) => http.get<ListResponse<Disk>>(`/servers/${serverId}/disks`).then((r) => unwrap(r.data)),
   listStorageDomains: (serverId: string) =>
     http.get<ListResponse<StorageDomain>>(`/servers/${serverId}/storage-domains`).then((r) => unwrap(r.data)),
+  listRestoreNetworks: (serverId: string) =>
+    http.get<ListResponse<RestoreNetworkTarget>>(`/servers/${serverId}/restore-networks`).then((r) => unwrap(r.data)),
+
+  listEngineConfigJobs: () => http.get<ListResponse<EngineConfigJob>>('/engine-config/jobs').then((r) => unwrap(r.data)),
+  createEngineConfigJob: (payload: Record<string, unknown>) =>
+    http.post<EngineConfigJob>('/engine-config/jobs', payload).then((r) => r.data),
+  updateEngineConfigJob: (id: string, payload: Record<string, unknown>) =>
+    http.put<EngineConfigJob>(`/engine-config/jobs/${id}`, payload).then((r) => r.data),
+  deleteEngineConfigJob: (id: string) => http.delete(`/engine-config/jobs/${id}`).then((r) => r.data),
+  runEngineConfigJob: (id: string) => http.post<EngineConfigRun>(`/engine-config/jobs/${id}/run`, {}).then((r) => r.data),
+  listEngineConfigRuns: (serverId = '') =>
+    http.get<ListResponse<EngineConfigRun>>('/engine-config/runs', { params: { server_id: serverId } }).then((r) => unwrap(r.data)),
+  runEngineConfig: (payload: { server_id: string; storage_target_id: string; encrypt: boolean }) =>
+    http.post<EngineConfigRun>('/engine-config/runs', payload).then((r) => r.data),
+  compareEngineConfig: (left: string, right: string) =>
+    http.get('/engine-config/compare', { params: { left, right } }).then((r) => r.data),
+
+  listFileBackupRoots: () =>
+    http.get<{ enabled: boolean; items: FileBackupRoot[]; total: number }>('/file-backup/roots').then((r) => r.data),
+  listFileBackupJobs: () =>
+    http.get<ListResponse<FileBackupJob>>('/file-backup/jobs').then((r) => unwrap(r.data)),
+  createFileBackupJob: (payload: Partial<FileBackupJob>) =>
+    http.post<FileBackupJob>('/file-backup/jobs', payload).then((r) => r.data),
+  updateFileBackupJob: (id: string, payload: Partial<FileBackupJob>) =>
+    http.put<FileBackupJob>(`/file-backup/jobs/${id}`, payload).then((r) => r.data),
+  deleteFileBackupJob: (id: string) => http.delete(`/file-backup/jobs/${id}`).then((r) => r.data),
+  runFileBackupJob: (id: string) =>
+    http.post<FileBackupRun>(`/file-backup/jobs/${id}/run`).then((r) => r.data),
+  listFileBackupRuns: (jobId = '', limit = 100) =>
+    http.get<ListResponse<FileBackupRun>>('/file-backup/runs', { params: { job_id: jobId, limit } }).then((r) => unwrap(r.data)),
+	deleteFileBackupRun: (id: string) => http.delete(`/file-backup/runs/${id}`).then((r) => r.data),
+  getFileBackupManifest: (id: string) =>
+    http.get<FileBackupManifest>(`/file-backup/runs/${id}/tree`).then((r) => r.data),
+  restoreFiles: (id: string, payload: { restore_root_index: number; destination: string; paths: string[]; overwrite: boolean }) =>
+    http.post(`/file-backup/runs/${id}/restore`, payload, { timeout: 0 }).then((r) => r.data),
+	listRepositoryArtifacts: (runId: string) =>
+		http.get<ListResponse<RepositoryArtifact>>(`/backups/${runId}/artifacts`).then((r) => unwrap(r.data)),
 
   // Управление
   vmAction: (serverId: string, vmId: string, action: string, extra: Record<string, unknown> = {}) =>
     http.post(`/servers/${serverId}/vms/${vmId}/action`, { action, ...extra }).then((r) => r.data),
   setVMPolicy: (serverId: string, vmId: string, desired_state: string, remediation_opt_out: boolean) =>
     http.put<VM>(`/servers/${serverId}/vms/${vmId}/policy`, { desired_state, remediation_opt_out }).then((r) => r.data),
+  setVMTags: (serverId: string, vmId: string, tags: string[]) =>
+    http.put<VM>(`/servers/${serverId}/vms/${vmId}/tags`, { tags }).then((r) => r.data),
   hostAction: (serverId: string, hostId: string, action: string, extra: Record<string, unknown> = {}) =>
     http.post(`/servers/${serverId}/hosts/${hostId}/action`, { action, ...extra }).then((r) => r.data),
   setDiskBackupMode: (serverId: string, diskId: string, incremental: boolean) =>

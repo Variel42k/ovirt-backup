@@ -6,6 +6,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -28,6 +29,7 @@ type Config struct {
 	Notifications    NotificationsConfig    `mapstructure:"notifications"`
 	Cluster          ClusterConfig          `mapstructure:"cluster"`
 	Backup           BackupConfig           `mapstructure:"backup"`
+	FileBackup       FileBackupConfig       `mapstructure:"file_backup"`
 	Scheduler        SchedulerConfig        `mapstructure:"scheduler"`
 	DisasterRecovery DisasterRecoveryConfig `mapstructure:"disaster_recovery"`
 }
@@ -438,6 +440,27 @@ type BackupConfig struct {
 	RestoreDirs []string `mapstructure:"restore_dirs"`
 }
 
+type FileBackupRoot struct {
+	ID           string   `mapstructure:"id" json:"id"`
+	Name         string   `mapstructure:"name" json:"name"`
+	Path         string   `mapstructure:"path" json:"-"`
+	RestoreRoots []string `mapstructure:"restore_roots" json:"-"`
+}
+
+type FileBackupConfig struct {
+	Enabled bool             `mapstructure:"enabled"`
+	Roots   []FileBackupRoot `mapstructure:"roots"`
+}
+
+func (f FileBackupConfig) Root(id string) (FileBackupRoot, bool) {
+	for _, root := range f.Roots {
+		if root.ID == id {
+			return root, true
+		}
+	}
+	return FileBackupRoot{}, false
+}
+
 // RestoreRoots возвращает каталоги, внутри которых разрешено создавать файлы
 // восстановления. temp_dir входит всегда: это каталог самой службы, и запрет
 // на него сделал бы восстановление в файл невозможным из коробки.
@@ -603,6 +626,24 @@ func (c *Config) Validate() error {
 	}
 	if c.Backup.ReplicationWorkers < 1 {
 		return fmt.Errorf("backup.replication_workers must be >= 1, got %d", c.Backup.ReplicationWorkers)
+	}
+	seenFileRoots := map[string]bool{}
+	for _, root := range c.FileBackup.Roots {
+		if strings.TrimSpace(root.ID) == "" || strings.TrimSpace(root.Path) == "" {
+			return fmt.Errorf("file_backup.roots require id and path")
+		}
+		if seenFileRoots[root.ID] {
+			return fmt.Errorf("duplicate file_backup root id %q", root.ID)
+		}
+		seenFileRoots[root.ID] = true
+		if !filepath.IsAbs(root.Path) {
+			return fmt.Errorf("file_backup root %q must be absolute", root.ID)
+		}
+		for _, restoreRoot := range root.RestoreRoots {
+			if !filepath.IsAbs(restoreRoot) {
+				return fmt.Errorf("file backup restore root %q must be absolute", restoreRoot)
+			}
+		}
 	}
 	if c.DisasterRecovery.Enabled {
 		if strings.TrimSpace(c.DisasterRecovery.PostgresDumpPath) == "" ||
@@ -787,5 +828,7 @@ func setDefaults(v *viper.Viper) {
 
 	v.SetDefault("scheduler.enabled", true)
 	v.SetDefault("scheduler.timezone", "UTC")
+	v.SetDefault("file_backup.enabled", false)
+	v.SetDefault("file_backup.roots", []map[string]any{})
 	v.SetDefault("scheduler.catch_up_missed", true)
 }

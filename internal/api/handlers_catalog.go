@@ -406,5 +406,29 @@ func (s *Server) importCatalogEntry(ctx context.Context, scan *model.CatalogScan
 			ManifestKey: disk.ManifestKey, DataKey: disk.DataKey, LogicalBytes: disk.VirtualSize,
 			StoredBytes: disk.StoredBytes, ChunkCount: disk.ChunkCount, Status: model.RunSucceeded})
 	}
-	return s.store.ImportCatalogRun(ctx, entry.ID, run, disks)
+	if err := s.store.ImportCatalogRun(ctx, entry.ID, run, disks); err != nil {
+		return err
+	}
+	existing, _ := s.store.ListRepositoryArtifacts(ctx, doc.RunID)
+	known := map[string]bool{}
+	for _, artifact := range existing {
+		known[artifact.StorageTargetID+":"+artifact.DiskID+":"+artifact.Kind] = true
+	}
+	for _, item := range doc.Artifacts {
+		key := scan.StorageTargetID + ":" + item.DiskID + ":" + item.Kind
+		if known[key] {
+			continue
+		}
+		artifact := &model.RepositoryArtifact{
+			RunID: doc.RunID, DiskID: item.DiskID, DiskAlias: item.DiskAlias, Kind: item.Kind,
+			StorageTargetID: scan.StorageTargetID, Status: model.RunSucceeded,
+			ManifestKey: item.ManifestKey, DataKey: item.DataKey, SizeBytes: item.SizeBytes,
+			StoredBytes: item.StoredBytes, SHA256: item.SHA256, StoredSHA256: item.StoredSHA256,
+			Encrypted: item.Encrypted, StartedAt: &started, EndedAt: &ended, CreatedAt: started,
+		}
+		if err := s.store.CreateRepositoryArtifact(ctx, artifact); err != nil {
+			return err
+		}
+	}
+	return nil
 }

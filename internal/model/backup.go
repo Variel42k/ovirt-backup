@@ -76,13 +76,14 @@ func (t BackupType) Title() string {
 type RunStatus string
 
 const (
-	RunPending   RunStatus = "pending"
-	RunRunning   RunStatus = "running"
-	RunSucceeded RunStatus = "succeeded"
-	RunPartial   RunStatus = "partial" // часть дисков сохранена, часть — нет
-	RunFailed    RunStatus = "failed"
-	RunCanceled  RunStatus = "canceled"
-	RunMissed    RunStatus = "missed"
+	RunPending       RunStatus = "pending"
+	RunRunning       RunStatus = "running"
+	RunWaitingCopies RunStatus = "waiting_copies"
+	RunSucceeded     RunStatus = "succeeded"
+	RunPartial       RunStatus = "partial" // часть дисков сохранена, часть — нет
+	RunFailed        RunStatus = "failed"
+	RunCanceled      RunStatus = "canceled"
+	RunMissed        RunStatus = "missed"
 )
 
 // Terminal reports whether the status will not change on its own.
@@ -374,6 +375,12 @@ type BackupJob struct {
 	// ForceFullNext устанавливается мастером перехода или смены primary.
 	ForceFullNext bool `json:"force_full_next"`
 
+	// OVA is written by oVirt directly to a hypervisor host. It deliberately
+	// has no repository target: lifecycle and removal of this external artifact
+	// remain explicit operator actions.
+	OVAHostID    string `json:"ova_host_id,omitempty"`
+	OVADirectory string `json:"ova_directory,omitempty"`
+
 	Retention RetentionPolicy `json:"retention"`
 
 	// Заморозка файловой системы гостя через qemu-guest-agent перед снятием
@@ -410,11 +417,24 @@ func (j *BackupJob) Validate() error {
 	if j.ServerID == "" {
 		return fmt.Errorf("не указан сервер")
 	}
-	if len(j.StorageTargetIDs) == 0 {
+	if j.Type != BackupOVA && len(j.StorageTargetIDs) == 0 {
 		return fmt.Errorf("не выбрано ни одного хранилища")
 	}
-	if j.Type == BackupOVA && (j.ReplicationEnabled || len(j.StorageTargetIDs) != 1) {
-		return fmt.Errorf("OVA не поддерживает репликацию и требует ровно одно хранилище")
+	if _, err := NewVMSelector(j); err != nil {
+		return err
+	}
+	switch j.StorageMode {
+	case "", StorageModeCopy, StorageModeParallel, StorageModeSeparate:
+	default:
+		return fmt.Errorf("неизвестный режим доставки: %q", j.StorageMode)
+	}
+	if j.Type == BackupOVA {
+		if j.OVAHostID == "" || j.OVADirectory == "" {
+			return fmt.Errorf("для OVA нужно указать хост и каталог на нём")
+		}
+		if j.ReplicationEnabled || len(j.StorageTargetIDs) != 0 {
+			return fmt.Errorf("OVA не использует хранилища и репликацию")
+		}
 	}
 	switch j.Type {
 	case BackupFull, BackupIncremental, BackupDifferential, BackupSnapshot, BackupOVA, BackupConfig:
@@ -781,12 +801,15 @@ type RestoreRun struct {
 	// Какие диски восстанавливать; пусто — все из бэкапа.
 	DiskIDs []string `json:"disk_ids,omitempty"`
 
-	OutputPath     string `json:"output_path,omitempty"`   // для RestoreToFile
-	OutputFormat   string `json:"output_format,omitempty"` // raw | qcow2
-	TargetServerID string `json:"target_server_id,omitempty"`
-	TargetDiskID   string `json:"target_disk_id,omitempty"`
-	TargetDomainID string `json:"target_domain_id,omitempty"`
-	TargetVMID     string `json:"target_vm_id,omitempty"`
+	OutputPath     string   `json:"output_path,omitempty"`   // для RestoreToFile
+	OutputFormat   string   `json:"output_format,omitempty"` // raw | qcow2
+	TargetServerID string   `json:"target_server_id,omitempty"`
+	TargetDiskID   string   `json:"target_disk_id,omitempty"`
+	TargetDomainID string   `json:"target_domain_id,omitempty"`
+	TargetVMID     string   `json:"target_vm_id,omitempty"`
+	TargetVMName   string   `json:"target_vm_name,omitempty"`
+	Phase          string   `json:"phase,omitempty"`
+	CleanupErrors  []string `json:"cleanup_errors,omitempty"`
 
 	Progress  int        `json:"progress"`
 	Error     string     `json:"error,omitempty"`

@@ -44,6 +44,11 @@ type Manager struct {
 	level atomic.Value
 	// rotated counts rotations performed by the daily timer, for the UI.
 	rotated atomic.Int64
+	// location is read for every new log record through a callback installed
+	// once in Setup. Replacing the pointer makes runtime timezone changes safe
+	// while other goroutines are logging.
+	location atomic.Pointer[time.Location]
+	timezone atomic.Value
 }
 
 // Setup installs a process-wide logger and returns it together with its manager.
@@ -57,6 +62,9 @@ func Setup(cfg config.LoggingConfig) (zerolog.Logger, *Manager, error) {
 
 	m := &Manager{cfg: cfg}
 	m.level.Store(level)
+	m.location.Store(time.UTC)
+	m.timezone.Store("UTC")
+	zerolog.TimestampFunc = func() time.Time { return m.Now() }
 
 	writers := []io.Writer{consoleWriter(cfg.Format)}
 	if cfg.File != "" {
@@ -73,6 +81,47 @@ func Setup(cfg config.LoggingConfig) (zerolog.Logger, *Manager, error) {
 	logger := zerolog.New(io.MultiWriter(writers...)).With().Timestamp().Logger()
 	log.Logger = logger
 	return logger, m, nil
+}
+
+// SetTimezone changes the offset used for human-facing log timestamps.
+// Stored database timestamps remain UTC and are not affected.
+func (m *Manager) SetTimezone(name string) error {
+	if m == nil {
+		return fmt.Errorf("log manager is not configured")
+	}
+	name = strings.TrimSpace(name)
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		return fmt.Errorf("часовой пояс журнала %q: %w", name, err)
+	}
+	m.location.Store(loc)
+	m.timezone.Store(name)
+	return nil
+}
+
+// Timezone reports the active IANA timezone used by the logger.
+func (m *Manager) Timezone() string {
+	if m == nil {
+		return "UTC"
+	}
+	name, _ := m.timezone.Load().(string)
+	if name == "" {
+		return "UTC"
+	}
+	return name
+}
+
+// Now returns the current instant represented in the configured timezone.
+func (m *Manager) Now() time.Time {
+	now := time.Now()
+	if m == nil {
+		return now.UTC()
+	}
+	loc := m.location.Load()
+	if loc == nil {
+		return now.UTC()
+	}
+	return now.In(loc)
 }
 
 func consoleWriter(format string) io.Writer {

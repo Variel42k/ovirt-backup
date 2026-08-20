@@ -67,6 +67,14 @@ func DiskDataKey(runPrefix string, index int, diskID string) string {
 	return fmt.Sprintf("%sdisk-%02d-%s.data", runPrefix, index, Segment(diskID))
 }
 
+func ArtifactManifestKey(runPrefix string, index int, diskID, kind string) string {
+	return fmt.Sprintf("%sartifact-%02d-%s.%s.manifest", runPrefix, index, Segment(diskID), Segment(kind))
+}
+
+func ArtifactDataKey(runPrefix string, index int, diskID, kind string) string {
+	return fmt.Sprintf("%sartifact-%02d-%s.%s.data", runPrefix, index, Segment(diskID), Segment(kind))
+}
+
 // OVAKey is the exported appliance of an OVA-type backup.
 func OVAKey(runPrefix, vmName string) string {
 	return fmt.Sprintf("%s%s.ova", runPrefix, Segment(vmName))

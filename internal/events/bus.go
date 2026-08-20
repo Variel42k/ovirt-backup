@@ -21,6 +21,7 @@ const (
 	KindStorageTarget Kind = "storage_target"
 	KindJob           Kind = "job"
 	KindReplication   Kind = "replication"
+	KindSettings      Kind = "settings.changed"
 )
 
 // Event is one notification.

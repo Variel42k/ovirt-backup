@@ -125,6 +125,7 @@ type RunRequest struct {
 
 	Quiesce       bool
 	Encrypt       bool
+	ExportQcow2   bool
 	VerifyAfter   model.VerifyMode
 	VerifyOptions model.VerifyOptions
 	Retention     model.RetentionPolicy
@@ -144,7 +145,7 @@ type RunRequest struct {
 	// счётчик выполняющихся бэкапов показывать нечего. Колбэк выполняется в
 	// той же горутине, что и бэкап, поэтому он обязан быть коротким и не
 	// блокироваться.
-	OnRunCreated func(*model.BackupRun)
+	OnRunCreated func(*model.BackupRun) `json:"-"`
 }
 
 // Execute performs one backup and returns the completed run record.
@@ -160,17 +161,25 @@ func (e *Engine) Execute(ctx context.Context, req RunRequest) (*model.BackupRun,
 	if err != nil {
 		return nil, fmt.Errorf("ВМ: %w", err)
 	}
+	client, err := e.pool.ForServer(srv)
+	if err != nil {
+		return nil, err
+	}
+	if req.Type == model.BackupOVA {
+		return e.executeOVA(ctx, client, srv, vm, req)
+	}
+	if req.ExportQcow2 {
+		if _, err := FindQemuImg(e.cfg.QemuImgPath); err != nil {
+			return nil, fmt.Errorf("export_qcow2: %w", err)
+		}
+	}
+
 	target, err := e.store.GetStorageTarget(ctx, req.StorageTargetID)
 	if err != nil {
 		return nil, fmt.Errorf("хранилище: %w", err)
 	}
 	if !target.Enabled {
 		return nil, fmt.Errorf("хранилище %q отключено", target.Name)
-	}
-
-	client, err := e.pool.ForServer(srv)
-	if err != nil {
-		return nil, err
 	}
 
 	run := &model.BackupRun{
@@ -248,26 +257,33 @@ func (e *Engine) Execute(ctx context.Context, req RunRequest) (*model.BackupRun,
 	// копия состоится. Такое зеркало просто не подключается, а точку потом
 	// дошлёт очередь репликации.
 	var (
-		mirror        *repo.Mirror
-		mirrorTargets []*model.StorageTarget
+		mirror         *repo.Mirror
+		mirrorTargets  []*model.StorageTarget
+		mirrorFailures = map[string]error{}
 	)
 	if len(req.MirrorTargetIDs) > 0 {
 		mirrors := make([]repo.Backend, 0, len(req.MirrorTargetIDs))
 		for _, id := range req.MirrorTargetIDs {
 			mirrorTarget, targetErr := e.store.GetStorageTarget(ctx, id)
-			if targetErr != nil || !mirrorTarget.Enabled {
+			if targetErr != nil {
 				log.Warn().Str("хранилище", id).Msg("зеркало недоступно, бэкап идёт без него")
+				continue
+			}
+			mirrorTargets = append(mirrorTargets, mirrorTarget)
+			if !mirrorTarget.Enabled {
+				mirrorFailures[mirrorTarget.Name] = fmt.Errorf("хранилище отключено")
+				log.Warn().Str("хранилище", id).Msg("зеркало отключено, бэкап идёт без него")
 				continue
 			}
 			mirrorBackend, openErr := repo.Open(ctx, mirrorTarget)
 			if openErr != nil {
+				mirrorFailures[mirrorTarget.Name] = openErr
 				log.Warn().Err(openErr).Str("зеркало", mirrorTarget.Name).
 					Msg("зеркало не открылось, бэкап идёт без него")
 				continue
 			}
 			defer mirrorBackend.Close()
 			mirrors = append(mirrors, mirrorBackend)
-			mirrorTargets = append(mirrorTargets, mirrorTarget)
 		}
 		if len(mirrors) > 0 {
 			if combined, ok := repo.NewMirror(backend, mirrors...).(*repo.Mirror); ok {
@@ -323,6 +339,14 @@ func (e *Engine) Execute(ctx context.Context, req RunRequest) (*model.BackupRun,
 		}
 	}
 
+	if req.ExportQcow2 && len(manifests) > 0 {
+		stored, err := e.ExportQcow2Artifacts(execCtx, backend, run, manifests)
+		if err != nil {
+			return e.failRun(ctx, run, err)
+		}
+		run.StoredBytes += stored
+	}
+
 	if err := e.writeRunManifest(execCtx, backend, srv, vm, run, manifests, vmConfig); err != nil {
 		return e.failRun(ctx, run, fmt.Errorf("запись манифеста запуска: %w", err))
 	}
@@ -342,7 +366,12 @@ func (e *Engine) Execute(ctx context.Context, req RunRequest) (*model.BackupRun,
 	}
 
 	if mirror != nil {
-		e.registerMirrorCopies(ctx, run, mirrorTargets, mirror.Failed(), log)
+		for name, failed := range mirror.Failed() {
+			mirrorFailures[name] = failed
+		}
+	}
+	if len(mirrorTargets) > 0 {
+		e.registerMirrorCopies(ctx, run, mirrorTargets, mirrorFailures, log)
 	}
 
 	log.Info().
@@ -355,6 +384,41 @@ func (e *Engine) Execute(ctx context.Context, req RunRequest) (*model.BackupRun,
 	return run, nil
 }
 
+// executeOVA handles the external oVirt artifact separately so an OVA job
+// does not need a fake repository and cannot accidentally enter retention,
+// replication or verification workflows meant for managed repository data.
+func (e *Engine) executeOVA(ctx context.Context, client *ovirt.Client, srv *model.Server,
+	vm *model.VM, req RunRequest) (*model.BackupRun, error) {
+	run := &model.BackupRun{
+		ID: uuid.NewString(), JobRunID: req.JobRunID, JobID: req.JobID, JobName: req.JobName,
+		ServerID: srv.ID, VMID: vm.ID, VMName: vm.Name, Type: model.BackupOVA,
+		Status: model.RunPending, CreatedAt: time.Now().UTC(),
+	}
+	if err := e.store.CreateBackupRun(ctx, run); err != nil {
+		return nil, fmt.Errorf("сохранение записи об OVA: %w", err)
+	}
+	if req.OnRunCreated != nil {
+		req.OnRunCreated(run)
+	}
+
+	started := time.Now().UTC()
+	run.StartedAt, run.Status = &started, model.RunRunning
+	if err := e.store.UpdateBackupRun(ctx, run); err != nil {
+		e.log.Warn().Err(err).Str("run", run.ID).Msg("не удалось отметить OVA как выполняющийся")
+	}
+	if err := e.runOVA(ctx, client, vm, run, req); err != nil {
+		return e.failRun(ctx, run, err)
+	}
+	ended := time.Now().UTC()
+	run.EndedAt, run.Status, run.Progress = &ended, model.RunSucceeded, 100
+	if err := e.store.UpdateBackupRun(ctx, run); err != nil {
+		return run, fmt.Errorf("OVA создан, но запись о запуске не обновлена: %w", err)
+	}
+	e.log.Info().Str("run", run.ID).Str("vm", vm.Name).Str("path", run.RepoPath).
+		Msg("внешний OVA-артефакт создан")
+	return run, nil
+}
+
 // registerMirrorCopies заводит записи о копиях в зеркалах.
 //
 // Байты, записанные в хранилище, о котором система не знает, — это мусор:
@@ -364,6 +428,13 @@ func (e *Engine) Execute(ctx context.Context, req RunRequest) (*model.BackupRun,
 // путём, что и в режиме копирования из основного.
 func (e *Engine) registerMirrorCopies(ctx context.Context, run *model.BackupRun,
 	targets []*model.StorageTarget, failed map[string]error, log zerolog.Logger) {
+	objectCount := run.DiskCount*2 + 1
+	if run.ConfigStored {
+		objectCount++
+	}
+	if artifacts, err := e.store.ListRepositoryArtifacts(ctx, run.ID); err == nil {
+		objectCount += len(artifacts) * 2
+	}
 
 	for _, target := range targets {
 		copyRecord := &model.BackupCopy{
@@ -373,6 +444,7 @@ func (e *Engine) registerMirrorCopies(ctx context.Context, run *model.BackupRun,
 			Required:        true,
 			ManifestSHA256:  run.ManifestSHA256,
 			TotalBytes:      run.StoredBytes,
+			ObjectCount:     objectCount,
 		}
 
 		if err, broken := failed[target.Name]; broken {
@@ -383,6 +455,7 @@ func (e *Engine) registerMirrorCopies(ctx context.Context, run *model.BackupRun,
 		} else {
 			copyRecord.Status = model.CopySucceeded
 			copyRecord.CopiedBytes = run.StoredBytes
+			copyRecord.CopiedObjects = objectCount
 			copyRecord.EndedAt = run.EndedAt
 		}
 
@@ -1079,6 +1152,11 @@ func (e *Engine) writeRunManifest(ctx context.Context, backend repo.Backend, srv
 			DataSHA256:  m.DataSHA256,
 		})
 	}
+	artifacts, err := e.ManifestArtifacts(ctx, run.ID)
+	if err != nil {
+		return err
+	}
+	doc.Artifacts = artifacts
 
 	encoded, err := EncodeManifest(doc)
 	if err != nil {

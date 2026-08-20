@@ -86,6 +86,10 @@ func (s *Store) SyncPrimaryCopy(ctx context.Context, run *model.BackupRun) error
 		status = model.CopyCanceled
 	}
 	objects := runObjectCount(run)
+	var artifactCount int
+	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM repository_artifacts WHERE run_id=? AND status='succeeded'`, run.ID).Scan(&artifactCount); err == nil {
+		objects += artifactCount * 2
+	}
 	copied := 0
 	if status == model.CopySucceeded {
 		copied = objects

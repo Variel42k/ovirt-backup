@@ -11,7 +11,7 @@ import HelpArticleBody from './HelpArticleBody.vue'
 // is fetched on first open, so pages that never ask pay nothing.
 
 const props = defineProps<{
-  /** Идентификатор статьи: changed-blocks, quiesce, retention, verify, hot-backup, chains. */
+  /** Идентификатор статьи из ответа /help. */
   article: string
   label?: string
   dense?: boolean
@@ -66,7 +66,7 @@ async function show() {
   </q-btn>
 
   <q-dialog v-model="open">
-    <q-card style="width: 760px; max-width: 96vw">
+    <q-card style="width: 1050px; max-width: 96vw">
       <q-card-section class="text-h6">
         {{ app.helpArticle(props.article)?.title ?? 'Справка' }}
       </q-card-section>

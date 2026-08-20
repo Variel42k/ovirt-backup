@@ -3,7 +3,9 @@ package api
 import (
 	"context"
 	"net/http"
+	"time"
 
+	"adveng/jh_virt/internal/events"
 	"adveng/jh_virt/internal/model"
 )
 
@@ -16,14 +18,15 @@ import (
 
 // restoreVMRequest is the wire form of model.RestoreVMRequest.
 type restoreVMRequest struct {
-	CopyID          string `json:"copy_id"`
-	ServerID        string `json:"server_id"`
-	Name            string `json:"name"`
-	ClusterID       string `json:"cluster_id"`
-	StorageDomainID string `json:"storage_domain_id"`
-	Network         string `json:"network"`
-	Start           bool   `json:"start"`
-	Confirm         bool   `json:"confirm"`
+	CopyID          string                          `json:"copy_id"`
+	ServerID        string                          `json:"server_id"`
+	Name            string                          `json:"name"`
+	ClusterID       string                          `json:"cluster_id"`
+	StorageDomainID string                          `json:"storage_domain_id"`
+	Network         string                          `json:"network"`
+	NetworkMappings []model.RestoreVMNetworkMapping `json:"network_mappings"`
+	Start           bool                            `json:"start"`
+	Confirm         bool                            `json:"confirm"`
 }
 
 func (r *restoreVMRequest) toModel(runID string) *model.RestoreVMRequest {
@@ -35,6 +38,7 @@ func (r *restoreVMRequest) toModel(runID string) *model.RestoreVMRequest {
 		ClusterID:       r.ClusterID,
 		StorageDomainID: r.StorageDomainID,
 		Network:         model.RestoreVMNetwork(r.Network),
+		NetworkMappings: r.NetworkMappings,
 		Start:           r.Start,
 		Confirm:         r.Confirm,
 	}
@@ -88,6 +92,21 @@ func (s *Server) handleRestoreVM(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.audit(r, "backup.restore_vm", model.ScopeBackup, id, true, plan.NewName)
+	restore := &model.RestoreRun{
+		RunID: id, CopyID: restoreReq.CopyID, Target: model.RestoreToNewVM,
+		Status: model.RunPending, TargetServerID: plan.ServerID,
+		TargetDomainID: restoreReq.StorageDomainID, TargetVMName: plan.NewName,
+		Phase: "queued", CreatedAt: time.Now().UTC(),
+	}
+	if err := s.store.CreateRestoreRun(r.Context(), restore); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	restoreReq.RestoreID = restore.ID
+	if s.bus != nil {
+		s.bus.Publish(events.Event{Kind: events.KindRestoreRun, ServerID: plan.ServerID,
+			ObjectID: restore.ID, Message: "VM restore queued", Payload: restore})
+	}
 
 	go func() {
 		ctx := context.WithoutCancel(r.Context())
@@ -102,11 +121,17 @@ func (s *Server) handleRestoreVM(w http.ResponseWriter, r *http.Request) {
 				s.log.Error().Str("копия", id).Msg(left)
 			}
 		}
+		if s.bus != nil {
+			latest, _ := s.store.GetRestoreRun(ctx, restore.ID)
+			s.bus.Publish(events.Event{Kind: events.KindRestoreRun, ServerID: plan.ServerID,
+				ObjectID: restore.ID, Message: "восстановление VM завершено", Payload: latest})
+		}
 	}()
 
 	writeJSON(w, http.StatusAccepted, map[string]any{
-		"status":  "queued",
-		"plan":    plan,
-		"message": "сборка машины запущена; следите за прогрессом в истории восстановлений",
+		"status":     "queued",
+		"restore_id": restore.ID,
+		"plan":       plan,
+		"message":    "сборка машины запущена; следите за прогрессом в истории восстановлений",
 	})
 }

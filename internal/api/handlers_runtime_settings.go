@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"adveng/jh_virt/internal/backup"
+	"adveng/jh_virt/internal/events"
 	"adveng/jh_virt/internal/logging"
 	"adveng/jh_virt/internal/model"
 )
@@ -149,16 +150,43 @@ func (s *Server) handleSetRuntimeTimezone(w http.ResponseWriter, r *http.Request
 		s.writeError(w, r, err)
 		return
 	}
+	if s.logs != nil {
+		if err := s.logs.SetTimezone(req.Timezone); err != nil {
+			_ = s.scheduler.SetTimezone(r.Context(), previous)
+			s.writeError(w, r, err)
+			return
+		}
+	}
+	if s.notifier != nil {
+		if err := s.notifier.SetTimezone(req.Timezone); err != nil {
+			_ = s.scheduler.SetTimezone(r.Context(), previous)
+			if s.logs != nil {
+				_ = s.logs.SetTimezone(previous)
+			}
+			s.writeError(w, r, err)
+			return
+		}
+	}
 	if err := s.store.SetSchedulerTimezone(r.Context(), req.Timezone, actor); err != nil {
 		_ = s.scheduler.SetTimezone(r.Context(), previous)
+		if s.logs != nil {
+			_ = s.logs.SetTimezone(previous)
+		}
+		if s.notifier != nil {
+			_ = s.notifier.SetTimezone(previous)
+		}
 		s.audit(r, "settings.timezone", model.ScopeServer, "", false, err.Error())
 		s.writeError(w, r, err)
 		return
 	}
 	s.log.Info().Str("было", previous).Str("стало", req.Timezone).
-		Str("оператор", actor).Msg("часовой пояс расписаний изменён")
+		Str("оператор", actor).Msg("системный часовой пояс изменён")
 	s.audit(r, "settings.timezone", model.ScopeServer, "", true,
 		fmt.Sprintf("%s -> %s", previous, req.Timezone))
+	if s.bus != nil {
+		s.bus.Publish(events.Event{Kind: events.KindSettings, Message: "system timezone changed",
+			Payload: map[string]string{"timezone": req.Timezone}})
+	}
 	s.handleRuntimeSettings(w, r)
 }
 
@@ -175,16 +203,43 @@ func (s *Server) handleResetRuntimeTimezone(w http.ResponseWriter, r *http.Reque
 		s.writeError(w, r, err)
 		return
 	}
+	if s.logs != nil {
+		if err := s.logs.SetTimezone(value); err != nil {
+			_ = s.scheduler.SetTimezone(r.Context(), previous)
+			s.writeError(w, r, err)
+			return
+		}
+	}
+	if s.notifier != nil {
+		if err := s.notifier.SetTimezone(value); err != nil {
+			_ = s.scheduler.SetTimezone(r.Context(), previous)
+			if s.logs != nil {
+				_ = s.logs.SetTimezone(previous)
+			}
+			s.writeError(w, r, err)
+			return
+		}
+	}
 	if err := s.store.ResetSchedulerTimezone(r.Context(), actor); err != nil {
 		_ = s.scheduler.SetTimezone(r.Context(), previous)
+		if s.logs != nil {
+			_ = s.logs.SetTimezone(previous)
+		}
+		if s.notifier != nil {
+			_ = s.notifier.SetTimezone(previous)
+		}
 		s.audit(r, "settings.timezone.reset", model.ScopeServer, "", false, err.Error())
 		s.writeError(w, r, err)
 		return
 	}
 	s.log.Info().Str("было", previous).Str("стало", value).
-		Str("оператор", actor).Msg("часовой пояс расписаний возвращён к конфигурации запуска")
+		Str("оператор", actor).Msg("системный часовой пояс возвращён к конфигурации запуска")
 	s.audit(r, "settings.timezone.reset", model.ScopeServer, "", true,
 		fmt.Sprintf("%s -> %s", previous, value))
+	if s.bus != nil {
+		s.bus.Publish(events.Event{Kind: events.KindSettings, Message: "system timezone reset",
+			Payload: map[string]string{"timezone": value}})
+	}
 	s.handleRuntimeSettings(w, r)
 }
 

@@ -117,7 +117,7 @@ func (e *Engine) DeleteRunData(ctx context.Context, runID string) error {
 			copy.Status = model.CopyLocked
 			_ = e.store.UpdateBackupCopy(ctx, copy)
 			return fmt.Errorf("копия в %s заблокирована Object Lock до %s", copy.StorageTargetName,
-				copy.LockedUntil.Local().Format(time.RFC3339))
+				copy.LockedUntil.UTC().Format(time.RFC3339))
 		}
 		target, err := e.store.GetStorageTarget(ctx, copy.StorageTargetID)
 		if err != nil {

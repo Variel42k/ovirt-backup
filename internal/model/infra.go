@@ -211,7 +211,10 @@ type VM struct {
 	HAEnabled   bool     `json:"ha_enabled"`
 	GuestAgent  bool     `json:"guest_agent"` // доступен ли ovirt-guest-agent/qemu-ga для quiesce
 	IPAddresses []string `json:"ip_addresses,omitempty"`
-	DiskCount   int      `json:"disk_count"`
+	// Tags is the union of provider tags and labels maintained in this service.
+	Tags      []string `json:"tags,omitempty"`
+	LocalTags []string `json:"local_tags,omitempty"`
+	DiskCount int      `json:"disk_count"`
 
 	DesiredState VMDesiredState `json:"desired_state"`
 	// Исключить ВМ из авто-оживления, даже если desired_state=up.

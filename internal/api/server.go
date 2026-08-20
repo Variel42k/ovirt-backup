@@ -18,9 +18,11 @@ import (
 	"adveng/jh_virt/internal/dispatch"
 	drcheck "adveng/jh_virt/internal/dr"
 	"adveng/jh_virt/internal/events"
+	"adveng/jh_virt/internal/filebackup"
 	"adveng/jh_virt/internal/libvirtx"
 	"adveng/jh_virt/internal/logging"
 	"adveng/jh_virt/internal/monitor"
+	"adveng/jh_virt/internal/notify"
 	"adveng/jh_virt/internal/ovirt"
 	"adveng/jh_virt/internal/quality"
 	"adveng/jh_virt/internal/replication"
@@ -44,7 +46,9 @@ type Server struct {
 	logs         *logging.Manager
 	quality      *quality.Service
 	replicator   *replication.Replicator
+	notifier     *notify.Notifier
 	dr           *drcheck.Checker
+	fileBackup   *filebackup.Engine
 	metricsToken []byte
 	// logins притормаживает подбор пароля. В памяти, а не в базе: ограничение
 	// действует на процесс, переживать перезапуск ему не нужно, а запись в
@@ -76,7 +80,9 @@ type Deps struct {
 	Logs        *logging.Manager
 	Quality     *quality.Service
 	Replicator  *replication.Replicator
+	Notifier    *notify.Notifier
 	DR          *drcheck.Checker
+	FileBackup  *filebackup.Engine
 }
 
 // New builds the API server.
@@ -96,8 +102,9 @@ func New(d Deps) *Server {
 	srv := &Server{
 		cfg: d.Config, baseCfg: base, store: d.Store, pool: d.Pool, libvirt: d.LibvirtPool, engine: d.Engine,
 		scheduler: d.Scheduler, monitor: d.Monitor, remediator: d.Remediator,
-		bus: d.Bus, log: d.Logger, logs: d.Logs, quality: d.Quality, replicator: d.Replicator,
+		bus: d.Bus, log: d.Logger, logs: d.Logs, quality: d.Quality, replicator: d.Replicator, notifier: d.Notifier,
 		dr: d.DR, metricsToken: metricsToken,
+		fileBackup: d.FileBackup,
 		logins:     newLoginLimiter(),
 		oidcLogins: newOIDCPending(),
 	}
@@ -167,10 +174,12 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /servers/{id}/vms/{vmID}/disks", s.handleListVMDisks)
 	mux.HandleFunc("GET /servers/{id}/disks", s.handleListDisks)
 	mux.HandleFunc("GET /servers/{id}/storage-domains", s.handleListStorageDomains)
+	mux.HandleFunc("GET /servers/{id}/restore-networks", s.handleListRestoreNetworks)
 
 	// Управление ВМ и хостами.
 	mux.HandleFunc("POST /servers/{id}/vms/{vmID}/action", s.writer(s.handleVMAction))
 	mux.HandleFunc("PUT /servers/{id}/vms/{vmID}/policy", s.writer(s.handleVMPolicy))
+	mux.HandleFunc("PUT /servers/{id}/vms/{vmID}/tags", s.writer(s.handleVMTags))
 	mux.HandleFunc("POST /servers/{id}/hosts/{hostID}/action", s.writer(s.handleHostAction))
 	mux.HandleFunc("PUT /servers/{id}/disks/{diskID}/backup-mode", s.writer(s.handleDiskBackupMode))
 
@@ -208,6 +217,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /backups/{id}/cancel", s.writer(s.handleCancelRun))
 	mux.HandleFunc("GET /backups/{id}/chain", s.handleRunChain)
 	mux.HandleFunc("GET /backups/{id}/copies", s.handleListBackupCopies)
+	mux.HandleFunc("GET /backups/{id}/artifacts", s.handleListRepositoryArtifacts)
 	mux.HandleFunc("POST /backups/{id}/copies", s.writer(s.handleCreateBackupCopy))
 	mux.HandleFunc("POST /backup-copies/{id}/retry", s.writer(s.handleRetryBackupCopy))
 	mux.HandleFunc("POST /backup-copies/{id}/cancel", s.writer(s.handleCancelBackupCopy))
@@ -263,6 +273,31 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /settings/runtime/compression", s.admin(s.handleResetRuntimeCompression))
 	mux.HandleFunc("PUT /settings/runtime/timezone", s.admin(s.handleSetRuntimeTimezone))
 	mux.HandleFunc("DELETE /settings/runtime/timezone", s.admin(s.handleResetRuntimeTimezone))
+	mux.HandleFunc("GET /engine-config/jobs", s.handleListEngineConfigJobs)
+	mux.HandleFunc("POST /engine-config/jobs", s.admin(s.handleCreateEngineConfigJob))
+	mux.HandleFunc("PUT /engine-config/jobs/{id}", s.admin(s.handleUpdateEngineConfigJob))
+	mux.HandleFunc("DELETE /engine-config/jobs/{id}", s.admin(s.handleDeleteEngineConfigJob))
+	mux.HandleFunc("POST /engine-config/jobs/{id}/run", s.admin(s.handleRunEngineConfigJob))
+	mux.HandleFunc("GET /engine-config/runs", s.handleListEngineConfigRuns)
+	mux.HandleFunc("POST /engine-config/runs", s.admin(s.handleRunEngineConfig))
+	mux.HandleFunc("GET /engine-config/runs/{id}", s.handleGetEngineConfigRun)
+	mux.HandleFunc("GET /engine-config/runs/{id}/download", s.handleDownloadEngineConfig)
+	mux.HandleFunc("GET /engine-config/compare", s.handleCompareEngineConfig)
+
+	// Native file backups are isolated from VM jobs and guarded by the
+	// file_backup.enabled feature gate.
+	mux.HandleFunc("GET /file-backup/roots", s.handleListFileBackupRoots)
+	mux.HandleFunc("GET /file-backup/jobs", s.handleListFileBackupJobs)
+	mux.HandleFunc("POST /file-backup/jobs", s.admin(s.handleCreateFileBackupJob))
+	mux.HandleFunc("GET /file-backup/jobs/{id}", s.handleGetFileBackupJob)
+	mux.HandleFunc("PUT /file-backup/jobs/{id}", s.admin(s.handleUpdateFileBackupJob))
+	mux.HandleFunc("DELETE /file-backup/jobs/{id}", s.admin(s.handleDeleteFileBackupJob))
+	mux.HandleFunc("POST /file-backup/jobs/{id}/run", s.writer(s.handleRunFileBackupJob))
+	mux.HandleFunc("GET /file-backup/runs", s.handleListFileBackupRuns)
+	mux.HandleFunc("GET /file-backup/runs/{id}", s.handleGetFileBackupRun)
+	mux.HandleFunc("DELETE /file-backup/runs/{id}", s.admin(s.handleDeleteFileBackupRun))
+	mux.HandleFunc("GET /file-backup/runs/{id}/tree", s.handleGetFileBackupTree)
+	mux.HandleFunc("POST /file-backup/runs/{id}/restore", s.writer(s.handleRestoreFiles))
 	mux.HandleFunc("PUT /settings/runtime/log-rotation", s.admin(s.handleSetRuntimeLogRotation))
 	mux.HandleFunc("DELETE /settings/runtime/log-rotation", s.admin(s.handleResetRuntimeLogRotation))
 	mux.HandleFunc("PUT /settings/runtime/backup-quality", s.admin(s.handleSetRuntimeBackupQuality))

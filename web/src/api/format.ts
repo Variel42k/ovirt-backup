@@ -1,7 +1,33 @@
+import { computed, ref } from 'vue'
+
 // Форматирование значений для интерфейса. Собрано в одном месте, чтобы
 // «12,3 ГБ» выглядело одинаково на всех экранах.
 
 const UNITS = ['Б', 'КБ', 'МБ', 'ГБ', 'ТБ', 'ПБ']
+
+const configuredTimezone = ref('UTC')
+const effectiveTimezone = ref('UTC')
+const timezoneError = ref('')
+
+export const systemTimezone = computed(() => configuredTimezone.value)
+export const displayTimezone = computed(() => effectiveTimezone.value)
+export const displayTimezoneWarning = computed(() => timezoneError.value)
+
+/** Configure the single application timezone used by every absolute date. */
+export function setSystemTimezone(timezone?: string | null): void {
+  const wanted = timezone?.trim() || 'UTC'
+  configuredTimezone.value = wanted
+  try {
+    // Some older browsers have an incomplete ICU database. Validate before
+    // replacing the current formatter so they fail visibly and safely.
+    new Intl.DateTimeFormat('ru-RU', { timeZone: wanted }).format(new Date(0))
+    effectiveTimezone.value = wanted
+    timezoneError.value = ''
+  } catch {
+    effectiveTimezone.value = 'UTC'
+    timezoneError.value = `Браузер не поддерживает часовой пояс ${wanted}; время показано в UTC`
+  }
+}
 
 export function bytes(value?: number | null): string {
   if (value === undefined || value === null) return '—'
@@ -21,14 +47,21 @@ export function dateTime(value?: string | null): string {
   if (!value) return '—'
   const d = new Date(value)
   if (Number.isNaN(d.getTime())) return '—'
-  return d.toLocaleString('ru-RU', { dateStyle: 'short', timeStyle: 'medium' })
+  return d.toLocaleString('ru-RU', {
+    dateStyle: 'short',
+    timeStyle: 'medium',
+    timeZone: effectiveTimezone.value,
+  })
 }
 
 export function dateOnly(value?: string | null): string {
   if (!value) return '—'
   const d = new Date(value)
   if (Number.isNaN(d.getTime())) return '—'
-  return d.toLocaleDateString('ru-RU', { dateStyle: 'medium' })
+  return d.toLocaleDateString('ru-RU', {
+    dateStyle: 'medium',
+    timeZone: effectiveTimezone.value,
+  })
 }
 
 /** Относительное время: «3 мин назад». Абсолютное время рядом всё равно нужно. */
@@ -94,6 +127,7 @@ export function statusColor(status?: string): string {
       return 'warning'
     case 'running':
     case 'pending':
+	case 'waiting_copies':
     case 'migrating':
     case 'powering_up':
     case 'powering_down':
@@ -136,6 +170,7 @@ const HOST_STATUS_RU: Record<string, string> = {
 const RUN_STATUS_RU: Record<string, string> = {
   pending: 'в очереди',
   running: 'выполняется',
+	waiting_copies: 'ожидает обязательные копии',
   succeeded: 'успешно',
   partial: 'частично',
   failed: 'ошибка',

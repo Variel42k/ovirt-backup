@@ -139,7 +139,9 @@ ssh server 'sudo sh /tmp/ovirt-backup-1.0.0-linux-amd64.run'
   1) docker compose   — сервис и PostgreSQL в контейнерах
   2) docker-compose   — то же через Compose v1
   3) systemd          — нативная служба и локальная PostgreSQL
-  4) удалить          — выбрать Docker Compose, systemd или оба варианта
+  4) перенести сюда    — восстановить пакет со старого сервера
+  5) подготовить перенос — создать пакет на текущем сервере
+  6) удалить          — выбрать Docker Compose, systemd или оба варианта
 ```
 
 После выбора удаления установщик показывает отдельное меню целей и запрашивает
@@ -153,6 +155,10 @@ ssh server 'sudo sh /tmp/ovirt-backup-1.0.0-linux-amd64.run'
 | `sudo sh ./ovirt-backup-*.run --mode systemd --url http://host:8080` | локальная PostgreSQL и systemd |
 | `sudo sh ./ovirt-backup-*.run --mode systemd --url … --database-url-file /root/jhvirt.dsn` | systemd с внешней PostgreSQL |
 | `sudo PREFIX=/srv/jhvirt sh ./ovirt-backup-*.run` | другой каталог |
+| `sudo sh ./ovirt-backup-*.run --migration-export /root/jhvirt-migration.tar.gz` | остановить приложение и создать пакет переноса |
+| `sudo sh ./ovirt-backup-*.run --migrate-from /root/jhvirt-migration.tar.gz` | импортировать настройки, ключи и БД на пустой сервер |
+| `sudo sh ./ovirt-backup-*.run --mode docker --url https://host:8080 --tls self-signed` | выпустить и подключить самоподписанный сертификат |
+| `sudo sh ./ovirt-backup-*.run --mode docker --url https://host:8080 --tls files --tls-cert-file server.crt --tls-key-file server.key` | подключить готовую PEM-пару |
 | `sudo sh ./ovirt-backup-*.run --uninstall` | интерактивно выбрать цель; без терминала снять оба варианта |
 | `sudo sh ./ovirt-backup-*.run --uninstall=docker` | снять только Compose-контейнеры и сеть |
 | `sudo sh ./ovirt-backup-*.run --uninstall=systemd` | снять только `jhvirt.service` |
@@ -168,7 +174,10 @@ ssh server 'sudo sh /tmp/ovirt-backup-1.0.0-linux-amd64.run'
 В unattended-режиме `--url` обязателен: от его схемы зависит флаг `Secure` у
 сессионной cookie. Для systemd установщик на Ubuntu/Debian или RHEL/Alma/Rocky
 ставит PostgreSQL, создаёт локальную роль и базу, формирует env и unit,
-проверяет конфигурацию, запускает службу и ждёт readiness. TLS он не выпускает.
+проверяет конфигурацию, запускает службу и ждёт readiness. По выбору он
+выпускает самоподписанный TLS-сертификат или проверяет и подключает готовую
+PEM-пару. Повторный запуск меняет TLS текущей инсталляции без сброса её
+настроек.
 
 Внешняя DSN передаётся через файл `0600`, чтобы пароль не попадал в историю
 команд. Локальная база работает через Unix socket и peer-аутентификацию без
@@ -227,6 +236,20 @@ ssh server 'sudo sh /tmp/ovirt-backup-1.0.0-linux-amd64.run'
 ```
 
 Гипервизор для тестов не нужен, а вот база нужна — см. ниже.
+
+Браузерные acceptance-тесты запускаются против уже работающей тестовой
+инсталляции:
+
+```bash
+cd web
+JHV_E2E_URL=https://127.0.0.1:58080 \
+JHV_E2E_PASSWORD='<пароль admin>' \
+JHV_E2E_INSECURE_TLS=true \
+npm run e2e
+```
+
+`JHV_E2E_INSECURE_TLS=true` нужен только для тестовой инсталляции с самоподписанным
+сертификатом; по умолчанию Chromium сохраняет обычную проверку доверия.
 
 ### Тестам нужна PostgreSQL
 

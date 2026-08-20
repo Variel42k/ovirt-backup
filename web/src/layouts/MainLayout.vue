@@ -12,6 +12,8 @@ import {
 } from '@/api/client'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
+import { displayTimezone, displayTimezoneWarning } from '@/api/format'
+import { setThemeMode, themeIcon, themeMode, type ThemeMode } from '@/theme'
 
 const auth = useAuthStore()
 const app = useAppStore()
@@ -24,12 +26,19 @@ const firingAlerts = ref(0)
 const liveConnected = ref(false)
 let source: EventSource | null = null
 let alertTimer: number | undefined
+const themeOptions: { value: ThemeMode; label: string; icon: string }[] = [
+  { value: 'system', label: 'Как в системе', icon: 'brightness_auto' },
+  { value: 'light', label: 'Светлая', icon: 'light_mode' },
+  { value: 'dark', label: 'Тёмная', icon: 'dark_mode' },
+]
 
 const links = [
   { name: 'dashboard', label: 'Обзор', icon: 'dashboard' },
   { name: 'servers', label: 'Серверы', icon: 'dns' },
   { name: 'jobs', label: 'Задания бэкапа', icon: 'event_repeat' },
   { name: 'backups', label: 'Бэкапы', icon: 'backup' },
+  { name: 'engine-config', label: 'Конфигурация Engine', icon: 'account_tree' },
+	{ name: 'file-backups', label: 'Файловые бекапы', icon: 'folder_copy' },
   { name: 'coverage', label: 'Защита', icon: 'shield' },
   { name: 'retention', label: 'Хранение', icon: 'auto_delete' },
   { name: 'storages', label: 'Хранилища', icon: 'inventory_2' },
@@ -86,6 +95,13 @@ function connectLive() {
       /* см. выше */
     }
   })
+  const reloadRuntimeSettings = () => {
+    void app.reloadMeta()
+  }
+  source.addEventListener('settings.changed', reloadRuntimeSettings)
+  // Accept events from servers predating the public settings.changed name
+  // while a rolling update still has mixed application versions.
+  source.addEventListener('settings', reloadRuntimeSettings)
 }
 
 async function doLogout() {
@@ -150,6 +166,26 @@ onBeforeUnmount(() => {
           <q-tooltip>{{ liveConnected ? 'Поток событий подключён' : 'Поток событий недоступен' }}</q-tooltip>
         </q-btn>
 
+        <q-btn flat dense round :icon="themeIcon" aria-label="Тема интерфейса">
+          <q-tooltip>Тема интерфейса</q-tooltip>
+          <q-menu>
+            <q-list style="min-width: 220px">
+              <q-item
+                v-for="option in themeOptions"
+                :key="option.value"
+                v-close-popup
+                clickable
+                :active="themeMode === option.value"
+                @click="setThemeMode(option.value)"
+              >
+                <q-item-section avatar><q-icon :name="option.icon" /></q-item-section>
+                <q-item-section>{{ option.label }}</q-item-section>
+                <q-item-section v-if="themeMode === option.value" side><q-icon name="check" /></q-item-section>
+              </q-item>
+            </q-list>
+          </q-menu>
+        </q-btn>
+
         <q-btn flat dense round icon="account_circle">
           <q-menu>
             <q-list style="min-width: 320px">
@@ -189,7 +225,7 @@ onBeforeUnmount(() => {
           :key="link.name"
           clickable
           :to="{ name: link.name }"
-          active-class="text-primary bg-blue-1"
+          active-class="jhv-nav-active"
         >
           <q-item-section avatar>
             <q-icon :name="link.icon" />
@@ -207,7 +243,8 @@ onBeforeUnmount(() => {
           <div>СУБД: {{ app.meta.capabilities.database_type }}</div>
           <div>Сжатие: {{ app.meta.capabilities.compression }}</div>
           <div>qemu-img: {{ app.meta.capabilities.qemu_img ? 'доступен' : 'нет' }}</div>
-          <div>Пояс расписаний: {{ app.meta.capabilities.scheduler_timezone }}</div>
+          <div>Часовой пояс: {{ displayTimezone }}</div>
+          <div v-if="displayTimezoneWarning" class="text-warning q-mt-xs">{{ displayTimezoneWarning }}</div>
         </div>
       </template>
     </q-drawer>

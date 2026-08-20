@@ -67,6 +67,33 @@ func BuildRestoreVMPlan(in RestoreVMInput) (*model.RestoreVMPlan, error) {
 			layout[d.DiskID] = d
 		}
 	}
+	mappings := make(map[string]model.RestoreVMNetworkMapping, len(in.Request.NetworkMappings))
+	for _, mapping := range in.Request.NetworkMappings {
+		mappings[mapping.NICID] = mapping
+	}
+	if in.Profile != nil {
+		for _, nic := range in.Profile.NICs {
+			mapping, mapped := mappings[nic.ID]
+			sourceKind := nic.SourceKind
+			if sourceKind == "" {
+				sourceKind = "vnic_profile"
+			}
+			entry := model.RestoreVMPlanNIC{
+				NICID: nic.ID, Name: nic.Name, Model: nic.Model, SourceMAC: nic.MAC,
+				TargetID: mapping.TargetID, TargetKind: mapping.TargetKind,
+				Excluded: mapping.Exclude,
+			}
+			// Network is detached by default. The legacy attached mode remains
+			// accepted for old clients and reuses the saved oVirt profile only
+			// when no explicit mapping was supplied.
+			if !mapped && plan.ServerID == in.Run.ServerID {
+				entry.TargetID, entry.TargetKind = nic.SourceProfile, sourceKind
+			}
+			entry.Connected = (mapping.Connected || (!mapped && plan.Network == model.RestoreNetworkAttached)) &&
+				entry.TargetID != "" && !entry.Excluded
+			plan.NICs = append(plan.NICs, entry)
+		}
+	}
 
 	for _, m := range in.Disks {
 		if m == nil {
@@ -80,7 +107,11 @@ func BuildRestoreVMPlan(in RestoreVMInput) (*model.RestoreVMPlan, error) {
 		}
 		if l, ok := layout[m.DiskID]; ok {
 			entry.Target, entry.Bus = l.Target, l.Bus
+			entry.BootOrder = l.BootOrder
 			entry.Bootable = entry.Bootable || l.BootOrder == 1
+		}
+		if entry.BootOrder == 0 && entry.Bootable {
+			entry.BootOrder = 1
 		}
 		plan.Disks = append(plan.Disks, entry)
 		plan.TotalBytes += m.VirtualSize
@@ -95,8 +126,11 @@ func BuildRestoreVMPlan(in RestoreVMInput) (*model.RestoreVMPlan, error) {
 func restoreVMBlockers(in RestoreVMInput, plan *model.RestoreVMPlan) []string {
 	var out []string
 
-	if len(plan.Disks) == 0 {
+	if len(plan.Disks) == 0 && in.Run.Type != model.BackupConfig {
 		out = append(out, "в точке восстановления нет ни одного диска")
+	}
+	if in.Run.Type == model.BackupConfig && plan.Start {
+		out = append(out, "config-only восстановление нельзя запускать автоматически: в машине нет дисков с данными")
 	}
 
 	// Незавершённая копия восстанавливается в машину, у которой часть дисков
@@ -129,6 +163,9 @@ func restoreVMWarnings(in RestoreVMInput, plan *model.RestoreVMPlan) []string {
 	if in.Profile == nil {
 		out = append(out, "конфигурация исходной машины не сохранена: "+
 			"диски будут подключены в порядке по умолчанию, загрузка может потребовать правки")
+	}
+	if in.Run.Type == model.BackupConfig {
+		out = append(out, "копия содержит только конфигурацию: машина будет создана без дисков и данных")
 	}
 
 	if plan.Network == model.RestoreNetworkAttached {

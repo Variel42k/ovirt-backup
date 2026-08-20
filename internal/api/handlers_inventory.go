@@ -84,7 +84,77 @@ func (s *Server) handleListDisks(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListStorageDomains(w http.ResponseWriter, r *http.Request) {
-	items, err := s.store.ListStorageDomains(r.Context(), r.PathValue("id"))
+	serverID := r.PathValue("id")
+	srv, err := s.store.GetServer(r.Context(), serverID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	if srv.Kind.UsesLibvirt() {
+		conn, connErr := s.libvirt.ForServer(r.Context(), srv)
+		if connErr != nil {
+			s.writeError(w, r, connErr)
+			return
+		}
+		pools, poolErr := conn.ListStoragePools(r.Context())
+		if poolErr != nil {
+			s.writeError(w, r, poolErr)
+			return
+		}
+		items := make([]*model.StorageDomain, 0, len(pools))
+		for _, pool := range pools {
+			items = append(items, &model.StorageDomain{ID: pool.Name, ServerID: serverID,
+				Name: pool.Name, Type: "data", Storage: pool.Kind, Status: "active",
+				AvailableSize: pool.Available, UsedSize: pool.Allocation,
+				CommittedSize: pool.Allocation, SeenAt: time.Now().UTC()})
+		}
+		writeList(w, items)
+		return
+	}
+	items, err := s.store.ListStorageDomains(r.Context(), serverID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeList(w, items)
+}
+
+func (s *Server) handleListRestoreNetworks(w http.ResponseWriter, r *http.Request) {
+	serverID := r.PathValue("id")
+	srv, err := s.store.GetServer(r.Context(), serverID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	if srv.Kind.UsesLibvirt() {
+		conn, connErr := s.libvirt.ForServer(r.Context(), srv)
+		if connErr != nil {
+			s.writeError(w, r, connErr)
+			return
+		}
+		networks, networkErr := conn.ListNetworks(r.Context())
+		if networkErr != nil {
+			s.writeError(w, r, networkErr)
+			return
+		}
+		items := make([]*model.RestoreNetworkTarget, 0, len(networks))
+		for _, network := range networks {
+			status := "inactive"
+			if network.Active {
+				status = "active"
+			}
+			items = append(items, &model.RestoreNetworkTarget{ID: network.Name, ServerID: serverID,
+				Name: network.Name, Kind: "network", Network: network.Name, Status: status})
+		}
+		writeList(w, items)
+		return
+	}
+	client, err := s.pool.Get(r.Context(), serverID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	items, err := client.ListVNICProfiles(r.Context(), serverID)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
@@ -251,6 +321,40 @@ func (s *Server) handleVMPolicy(w http.ResponseWriter, r *http.Request) {
 	s.audit(r, "vm.policy", model.ScopeVM, vmID, true,
 		string(req.DesiredState)+" opt_out="+boolText(req.RemediationOptOut))
 
+	vm, err := s.store.GetVM(r.Context(), serverID, vmID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, vm)
+}
+
+type vmTagsRequest struct {
+	Tags []string `json:"tags"`
+}
+
+func (s *Server) handleVMTags(w http.ResponseWriter, r *http.Request) {
+	serverID, vmID := r.PathValue("id"), r.PathValue("vmID")
+	var req vmTagsRequest
+	if err := decodeJSON(r, &req); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	if len(req.Tags) > 64 {
+		s.writeError(w, r, badRequest("у ВМ не может быть больше 64 локальных тегов"))
+		return
+	}
+	for _, tag := range req.Tags {
+		if len(strings.TrimSpace(tag)) > 128 {
+			s.writeError(w, r, badRequest("тег ВМ длиннее 128 символов"))
+			return
+		}
+	}
+	if err := s.store.SetVMLocalTags(r.Context(), serverID, vmID, req.Tags); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	s.audit(r, "vm.tags", model.ScopeVM, vmID, true, strings.Join(req.Tags, ","))
 	vm, err := s.store.GetVM(r.Context(), serverID, vmID)
 	if err != nil {
 		s.writeError(w, r, err)

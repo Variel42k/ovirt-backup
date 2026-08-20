@@ -8,7 +8,10 @@ package notify
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -51,10 +54,11 @@ type Notifier struct {
 	minSeverity model.Severity
 	log         zerolog.Logger
 
-	queue chan Message
-	wg    sync.WaitGroup
-	once  sync.Once
-	done  chan struct{}
+	queue    chan Message
+	wg       sync.WaitGroup
+	once     sync.Once
+	done     chan struct{}
+	location atomic.Pointer[time.Location]
 
 	// dropped считает потерянные из-за переполнения. Молчаливая потеря
 	// оповещения — худшее, что может сделать система оповещений, поэтому она
@@ -98,6 +102,7 @@ func New(cfg config.NotificationsConfig, log zerolog.Logger) *Notifier {
 		queue:       make(chan Message, queueSize),
 		done:        make(chan struct{}),
 	}
+	n.location.Store(time.UTC)
 	n.wg.Add(1)
 	go n.run()
 
@@ -123,7 +128,7 @@ func (n *Notifier) Alert(a model.Alert) {
 		Object:   a.ObjectName,
 		Text:     a.Message,
 		Details:  a.Details,
-		At:       time.Now().UTC(),
+		At:       n.now(),
 	}:
 	default:
 		n.mu.Lock()
@@ -132,6 +137,31 @@ func (n *Notifier) Alert(a model.Alert) {
 		n.mu.Unlock()
 		n.log.Warn().Int("потеряно", count).Msg("очередь оповещений переполнена")
 	}
+}
+
+// SetTimezone changes the zone used in human-readable notifications. The
+// event instant remains unchanged; RFC3339 output carries the selected offset.
+func (n *Notifier) SetTimezone(name string) error {
+	if n == nil {
+		return nil
+	}
+	loc, err := time.LoadLocation(strings.TrimSpace(name))
+	if err != nil {
+		return fmt.Errorf("часовой пояс уведомлений %q: %w", name, err)
+	}
+	n.location.Store(loc)
+	return nil
+}
+
+func (n *Notifier) now() time.Time {
+	if n == nil {
+		return time.Now().UTC()
+	}
+	loc := n.location.Load()
+	if loc == nil {
+		loc = time.UTC
+	}
+	return time.Now().In(loc)
 }
 
 // passes отсекает то, что ниже порога. Предупреждения по умолчанию наружу не

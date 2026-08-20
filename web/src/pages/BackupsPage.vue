@@ -1,12 +1,12 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useQuasar } from 'quasar'
 import { api, notify, notifyError, notifyOk } from '@/api/client'
 import { bytes, dateTime, elapsed, runStatus, statusColor } from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import HelpButton from '@/components/HelpButton.vue'
-import type { BackupCopy, BackupDisk, BackupRun, BootReport, ReplicationDetail, RestoreRun, RestoreVMPlan, StorageDomain, VerifyRun } from '@/api/types'
+import type { BackupCopy, BackupDisk, BackupRun, BootReport, Cluster, ReplicationDetail, RepositoryArtifact, RestoreNetworkTarget, RestoreRun, RestoreVMPlan, StorageDomain, VerifyRun } from '@/api/types'
 
 const $q = useQuasar()
 const app = useAppStore()
@@ -21,10 +21,14 @@ const detail = ref<BackupRun | null>(null)
 const detailOpen = ref(false)
 const chain = ref<BackupRun[]>([])
 const verifications = ref<VerifyRun[]>([])
+const artifacts = ref<RepositoryArtifact[]>([])
 const replications = ref<BackupCopy[]>([])
 const replicationsLoading = ref(false)
 const replicationOpen = ref(false)
 const replicationDetail = ref<ReplicationDetail | null>(null)
+let liveSource: EventSource | null = null
+let liveRefreshTimer: number | undefined
+let fallbackPollTimer: number | undefined
 
 const restoreOpen = ref(false)
 const restoreForm = ref({
@@ -38,16 +42,67 @@ const restoreForm = ref({
   disk_ids: [] as string[],
 })
 const domains = ref<StorageDomain[]>([])
+const clusters = ref<Cluster[]>([])
+const restoreNetworks = ref<RestoreNetworkTarget[]>([])
 
 // План сборки машины целиком. Запрашивается отдельно и до запуска: он ничего
 // не создаёт, а показывает объём и последствия — сколько дисков, сколько
 // места, как будет называться машина и что с сетью.
 const vmPlan = ref<RestoreVMPlan | null>(null)
 const vmPlanLoading = ref(false)
-const vmForm = ref({ name: '', cluster_id: '', network: 'detached', start: false, confirm: false })
+const vmPlanDirty = ref(false)
+const vmForm = ref({
+  server_id: '', name: '', cluster_id: '', network: 'detached', start: false, confirm: false,
+  network_mappings: [] as Array<{ nic_id: string; target_id: string; target_kind: string; exclude: boolean; connected: boolean }>,
+})
+const vmTargetServer = computed(() => app.servers.find((server) => server.id === vmForm.value.server_id))
+const compatibleRestoreServers = computed(() => {
+  const source = app.servers.find((server) => server.id === detail.value?.server_id)
+  if (!source) return []
+  return app.servers.filter((server) => server.enabled && ((server.kind === 'kvm') === (source.kind === 'kvm')))
+})
 
-async function load() {
-  loading.value = true
+async function loadVMTargetInventory(serverId: string) {
+  domains.value = []
+  clusters.value = []
+  restoreNetworks.value = []
+  if (!serverId) return
+  const server = app.servers.find((item) => item.id === serverId)
+  try {
+    const [targetDomains, targetNetworks, targetClusters] = await Promise.all([
+      api.listStorageDomains(serverId),
+      api.listRestoreNetworks(serverId),
+      server?.kind === 'kvm' ? Promise.resolve([] as Cluster[]) : api.listClusters(serverId),
+    ])
+    domains.value = targetDomains
+    restoreNetworks.value = targetNetworks
+    clusters.value = targetClusters
+  } catch (err) {
+    notifyError(err, 'Не удалось загрузить ресурсы целевой платформы')
+  }
+}
+
+async function changeVMTargetServer(serverId: string) {
+  vmForm.value.server_id = serverId
+  vmForm.value.cluster_id = ''
+  vmForm.value.network_mappings = []
+  restoreForm.value.target_domain_id = ''
+  vmPlan.value = null
+  vmPlanDirty.value = false
+  await loadVMTargetInventory(serverId)
+}
+
+async function changeRestoreTarget(target: string) {
+  vmPlan.value = null
+  if (target === 'new_vm') {
+    await loadVMTargetInventory(vmForm.value.server_id)
+  } else if (detail.value) {
+    await loadVMTargetInventory(detail.value.server_id)
+  }
+}
+
+async function load(silent = false) {
+  if (!silent) loading.value = true
   try {
     const params: Record<string, string | number> = { limit: 200, days: filters.value.days }
     if (filters.value.server_id) params.server_id = filters.value.server_id
@@ -56,7 +111,7 @@ async function load() {
   } catch (err) {
     notifyError(err, 'Не удалось загрузить список бэкапов')
   } finally {
-    loading.value = false
+    if (!silent) loading.value = false
   }
 }
 
@@ -65,18 +120,21 @@ async function openDetail(run: BackupRun) {
   detail.value = run
   chain.value = []
   verifications.value = []
+	artifacts.value = []
   runRestores.value = []
   try {
-    const [full, chainRuns, verifyRuns, restoreRuns] = await Promise.all([
+    const [full, chainRuns, verifyRuns, restoreRuns, artifactRuns] = await Promise.all([
       api.getRun(run.id),
       api.runChain(run.id),
       api.listVerifications(run.id),
       api.listRestores(run.id),
+			api.listRepositoryArtifacts(run.id),
     ])
     detail.value = full
     chain.value = chainRuns
     verifications.value = verifyRuns
     runRestores.value = restoreRuns
+		artifacts.value = artifactRuns
   } catch (err) {
     notifyError(err, 'Не удалось загрузить подробности')
   }
@@ -87,14 +145,14 @@ const restores = ref<RestoreRun[]>([])
 const restoresLoading = ref(false)
 
 /** Восстановление идёт в фоне и нигде больше не видно — этот список и есть его окно. */
-async function loadRestores() {
-  restoresLoading.value = true
+async function loadRestores(silent = false) {
+  if (!silent) restoresLoading.value = true
   try {
     restores.value = await api.listRestores()
   } catch (err) {
     notifyError(err, 'Не удалось загрузить историю восстановлений')
   } finally {
-    restoresLoading.value = false
+    if (!silent) restoresLoading.value = false
   }
 }
 
@@ -215,12 +273,9 @@ async function openRestore(run: BackupRun) {
     disk_ids: [],
   }
   vmPlan.value = null
-  vmForm.value = { name: '', cluster_id: '', network: 'detached', start: false, confirm: false }
-  try {
-    domains.value = await api.listStorageDomains(run.server_id)
-  } catch {
-    domains.value = []
-  }
+  vmPlanDirty.value = false
+  vmForm.value = { server_id: run.server_id, name: '', cluster_id: '', network: 'detached', start: false, confirm: false, network_mappings: [] }
+  await loadVMTargetInventory(run.server_id)
   restoreOpen.value = true
 }
 
@@ -243,15 +298,37 @@ function copyColor(status: string): string {
 	return 'grey-7'
 }
 
-async function loadReplications() {
-	replicationsLoading.value = true
+async function loadReplications(silent = false) {
+	if (!silent) replicationsLoading.value = true
 	try {
 		replications.value = await api.listReplications({ limit: 200 })
 	} catch (err) {
 		notifyError(err, 'Не удалось загрузить очередь репликации')
 	} finally {
-		replicationsLoading.value = false
+		if (!silent) replicationsLoading.value = false
 	}
+}
+
+async function refreshLiveState() {
+	if (tab.value === 'runs') await load(true)
+	if (tab.value === 'restores') await loadRestores(true)
+	if (tab.value === 'replications') await loadReplications(true)
+	if (detailOpen.value && detail.value) await openDetail(detail.value)
+}
+
+function queueLiveRefresh() {
+	if (liveRefreshTimer) window.clearTimeout(liveRefreshTimer)
+	liveRefreshTimer = window.setTimeout(() => void refreshLiveState(), 250)
+}
+
+function connectLiveUpdates() {
+	liveSource = new EventSource('/api/v1/events', { withCredentials: true })
+	for (const kind of ['backup_run', 'verify_run', 'restore_run', 'replication', 'job']) {
+		liveSource.addEventListener(kind, queueLiveRefresh)
+	}
+	// Polling remains active as a fallback for a proxy which buffers SSE and
+	// for intermediate phase updates that are deliberately not broadcast.
+	fallbackPollTimer = window.setInterval(() => void refreshLiveState(), 10_000)
 }
 
 async function showReplication(copy: BackupCopy) {
@@ -288,6 +365,9 @@ async function cancelCopy(copy: BackupCopy) {
 /** Переключатель сети хранит строку, а не флаг: у режима есть имя в API. */
 function setRestoreNetwork(attached: boolean) {
   vmForm.value.network = attached ? 'attached' : 'detached'
+  for (const mapping of vmForm.value.network_mappings) {
+    mapping.connected = attached && !mapping.exclude && Boolean(mapping.target_id)
+  }
   vmPlan.value = null
 }
 
@@ -295,11 +375,19 @@ async function loadVMPlan() {
   if (!detail.value) return
   vmPlanLoading.value = true
   try {
-    vmPlan.value = await api.planRestoreVM(detail.value.id, {
+    const plan = await api.planRestoreVM(detail.value.id, {
       copy_id: restoreForm.value.copy_id,
       storage_domain_id: restoreForm.value.target_domain_id,
       ...vmForm.value,
     })
+    vmPlan.value = plan
+    vmPlanDirty.value = false
+    if (!vmForm.value.network_mappings.length && plan.nics?.length) {
+      vmForm.value.network_mappings = plan.nics.map((nic) => ({
+        nic_id: nic.nic_id, target_id: nic.target_id ?? '', target_kind: nic.target_kind || 'vnic_profile',
+        exclude: nic.excluded ?? false, connected: nic.connected ?? false,
+      }))
+    }
   } catch (err) {
     vmPlan.value = null
     notifyError(err, 'Не удалось построить план')
@@ -392,6 +480,13 @@ watch(tab, (value) => {
 onMounted(async () => {
   await app.bootstrap()
   await load()
+	connectLiveUpdates()
+})
+
+onBeforeUnmount(() => {
+	liveSource?.close()
+	if (liveRefreshTimer) window.clearTimeout(liveRefreshTimer)
+	if (fallbackPollTimer) window.clearInterval(fallbackPollTimer)
 })
 
 const restoreColumns = [
@@ -791,6 +886,22 @@ const replicationColumns = [
             </tbody>
           </q-markup-table>
 
+					<template v-if="artifacts.length">
+						<div class="text-subtitle2 q-mb-xs">Производные артефакты</div>
+						<q-list dense bordered separator class="q-mb-md">
+							<q-item v-for="artifact in artifacts" :key="artifact.id">
+								<q-item-section avatar><q-icon name="data_object" :color="statusColor(artifact.status)" /></q-item-section>
+								<q-item-section>
+									<q-item-label>{{ artifact.disk_alias }} · {{ artifact.kind.toUpperCase() }}</q-item-label>
+									<q-item-label caption>{{ bytes(artifact.size_bytes) }} → {{ bytes(artifact.stored_bytes) }} · {{ artifact.encrypted ? 'зашифрован' : 'без шифрования' }}</q-item-label>
+									<q-item-label v-if="artifact.sha256" caption class="jhv-mono ellipsis">SHA-256: {{ artifact.sha256 }}</q-item-label>
+									<q-item-label v-if="artifact.error" caption class="text-negative">{{ artifact.error }}</q-item-label>
+								</q-item-section>
+								<q-item-section side><q-chip dense :color="statusColor(artifact.status)" text-color="white">{{ runStatus(artifact.status) }}</q-chip></q-item-section>
+							</q-item>
+						</q-list>
+					</template>
+
           <!--
             Пропущенные диски идут прямо под списком сохранённых и до цепочки:
             «успешно» с тихо выпавшим диском — самый опасный случай во всей
@@ -1120,11 +1231,23 @@ const replicationColumns = [
               { label: 'Создать новый диск в oVirt и залить в него', value: 'new_disk' },
               { label: 'Записать поверх существующего диска', value: 'disk' },
             ]"
-            @update:model-value="vmPlan = null"
+            @update:model-value="changeRestoreTarget"
           />
 
           <!-- Сборка машины целиком -->
           <template v-if="restoreForm.target === 'new_vm'">
+            <div class="col-12">
+              <q-select
+                :model-value="vmForm.server_id"
+                :options="compatibleRestoreServers.map((server) => ({ label: server.name, value: server.id }))"
+                emit-value
+                map-options
+                label="Целевая платформа"
+                outlined
+                dense
+                @update:model-value="changeVMTargetServer"
+              />
+            </div>
             <div class="col-12 col-sm-7">
               <q-input
                 v-model="vmForm.name"
@@ -1135,11 +1258,13 @@ const replicationColumns = [
                 @update:model-value="vmPlan = null"
               />
             </div>
-            <div class="col-12 col-sm-5">
-              <q-input
+            <div v-if="vmTargetServer?.kind !== 'kvm'" class="col-12 col-sm-5">
+              <q-select
                 v-model="vmForm.cluster_id"
+                :options="clusters.map((cluster) => ({ label: cluster.name, value: cluster.id }))"
+                emit-value
+                map-options
                 label="Кластер"
-                hint="Идентификатор кластера движка"
                 outlined
                 dense
                 @update:model-value="vmPlan = null"
@@ -1151,7 +1276,7 @@ const replicationColumns = [
                 :options="domains.filter((d) => d.type === 'data').map((d) => ({ label: d.name, value: d.id }))"
                 emit-value
                 map-options
-                label="Домен хранения для дисков"
+                :label="vmTargetServer?.kind === 'kvm' ? 'Storage pool для дисков' : 'Домен хранения для дисков'"
                 outlined
                 dense
                 @update:model-value="vmPlan = null"
@@ -1248,6 +1373,59 @@ const replicationColumns = [
                   </q-markup-table>
                 </q-card-section>
 
+                <q-card-section v-if="vmPlan.nics?.length" class="q-pt-none">
+                  <div class="text-subtitle2 q-mb-sm">Сетевые интерфейсы</div>
+                  <div
+                    v-for="(nic, index) in vmPlan.nics"
+                    :key="nic.nic_id"
+                    class="row q-col-gutter-sm items-center q-mb-sm"
+                  >
+                    <div class="col-12 col-sm-3">
+                      <div>{{ nic.name || nic.nic_id }}</div>
+                      <div class="text-caption text-grey-7">{{ nic.model || 'virtio' }} · MAC будет новым</div>
+                    </div>
+                    <div class="col-12 col-sm-5">
+                      <q-select
+                        v-model="vmForm.network_mappings[index].target_id"
+                        :options="restoreNetworks.filter((target) => target.status === 'active').map((target) => ({ label: target.network && target.network !== target.name ? `${target.name} · ${target.network}` : target.name, value: target.id }))"
+                        emit-value
+                        map-options
+                        use-input
+                        new-value-mode="add-unique"
+                        :label="vmForm.network_mappings[index].target_kind === 'bridge' ? 'Bridge' : (vmTargetServer?.kind === 'kvm' ? 'Сеть libvirt' : 'vNIC profile')"
+                        outlined dense
+                        :disable="vmForm.network_mappings[index].exclude"
+                        @update:model-value="vmPlanDirty = true"
+                      />
+                    </div>
+                    <div v-if="vmTargetServer?.kind === 'kvm'" class="col-12 col-sm-2">
+                      <q-select
+                        v-model="vmForm.network_mappings[index].target_kind"
+                        :options="[{ label: 'Сеть', value: 'network' }, { label: 'Bridge', value: 'bridge' }]"
+                        emit-value map-options label="Тип" outlined dense
+                        :disable="vmForm.network_mappings[index].exclude"
+                        @update:model-value="vmPlanDirty = true"
+                      />
+                    </div>
+                    <div class="col-auto">
+                      <q-toggle
+                        v-model="vmForm.network_mappings[index].connected"
+                        label="Подключён"
+                        :disable="vmForm.network_mappings[index].exclude"
+                        @update:model-value="vmPlanDirty = true"
+                      />
+                    </div>
+                    <div class="col-auto">
+                      <q-toggle
+                        v-model="vmForm.network_mappings[index].exclude"
+                        label="Исключить"
+                        @update:model-value="vmPlanDirty = true"
+                      />
+                    </div>
+                  </div>
+                  <div class="jhv-reason">Все NIC по умолчанию отключены; исходные MAC-адреса не переносятся.</div>
+                </q-card-section>
+
                 <q-card-section v-if="vmPlan.blockers?.length" class="q-pt-none">
                   <q-banner dense class="bg-red-1">
                     <template #avatar><q-icon name="block" color="negative" /></template>
@@ -1332,10 +1510,11 @@ const replicationColumns = [
             color="primary"
             unelevated
             label="Собрать машину"
-            :disable="!vmPlan || !!vmPlan.blockers?.length"
+            :disable="!vmPlan || vmPlanDirty || !!vmPlan.blockers?.length"
             @click="submitRestoreVM"
           >
             <q-tooltip v-if="!vmPlan">Сначала посмотрите план</q-tooltip>
+            <q-tooltip v-else-if="vmPlanDirty">После изменения сети обновите план</q-tooltip>
             <q-tooltip v-else-if="vmPlan.blockers?.length">Сначала устраните то, что мешает</q-tooltip>
           </q-btn>
           <q-btn v-else color="primary" unelevated label="Восстановить" @click="submitRestore" />

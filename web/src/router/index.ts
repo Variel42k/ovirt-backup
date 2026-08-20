@@ -28,6 +28,8 @@ const routes = [
       },
       { path: 'jobs', name: 'jobs', component: () => import('@/pages/JobsPage.vue') },
       { path: 'backups', name: 'backups', component: () => import('@/pages/BackupsPage.vue') },
+      { path: 'engine-config', name: 'engine-config', component: () => import('@/pages/EngineConfigPage.vue') },
+			{ path: 'file-backups', name: 'file-backups', component: () => import('@/pages/FileBackupsPage.vue') },
       { path: 'coverage', name: 'coverage', component: () => import('@/pages/CoveragePage.vue') },
       { path: 'retention', name: 'retention', component: () => import('@/pages/RetentionPage.vue') },
       { path: 'storages', name: 'storages', component: () => import('@/pages/StoragesPage.vue') },

@@ -64,7 +64,7 @@ func TestRelatedArticlesExist(t *testing.T) {
 // Blocks are rendered by kind; an unknown kind would silently disappear.
 func TestArticleBlocksAreRenderable(t *testing.T) {
 	renderable := map[string]bool{
-		"text": true, "list": true, "table": true, "flow": true, "note": true, "warning": true,
+		"text": true, "list": true, "table": true, "flow": true, "layers": true, "note": true, "warning": true,
 	}
 
 	for _, a := range helpArticles() {
@@ -88,9 +88,9 @@ func TestArticleBlocksAreRenderable(t *testing.T) {
 							a.ID, i, r, len(row), len(b.Columns))
 					}
 				}
-			} else if b.Kind == "flow" {
+			} else if b.Kind == "flow" || b.Kind == "layers" {
 				if len(b.Steps) < 2 {
-					t.Errorf("статья %q, блок %d: в схеме должно быть не меньше двух шагов", a.ID, i)
+					t.Errorf("статья %q, блок %d: в схеме должно быть не меньше двух элементов", a.ID, i)
 				}
 				for step, value := range b.Steps {
 					if value.Title == "" || value.Detail == "" {
@@ -112,7 +112,7 @@ func TestKeyTopicsArePresent(t *testing.T) {
 		known[a.ID] = true
 	}
 	for _, id := range []string{
-		"backup-pipeline", "ovirt-data-path", "kvm-data-path", "consistency-levels",
+		"backup-pipeline", "disk-layers", "disk-formats", "ovirt-data-path", "kvm-data-path", "consistency-levels",
 		"changed-blocks", "quiesce", "hot-backup", "retention", "verify", "chains",
 	} {
 		if !known[id] {

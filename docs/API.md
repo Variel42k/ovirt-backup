@@ -108,7 +108,7 @@ curl -b cookies.txt http://localhost:8080/api/v1/dashboard
 |---|---|---|
 | `GET` | `/settings/runtime` | эффективные значения и их источник |
 | `PUT/DELETE` | `/settings/runtime/compression` | задать алгоритм или вернуть конфигурационный |
-| `PUT/DELETE` | `/settings/runtime/timezone` | задать IANA-зону расписаний или вернуть конфигурационную |
+| `PUT/DELETE` | `/settings/runtime/timezone` | задать системную IANA-зону или вернуть конфигурационную |
 | `PUT/DELETE` | `/settings/runtime/log-rotation` | задать политику ротации или вернуть конфигурационную |
 
 ```jsonc
@@ -146,8 +146,9 @@ curl -b cookies.txt http://localhost:8080/api/v1/dashboard
 Сжатие меняется только для новых запусков; активный запуск использует алгоритм,
 зафиксированный при старте. `compression_level` через этот API не изменяется.
 Смена часового пояса немедленно пересчитывает будущие точки всех cron-заданий,
-но не отменяет и не перезапускает уже выполняющиеся бэкапы. Неизвестная IANA-зона
-возвращает `400`.
+но не отменяет и не перезапускает уже выполняющиеся бэкапы. Эта же зона используется web,
+отчётами, уведомлениями и журналом; открытые web-сессии получают SSE-событие
+`settings.changed`. Неизвестная IANA-зона возвращает `400`.
 
 ## Подключения
 
@@ -170,8 +171,10 @@ curl -b cookies.txt http://localhost:8080/api/v1/dashboard
 | `GET` | `/servers/{id}/clusters` `\|hosts\|vms\|disks\|storage-domains` | кэш инвентаря |
 | `GET` | `/servers/{id}/vms/{vmID}` | одна ВМ |
 | `GET` | `/servers/{id}/vms/{vmID}/disks` | диски ВМ |
+| `GET` | `/servers/{id}/restore-networks` | доступные vNIC profiles oVirt или сети KVM для восстановления |
 | `POST` | `/servers/{id}/vms/{vmID}/action` | питание ВМ |
 | `PUT` | `/servers/{id}/vms/{vmID}/policy` | требуемое состояние |
+| `PUT` | `/servers/{id}/vms/{vmID}/tags` | локальные управляемые теги KVM |
 | `POST` | `/servers/{id}/hosts/{hostID}/action` | управление хостом |
 | `PUT` | `/servers/{id}/disks/{diskID}/backup-mode` | включить/выключить CBT |
 | `GET` | `/servers/{id}/vms/{vmID}/backup-options` | рекомендатель вариантов |
@@ -228,14 +231,23 @@ S3 endpoint не передаёт данные через сервис и пот
 {
   "name": "Ночной инкремент",
   "server_id": "…",
-  "vm_ids": [],                       // пусто — все ВМ сервера
+  "vm_ids": [],
+  "vm_name_regex": "^(prod|infra)-",
+  "cluster_ids": ["…"],
+  "tags": ["critical"],             // положительные условия объединяются через OR
+  "exclude_vm_ids": ["…"],          // исключения применяются первыми
+  "exclude_disk_ids": ["…"],        // пустой selector — все ВМ сервера
   "type": "incremental",
   "full_every": 7,
   "fallback_type": "snapshot",        // если CBT недоступен
   "schedule": "0 1 * * *",
   "storage_target_ids": ["…"],
+  "storage_mode": "copy",             // copy|parallel|separate
+  "priority": 10,                      // больше — раньше в персистентной очереди
+  "concurrency": 2,                    // предел только для этого задания
   "retention": { "keep_last": 3, "keep_daily": 7, "keep_weekly": 4, "keep_monthly": 6 },
   "quiesce": true,
+  "export_qcow2": true,
   "verify_after": "boot",
   "verify_options": {
     "boot_host_id": "…",             // включённое подключение типа kvm
@@ -246,6 +258,17 @@ S3 endpoint не передаёт данные через сервис и пот
 }
 ```
 
+Для legacy-клиентов принимается `replication_enabled`: `true` соответствует
+`storage_mode: "copy"`. В новых клиентах источником истины служит
+`storage_mode`: `copy` снимает одну основную копию и ставит остальные в очередь,
+`parallel` пишет доступные цели одновременно и дозаписывает отказавшие,
+`separate` независимо читает источник для каждого хранилища.
+
+У задания типа `ova` вместо `storage_target_ids` обязательны `ova_host_id` и
+`ova_directory`. OVA остаётся внешним артефактом на гипервизоре, не участвует в
+обычной репликации и ретенции. `export_qcow2` относится к управляемым артефактам
+обычного бэкапа; до запуска проверяется наличие `qemu-img`.
+
 ## Бэкапы
 
 | Метод | Путь | Описание |
@@ -254,10 +277,16 @@ S3 endpoint не передаёт данные через сервис и пот
 | `GET` | `/backups` | список; фильтры `server_id`, `vm_id`, `job_id`, `status`, `days`, `limit` |
 | `GET` | `/backups/{id}` | запуск вместе с дисками |
 | `GET` | `/backups/{id}/chain` | цепочка, от которой зависит эта точка |
+| `GET` | `/backups/{id}/copies` | физические копии точки и их состояние |
+| `GET` | `/backups/{id}/artifacts` | управляемые производные артефакты, включая QCOW2 |
 | `DELETE` | `/backups/{id}` | удалить данные из хранилища |
 | `POST` | `/backups/{id}/cancel` | отменить выполняющийся |
 | `POST` | `/backups/{id}/verify` | проверить |
 | `POST` | `/backups/{id}/restore` | восстановить |
+| `POST` | `/backups/{id}/restore-vm/plan` | проверить план восстановления новой ВМ без изменений |
+| `POST` | `/backups/{id}/restore-vm` | создать новую ВМ; ответ `202` содержит `restore_id` |
+| `GET` | `/verifications` `/verifications/{id}` | история и состояние проверок |
+| `GET` | `/restores` `/restores/{id}` | история, фаза, прогресс и результат восстановления |
 
 ```jsonc
 // POST /backups
@@ -285,6 +314,19 @@ S3 endpoint не передаёт данные через сервис и пот
 { "target": "file", "output_dir": "/srv/restores/vm1", "output_format": "qcow2" }
 { "target": "new_disk", "target_domain_id": "…", "attach_to_vm_id": "…" }
 { "target": "disk", "target_disk_id": "…", "confirm": true }   // затирает диск
+
+// POST /backups/{id}/restore-vm/plan и /restore-vm
+// storage_domain_id означает storage domain для oVirt и storage pool для KVM.
+// Неуказанные NIC по умолчанию создаются отключёнными, MAC всегда новый.
+{
+  "server_id": "…", "name": "vm-restored", "cluster_id": "…",
+  "storage_domain_id": "…", "start": false,
+  "network_mappings": [
+    { "nic_id": "nic-1", "target_kind": "vnic_profile",
+      "target_id": "…", "connected": false },
+    { "nic_id": "nic-2", "exclude": true }
+  ]
+}
 ```
 
 Каталог восстановления ограничен списком не из осторожности вообще: путь задаёт
@@ -294,6 +336,85 @@ S3 endpoint не передаёт данные через сервис и пот
 виден сразу, а не всплывает как «восстановление не выполнено».
 
 Удаление отклоняется, если от точки зависят более поздние инкременты.
+
+Полное восстановление поддерживает oVirt→oVirt и KVM→KVM. Межплатформенная
+конвертация не выполняется. Preview возвращает `warnings`, `blockers`, диски,
+NIC и оценку места. Для старых точек недостающие части профиля восстанавливаются
+по исходному oVirt JSON или libvirt XML с предупреждением. При ошибке служба
+откатывает созданные ресурсы; неполная очистка остаётся в поле ошибки запуска.
+Конфигурационная точка может создать ВМ без дисков, но автоматический запуск в
+этом случае запрещён.
+
+## Снимки конфигурации Engine
+
+| Метод | Путь | Описание |
+|---|---|---|
+| `GET/POST` | `/engine-config/jobs` | список и создание заданий oVirt Engine |
+| `PUT/DELETE` | `/engine-config/jobs/{id}` | изменить или удалить задание |
+| `POST` | `/engine-config/jobs/{id}/run` | выполнить задание немедленно |
+| `GET/POST` | `/engine-config/runs` | список или разовый снимок без задания |
+| `GET` | `/engine-config/runs/{id}` | метаданные, checksum и состояние снимка |
+| `GET` | `/engine-config/runs/{id}/download` | скачать JSON снимка |
+| `GET` | `/engine-config/compare?left={id}&right={id}` | сравнить секции двух снимков |
+
+```jsonc
+// POST /engine-config/jobs
+{
+  "name": "Engine ежедневно", "enabled": true, "server_id": "…",
+  "storage_target_id": "…", "encrypt": true, "schedule": "30 2 * * *",
+  "retention": { "keep_last": 3, "keep_daily": 7, "keep_monthly": 6 }
+}
+
+// POST /engine-config/runs
+{ "server_id": "…", "storage_target_id": "…", "encrypt": true }
+```
+
+Снимок является server-level артефактом: в нём нет дисков ВМ. Поддерживаются
+только подключения семейства oVirt. API умеет просматривать, сравнивать и
+скачивать сохранённые данные, но намеренно не применяет конфигурацию к Engine.
+
+## Нативный файловый бэкап
+
+Функция доступна только при `file_backup.enabled: true`. Клиент выбирает ID
+именованного корня из конфигурации и относительные пути; абсолютный исходный
+путь через API передать нельзя.
+
+| Метод | Путь | Описание |
+|---|---|---|
+| `GET` | `/file-backup/roots` | включён ли feature gate и доступные именованные корни |
+| `GET/POST` | `/file-backup/jobs` | список и создание файловых заданий |
+| `GET/PUT/DELETE` | `/file-backup/jobs/{id}` | получить, изменить или удалить задание |
+| `POST` | `/file-backup/jobs/{id}/run` | запустить; ответ `202` содержит запуск |
+| `GET` | `/file-backup/runs?job_id={id}&limit=100` | точки файлового бэкапа |
+| `GET/DELETE` | `/file-backup/runs/{id}` | получить или удалить точку с данными |
+| `GET` | `/file-backup/runs/{id}/tree` | manifest и дерево файлов |
+| `POST` | `/file-backup/runs/{id}/restore` | восстановить набор или выбранные пути |
+
+```jsonc
+// POST /file-backup/jobs
+{
+  "name": "Конфигурация приложений", "enabled": true,
+  "root_id": "application-data",
+  "include_paths": ["config", "certificates/server.pem"],
+  "exclude_globs": ["**/*.tmp", "cache/**"],
+  "storage_target_ids": ["…"], "storage_mode": "copy",
+  "incremental": true, "encrypt": true, "schedule": "0 3 * * *",
+  "retention": { "keep_last": 3, "keep_daily": 7 }
+}
+
+// POST /file-backup/runs/{id}/restore
+{
+  "restore_root_index": 0, "destination": "incident-2026-08-21",
+  "paths": ["config/app.yaml", "certificates"], "overwrite": false
+}
+```
+
+`destination` также относительный и обязан оставаться внутри выбранного
+`restore_root_index`. По умолчанию существующие файлы не перезаписываются.
+Symlink хранится и восстанавливается как ссылка, но при сканировании не
+обходится; canonical path не может выйти из allowlist. Изменившийся во время
+чтения файл перечитывается один раз, затем точка завершается как `partial` со
+списком `unstable_paths`.
 
 ## Ретенция
 
@@ -345,7 +466,7 @@ S3 endpoint не передаёт данные через сервис и пот
 | Метод | Путь | Описание |
 |---|---|---|
 | `GET` | `/settings/runtime` | эффективные значения и источник `config`/`database` |
-| `PUT/DELETE` | `/settings/runtime/timezone` | сохранить IANA-зону расписаний или сбросить к YAML/окружению |
+| `PUT/DELETE` | `/settings/runtime/timezone` | сохранить системную IANA-зону или сбросить к YAML/окружению |
 | `PUT` | `/settings/runtime/backup-quality` | сохранить полный набор порогов в PostgreSQL |
 | `DELETE` | `/settings/runtime/backup-quality` | сбросить к YAML/окружению |
 
@@ -385,7 +506,8 @@ Authorization: Bearer <содержимое metrics.token_file>
 ## Поток событий
 
 `GET /events` — server-sent events. Типы: `server_state`, `inventory`, `alert`,
-`remediation`, `backup_run`, `verify_run`, `restore_run`, `storage_target`, `job`.
+`remediation`, `backup_run`, `verify_run`, `restore_run`, `replication`,
+`storage_target`, `job`, `settings.changed`.
 
 ```javascript
 const source = new EventSource('/api/v1/events', { withCredentials: true })

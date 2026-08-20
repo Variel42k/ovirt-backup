@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"regexp"
 	"sort"
 	"time"
 
@@ -211,7 +210,11 @@ func (s *Server) coverageForServer(ctx context.Context, srv *model.Server, stale
 			item.SkippedDisks = run.SkippedDisks
 		}
 
-		item.State, item.Reason = classify(item, staleBefore, staleHours)
+		loc := s.cfg.Location()
+		if s.scheduler != nil {
+			loc = s.scheduler.Location()
+		}
+		item.State, item.Reason = classify(item, staleBefore, staleHours, loc)
 		item.StateTitle = item.State.Title()
 		out = append(out, item)
 	}
@@ -219,7 +222,13 @@ func (s *Server) coverageForServer(ctx context.Context, srv *model.Server, stale
 }
 
 // classify decides how protected a VM is and says why in one sentence.
-func classify(item VMCoverage, staleBefore time.Time, staleHours int) (CoverageState, string) {
+
+func classify(item VMCoverage, staleBefore time.Time, staleHours int, locations ...*time.Location) (CoverageState, string) {
+	loc := time.UTC
+	if len(locations) > 0 && locations[0] != nil {
+		loc = locations[0]
+	}
+	formatted := func(at *time.Time) string { return at.In(loc).Format("02.01.2006 15:04") }
 	switch {
 	case item.LastSuccessAt == nil && len(item.Jobs) == 0:
 		return CoverageNone, "ни одной копии и ни одного задания — при потере машины восстанавливать нечего"
@@ -231,7 +240,7 @@ func classify(item VMCoverage, staleBefore time.Time, staleHours int) (CoverageS
 	case item.LastRunStatus == model.RunFailed:
 		return CoverageFailing, fmt.Sprintf(
 			"последний запуск завершился ошибкой; годная копия от %s",
-			item.LastSuccessAt.Format("02.01.2006 15:04"))
+			formatted(item.LastSuccessAt))
 
 	case len(item.Jobs) == 0:
 		return CoverageNoJob, "копии есть, но ни одно задание эту ВМ не покрывает — " +
@@ -240,7 +249,7 @@ func classify(item VMCoverage, staleBefore time.Time, staleHours int) (CoverageS
 	case item.LastSuccessAt.Before(staleBefore):
 		return CoverageStale, fmt.Sprintf(
 			"последняя удачная копия от %s — старше %d ч",
-			item.LastSuccessAt.Format("02.01.2006 15:04"), staleHours)
+			formatted(item.LastSuccessAt), staleHours)
 
 	case len(item.SkippedDisks) > 0:
 		return CoveragePartial, fmt.Sprintf(
@@ -249,7 +258,7 @@ func classify(item VMCoverage, staleBefore time.Time, staleHours int) (CoverageS
 
 	default:
 		return CoverageOK, fmt.Sprintf("свежая копия от %s",
-			item.LastSuccessAt.Format("02.01.2006 15:04"))
+			formatted(item.LastSuccessAt))
 	}
 }
 
@@ -263,19 +272,11 @@ func jobsCovering(jobs []*model.BackupJob, vm *model.VM) []string {
 		if !job.Enabled {
 			continue
 		}
-		if contains(job.ExcludeVMIDs, vm.ID) {
+		selector, err := model.NewVMSelector(job)
+		if err != nil {
 			continue
 		}
-		selectorEmpty := len(job.VMIDs) == 0 && job.VMNameRegex == "" && len(job.ClusterIDs) == 0
-		matched := selectorEmpty ||
-			contains(job.VMIDs, vm.ID) ||
-			contains(job.ClusterIDs, vm.ClusterID)
-
-		if !matched && job.VMNameRegex != "" {
-			if re, err := regexp.Compile(job.VMNameRegex); err == nil && re.MatchString(vm.Name) {
-				matched = true
-			}
-		}
+		matched, _ := selector.Match(vm)
 		if matched {
 			names = append(names, job.Name)
 		}

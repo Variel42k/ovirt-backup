@@ -145,12 +145,39 @@ func (c *Client) ListStorageDomains(ctx context.Context, serverID string) ([]*mo
 	return out, nil
 }
 
+// ListVNICProfiles returns the engine-managed network targets accepted when a
+// NIC is created. Network IDs alone are insufficient in oVirt: CreateNIC
+// requires a vNIC profile ID.
+func (c *Client) ListVNICProfiles(ctx context.Context, serverID string) ([]*model.RestoreNetworkTarget, error) {
+	var list struct {
+		Profiles []struct {
+			ID      string `json:"id"`
+			Name    string `json:"name"`
+			Network struct {
+				ID   string `json:"id"`
+				Name string `json:"name"`
+			} `json:"network"`
+		} `json:"vnic_profile"`
+	}
+	q := url.Values{}
+	q.Set("follow", "network")
+	if err := c.get(ctx, "/vnicprofiles", &list, withQuery(q)); err != nil {
+		return nil, err
+	}
+	out := make([]*model.RestoreNetworkTarget, 0, len(list.Profiles))
+	for _, profile := range list.Profiles {
+		out = append(out, &model.RestoreNetworkTarget{ID: profile.ID, ServerID: serverID,
+			Name: profile.Name, Kind: "vnic_profile", Network: profile.Network.Name, Status: "active"})
+	}
+	return out, nil
+}
+
 // listVMsWithAttachments returns the VMs and, as a side product, the
 // disk-id → vm-ids mapping taken from their disk attachments.
 func (c *Client) listVMsWithAttachments(ctx context.Context, serverID string) ([]*model.VM, map[string][]string, error) {
 	var list vmList
 	q := url.Values{}
-	q.Set("follow", "disk_attachments")
+	q.Set("follow", "disk_attachments,tags")
 	if err := c.get(ctx, "/vms", &list, withQuery(q)); err != nil {
 		return nil, nil, err
 	}
@@ -177,6 +204,7 @@ func (c *Client) listVMsWithAttachments(ctx context.Context, serverID string) ([
 			HAEnabled:   v.HighAvailability.Enabled.Bool(),
 			GuestAgent:  v.HasGuestAgent(),
 			IPAddresses: v.IPs(),
+			Tags:        v.TagNames(),
 		})
 
 		if v.DiskAttachments == nil {

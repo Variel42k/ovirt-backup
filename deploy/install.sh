@@ -16,6 +16,16 @@
 #   ./install.sh --port 18080          порт наружу, если 8080 занят
 #   ./install.sh --database-url-file /root/jhvirt.dsn  внешняя PostgreSQL
 #   ./install.sh --no-start            подготовить, но не запускать
+#   ./install.sh --migration-export /root/jhvirt-migration.tar.gz
+#                                      создать пакет переноса на старом сервере
+#   ./install.sh --migration-export /root/rehearsal.tar.gz --keep-source-running
+#                                      пакет для репетиции; старый узел продолжит работу
+#   ./install.sh --migrate-from /root/jhvirt-migration.tar.gz
+#                                      восстановить пакет на новом сервере
+#   ./install.sh --tls self-signed      создать и подключить локальный сертификат
+#   ./install.sh --tls files --tls-cert-file /root/server.crt \
+#                --tls-key-file /root/server.key
+#                                      подключить существующую пару сертификат/ключ
 #
 # Вход в систему (только для docker-вариантов):
 #   ./install.sh --oidc none           только по паролю (по умолчанию)
@@ -37,6 +47,8 @@ set -eu
 SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 HERE="$(dirname "$SELF")"
 
+PREFIX_EXPLICIT=0; [ "${PREFIX+x}" = x ] && PREFIX_EXPLICIT=1
+USER_NAME_EXPLICIT=0; [ "${USER_NAME+x}" = x ] && USER_NAME_EXPLICIT=1
 PREFIX="${PREFIX:-/opt/jhvirt}"
 USER_NAME="${USER_NAME:-jhvirt}"
 UNIT="/etc/systemd/system/jhvirt.service"
@@ -48,7 +60,15 @@ CONFIG_NAME="ovirt-backup.yaml"
 LEGACY_CONFIG_NAME="virt-manager.yaml"
 
 MODE=""; URL=""; DATABASE_URL_FILE=""; UNINSTALL_TARGET=""; START=1; PORT=8080
+URL_EXPLICIT=0; PORT_EXPLICIT=0
 UNINSTALL_REMOVE_CONFIG=0; UNINSTALL_REMOVE_DATA=0
+MIGRATION_ACTION=""; MIGRATION_EXPORT_FILE=""; MIGRATION_IMPORT_FILE=""
+MIGRATION_TMP=""; MIGRATION_ACTIVE=0; MIGRATION_SOURCE_MODE=""
+MIGRATION_SOURCE_PREFIX=""; MIGRATION_SOURCE_USER=""; MIGRATION_DATABASE_KIND=""
+MIGRATION_TLS_AVAILABLE=0
+MIGRATION_KEEP_SOURCE=0; MIGRATION_SOURCE_STOPPED=""; MIGRATION_EXPORT_COMMITTED=0
+TLS_MODE=""; TLS_CERT_FILE=""; TLS_KEY_FILE=""
+TLS_DAYS=825; TLS_MATERIAL_DIR=""; TLS_RESTART_REQUIRED=0; READY_SCHEME=http
 # Внешний вход: none — только пароль, keycloak — поднять рядом, external —
 # подключить существующего провайдера.
 OIDC_MODE=""; OIDC_ISSUER=""; OIDC_CLIENT_ID=""; OIDC_CLIENT_SECRET_FILE=""
@@ -67,13 +87,27 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --mode) [ $# -ge 2 ] || die "--mode требует значение"; MODE="$2"; shift 2 ;;
         --mode=*) MODE="${1#--mode=}"; shift ;;
-        --url) [ $# -ge 2 ] || die "--url требует значение"; URL="$2"; shift 2 ;;
-        --url=*) URL="${1#--url=}"; shift ;;
-        --port) [ $# -ge 2 ] || die "--port требует значение"; PORT="$2"; shift 2 ;;
-        --port=*) PORT="${1#--port=}"; shift ;;
+        --url) [ $# -ge 2 ] || die "--url требует значение"; URL="$2"; URL_EXPLICIT=1; shift 2 ;;
+        --url=*) URL="${1#--url=}"; URL_EXPLICIT=1; shift ;;
+        --port) [ $# -ge 2 ] || die "--port требует значение"; PORT="$2"; PORT_EXPLICIT=1; shift 2 ;;
+        --port=*) PORT="${1#--port=}"; PORT_EXPLICIT=1; shift ;;
         --database-url-file) [ $# -ge 2 ] || die "--database-url-file требует путь"; DATABASE_URL_FILE="$2"; shift 2 ;;
         --database-url-file=*) DATABASE_URL_FILE="${1#--database-url-file=}"; shift ;;
         --no-start) START=0; shift ;;
+        --migration-export) [ $# -ge 2 ] || die "--migration-export требует путь"; MIGRATION_ACTION="export"; MIGRATION_EXPORT_FILE="$2"; shift 2 ;;
+        --migration-export=*) MIGRATION_ACTION="export"; MIGRATION_EXPORT_FILE="${1#--migration-export=}"; shift ;;
+        --migrate-from) [ $# -ge 2 ] || die "--migrate-from требует путь"; MIGRATION_ACTION="import"; MIGRATION_IMPORT_FILE="$2"; shift 2 ;;
+        --migrate-from=*) MIGRATION_ACTION="import"; MIGRATION_IMPORT_FILE="${1#--migrate-from=}"; shift ;;
+        --keep-source-running) MIGRATION_KEEP_SOURCE=1; shift ;;
+        --tls) [ $# -ge 2 ] || die "--tls требует none, self-signed или files"; TLS_MODE="$2"; shift 2 ;;
+        --tls=*) TLS_MODE="${1#--tls=}"; shift ;;
+        --self-signed) TLS_MODE=self-signed; shift ;;
+        --tls-cert-file) [ $# -ge 2 ] || die "--tls-cert-file требует путь"; TLS_CERT_FILE="$2"; shift 2 ;;
+        --tls-cert-file=*) TLS_CERT_FILE="${1#--tls-cert-file=}"; shift ;;
+        --tls-key-file) [ $# -ge 2 ] || die "--tls-key-file требует путь"; TLS_KEY_FILE="$2"; shift 2 ;;
+        --tls-key-file=*) TLS_KEY_FILE="${1#--tls-key-file=}"; shift ;;
+        --tls-days) [ $# -ge 2 ] || die "--tls-days требует число дней"; TLS_DAYS="$2"; shift 2 ;;
+        --tls-days=*) TLS_DAYS="${1#--tls-days=}"; shift ;;
         --oidc) [ $# -ge 2 ] || die "--oidc требует значение"; OIDC_MODE="$2"; shift 2 ;;
         --oidc=*) OIDC_MODE="${1#--oidc=}"; shift ;;
         --oidc-issuer) [ $# -ge 2 ] || die "--oidc-issuer требует значение"; OIDC_ISSUER="$2"; shift 2 ;;
@@ -132,11 +166,46 @@ has_systemd()   { have systemctl && [ -d /run/systemd/system ]; }
 # Имя проекта: от него зависят имена томов. Берётся из .env, если он есть, —
 # иначе то же значение, что скрипт туда пишет.
 project_name() {
-    if [ -f "$COMPOSE_DIR/.env" ]; then
-        v="$(grep -m1 '^COMPOSE_PROJECT_NAME=' "$COMPOSE_DIR/.env" 2>/dev/null | cut -d= -f2-)"
+    PN_ENV="$COMPOSE_DIR/.env"
+    if [ -n "${WORK:-}" ] && [ -f "$WORK/.env" ]; then
+        PN_ENV="$WORK/.env"
+    elif [ -f "$PREFIX/compose/.env" ]; then
+        PN_ENV="$PREFIX/compose/.env"
+    fi
+    if [ -f "$PN_ENV" ]; then
+        v="$(grep -m1 '^COMPOSE_PROJECT_NAME=' "$PN_ENV" 2>/dev/null | cut -d= -f2-)"
         [ -n "$v" ] && { printf '%s' "$v"; return; }
     fi
     printf 'ovirt-backup'
+}
+
+valid_host_timezone() {
+    case "$1" in
+        ""|/*|*..*|*[!A-Za-z0-9_+./-]*) return 1 ;;
+    esac
+    [ "$1" = UTC ] || [ -f "/usr/share/zoneinfo/$1" ]
+}
+
+# Debian-like systems expose /etc/timezone, while RHEL-like systems normally
+# only symlink /etc/localtime.  timedatectl is the last discovery mechanism:
+# it may be unavailable in a minimal installer environment even on systemd.
+host_timezone() {
+    HTZ_VALUE="${TZ:-}"
+    if valid_host_timezone "$HTZ_VALUE"; then printf '%s' "$HTZ_VALUE"; return; fi
+
+    HTZ_VALUE=""
+    if [ -r /etc/timezone ]; then IFS= read -r HTZ_VALUE < /etc/timezone || HTZ_VALUE=""; fi
+    if valid_host_timezone "$HTZ_VALUE"; then printf '%s' "$HTZ_VALUE"; return; fi
+
+    HTZ_LINK="$(readlink /etc/localtime 2>/dev/null || true)"
+    case "$HTZ_LINK" in *zoneinfo/*) HTZ_VALUE="${HTZ_LINK#*zoneinfo/}" ;; esac
+    if valid_host_timezone "$HTZ_VALUE"; then printf '%s' "$HTZ_VALUE"; return; fi
+
+    if have timedatectl; then
+        HTZ_VALUE="$(timedatectl show -p Timezone --value 2>/dev/null || true)"
+        if valid_host_timezone "$HTZ_VALUE"; then printf '%s' "$HTZ_VALUE"; return; fi
+    fi
+    printf 'UTC'
 }
 
 volume_exists() {
@@ -309,6 +378,7 @@ validate_install_identity() {
     fi
     case "$USER_NAME" in
         ''|-*|*[!A-Za-z0-9_-]*) die "USER_NAME должен начинаться не с '-' и содержать только A-Z, a-z, 0-9, _ и -: $USER_NAME" ;;
+        root) die "USER_NAME=root запрещён: служба должна работать без прав root" ;;
     esac
 }
 
@@ -327,6 +397,502 @@ systemd_install_present() {
             grep -q '^jhvirt\.service' && return 0
     fi
     return 1
+}
+
+# --- Перенос на другой сервер ----------------------------------------------
+
+migration_cleanup() {
+    if [ -n "${MIGRATION_SOURCE_STOPPED:-}" ] && [ "${MIGRATION_EXPORT_COMMITTED:-0}" -eq 0 ]; then
+        migration_resume_source || true
+    fi
+    [ -n "${MIGRATION_TMP:-}" ] && [ -d "$MIGRATION_TMP" ] &&
+        rm -rf "$MIGRATION_TMP"
+    [ -n "${TLS_MATERIAL_DIR:-}" ] && [ -d "$TLS_MATERIAL_DIR" ] &&
+        rm -rf "$TLS_MATERIAL_DIR"
+}
+
+migration_quiesce_source() {
+    MIGRATION_SOURCE_STOPPED=""
+    case "$MODE" in
+        docker|docker-compose)
+            MQS_WORK="$(migration_docker_work)"; MQS_RUN="$(runner "$MODE")"
+            for MQS_SERVICE in "$COMPOSE_SERVICE" keycloak; do
+                # shellcheck disable=SC2086
+                MQS_ID="$(cd "$MQS_WORK" && $MQS_RUN ps -q "$MQS_SERVICE" 2>/dev/null || true)"
+                [ -n "$MQS_ID" ] || continue
+                if [ "$(docker inspect -f '{{.State.Running}}' "$MQS_ID" 2>/dev/null || true)" = true ]; then
+                    # shellcheck disable=SC2086
+                    (cd "$MQS_WORK" && $MQS_RUN stop "$MQS_SERVICE") >/dev/null ||
+                        die "не удалось остановить $MQS_SERVICE перед dump"
+                    MIGRATION_SOURCE_STOPPED="$MIGRATION_SOURCE_STOPPED $MQS_SERVICE"
+                fi
+            done
+            ;;
+        systemd)
+            if systemctl is-active --quiet jhvirt 2>/dev/null; then
+                systemctl stop jhvirt
+                MIGRATION_SOURCE_STOPPED=systemd
+            fi
+            ;;
+    esac
+}
+
+migration_resume_source() {
+    [ -n "${MIGRATION_SOURCE_STOPPED:-}" ] || return 0
+    case "$MODE" in
+        docker|docker-compose)
+            MRS_WORK="$(migration_docker_work)"; MRS_RUN="$(runner "$MODE")"
+            for MRS_SERVICE in $MIGRATION_SOURCE_STOPPED; do
+                # shellcheck disable=SC2086
+                (cd "$MRS_WORK" && $MRS_RUN start "$MRS_SERVICE") >/dev/null || return 1
+            done
+            ;;
+        systemd) systemctl start jhvirt || return 1 ;;
+    esac
+    MIGRATION_SOURCE_STOPPED=""
+}
+
+migration_ask_nonempty() {
+    ANSWER=""
+    while [ -z "$ANSWER" ]; do
+        printf '%s' "$1"
+        read -r ANSWER || ANSWER=""
+    done
+}
+
+env_file_value() {
+    EF_FILE="$1"; EF_KEY="$2"
+    [ -f "$EF_FILE" ] || return 0
+    EF_VALUE="$(sed -n "s/^${EF_KEY}=//p" "$EF_FILE" | tail -n 1)"
+    case "$EF_VALUE" in
+        \"*\") EF_VALUE="${EF_VALUE#\"}"; EF_VALUE="${EF_VALUE%\"}" ;;
+    esac
+    printf '%s' "$EF_VALUE"
+}
+
+yaml_server_tls_value() {
+    YTV_FILE="$1"; YTV_KEY="$2"
+    awk -v wanted="$YTV_KEY" '
+        /^server:[[:space:]]*$/ { in_server=1; next }
+        in_server && /^[^[:space:]]/ { in_server=0; in_tls=0 }
+        in_server && /^  tls:[[:space:]]*$/ { in_tls=1; next }
+        in_tls && /^  [^[:space:]]/ { in_tls=0 }
+        in_tls && $0 ~ "^    " wanted ":[[:space:]]*" {
+            value=$0
+            sub("^    " wanted ":[[:space:]]*", "", value)
+            gsub(/^\"|\"$/, "", value)
+            print value
+            exit
+        }
+    ' "$YTV_FILE"
+}
+
+rewrite_prefix_file() {
+    RPF_FILE="$1"; RPF_OLD="$2"; RPF_NEW="$3"
+    [ -f "$RPF_FILE" ] || return 0
+    [ -n "$RPF_OLD" ] && [ "$RPF_OLD" != "$RPF_NEW" ] || return 0
+    awk -v old="$RPF_OLD" -v new="$RPF_NEW" '
+        {
+            line = $0
+            while ((pos = index(line, old)) != 0) {
+                line = substr(line, 1, pos - 1) new substr(line, pos + length(old))
+            }
+            print line
+        }
+    ' "$RPF_FILE" > "$RPF_FILE.tmp.$$"
+    cat "$RPF_FILE.tmp.$$" > "$RPF_FILE"
+    rm -f "$RPF_FILE.tmp.$$"
+}
+
+migration_docker_work() {
+    if [ -f "$PREFIX/compose/.env" ] && [ -f "$PREFIX/compose/docker-compose.yml" ]; then
+        printf '%s' "$PREFIX/compose"
+    elif [ -f "$COMPOSE_DIR/.env" ]; then
+        printf '%s' "$COMPOSE_DIR"
+    else
+        return 1
+    fi
+}
+
+migration_detect_mode() {
+    MD_DOCKER=0; MD_SYSTEMD=0
+    migration_docker_work >/dev/null 2>&1 && MD_DOCKER=1
+    systemd_install_present && MD_SYSTEMD=1
+
+    case "$MODE" in
+        docker|docker-compose)
+            [ "$MD_DOCKER" -eq 1 ] || die "контейнерная установка для экспорта не найдена"
+            ;;
+        systemd)
+            [ "$MD_SYSTEMD" -eq 1 ] || die "systemd-установка для экспорта не найдена"
+            ;;
+        "")
+            if [ "$MD_DOCKER" -eq 1 ] && [ "$MD_SYSTEMD" -eq 0 ]; then
+                if has_docker; then MODE=docker
+                elif has_dockerc; then MODE=docker-compose
+                else die "Docker Compose недоступен для экспорта"
+                fi
+            elif [ "$MD_SYSTEMD" -eq 1 ] && [ "$MD_DOCKER" -eq 0 ]; then
+                MODE=systemd
+            elif [ "$MD_DOCKER" -eq 1 ] && [ "$MD_SYSTEMD" -eq 1 ] && [ -t 0 ]; then
+                say ""
+                say "На сервере найдены две установки. Какую переносить?"
+                say "  1) Docker Compose"
+                say "  2) systemd"
+                while :; do
+                    printf 'Номер [1]: '
+                    read -r MD_CHOICE || MD_CHOICE=""
+                    [ -n "$MD_CHOICE" ] || MD_CHOICE=1
+                    case "$MD_CHOICE" in
+                        1)
+                            if has_docker; then MODE=docker
+                            elif has_dockerc; then MODE=docker-compose
+                            else die "Docker Compose недоступен для экспорта"
+                            fi
+                            break
+                            ;;
+                        2) MODE=systemd; break ;;
+                        *) say "Нет такого варианта." ;;
+                    esac
+                done
+            elif [ "$MD_DOCKER" -eq 1 ] && [ "$MD_SYSTEMD" -eq 1 ]; then
+                die "найдены Docker и systemd; укажите экспортируемую установку через --mode"
+            else
+                die "установка для переноса не найдена в $PREFIX"
+            fi
+            ;;
+        *) die "--migration-export принимает --mode docker|docker-compose|systemd" ;;
+    esac
+}
+
+migration_detect_source_identity() {
+    case "$MODE" in
+        systemd)
+            if [ "$PREFIX_EXPLICIT" -eq 0 ] && [ -f "$UNIT" ]; then
+                MDSI_PREFIX="$(sed -n 's/^WorkingDirectory=//p' "$UNIT" | head -n 1)"
+                [ -z "$MDSI_PREFIX" ] || PREFIX="$MDSI_PREFIX"
+            fi
+            if [ "$USER_NAME_EXPLICIT" -eq 0 ] && [ -f "$UNIT" ]; then
+                MDSI_USER="$(sed -n 's/^User=//p' "$UNIT" | head -n 1)"
+                [ -z "$MDSI_USER" ] || USER_NAME="$MDSI_USER"
+            fi
+            ;;
+        docker|docker-compose)
+            # Для bundle владельцем каталога является системный пользователь,
+            # созданный установщиком. В режиме из репозитория файлы нередко
+            # принадлежат root; это не означает, что на новом узле приложение
+            # следует запускать от root, поэтому такого владельца игнорируем.
+            MDSI_WORK="$(migration_docker_work)"
+            if [ "$USER_NAME_EXPLICIT" -eq 0 ]; then
+                MDSI_USER="$(stat -c '%U' "$MDSI_WORK/.env" 2>/dev/null || true)"
+                if [ -n "$MDSI_USER" ] && [ "$MDSI_USER" != root ] &&
+                        [ "$MDSI_USER" != UNKNOWN ] && id "$MDSI_USER" >/dev/null 2>&1; then
+                    USER_NAME="$MDSI_USER"
+                fi
+            fi
+            ;;
+    esac
+    validate_install_identity
+}
+
+migration_volume_file() {
+    MV_VOLUME="$1"; MV_SOURCE="$2"; MV_DEST="$3"; MV_REQUIRED="$4"
+    if docker run --rm --network none --user root -v "$MV_VOLUME:/data:ro" \
+            docker.io/library/postgres:17-alpine \
+            sh -c "test -f '/data/$MV_SOURCE' && cat '/data/$MV_SOURCE'" \
+            > "$MV_DEST.tmp" 2>/dev/null; then
+        mv "$MV_DEST.tmp" "$MV_DEST"
+        return 0
+    fi
+    rm -f "$MV_DEST.tmp"
+    [ "$MV_REQUIRED" -eq 0 ] && return 0
+    die "в томе $MV_VOLUME не найден обязательный файл $MV_SOURCE"
+}
+
+migration_write_manifest() {
+    MWM_DIR="$1"; MWM_MODE="$2"; MWM_PREFIX="$3"; MWM_DB="$4"; MWM_KEYCLOAK="$5"
+    {
+        printf 'format=jhvirt-migration-v1\n'
+        printf 'source_mode=%s\n' "$MWM_MODE"
+        printf 'source_prefix=%s\n' "$MWM_PREFIX"
+        printf 'source_user=%s\n' "$USER_NAME"
+        printf 'database_kind=%s\n' "$MWM_DB"
+        printf 'keycloak=%s\n' "$MWM_KEYCLOAK"
+        printf 'created_at=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    } > "$MWM_DIR/manifest"
+}
+
+migration_export_docker() {
+    ME_DIR="$1"; ME_WORK="$(migration_docker_work)"
+    ME_RUN="$(runner "$MODE")"
+    cp "$ME_WORK/.env" "$ME_DIR/environment/docker.env"
+
+    ME_CONFIG_REF="$(env_file_value "$ME_WORK/.env" JHV_CONFIG_FILE)"
+    [ -n "$ME_CONFIG_REF" ] || ME_CONFIG_REF="../config/$CONFIG_NAME"
+    case "$ME_CONFIG_REF" in
+        /*) ME_CONFIG_PATH="$ME_CONFIG_REF" ;;
+        *) ME_CONFIG_PATH="$ME_WORK/$ME_CONFIG_REF" ;;
+    esac
+    [ -f "$ME_CONFIG_PATH" ] || die "не найден активный YAML: $ME_CONFIG_PATH"
+    cp "$ME_CONFIG_PATH" "$ME_DIR/config/$CONFIG_NAME"
+
+    ME_PROJECT="$(env_file_value "$ME_WORK/.env" COMPOSE_PROJECT_NAME)"
+    [ -n "$ME_PROJECT" ] || ME_PROJECT=ovirt-backup
+    ME_DATA_VOLUME="${ME_PROJECT}_jhvirt-data"
+    volume_exists "$ME_DATA_VOLUME" || die "не найден том с ключом: $ME_DATA_VOLUME"
+    migration_volume_file "$ME_DATA_VOLUME" secret.key "$ME_DIR/data/secret.key" 1
+    migration_volume_file "$ME_DATA_VOLUME" metrics.token "$ME_DIR/data/metrics.token" 0
+    migration_volume_file "$ME_DATA_VOLUME" tls/server.crt "$ME_DIR/tls/server.crt" 0
+    migration_volume_file "$ME_DATA_VOLUME" tls/server.key "$ME_DIR/tls/server.key" 0
+    if [ "$(env_file_value "$ME_WORK/.env" JHV_TLS_ENABLED)" = true ]; then
+        [ -s "$ME_DIR/tls/server.crt" ] && [ -s "$ME_DIR/tls/server.key" ] ||
+            die "TLS включён, но в томе $ME_DATA_VOLUME нет сертификата или ключа"
+    fi
+
+    ME_DATABASE_URL="$(env_file_value "$ME_WORK/.env" JHV_DATABASE_URL)"
+    ME_KEYCLOAK=0
+    case "$(env_file_value "$ME_WORK/.env" COMPOSE_PROFILES)" in
+        *keycloak*) ME_KEYCLOAK=1 ;;
+    esac
+    if [ -n "$ME_DATABASE_URL" ]; then
+        ME_DATABASE_KIND=external
+        say "    внешняя PostgreSQL останется на месте; её DSN сохранён в пакете"
+    else
+        ME_DATABASE_KIND=embedded
+        ME_PG_USER="$(env_file_value "$ME_WORK/.env" POSTGRES_USER)"; [ -n "$ME_PG_USER" ] || ME_PG_USER=jhvirt
+        ME_PG_DB="$(env_file_value "$ME_WORK/.env" POSTGRES_DB)"; [ -n "$ME_PG_DB" ] || ME_PG_DB=jhvirt
+        step "согласованный dump PostgreSQL"
+        # shellcheck disable=SC2086
+        (cd "$ME_WORK" && $ME_RUN exec -T postgres \
+            pg_dump -U "$ME_PG_USER" -d "$ME_PG_DB" -Fc --no-owner --no-privileges) \
+            > "$ME_DIR/database/jhvirt.dump" ||
+            die "не удалось снять dump; контейнер postgres должен быть запущен"
+        [ -s "$ME_DIR/database/jhvirt.dump" ] || die "получен пустой dump PostgreSQL"
+        if [ "$ME_KEYCLOAK" -eq 1 ]; then
+            ME_KC_DB="$(env_file_value "$ME_WORK/.env" KEYCLOAK_DB)"; [ -n "$ME_KC_DB" ] || ME_KC_DB=keycloak
+            # shellcheck disable=SC2086
+            (cd "$ME_WORK" && $ME_RUN exec -T postgres \
+                pg_dump -U "$ME_PG_USER" -d "$ME_KC_DB" -Fc --no-owner --no-privileges) \
+                > "$ME_DIR/database/keycloak.dump" ||
+                die "не удалось снять dump базы Keycloak"
+        fi
+    fi
+
+    case "$ME_WORK" in
+        "$PREFIX/compose") ME_SOURCE_PREFIX="$PREFIX" ;;
+        *) ME_SOURCE_PREFIX="$(cd "$ME_WORK/.." && pwd -P)" ;;
+    esac
+    migration_write_manifest "$ME_DIR" docker "$ME_SOURCE_PREFIX" "$ME_DATABASE_KIND" "$ME_KEYCLOAK"
+}
+
+migration_export_systemd() {
+    ME_DIR="$1"
+    [ -f "$PREFIX/config/$CONFIG_NAME" ] || die "не найден $PREFIX/config/$CONFIG_NAME"
+    [ -f "$PREFIX/config/jhvirt.env" ] || die "не найден $PREFIX/config/jhvirt.env"
+    [ -s "$PREFIX/data/secret.key" ] || die "не найден ключ $PREFIX/data/secret.key"
+    cp "$PREFIX/config/$CONFIG_NAME" "$ME_DIR/config/$CONFIG_NAME"
+    cp "$PREFIX/config/jhvirt.env" "$ME_DIR/environment/systemd.env"
+    cp "$PREFIX/data/secret.key" "$ME_DIR/data/secret.key"
+    [ ! -f "$PREFIX/config/metrics.token" ] || cp "$PREFIX/config/metrics.token" "$ME_DIR/data/metrics.token"
+
+    ME_TLS_ENABLED="$(env_file_value "$PREFIX/config/jhvirt.env" JHV_SERVER_TLS_ENABLED)"
+    [ -n "$ME_TLS_ENABLED" ] || ME_TLS_ENABLED="$(yaml_server_tls_value "$PREFIX/config/$CONFIG_NAME" enabled)"
+    if [ "$ME_TLS_ENABLED" = true ]; then
+        ME_TLS_CERT="$(env_file_value "$PREFIX/config/jhvirt.env" JHV_SERVER_TLS_CERT_FILE)"
+        ME_TLS_KEY="$(env_file_value "$PREFIX/config/jhvirt.env" JHV_SERVER_TLS_KEY_FILE)"
+        [ -n "$ME_TLS_CERT" ] || ME_TLS_CERT="$(yaml_server_tls_value "$PREFIX/config/$CONFIG_NAME" cert_file)"
+        [ -n "$ME_TLS_KEY" ] || ME_TLS_KEY="$(yaml_server_tls_value "$PREFIX/config/$CONFIG_NAME" key_file)"
+        [ -f "$ME_TLS_CERT" ] && cp "$ME_TLS_CERT" "$ME_DIR/tls/server.crt"
+        [ -f "$ME_TLS_KEY" ] && cp "$ME_TLS_KEY" "$ME_DIR/tls/server.key"
+        [ -s "$ME_DIR/tls/server.crt" ] && [ -s "$ME_DIR/tls/server.key" ] ||
+            die "TLS включён, но сертификат или ключ недоступны для экспорта"
+    fi
+
+    ME_DATABASE_URL="$(env_file_value "$PREFIX/config/jhvirt.env" JHV_DATABASE_URL)"
+    case "$ME_DATABASE_URL" in
+        *host=*|*://*)
+            ME_DATABASE_KIND=external
+            say "    внешняя PostgreSQL останется на месте; её DSN сохранён в пакете"
+            ;;
+        *)
+            ME_DATABASE_KIND=embedded
+            have pg_dump || die "для экспорта локальной PostgreSQL нужен pg_dump"
+            step "согласованный dump PostgreSQL"
+            runuser -u postgres -- pg_dump -d jhvirt -Fc --no-owner --no-privileges \
+                > "$ME_DIR/database/jhvirt.dump" || die "не удалось снять dump локальной PostgreSQL"
+            [ -s "$ME_DIR/database/jhvirt.dump" ] || die "получен пустой dump PostgreSQL"
+            ;;
+    esac
+    if [ -f "$UNIT" ]; then
+        sed -n 's/^ReadWritePaths=//p' "$UNIT" > "$ME_DIR/systemd-write-paths"
+    fi
+    migration_write_manifest "$ME_DIR" systemd "$PREFIX" "$ME_DATABASE_KIND" 0
+}
+
+migration_export() {
+    [ -n "$MIGRATION_EXPORT_FILE" ] || die "укажите файл после --migration-export"
+    [ ! -e "$MIGRATION_EXPORT_FILE" ] || die "файл уже существует: $MIGRATION_EXPORT_FILE"
+    ME_PARENT="$(dirname "$MIGRATION_EXPORT_FILE")"
+    [ -d "$ME_PARENT" ] && [ -w "$ME_PARENT" ] || die "каталог назначения недоступен: $ME_PARENT"
+    migration_detect_mode
+    migration_detect_source_identity
+    [ "$MODE" != systemd ] || [ "$(id -u)" -eq 0 ] ||
+        die "для экспорта systemd нужны права root: sudo $SELF --migration-export $MIGRATION_EXPORT_FILE"
+    if [ -t 0 ] && [ "$MIGRATION_KEEP_SOURCE" -eq 0 ]; then
+        say ""
+        say "Для согласованного переноса приложение будет остановлено и останется"
+        say "остановленным после создания пакета. PostgreSQL продолжит работать."
+        printf 'Продолжить? [y/N]: '
+        read -r ME_CONFIRM || ME_CONFIRM=""
+        case "$ME_CONFIRM" in y|Y|yes|YES|да|Да|ДА) ;; *) die "экспорт отменён" ;; esac
+    fi
+    MIGRATION_TMP="$(mktemp -d "${TMPDIR:-/tmp}/jhvirt-migration-export.XXXXXX")" ||
+        die "не удалось создать временный каталог"
+    trap migration_cleanup EXIT INT TERM HUP
+    mkdir -p "$MIGRATION_TMP/config" "$MIGRATION_TMP/environment" \
+        "$MIGRATION_TMP/database" "$MIGRATION_TMP/data" "$MIGRATION_TMP/tls"
+    chmod 700 "$MIGRATION_TMP"
+
+    step "подготовка пакета миграции ($MODE)"
+    migration_quiesce_source
+    case "$MODE" in
+        docker|docker-compose) migration_export_docker "$MIGRATION_TMP" ;;
+        systemd) migration_export_systemd "$MIGRATION_TMP" ;;
+    esac
+    chmod 600 "$MIGRATION_TMP/data/"* "$MIGRATION_TMP/tls/"* \
+        "$MIGRATION_TMP/environment/"* "$MIGRATION_TMP/database/"* 2>/dev/null || true
+    umask 077
+    tar czf "$MIGRATION_EXPORT_FILE.tmp.$$" -C "$MIGRATION_TMP" . ||
+        die "не удалось упаковать данные миграции"
+    mv "$MIGRATION_EXPORT_FILE.tmp.$$" "$MIGRATION_EXPORT_FILE"
+    chmod 600 "$MIGRATION_EXPORT_FILE"
+    if [ "$MIGRATION_KEEP_SOURCE" -eq 1 ]; then
+        migration_resume_source || die "пакет создан, но исходное приложение не удалось запустить снова"
+    fi
+    MIGRATION_EXPORT_COMMITTED=1
+    say ""
+    say "Пакет миграции создан: $MIGRATION_EXPORT_FILE"
+    say "Права: 0600. Внутри находятся пароль БД, secret.key и настройки."
+    say "Передайте его на новый сервер защищённым каналом и выполните:"
+    say "  sudo sh ./ovirt-backup-*.run --migrate-from $MIGRATION_EXPORT_FILE"
+    say "Локальные каталоги бекапов не копировались; подключите их на новом узле отдельно."
+    if [ "$MIGRATION_KEEP_SOURCE" -eq 1 ]; then
+        say "Исходное приложение снова запущено: пакет предназначен для репетиции."
+    elif [ -n "$MIGRATION_SOURCE_STOPPED" ]; then
+        say "Исходное приложение оставлено остановленным, чтобы состояние больше не расходилось."
+    fi
+}
+
+migration_manifest_value() {
+    MMV_KEY="$1"
+    sed -n "s/^${MMV_KEY}=//p" "$MIGRATION_TMP/manifest" | tail -n 1
+}
+
+migration_validate_archive() {
+    [ -f "$MIGRATION_IMPORT_FILE" ] && [ -r "$MIGRATION_IMPORT_FILE" ] ||
+        die "пакет миграции недоступен: $MIGRATION_IMPORT_FILE"
+    tar tzf "$MIGRATION_IMPORT_FILE" > "$MIGRATION_TMP/archive.list" ||
+        die "пакет миграции повреждён или не является tar.gz"
+    tar tvzf "$MIGRATION_IMPORT_FILE" > "$MIGRATION_TMP/archive.types" ||
+        die "не удалось проверить типы файлов в пакете миграции"
+    while IFS= read -r MVA_TYPE_LINE; do
+        case "$MVA_TYPE_LINE" in
+            -*|d*) ;;
+            *) die "пакет миграции содержит недопустимую ссылку или special file" ;;
+        esac
+    done < "$MIGRATION_TMP/archive.types"
+    while IFS= read -r MVA_ENTRY; do
+        MVA_ENTRY="${MVA_ENTRY#./}"; MVA_ENTRY="${MVA_ENTRY%/}"
+        case "$MVA_ENTRY" in
+            ""|manifest|systemd-write-paths|config|config/ovirt-backup.yaml|environment|environment/docker.env|environment/systemd.env|database|database/jhvirt.dump|database/keycloak.dump|data|data/secret.key|data/metrics.token|tls|tls/server.crt|tls/server.key) ;;
+            *) die "в пакете миграции найден неожиданный путь: $MVA_ENTRY" ;;
+        esac
+    done < "$MIGRATION_TMP/archive.list"
+    tar xzf "$MIGRATION_IMPORT_FILE" -C "$MIGRATION_TMP" || die "не удалось распаковать пакет миграции"
+    if find "$MIGRATION_TMP" -type l -print | grep -q .; then
+        die "пакет миграции содержит символические ссылки"
+    fi
+    [ "$(migration_manifest_value format)" = jhvirt-migration-v1 ] ||
+        die "неподдерживаемый формат пакета миграции"
+    [ -s "$MIGRATION_TMP/data/secret.key" ] || die "в пакете нет secret.key"
+    [ -f "$MIGRATION_TMP/manifest" ] && [ ! -L "$MIGRATION_TMP/manifest" ] ||
+        die "manifest пакета имеет недопустимый тип"
+    rm -f "$MIGRATION_TMP/archive.list" "$MIGRATION_TMP/archive.types"
+}
+
+migration_prepare_import() {
+    [ -n "$MIGRATION_IMPORT_FILE" ] || die "укажите файл после --migrate-from"
+    MIGRATION_TMP="$(mktemp -d "${TMPDIR:-/tmp}/jhvirt-migration-import.XXXXXX")" ||
+        die "не удалось создать временный каталог"
+    trap migration_cleanup EXIT INT TERM HUP
+    chmod 700 "$MIGRATION_TMP"
+    migration_validate_archive
+
+    MIGRATION_SOURCE_MODE="$(migration_manifest_value source_mode)"
+    MIGRATION_SOURCE_PREFIX="$(migration_manifest_value source_prefix)"
+    MIGRATION_SOURCE_USER="$(migration_manifest_value source_user)"
+    MIGRATION_DATABASE_KIND="$(migration_manifest_value database_kind)"
+    case "$MIGRATION_SOURCE_MODE" in docker|systemd) ;; *) die "неизвестный source_mode в пакете" ;; esac
+    case "$MIGRATION_DATABASE_KIND" in embedded|external) ;; *) die "неизвестный database_kind в пакете" ;; esac
+    [ -f "$MIGRATION_TMP/config/$CONFIG_NAME" ] || die "в пакете нет конфигурации"
+    if [ "$MIGRATION_SOURCE_MODE" = docker ]; then
+        [ -f "$MIGRATION_TMP/environment/docker.env" ] || die "в пакете нет Docker env"
+    else
+        [ -f "$MIGRATION_TMP/environment/systemd.env" ] || die "в пакете нет systemd env"
+    fi
+    if [ "$MIGRATION_DATABASE_KIND" = embedded ]; then
+        [ -s "$MIGRATION_TMP/database/jhvirt.dump" ] || die "в пакете нет dump PostgreSQL"
+    fi
+
+    [ "$PREFIX_EXPLICIT" -eq 1 ] || PREFIX="$MIGRATION_SOURCE_PREFIX"
+    [ "$USER_NAME_EXPLICIT" -eq 1 ] || USER_NAME="$MIGRATION_SOURCE_USER"
+    validate_install_identity
+
+    case "$MIGRATION_SOURCE_MODE:$MODE" in
+        docker:"")
+            if has_docker; then MODE=docker
+            elif has_dockerc; then MODE=docker-compose
+            else die "на новом сервере нет Docker Compose"
+            fi
+            ;;
+        docker:docker|docker:docker-compose) ;;
+        systemd:"") MODE=systemd ;;
+        systemd:systemd) ;;
+        *) die "смена способа запуска при миграции не поддерживается: $MIGRATION_SOURCE_MODE -> $MODE" ;;
+    esac
+
+    if [ -e "$PREFIX/compose/.env" ] || [ -e "$PREFIX/config/jhvirt.env" ] || systemd_install_present; then
+        die "в $PREFIX уже есть установка; импорт разрешён только в пустую цель"
+    fi
+    if [ "$MIGRATION_SOURCE_MODE" = docker ]; then
+        MI_ENV="$MIGRATION_TMP/environment/docker.env"
+        MI_PROJECT="$(env_file_value "$MI_ENV" COMPOSE_PROJECT_NAME)"; [ -n "$MI_PROJECT" ] || MI_PROJECT=ovirt-backup
+        if have docker && { volume_exists "${MI_PROJECT}_postgres-data" || volume_exists "${MI_PROJECT}_jhvirt-data"; }; then
+            die "на новом сервере уже есть тома проекта $MI_PROJECT; выберите пустой PREFIX/проект"
+        fi
+        [ "$URL_EXPLICIT" -eq 1 ] || URL="$(env_file_value "$MI_ENV" JHV_EXTERNAL_URL)"
+        if [ "$PORT_EXPLICIT" -eq 0 ]; then
+            MI_PORT="$(env_file_value "$MI_ENV" JHV_PORT)"; [ -z "$MI_PORT" ] || PORT="$MI_PORT"
+        fi
+    else
+        MI_ENV="$MIGRATION_TMP/environment/systemd.env"
+        [ "$URL_EXPLICIT" -eq 1 ] || URL="$(env_file_value "$MI_ENV" JHV_SERVER_EXTERNAL_URL)"
+        if [ "$PORT_EXPLICIT" -eq 0 ]; then
+            MI_PORT="$(env_file_value "$MI_ENV" JHV_SERVER_PORT)"; [ -z "$MI_PORT" ] || PORT="$MI_PORT"
+        fi
+    fi
+    if [ -s "$MIGRATION_TMP/tls/server.crt" ] && [ -s "$MIGRATION_TMP/tls/server.key" ]; then
+        MIGRATION_TLS_AVAILABLE=1
+        if [ -z "$TLS_MODE" ] && [ -z "$TLS_CERT_FILE" ] && [ -z "$TLS_KEY_FILE" ] && [ ! -t 0 ]; then
+            TLS_MODE=preserve
+            READY_SCHEME=https
+        fi
+    fi
+    MIGRATION_ACTIVE=1
+    say ""
+    say "Пакет миграции: $MIGRATION_SOURCE_MODE из $MIGRATION_SOURCE_PREFIX"
+    say "Новая установка: $MODE в $PREFIX, пользователь $USER_NAME"
+    say "Исходная служба должна оставаться остановленной до завершения проверки нового узла."
 }
 
 uninstall_containers() {
@@ -539,9 +1105,12 @@ remove_data_stores() {
 
     if [ "$UNINSTALL_TARGET" = systemd ] || [ "$UNINSTALL_TARGET" = all ]; then
         if [ -d "$PREFIX/data" ]; then
-            rm -rf "$PREFIX/data" && say "    удалён $PREFIX/data (ключ шифрования)" ||
-                { say "    предупреждение: не удалось удалить $PREFIX/data"
-                  UNINSTALL_ERRORS=$((UNINSTALL_ERRORS+1)); }
+            if rm -rf "$PREFIX/data"; then
+                say "    удалён $PREFIX/data (ключ шифрования)"
+            else
+                say "    предупреждение: не удалось удалить $PREFIX/data"
+                UNINSTALL_ERRORS=$((UNINSTALL_ERRORS+1))
+            fi
         fi
         # Базу локальной PostgreSQL не трогаем сами: кластер может обслуживать и
         # чужие базы, а команда на удаление — короткая и точная, её лучше
@@ -633,10 +1202,12 @@ uninstall() {
 # --- Выбор ------------------------------------------------------------------
 
 choose() {
-    i=0; a=""; b=""; d=""; u=""
+    i=0; a=""; b=""; d=""; m=""; e=""; u=""
     has_docker   && { i=$((i+1)); a=$i; }
     has_dockerc  && { i=$((i+1)); b=$i; }
     has_systemd  && { i=$((i+1)); d=$i; }
+    i=$((i+1)); m=$i
+    i=$((i+1)); e=$i
     i=$((i+1)); u=$i
 
     if [ ! -t 0 ]; then
@@ -650,6 +1221,8 @@ choose() {
     [ -n "$a" ] && say "  $a) docker compose   — сервис и PostgreSQL в контейнерах"
     [ -n "$b" ] && say "  $b) docker-compose   — то же, старой командой через дефис"
     [ -n "$d" ] && say "  $d) systemd          — нативная служба и локальная PostgreSQL"
+    say "  $m) перенести сюда    — восстановить пакет со старого сервера"
+    say "  $e) подготовить перенос — создать защищённый пакет настроек и БД"
     say "  $u) удалить          — выбрать Docker Compose, systemd или оба варианта"
     say ""
     say "Для установки показаны только доступные на этой машине способы."
@@ -661,6 +1234,8 @@ choose() {
         [ -n "$a" ] && [ "$n" = "$a" ] && { MODE=docker; return; }
         [ -n "$b" ] && [ "$n" = "$b" ] && { MODE=docker-compose; return; }
         [ -n "$d" ] && [ "$n" = "$d" ] && { MODE=systemd; return; }
+        [ "$n" = "$m" ] && { MIGRATION_ACTION="import"; MODE=migration-import; return; }
+        [ "$n" = "$e" ] && { MIGRATION_ACTION="export"; MODE=migration-export; return; }
         [ "$n" = "$u" ] && { MODE=uninstall; return; }
         say "Нет такого варианта."
     done
@@ -669,7 +1244,34 @@ choose() {
 if [ "$UNINSTALL_REMOVE_CONFIG" -eq 1 ] && [ "$MODE" != uninstall ]; then
     die "--remove-config используется только вместе с --uninstall"
 fi
-[ -n "$MODE" ] || choose
+[ "$MIGRATION_KEEP_SOURCE" -eq 0 ] || [ "$MIGRATION_ACTION" = export ] ||
+    die "--keep-source-running используется только с --migration-export"
+[ -n "$MODE" ] || [ -n "$MIGRATION_ACTION" ] || choose
+
+if [ "$MODE" = migration-import ]; then
+    MODE=""
+    migration_ask_nonempty "Путь к пакету миграции: "
+    MIGRATION_IMPORT_FILE="$ANSWER"
+elif [ "$MODE" = migration-export ]; then
+    MODE=""
+    migration_ask_nonempty "Куда записать пакет миграции: "
+    MIGRATION_EXPORT_FILE="$ANSWER"
+fi
+
+case "$MIGRATION_ACTION" in
+    "") ;;
+    export)
+        [ -z "$MIGRATION_IMPORT_FILE" ] || die "нельзя одновременно экспортировать и импортировать миграцию"
+        migration_export
+        exit 0
+        ;;
+    import)
+        [ -z "$MIGRATION_EXPORT_FILE" ] || die "нельзя одновременно экспортировать и импортировать миграцию"
+        migration_prepare_import
+        ;;
+    *) die "неизвестное действие миграции" ;;
+esac
+
 if [ "$MODE" = uninstall ]; then
     if [ -z "$UNINSTALL_TARGET" ]; then
         if [ -t 0 ]; then
@@ -753,6 +1355,257 @@ ask_url() {
         [ -n "$URL" ] || URL="$GUESS"
     fi
     validate_url
+}
+
+# --- TLS приложения --------------------------------------------------------
+
+installed_tls_enabled() {
+    IT_ENV=""
+    case "$MODE" in
+        docker|docker-compose)
+            IT_WORK="$(migration_docker_work 2>/dev/null || true)"
+            [ -z "$IT_WORK" ] || IT_ENV="$IT_WORK/.env"
+            [ "$(env_file_value "$IT_ENV" JHV_TLS_ENABLED)" = true ]
+            ;;
+        systemd)
+            IT_ENV="$PREFIX/config/jhvirt.env"
+            [ "$(env_file_value "$IT_ENV" JHV_SERVER_TLS_ENABLED)" = true ] ||
+                [ "$(yaml_server_tls_value "$PREFIX/config/$CONFIG_NAME" enabled 2>/dev/null)" = true ]
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+choose_tls() {
+    if [ -z "$TLS_MODE" ] && { [ -n "$TLS_CERT_FILE" ] || [ -n "$TLS_KEY_FILE" ]; }; then
+        TLS_MODE=files
+    fi
+    if [ -n "$TLS_MODE" ]; then
+        return 0
+    fi
+    if [ "$MIGRATION_ACTIVE" -eq 1 ] && [ "$MIGRATION_TLS_AVAILABLE" -eq 1 ]; then
+        if [ ! -t 0 ]; then
+            TLS_MODE=preserve
+            READY_SCHEME=https
+            return 0
+        fi
+        say ""
+        say "В пакете есть TLS-сертификат старого сервера. Что использовать?"
+        say "  1) сохранить его (по умолчанию)"
+        say "  2) выпустить новый самоподписанный сертификат"
+        say "  3) взять сертификат и ключ из файлов"
+        say "  4) выключить собственный TLS"
+        while :; do
+            printf 'Номер [1]: '
+            read -r TLS_CHOICE || TLS_CHOICE=""
+            [ -n "$TLS_CHOICE" ] || TLS_CHOICE=1
+            case "$TLS_CHOICE" in
+                1) TLS_MODE=preserve; READY_SCHEME=https; return 0 ;;
+                2) TLS_MODE=self-signed; return 0 ;;
+                3) TLS_MODE=files; return 0 ;;
+                4) TLS_MODE=none; return 0 ;;
+                *) say "Нет такого варианта." ;;
+            esac
+        done
+    fi
+    if installed_tls_enabled; then
+        if [ ! -t 0 ]; then
+            TLS_MODE=preserve
+            READY_SCHEME=https
+            return 0
+        fi
+        say ""
+        say "В установке уже включён собственный TLS."
+        say "  1) сохранить текущий сертификат (по умолчанию)"
+        say "  2) выпустить новый самоподписанный сертификат"
+        say "  3) заменить сертификатом и ключом из файлов"
+        say "  4) выключить собственный TLS (например, для reverse proxy)"
+        while :; do
+            printf 'Номер [1]: '
+            read -r TLS_CHOICE || TLS_CHOICE=""
+            [ -n "$TLS_CHOICE" ] || TLS_CHOICE=1
+            case "$TLS_CHOICE" in
+                1) TLS_MODE=preserve; READY_SCHEME=https; return 0 ;;
+                2) TLS_MODE=self-signed; return 0 ;;
+                3) TLS_MODE=files; return 0 ;;
+                4) TLS_MODE=none; return 0 ;;
+                *) say "Нет такого варианта." ;;
+            esac
+        done
+    fi
+    if [ ! -t 0 ]; then
+        TLS_MODE=none
+        return 0
+    fi
+
+    say ""
+    say "Как обслуживать HTTPS?"
+    say "  1) без собственного TLS — HTTP или TLS на reverse proxy (по умолчанию)"
+    say "  2) создать самоподписанный сертификат и включить HTTPS приложения"
+    say "  3) подключить существующие сертификат и закрытый ключ"
+    while :; do
+        printf 'Номер [1]: '
+        read -r TLS_CHOICE || TLS_CHOICE=""
+        [ -n "$TLS_CHOICE" ] || TLS_CHOICE=1
+        case "$TLS_CHOICE" in
+            1) TLS_MODE=none; return 0 ;;
+            2) TLS_MODE=self-signed; return 0 ;;
+            3) TLS_MODE=files; return 0 ;;
+            *) say "Нет такого варианта." ;;
+        esac
+    done
+}
+
+tls_host_from_url() {
+    TLS_AUTHORITY="${URL#*://}"
+    case "$TLS_AUTHORITY" in
+        \[*\]*) TLS_HOST="${TLS_AUTHORITY#\[}"; TLS_HOST="${TLS_HOST%%\]*}" ;;
+        *) TLS_HOST="${TLS_AUTHORITY%%:*}" ;;
+    esac
+    case "$TLS_HOST" in
+        ""|*[!A-Za-z0-9_.:-]*) die "не удалось получить безопасное имя сертификата из URL: $URL" ;;
+    esac
+    printf '%s' "$TLS_HOST"
+}
+
+tls_validate_pair() {
+    TV_CERT="$1"; TV_KEY="$2"
+    have openssl || die "для проверки или выпуска TLS-сертификата нужен openssl"
+    openssl x509 -in "$TV_CERT" -noout -checkend 1 >/dev/null 2>&1 ||
+        die "сертификат не читается или уже истёк: $TV_CERT"
+    openssl pkey -in "$TV_KEY" -passin pass: -noout >/dev/null 2>&1 ||
+        die "закрытый ключ не читается или защищён паролем: $TV_KEY"
+    openssl x509 -in "$TV_CERT" -pubkey -noout > "$TLS_MATERIAL_DIR/cert.pub"
+    openssl pkey -in "$TV_KEY" -passin pass: -pubout > "$TLS_MATERIAL_DIR/key.pub"
+    cmp -s "$TLS_MATERIAL_DIR/cert.pub" "$TLS_MATERIAL_DIR/key.pub" ||
+        die "сертификат и закрытый ключ не образуют пару"
+    rm -f "$TLS_MATERIAL_DIR/cert.pub" "$TLS_MATERIAL_DIR/key.pub"
+}
+
+prepare_tls() {
+    case "$TLS_MODE" in
+        none) return 0 ;;
+        preserve)
+            if [ "$MIGRATION_ACTIVE" -eq 0 ]; then
+                READY_SCHEME=https
+                return 0
+            fi
+            [ -s "$MIGRATION_TMP/tls/server.crt" ] && [ -s "$MIGRATION_TMP/tls/server.key" ] ||
+                die "в пакете включён TLS, но нет сертификата или ключа"
+            ;;
+        self-signed|files) ;;
+        *) die "--tls принимает none, self-signed или files" ;;
+    esac
+
+    case "$TLS_DAYS" in ''|*[!0-9]*) die "--tls-days должен быть целым числом" ;; esac
+    [ "$TLS_DAYS" -ge 1 ] && [ "$TLS_DAYS" -le 3650 ] ||
+        die "--tls-days должен быть в диапазоне 1..3650"
+    case "$URL" in
+        https://*) ;;
+        http://*)
+            if [ -t 0 ]; then
+                URL="https://${URL#http://}"
+                say "    внешний URL изменён на $URL, потому что включён TLS"
+            else
+                die "собственный TLS требует --url https://host[:port]"
+            fi
+            ;;
+    esac
+
+    TLS_MATERIAL_DIR="$(mktemp -d "${TMPDIR:-/tmp}/jhvirt-tls.XXXXXX")" ||
+        die "не удалось создать временный каталог TLS"
+    chmod 700 "$TLS_MATERIAL_DIR"
+    trap migration_cleanup EXIT INT TERM HUP
+    if [ "$TLS_MODE" = preserve ]; then
+        cp "$MIGRATION_TMP/tls/server.crt" "$TLS_MATERIAL_DIR/server.crt"
+        cp "$MIGRATION_TMP/tls/server.key" "$TLS_MATERIAL_DIR/server.key"
+    elif [ "$TLS_MODE" = files ]; then
+        if [ -t 0 ]; then
+            [ -n "$TLS_CERT_FILE" ] || { migration_ask_nonempty "Путь к сертификату PEM: "; TLS_CERT_FILE="$ANSWER"; }
+            [ -n "$TLS_KEY_FILE" ] || { migration_ask_nonempty "Путь к закрытому ключу PEM: "; TLS_KEY_FILE="$ANSWER"; }
+        fi
+        [ -f "$TLS_CERT_FILE" ] && [ -r "$TLS_CERT_FILE" ] || die "сертификат недоступен: $TLS_CERT_FILE"
+        [ -f "$TLS_KEY_FILE" ] && [ -r "$TLS_KEY_FILE" ] || die "закрытый ключ недоступен: $TLS_KEY_FILE"
+        cp "$TLS_CERT_FILE" "$TLS_MATERIAL_DIR/server.crt"
+        cp "$TLS_KEY_FILE" "$TLS_MATERIAL_DIR/server.key"
+    else
+        TLS_HOST="$(tls_host_from_url)"
+        case "$TLS_HOST" in *:*) TLS_SAN="IP:$TLS_HOST" ;; *[!0-9.]* ) TLS_SAN="DNS:$TLS_HOST" ;; *) TLS_SAN="IP:$TLS_HOST" ;; esac
+        have openssl || die "для выпуска самоподписанного сертификата нужен openssl"
+        step "самоподписанный TLS-сертификат для $TLS_HOST"
+        openssl req -x509 -newkey rsa:3072 -sha256 -nodes -days "$TLS_DAYS" \
+            -subj "/CN=$TLS_HOST" \
+            -addext "subjectAltName=$TLS_SAN" \
+            -addext "basicConstraints=critical,CA:FALSE" \
+            -addext "keyUsage=critical,digitalSignature,keyEncipherment" \
+            -addext "extendedKeyUsage=serverAuth" \
+            -keyout "$TLS_MATERIAL_DIR/server.key" \
+            -out "$TLS_MATERIAL_DIR/server.crt" >/dev/null 2>&1 ||
+            die "openssl не смог создать сертификат"
+    fi
+    chmod 644 "$TLS_MATERIAL_DIR/server.crt"
+    chmod 600 "$TLS_MATERIAL_DIR/server.key"
+    tls_validate_pair "$TLS_MATERIAL_DIR/server.crt" "$TLS_MATERIAL_DIR/server.key"
+    READY_SCHEME=https
+}
+
+install_tls_docker() {
+    ITD_ENV="$1"; ITD_VOL="$(docker_metrics_volume)"
+    case "$TLS_MODE" in
+        preserve)
+            [ -n "$TLS_MATERIAL_DIR" ] || return 0
+            ;;
+        none)
+            set_plain_env JHV_TLS_ENABLED false "$ITD_ENV"
+            return 0
+            ;;
+    esac
+    [ -n "$TLS_MATERIAL_DIR" ] || die "TLS-материалы не подготовлены"
+    docker run --rm -i --network none --user root -v "$ITD_VOL:/data" \
+        docker.io/library/postgres:17-alpine sh -c '
+            mkdir -p /data/tls
+            umask 077
+            cat > /data/tls/server.key
+            chown 10001:10001 /data/tls/server.key
+            chmod 600 /data/tls/server.key' < "$TLS_MATERIAL_DIR/server.key" ||
+        die "не удалось записать TLS-ключ в том $ITD_VOL"
+    docker run --rm -i --network none --user root -v "$ITD_VOL:/data" \
+        docker.io/library/postgres:17-alpine sh -c '
+            cat > /data/tls/server.crt
+            chown 10001:10001 /data/tls/server.crt /data/tls
+            chmod 700 /data/tls
+            chmod 644 /data/tls/server.crt' < "$TLS_MATERIAL_DIR/server.crt" ||
+        die "не удалось записать TLS-сертификат в том $ITD_VOL"
+    set_plain_env JHV_TLS_ENABLED true "$ITD_ENV"
+    set_plain_env JHV_TLS_CERT_FILE /app/data/tls/server.crt "$ITD_ENV"
+    set_plain_env JHV_TLS_KEY_FILE /app/data/tls/server.key "$ITD_ENV"
+    # Go загружает пару сертификат/ключ при старте HTTP-сервера. При явной
+    # замене файлов Compose может не пересоздать контейнер, поскольку пути и
+    # переменные окружения не изменились. Перезапуск ниже гарантирует, что
+    # текущая инсталляция сразу начнёт отдавать новый сертификат.
+    case "$TLS_MODE" in self-signed|files) TLS_RESTART_REQUIRED=1 ;; esac
+}
+
+install_tls_systemd() {
+    ITS_ENV="$1"
+    case "$TLS_MODE" in
+        preserve)
+            [ -n "$TLS_MATERIAL_DIR" ] || return 0
+            ;;
+        none)
+            set_env JHV_SERVER_TLS_ENABLED false "$ITS_ENV"
+            return 0
+            ;;
+    esac
+    [ -n "$TLS_MATERIAL_DIR" ] || die "TLS-материалы не подготовлены"
+    install -d -o "$USER_NAME" -g "$USER_NAME" -m 0750 "$PREFIX/config/tls"
+    install -o "$USER_NAME" -g "$USER_NAME" -m 0644 \
+        "$TLS_MATERIAL_DIR/server.crt" "$PREFIX/config/tls/server.crt"
+    install -o "$USER_NAME" -g "$USER_NAME" -m 0600 \
+        "$TLS_MATERIAL_DIR/server.key" "$PREFIX/config/tls/server.key"
+    set_env JHV_SERVER_TLS_ENABLED true "$ITS_ENV"
+    set_env JHV_SERVER_TLS_CERT_FILE "$PREFIX/config/tls/server.crt" "$ITS_ENV"
+    set_env JHV_SERVER_TLS_KEY_FILE "$PREFIX/config/tls/server.key" "$ITS_ENV"
 }
 
 # Docker сообщает о занятом host-порте только после сборки образа. Проверяем
@@ -867,12 +1720,20 @@ case "$MODE" in
 esac
 
 ask_url
+choose_tls
+prepare_tls
 
 http_ok() {
     if have curl; then
-        curl -fsS --max-time 5 "$1" >/dev/null 2>&1
+        case "$1" in
+            https://*) curl -kfsS --max-time 5 "$1" >/dev/null 2>&1 ;;
+            *) curl -fsS --max-time 5 "$1" >/dev/null 2>&1 ;;
+        esac
     elif have wget; then
-        wget -qO- -T 5 "$1" >/dev/null 2>&1
+        case "$1" in
+            https://*) wget --no-check-certificate -qO- -T 5 "$1" >/dev/null 2>&1 ;;
+            *) wget -qO- -T 5 "$1" >/dev/null 2>&1 ;;
+        esac
     else
         return 1
     fi
@@ -1132,6 +1993,133 @@ keycloak_bootstrap() {
 
 # --- Контейнеры -------------------------------------------------------------
 
+docker_volume_put() {
+    DVP_VOLUME="$1"; DVP_SOURCE="$2"; DVP_TARGET="$3"; DVP_MODE="$4"
+    docker run --rm -i --network none --user root -v "$DVP_VOLUME:/data" \
+        -e DVP_TARGET="$DVP_TARGET" -e DVP_MODE="$DVP_MODE" \
+        docker.io/library/postgres:17-alpine sh -c '
+            target="/data/$DVP_TARGET"
+            mkdir -p "$(dirname "$target")"
+            umask 077
+            cat > "$target"
+            chown 10001:10001 "$target" "$(dirname "$target")"
+            chmod "$DVP_MODE" "$target"' < "$DVP_SOURCE" ||
+        die "не удалось восстановить $DVP_TARGET в том $DVP_VOLUME"
+}
+
+migration_apply_docker_files() {
+    MAD_WORK="$1"
+    [ "$MIGRATION_ACTIVE" -eq 1 ] || return 0
+    [ -f "$MIGRATION_TMP/environment/docker.env" ] || die "в пакете нет Docker env"
+    [ -f "$MIGRATION_TMP/config/$CONFIG_NAME" ] || die "в пакете нет YAML"
+
+    cp "$MIGRATION_TMP/environment/docker.env" "$MAD_WORK/.env"
+    chmod 600 "$MAD_WORK/.env"
+    if [ "$BUNDLE" -eq 1 ]; then
+        MAD_CONFIG="$PREFIX/config/$CONFIG_NAME"
+        cp "$MIGRATION_TMP/config/$CONFIG_NAME" "$MAD_CONFIG"
+        set_plain_env JHV_CONFIG_FILE "../config/$CONFIG_NAME" "$MAD_WORK/.env"
+    else
+        MAD_CONFIG="$MAD_WORK/ovirt-backup.migrated.yaml"
+        cp "$MIGRATION_TMP/config/$CONFIG_NAME" "$MAD_CONFIG"
+        set_plain_env JHV_CONFIG_FILE ./ovirt-backup.migrated.yaml "$MAD_WORK/.env"
+    fi
+    rewrite_prefix_file "$MAD_CONFIG" "$MIGRATION_SOURCE_PREFIX" "$PREFIX"
+    chmod 644 "$MAD_CONFIG"
+    rewrite_prefix_file "$MAD_WORK/.env" "$MIGRATION_SOURCE_PREFIX" "$PREFIX"
+    set_plain_env JHV_EXTERNAL_URL "$URL" "$MAD_WORK/.env"
+    set_plain_env JHV_PORT "$PORT" "$MAD_WORK/.env"
+    set_plain_env JHV_ADMIN_PASSWORD "" "$MAD_WORK/.env"
+    if [ "$(env_file_value "$MAD_WORK/.env" JHV_OIDC_ENABLED)" = true ]; then
+        set_plain_env JHV_OIDC_REDIRECT_URL "$URL/api/v1/auth/oidc/callback" "$MAD_WORK/.env"
+        set_plain_env JHV_OIDC_POST_LOGOUT_URL "$URL/login" "$MAD_WORK/.env"
+    fi
+    say "    YAML, env и настройки входа восстановлены из пакета"
+}
+
+migration_restore_docker_data() {
+    [ "$MIGRATION_ACTIVE" -eq 1 ] || return 0
+    MRD_VOL="$(docker_metrics_volume)"
+    docker_volume_put "$MRD_VOL" "$MIGRATION_TMP/data/secret.key" secret.key 600
+    if [ -s "$MIGRATION_TMP/data/metrics.token" ]; then
+        docker_volume_put "$MRD_VOL" "$MIGRATION_TMP/data/metrics.token" metrics.token 600
+    fi
+    say "    secret.key и служебные токены восстановлены с владельцем UID 10001"
+}
+
+docker_wait_postgres() {
+    DWP_WORK="$1"; DWP_RUN="$2"; DWP_USER="$3"
+    DWP_TRY=0
+    while [ "$DWP_TRY" -lt 40 ]; do
+        # shellcheck disable=SC2086
+        (cd "$DWP_WORK" && $DWP_RUN exec -T postgres pg_isready -U "$DWP_USER" -q) >/dev/null 2>&1 && return 0
+        DWP_TRY=$((DWP_TRY+1)); sleep 2
+    done
+    return 1
+}
+
+migration_restore_docker_database() {
+    MRDB_WORK="$1"; MRDB_RUN="$2"
+    [ "$MIGRATION_ACTIVE" -eq 1 ] || return 0
+    [ "$MIGRATION_DATABASE_KIND" = embedded ] || return 0
+    MRDB_USER="$(env_file_value "$MRDB_WORK/.env" POSTGRES_USER)"; [ -n "$MRDB_USER" ] || MRDB_USER=jhvirt
+    MRDB_DB="$(env_file_value "$MRDB_WORK/.env" POSTGRES_DB)"; [ -n "$MRDB_DB" ] || MRDB_DB=jhvirt
+    step "восстановление PostgreSQL из пакета"
+    # shellcheck disable=SC2086
+    (cd "$MRDB_WORK" && $MRDB_RUN up -d postgres) >/dev/null || die "не удалось запустить PostgreSQL"
+    docker_wait_postgres "$MRDB_WORK" "$MRDB_RUN" "$MRDB_USER" || die "PostgreSQL не стала готова"
+    # shellcheck disable=SC2086
+    (cd "$MRDB_WORK" && $MRDB_RUN exec -T postgres \
+        pg_restore -U "$MRDB_USER" -d "$MRDB_DB" --clean --if-exists --no-owner --no-privileges) \
+        < "$MIGRATION_TMP/database/jhvirt.dump" || die "не удалось восстановить базу jhvirt"
+
+    if [ -s "$MIGRATION_TMP/database/keycloak.dump" ]; then
+        MRDB_KC="$(env_file_value "$MRDB_WORK/.env" KEYCLOAK_DB)"; [ -n "$MRDB_KC" ] || MRDB_KC=keycloak
+        # shellcheck disable=SC2086
+        if ! (cd "$MRDB_WORK" && $MRDB_RUN exec -T postgres psql -U "$MRDB_USER" -d postgres -tAc \
+                "SELECT 1 FROM pg_database WHERE datname='$MRDB_KC'") | grep -q 1; then
+            # shellcheck disable=SC2086
+            (cd "$MRDB_WORK" && $MRDB_RUN exec -T postgres createdb -U "$MRDB_USER" "$MRDB_KC") ||
+                die "не удалось создать базу Keycloak"
+        fi
+        # shellcheck disable=SC2086
+        (cd "$MRDB_WORK" && $MRDB_RUN exec -T postgres \
+            pg_restore -U "$MRDB_USER" -d "$MRDB_KC" --clean --if-exists --no-owner --no-privileges) \
+            < "$MIGRATION_TMP/database/keycloak.dump" || die "не удалось восстановить базу Keycloak"
+    fi
+    say "    база и все runtime-настройки восстановлены"
+}
+
+docker_host_path() {
+    DHP_WORK="$1"; DHP_VALUE="$2"
+    case "$DHP_VALUE" in
+        /*) printf '%s' "$DHP_VALUE" ;;
+        *) printf '%s/%s' "$DHP_WORK" "${DHP_VALUE#./}" ;;
+    esac
+}
+
+prepare_docker_data_paths() {
+    PDP_WORK="$1"
+    for PDP_KEY in JHV_BACKUP_DIR JHV_RESTORE_DIR; do
+        PDP_VALUE="$(env_file_value "$PDP_WORK/.env" "$PDP_KEY")"
+        [ -n "$PDP_VALUE" ] || continue
+        PDP_PATH="$(docker_host_path "$PDP_WORK" "$PDP_VALUE")"
+        if [ "$MIGRATION_ACTIVE" -eq 1 ] && [ ! -d "$PDP_PATH" ]; then
+            case "$PDP_PATH" in
+                "$PREFIX"/*|"$PDP_WORK"/*) ;;
+                *) die "внешний каталог из $PDP_KEY не найден: $PDP_PATH
+Сначала подключите прежнее хранилище или создайте каталог, затем повторите импорт." ;;
+            esac
+        fi
+        mkdir -p "$PDP_PATH" || die "не удалось создать каталог $PDP_PATH"
+        # Меняется только сам корень, не содержимое подключённого хранилища.
+        docker run --rm --network none --user root -v "$PDP_PATH:/target" \
+            docker.io/library/postgres:17-alpine \
+            sh -c 'chown 10001:10001 /target && chmod u+rwx /target && test -w /target' >/dev/null ||
+            die "контейнерный UID 10001 не получил право записи в $PDP_PATH"
+    done
+}
+
 install_containers() {
     RUN="$(runner "$MODE")"
 
@@ -1141,8 +2129,12 @@ install_containers() {
 
     # Спрашивается после адреса службы: из него складывается и адрес Keycloak,
     # и адрес возврата, который провайдер сверяет побуквенно.
-    choose_oidc
-    prepare_oidc
+    if [ "$MIGRATION_ACTIVE" -eq 0 ]; then
+        choose_oidc
+        prepare_oidc
+    else
+        OIDC_MODE=none
+    fi
 
     if [ "$BUNDLE" -eq 1 ]; then
         step "раскладка в $PREFIX"
@@ -1158,6 +2150,8 @@ install_containers() {
         cp "$HERE/Dockerfile" "$PREFIX/Dockerfile"
         install_bundle_config
         cp "$HERE/compose/docker-compose.yml" "$HERE/compose/.env.example" "$PREFIX/compose/"
+        chmod 644 "$PREFIX/Dockerfile" "$PREFIX/compose/docker-compose.yml" \
+            "$PREFIX/compose/.env.example"
         [ -d "$HERE/docs" ] && cp -r "$HERE/docs/." "$PREFIX/docs/"
         [ -f "$HERE/VERSION" ] && cp "$HERE/VERSION" "$PREFIX/"
         WORK="$PREFIX/compose"
@@ -1168,12 +2162,14 @@ install_containers() {
         BACKUPS="./backups"; RESTORES="./restores"
     fi
 
+    migration_apply_docker_files "$WORK"
+
 	if [ -f "$WORK/.env" ]; then
         say "    $WORK/.env уже есть; пароль базы и пользовательские настройки сохранены"
         set_plain_env JHV_EXTERNAL_URL "$URL" "$WORK/.env"
 		set_plain_env JHV_PORT "$PORT" "$WORK/.env"
 		set_plain_env JHV_METRICS_ENABLED true "$WORK/.env"
-        write_oidc_env "$WORK/.env"
+        [ "$MIGRATION_ACTIVE" -eq 1 ] || write_oidc_env "$WORK/.env"
     else
         # Пароль базы задаётся один раз — при создании тома. Если том с прошлой
         # установки уцелел, а .env исчез, сгенерированный пароль базе не
@@ -1279,7 +2275,7 @@ PostgreSQL хранит пароль внутри тома и новый не п
             # раз тогда, когда по нему разбираются, что было до обновления.
             printf 'JHV_LOG_FILE=/app/data/logs/jhvirt.log\n'
 			printf 'JHV_METRICS_ENABLED=true\n'
-            printf 'TZ=%s\n' "$(cat /etc/timezone 2>/dev/null || echo Europe/Moscow)"
+            printf 'TZ=%s\n' "$(host_timezone)"
         } > "$WORK/.env"
         write_oidc_env "$WORK/.env"
         umask 022
@@ -1287,15 +2283,29 @@ PostgreSQL хранит пароль внутри тома и новый не п
         say "    создан $WORK/.env, пароль базы сгенерирован"
 	fi
 
+	if [ "$BUNDLE" -eq 1 ]; then
+		chown -R "$USER_NAME:$USER_NAME" "$PREFIX"
+		chmod 700 "$PREFIX/data"
+		# YAML не содержит паролей, а контейнер читает bind mount под UID
+		# 10001, который не обязан совпадать с системным пользователем хоста.
+		chmod 644 "$PREFIX/config/$CONFIG_NAME"
+	fi
+
 	step "token-файл Prometheus"
 	ensure_docker_metrics_token
-
-    [ "$BUNDLE" -eq 1 ] && { chown -R "$USER_NAME:$USER_NAME" "$PREFIX"; chmod 700 "$PREFIX/data"; }
+	migration_restore_docker_data
+	install_tls_docker "$WORK/.env"
+	prepare_docker_data_paths "$WORK"
+	migration_restore_docker_database "$WORK" "$RUN"
 
     if [ "$START" -eq 0 ]; then
         say ""
         say "Подготовлено. Запуск:"
         say "  cd $WORK && $RUN up -d --build"
+        if [ "$MIGRATION_ACTIVE" -eq 1 ] && [ "$MIGRATION_DATABASE_KIND" = embedded ]; then
+            # shellcheck disable=SC2086
+            (cd "$WORK" && $RUN stop postgres) >/dev/null 2>&1 || true
+        fi
         return
     fi
 
@@ -1328,9 +2338,14 @@ PostgreSQL хранит пароль внутри тома и новый не п
     step "сборка образа и запуск (в первый раз это несколько минут)"
     # shellcheck disable=SC2086
     (cd "$WORK" && $RUN up -d --build --remove-orphans) || die "запуск не удался; смотрите вывод выше"
+    if [ "$TLS_RESTART_REQUIRED" -eq 1 ]; then
+        # shellcheck disable=SC2086
+        (cd "$WORK" && $RUN restart "$COMPOSE_SERVICE") ||
+            die "не удалось перезапустить приложение после замены TLS"
+    fi
 
     step "жду готовности"
-    if ! wait_ready "http://127.0.0.1:$PORT/readyz"; then
+    if ! wait_ready "$READY_SCHEME://127.0.0.1:$PORT/readyz"; then
         say ""
         # shellcheck disable=SC2086
         (cd "$WORK" && $RUN logs --tail 30 "$COMPOSE_SERVICE" 2>/dev/null) || true
@@ -1402,7 +2417,18 @@ PostgreSQL хранит пароль внутри тома и новый не п
         say ""
     fi
     say "Дальше:"
-    say "  • TLS не настроен — при необходимости поставьте обратный прокси перед портом $PORT."
+    if [ "$READY_SCHEME" = https ]; then
+        say "  • Собственный TLS включён. Добавьте сертификат в доверенные на рабочих местах."
+        say "    Сертификат можно заменить повторным запуском установщика с --tls."
+    else
+        say "  • Собственный TLS не настроен — при необходимости поставьте reverse proxy перед портом $PORT."
+    fi
+    if [ "$MIGRATION_ACTIVE" -eq 1 ]; then
+        say "  • Подключите на новом сервере прежние backup/restore mount points и проверьте их запись."
+        if [ "$(env_file_value "$WORK/.env" JHV_OIDC_ENABLED)" = true ]; then
+            say "  • В OIDC-провайдере проверьте redirect URI: $URL/api/v1/auth/oidc/callback"
+        fi
+    fi
     say "  • Скопируйте ключ шифрования отдельно от базы и не туда, где копии:"
     say "      cd $WORK && $RUN cp $COMPOSE_SERVICE:/app/data/secret.key ./secret.key.backup"
     say "  • Чек-лист перед боем: docs/DEPLOY.md"
@@ -1569,6 +2595,78 @@ check_installed_config() {
         -config "$PREFIX/config/$CONFIG_NAME" -check-config
 }
 
+migration_apply_systemd_files() {
+    [ "$MIGRATION_ACTIVE" -eq 1 ] || return 0
+    [ -f "$MIGRATION_TMP/environment/systemd.env" ] || die "в пакете нет systemd env"
+    [ -f "$MIGRATION_TMP/config/$CONFIG_NAME" ] || die "в пакете нет YAML"
+    cp "$MIGRATION_TMP/config/$CONFIG_NAME" "$PREFIX/config/$CONFIG_NAME"
+    cp "$MIGRATION_TMP/environment/systemd.env" "$PREFIX/config/jhvirt.env"
+    cp "$MIGRATION_TMP/data/secret.key" "$PREFIX/data/secret.key"
+    [ ! -s "$MIGRATION_TMP/data/metrics.token" ] ||
+        cp "$MIGRATION_TMP/data/metrics.token" "$PREFIX/config/metrics.token"
+    rewrite_prefix_file "$PREFIX/config/$CONFIG_NAME" "$MIGRATION_SOURCE_PREFIX" "$PREFIX"
+    rewrite_prefix_file "$PREFIX/config/jhvirt.env" "$MIGRATION_SOURCE_PREFIX" "$PREFIX"
+    set_env JHV_SERVER_EXTERNAL_URL "$URL" "$PREFIX/config/jhvirt.env"
+    set_env JHV_SERVER_PORT "$PORT" "$PREFIX/config/jhvirt.env"
+    set_env JHV_AUTH_BOOTSTRAP_PASSWORD "" "$PREFIX/config/jhvirt.env"
+    set_env JHV_METRICS_TOKEN_FILE "$PREFIX/config/metrics.token" "$PREFIX/config/jhvirt.env"
+    say "    YAML, env, secret.key и runtime-настройки восстановлены из пакета"
+}
+
+migration_restore_systemd_database() {
+    [ "$MIGRATION_ACTIVE" -eq 1 ] || return 0
+    [ "$MIGRATION_DATABASE_KIND" = embedded ] || return 0
+    [ -s "$MIGRATION_TMP/database/jhvirt.dump" ] || die "в пакете нет dump PostgreSQL"
+    step "восстановление PostgreSQL из пакета"
+    runuser -u postgres -- pg_restore -d jhvirt --clean --if-exists \
+        --no-owner --no-privileges --role="$USER_NAME" \
+        "$MIGRATION_TMP/database/jhvirt.dump" || die "не удалось восстановить базу jhvirt"
+    say "    база, пользователи, задания и runtime-настройки восстановлены"
+}
+
+systemd_write_paths() {
+    SWP_VALUE="$PREFIX/data $PREFIX/logs"
+    if [ "$MIGRATION_ACTIVE" -eq 1 ] && [ -s "$MIGRATION_TMP/systemd-write-paths" ]; then
+        SWP_IMPORTED="$(sed -n '1p' "$MIGRATION_TMP/systemd-write-paths")"
+        SWP_TEMP="$MIGRATION_TMP/systemd-write-paths.rewritten"
+        printf '%s\n' "$SWP_IMPORTED" > "$SWP_TEMP"
+        rewrite_prefix_file "$SWP_TEMP" "$MIGRATION_SOURCE_PREFIX" "$PREFIX"
+        SWP_VALUE="$(sed -n '1p' "$SWP_TEMP")"
+    elif [ -f "$UNIT" ]; then
+        SWP_EXISTING="$(sed -n 's/^ReadWritePaths=//p' "$UNIT" | head -n 1)"
+        [ -z "$SWP_EXISTING" ] || SWP_VALUE="$SWP_EXISTING"
+    fi
+    for SWP_PATH in $SWP_VALUE; do
+        case "$SWP_PATH" in
+            /*) ;;
+            *) die "ReadWritePaths содержит не абсолютный путь: $SWP_PATH" ;;
+        esac
+        case "$SWP_PATH" in
+            *[!A-Za-z0-9_./-]*) die "ReadWritePaths содержит неподдерживаемый путь: $SWP_PATH" ;;
+        esac
+    done
+    printf '%s' "$SWP_VALUE"
+}
+
+prepare_systemd_write_paths() {
+    for PSWP_PATH in $1; do
+        if [ ! -d "$PSWP_PATH" ]; then
+            case "$PSWP_PATH" in
+                "$PREFIX"/*)
+                    install -d -o "$USER_NAME" -g "$USER_NAME" -m 0750 "$PSWP_PATH"
+                    ;;
+                *)
+                    die "внешний путь из ReadWritePaths не найден: $PSWP_PATH
+Сначала подключите прежнее хранилище или создайте каталог на новом сервере,
+назначьте владельца $USER_NAME:$USER_NAME и повторите импорт."
+                    ;;
+            esac
+        fi
+        runuser -u "$USER_NAME" -- test -w "$PSWP_PATH" ||
+            die "пользователь $USER_NAME не может писать в $PSWP_PATH"
+    done
+}
+
 install_systemd() {
     [ "$BUNDLE" -eq 1 ] || die "установка службой возможна только из комплекта .run
 Из репозитория соберите его: ./run build --target linux/amd64"
@@ -1623,10 +2721,15 @@ install_systemd() {
 
     # Конфигурацию не трогаем: в ней уже могут быть правки оператора.
     install_bundle_config
+	migration_apply_systemd_files
 
     chown -R "$USER_NAME:$USER_NAME" "$PREFIX"
     chmod 700 "$PREFIX/data"
     chmod 750 "$PREFIX/logs"
+	chmod 750 "$PREFIX/config"
+	chmod 640 "$PREFIX/config/$CONFIG_NAME"
+	chmod 600 "$PREFIX/config/jhvirt.env" 2>/dev/null || true
+	chmod 600 "$PREFIX/data/secret.key" 2>/dev/null || true
 
     ENV_FILE="$PREFIX/config/jhvirt.env"
     ENV_EXISTED=0
@@ -1636,6 +2739,14 @@ install_systemd() {
     if [ -n "$DATABASE_URL_FILE" ]; then
         step "подключение внешней PostgreSQL"
         read_external_database_url
+        set_env JHV_DATABASE_URL "$DATABASE_URL" "$ENV_FILE"
+    elif [ "$MIGRATION_ACTIVE" -eq 1 ] && [ "$MIGRATION_DATABASE_KIND" = embedded ]; then
+        if have runuser && id postgres >/dev/null 2>&1 &&
+                runuser -u postgres -- psql -d jhvirt -Atc \
+                    "select to_regclass('public.users') is not null" 2>/dev/null | grep -q t; then
+            die "локальная база jhvirt на новом сервере уже содержит данные; импорт остановлен"
+        fi
+        prepare_local_postgres
         set_env JHV_DATABASE_URL "$DATABASE_URL" "$ENV_FILE"
     elif [ "$ENV_EXISTED" -eq 0 ]; then
         prepare_local_postgres
@@ -1658,6 +2769,8 @@ install_systemd() {
 	chmod 600 "$METRICS_TOKEN_FILE"
 	set_env JHV_METRICS_ENABLED true "$ENV_FILE"
 	set_env JHV_METRICS_TOKEN_FILE "$METRICS_TOKEN_FILE" "$ENV_FILE"
+	install_tls_systemd "$ENV_FILE"
+	migration_restore_systemd_database
 
     ADMPASS=""
     if [ "$START" -eq 1 ] && [ "$ENV_EXISTED" -eq 0 ] &&
@@ -1669,7 +2782,10 @@ install_systemd() {
         set_env JHV_AUTH_BOOTSTRAP_PASSWORD "" "$ENV_FILE"
     fi
 
+    SYSTEMD_WRITE_PATHS="$(systemd_write_paths)"
+	prepare_systemd_write_paths "$SYSTEMD_WRITE_PATHS"
     sed -e "s|@PREFIX@|$PREFIX|g" -e "s|@USER_NAME@|$USER_NAME|g" \
+        -e "s|@READ_WRITE_PATHS@|$SYSTEMD_WRITE_PATHS|g" \
         "$HERE/systemd/jhvirt.service" > "$UNIT.tmp"
     install -m 0644 "$UNIT.tmp" "$UNIT"
     rm -f "$UNIT.tmp"
@@ -1694,7 +2810,7 @@ install_systemd() {
             systemctl start jhvirt
         fi
         step "жду готовности"
-        if ! wait_ready "http://127.0.0.1:$PORT/readyz"; then
+        if ! wait_ready "$READY_SCHEME://127.0.0.1:$PORT/readyz"; then
             journalctl -u jhvirt -n 40 --no-pager || true
             die "за 3 минуты служба не стала готова — последние строки журнала выше"
         fi
@@ -1732,6 +2848,13 @@ install_systemd() {
     fi
     say "Журнал: journalctl -u jhvirt -f"
     say "Ключ шифрования: $PREFIX/data/secret.key — сохраните его отдельно от базы."
+    if [ "$READY_SCHEME" = https ]; then
+        say "TLS: $PREFIX/config/tls/server.crt — добавьте сертификат в доверенные на рабочих местах."
+    fi
+    if [ "$MIGRATION_ACTIVE" -eq 1 ]; then
+        say "Проверьте существование и владельцев внешних путей из ReadWritePaths:"
+        say "  $SYSTEMD_WRITE_PATHS"
+    fi
 }
 
 case "$MODE" in

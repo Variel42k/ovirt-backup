@@ -1,6 +1,7 @@
 package kvm
 
 import (
+	"fmt"
 	"strings"
 
 	"adveng/jh_virt/internal/backup"
@@ -55,6 +56,16 @@ func profileForDomain(info *libvirtx.Domain, manifests []*backup.DiskManifest) *
 	}
 	if !hasBoot && len(profile.Disks) > 0 {
 		profile.Disks[0].BootOrder = 1
+	}
+	for i, nic := range info.Interfaces {
+		id := nic.Alias
+		if id == "" {
+			id = fmt.Sprintf("nic-%d", i)
+		}
+		profile.NICs = append(profile.NICs, backup.VMProfileNIC{
+			ID: id, Name: nic.Alias, Model: nic.Model, MAC: nic.MAC,
+			Network: nic.Source, SourceProfile: nic.Source, SourceKind: nic.Kind,
+		})
 	}
 	return profile
 }

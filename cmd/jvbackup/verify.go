@@ -20,11 +20,15 @@ import (
 
 func cmdVerify(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("verify", flag.ExitOnError)
+	timezone := timezoneFlag(fs)
 	repoSpec := fs.String("repo", "", "хранилище копий")
 	runID := fs.String("run", "", "идентификатор копии")
 	mode := fs.String("mode", "manifest", "режим: quick, chain, manifest, structure, restore")
 	keyFile := fs.String("keyfile", "./jvbackup.key", "файл ключа шифрования")
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := applyTimezone(*timezone); err != nil {
 		return err
 	}
 	if *runID == "" {
@@ -48,7 +52,7 @@ func cmdVerify(ctx context.Context, args []string) error {
 	fmt.Printf("Цепочка из %d звеньев:\n", len(chain))
 	for _, link := range chain {
 		fmt.Printf("  %-38s %-14s %s\n", link.Manifest.RunID, string(link.Manifest.Type),
-			link.Manifest.CreatedAt.Local().Format("2006-01-02 15:04:05"))
+			link.Manifest.CreatedAt.In(cliLocation).Format("2006-01-02 15:04:05"))
 	}
 
 	cipher := loadCipherIfPresent(*keyFile)
@@ -264,6 +268,7 @@ func verifyRestore(ctx context.Context, backend repo.Backend, cipher *secret.Cip
 
 func cmdRestore(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("restore", flag.ExitOnError)
+	timezone := timezoneFlag(fs)
 	repoSpec := fs.String("repo", "", "хранилище копий")
 	runID := fs.String("run", "", "идентификатор копии")
 	outDir := fs.String("out", ".", "каталог для восстановленных образов")
@@ -271,6 +276,9 @@ func cmdRestore(ctx context.Context, args []string) error {
 	only := fs.String("disk", "", "восстановить только этот диск")
 	keyFile := fs.String("keyfile", "./jvbackup.key", "файл ключа шифрования")
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := applyTimezone(*timezone); err != nil {
 		return err
 	}
 	if *runID == "" {
@@ -304,7 +312,7 @@ func cmdRestore(ctx context.Context, args []string) error {
 	}
 
 	fmt.Printf("Восстановление копии %s (%s от %s), звеньев в цепочке: %d\n",
-		leaf.RunID, leaf.VMName, leaf.CreatedAt.Local().Format("2006-01-02 15:04:05"), len(chain))
+		leaf.RunID, leaf.VMName, leaf.CreatedAt.In(cliLocation).Format("2006-01-02 15:04:05"), len(chain))
 
 	for _, diskID := range order {
 		if *only != "" && diskID != *only {

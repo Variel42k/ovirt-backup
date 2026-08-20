@@ -4,14 +4,14 @@ package scheduler
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"regexp"
-	"slices"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/robfig/cron/v3"
 	"github.com/rs/zerolog"
 
@@ -19,6 +19,7 @@ import (
 	"adveng/jh_virt/internal/config"
 	"adveng/jh_virt/internal/dispatch"
 	"adveng/jh_virt/internal/events"
+	"adveng/jh_virt/internal/filebackup"
 	"adveng/jh_virt/internal/model"
 	"adveng/jh_virt/internal/quality"
 	"adveng/jh_virt/internal/replication"
@@ -58,6 +59,7 @@ type Scheduler struct {
 	log        zerolog.Logger
 	quality    *quality.Service
 	replicator *replication.Replicator
+	fileBackup *filebackup.Engine
 
 	cron *cron.Cron
 	// scheduleMu serializes job reloads with a timezone change. robfig/cron can
@@ -77,12 +79,19 @@ type Scheduler struct {
 	active map[string]struct{}
 
 	// workers ограничивает число одновременно выполняющихся бэкапов.
-	workers chan struct{}
-	baseCtx context.Context
+	workers     chan struct{}
+	taskWake    chan struct{}
+	taskSlotsMu sync.Mutex
+	taskSlots   map[string]chan struct{}
+	baseCtx     context.Context
 }
 
 func (s *Scheduler) SetReplicator(replicator *replication.Replicator) {
 	s.replicator = replicator
+}
+
+func (s *Scheduler) SetFileBackupEngine(engine *filebackup.Engine) {
+	s.fileBackup = engine
 }
 
 // SetQualityService connects the schedule-aware health evaluator. It is kept
@@ -103,18 +112,20 @@ func New(st *store.Store, engine *dispatch.Dispatcher, cfg config.Config, bus *e
 	}
 	loc := cfg.Location()
 	return &Scheduler{
-		store:    st,
-		engine:   engine,
-		cfg:      cfg,
-		bus:      bus,
-		log:      log,
-		cron:     cron.New(cron.WithLocation(loc), cron.WithParser(cronParser)),
-		timezone: cfg.Scheduler.Timezone,
-		location: loc,
-		entries:  map[string]cron.EntryID{},
-		running:  map[string]context.CancelFunc{},
-		active:   map[string]struct{}{},
-		workers:  make(chan struct{}, workers),
+		store:     st,
+		engine:    engine,
+		cfg:       cfg,
+		bus:       bus,
+		log:       log,
+		cron:      cron.New(cron.WithLocation(loc), cron.WithParser(cronParser)),
+		timezone:  cfg.Scheduler.Timezone,
+		location:  loc,
+		entries:   map[string]cron.EntryID{},
+		running:   map[string]context.CancelFunc{},
+		active:    map[string]struct{}{},
+		workers:   make(chan struct{}, workers),
+		taskWake:  make(chan struct{}, 1),
+		taskSlots: map[string]chan struct{}{},
 	}
 }
 
@@ -183,6 +194,12 @@ func cronSpecInTimezone(spec, timezone string) string {
 // Start loads the jobs, registers the housekeeping tasks and begins ticking.
 func (s *Scheduler) Start(ctx context.Context) error {
 	s.baseCtx = ctx
+	if err := s.recoverTaskFinalizations(ctx); err != nil {
+		return fmt.Errorf("восстановление итогов очереди: %w", err)
+	}
+	for i := 0; i < cap(s.workers); i++ {
+		go s.taskWorker(ctx, fmt.Sprintf("%s-%d", uuid.NewString(), i))
+	}
 
 	if err := s.registerMaintenance(); err != nil {
 		return err
@@ -314,6 +331,17 @@ func (s *Scheduler) reload(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("загрузка заданий: %w", err)
 	}
+	var fileJobs []*model.FileBackupJob
+	if s.cfg.FileBackup.Enabled {
+		fileJobs, err = s.store.ListFileBackupJobs(ctx)
+		if err != nil {
+			return fmt.Errorf("загрузка заданий файлового бекапа: %w", err)
+		}
+	}
+	engineJobs, err := s.store.ListEngineConfigJobs(ctx)
+	if err != nil {
+		return fmt.Errorf("загрузка заданий снимков Engine: %w", err)
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -354,9 +382,97 @@ func (s *Scheduler) reload(ctx context.Context) error {
 			s.log.Debug().Err(err).Msg("не удалось сохранить время следующего запуска")
 		}
 	}
+	for _, job := range fileJobs {
+		if !job.Enabled || job.Schedule == "" || s.fileBackup == nil {
+			continue
+		}
+		if _, err := ValidateSchedule(job.Schedule, loc); err != nil {
+			s.log.Error().Err(err).Str("файловое задание", job.Name).
+				Msg("задание пропущено: не удалось разобрать расписание")
+			continue
+		}
+		jobID := job.ID
+		entryID, err := s.cron.AddFunc(cronSpecInTimezone(job.Schedule, timezone), func() {
+			s.runScheduledFile(jobID)
+		})
+		if err != nil {
+			s.log.Error().Err(err).Str("файловое задание", job.Name).Msg("не удалось зарегистрировать задание")
+			continue
+		}
+		s.entries["file:"+jobID] = entryID
+		active++
+	}
+	for _, job := range engineJobs {
+		if !job.Enabled || job.Schedule == "" {
+			continue
+		}
+		if _, err := ValidateSchedule(job.Schedule, loc); err != nil {
+			s.log.Error().Err(err).Str("задание Engine", job.Name).
+				Msg("задание пропущено: не удалось разобрать расписание")
+			continue
+		}
+		jobID := job.ID
+		entryID, err := s.cron.AddFunc(cronSpecInTimezone(job.Schedule, timezone), func() {
+			s.runScheduledEngineConfig(jobID)
+		})
+		if err != nil {
+			s.log.Error().Err(err).Str("задание Engine", job.Name).Msg("не удалось зарегистрировать задание")
+			continue
+		}
+		s.entries["engine:"+jobID] = entryID
+		active++
+	}
 
-	s.log.Info().Int("активных заданий", active).Int("всего", len(jobs)).Msg("расписание перечитано")
+	s.log.Info().Int("активных заданий", active).Int("всего", len(jobs)+len(fileJobs)+len(engineJobs)).Msg("расписание перечитано")
 	return nil
+}
+
+func (s *Scheduler) runScheduledEngineConfig(jobID string) {
+	ctx := s.baseCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	job, err := s.store.GetEngineConfigJob(ctx, jobID)
+	if err != nil {
+		s.log.Error().Err(err).Str("задание Engine", jobID).Msg("задание не найдено")
+		return
+	}
+	busy, err := s.store.HasActiveEngineConfigRun(ctx, job.ID)
+	if err != nil {
+		s.log.Error().Err(err).Str("задание Engine", job.Name).Msg("не удалось проверить активный запуск")
+		return
+	}
+	if busy {
+		s.log.Warn().Str("задание Engine", job.Name).Msg("точка расписания пропущена: предыдущий снимок ещё выполняется")
+		return
+	}
+	if _, err := s.engine.SnapshotEngineConfigJob(ctx, job); err != nil {
+		s.log.Error().Err(err).Str("задание Engine", job.Name).Msg("снимок Engine по расписанию не создан")
+		return
+	}
+	if err := s.engine.ApplyEngineConfigRetention(ctx, job); err != nil {
+		s.log.Warn().Err(err).Str("задание Engine", job.Name).Msg("ретенция снимков Engine не отработала")
+	}
+}
+
+func (s *Scheduler) runScheduledFile(jobID string) {
+	ctx := s.baseCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	busy, err := s.store.HasActiveFileBackupRun(ctx, jobID)
+	if err != nil {
+		s.log.Error().Err(err).Str("файловое задание", jobID).Msg("не удалось проверить активные запуски")
+		return
+	}
+	if busy {
+		s.log.Warn().Str("файловое задание", jobID).
+			Msg("точка расписания пропущена: предыдущий файловый бекап ещё выполняется")
+		return
+	}
+	if _, err := s.fileBackup.Start(ctx, jobID); err != nil {
+		s.log.Error().Err(err).Str("файловое задание", jobID).Msg("не удалось запустить файловый бекап по расписанию")
+	}
 }
 
 // registerMaintenance wires the periodic housekeeping.
@@ -426,7 +542,7 @@ func (s *Scheduler) TriggerJob(ctx context.Context, jobID, triggeredBy string, s
 	if err != nil {
 		return nil, err
 	}
-	if len(job.StorageTargetIDs) == 0 {
+	if job.Type != model.BackupOVA && len(job.StorageTargetIDs) == 0 {
 		return nil, fmt.Errorf("у задания %q не выбрано ни одного хранилища", job.Name)
 	}
 
@@ -438,6 +554,9 @@ func (s *Scheduler) TriggerJob(ctx context.Context, jobID, triggeredBy string, s
 	jobRun := &model.BackupJobRun{JobID: job.ID, JobName: job.Name, ServerID: job.ServerID,
 		TriggeredBy: triggeredBy, ScheduledAt: scheduledAt, Status: model.RunRunning,
 		VMCount: len(vms), ReplicaCount: len(vms) * len(job.StorageTargetIDs), StartedAt: &now}
+	if job.Type == model.BackupOVA {
+		jobRun.ReplicaCount = len(vms)
+	}
 	if len(vms) == 0 {
 		s.log.Warn().Str("задание", job.Name).Msg("задание не выбрало ни одной ВМ")
 		jobRun.Status, jobRun.Error, jobRun.EndedAt = model.RunFailed, "задание не выбрало ни одной ВМ", &now
@@ -451,7 +570,11 @@ func (s *Scheduler) TriggerJob(ctx context.Context, jobID, triggeredBy string, s
 	// предыдущий запуск ещё идёт, второй не начинаем: для инкрементальных
 	// цепочек два одновременных бэкапа одной ВМ вдобавок соревнуются за
 	// родительский чекпоинт и оставляют цепочку в неопределённом состоянии.
-	if !s.claimJob(job.ID) {
+	openTasks, openErr := s.store.HasOpenBackupTasks(ctx, job.ID, "")
+	if openErr != nil {
+		return nil, openErr
+	}
+	if openTasks || !s.claimJob(job.ID) {
 		jobRun.EndedAt = &now
 		if scheduledAt != nil {
 			jobRun.Status, jobRun.MissedIntervals = model.RunMissed, 1
@@ -490,7 +613,7 @@ func (s *Scheduler) TriggerJob(ctx context.Context, jobID, triggeredBy string, s
 		Str("инициатор", triggeredBy).
 		Msg("задание запущено")
 
-	var wg sync.WaitGroup
+	var requests []backup.RunRequest
 
 	for _, vm := range vms {
 		// Какие хранилища получают данные напрямую от гипервизора:
@@ -499,12 +622,16 @@ func (s *Scheduler) TriggerJob(ctx context.Context, jobID, triggeredBy string, s
 		//   separate  — по запуску на каждое, то есть диск читается заново.
 		targetIDs := job.StorageTargetIDs
 		var mirrorIDs []string
-		switch job.StorageMode {
-		case model.StorageModeCopy:
-			targetIDs = job.StorageTargetIDs[:1]
-		case model.StorageModeParallel:
-			targetIDs = job.StorageTargetIDs[:1]
-			mirrorIDs = job.StorageTargetIDs[1:]
+		if job.Type == model.BackupOVA {
+			targetIDs = []string{""}
+		} else {
+			switch job.StorageMode {
+			case model.StorageModeCopy:
+				targetIDs = job.StorageTargetIDs[:1]
+			case model.StorageModeParallel:
+				targetIDs = job.StorageTargetIDs[:1]
+				mirrorIDs = job.StorageTargetIDs[1:]
+			}
 		}
 		for _, targetID := range targetIDs {
 			runType := job.Type
@@ -525,28 +652,49 @@ func (s *Scheduler) TriggerJob(ctx context.Context, jobID, triggeredBy string, s
 				ExcludeDiskIDs:  job.ExcludeDiskIDs,
 				Quiesce:         job.Quiesce,
 				Encrypt:         job.Encrypt,
+				ExportQcow2:     job.ExportQcow2,
 				VerifyAfter:     job.VerifyAfter,
 				VerifyOptions:   job.VerifyOptions,
 				Retention:       job.Retention,
+				OVAHostID:       job.OVAHostID,
+				OVADirectory:    job.OVADirectory,
 				TriggeredBy:     triggeredBy,
 			}
-			wg.Add(1)
-			go func(req backup.RunRequest, job *model.BackupJob) {
-				defer wg.Done()
-				s.executeOne(ctx, req, job)
-			}(req, job)
+			requests = append(requests, req)
 		}
 	}
 
-	// Wait in the background so an operator pressing "run now" gets an
-	// immediate answer while the work continues.
-	go func() {
-		defer s.releaseJob(job.ID)
-		wg.Wait()
-		s.finishJob(context.WithoutCancel(ctx), job, jobRun)
-	}()
+	tasks := make([]*model.BackupTask, 0, len(requests))
+	for _, req := range requests {
+		payload, marshalErr := json.Marshal(queuedBackupTask{Request: req, Job: *job})
+		if marshalErr != nil {
+			s.releaseJob(job.ID)
+			return nil, fmt.Errorf("сериализация задачи бэкапа: %w", marshalErr)
+		}
+		tasks = append(tasks, &model.BackupTask{
+			JobRunID: jobRun.ID, JobID: job.ID, ServerID: req.ServerID, VMID: req.VMID,
+			Priority: job.Priority, Concurrency: max(1, job.Concurrency), Payload: payload,
+		})
+	}
+	if err := s.store.EnqueueBackupTasks(ctx, tasks); err != nil {
+		s.releaseJob(job.ID)
+		jobRun.Status, jobRun.Error = model.RunFailed, err.Error()
+		ended := time.Now().UTC()
+		jobRun.EndedAt = &ended
+		_ = s.store.UpdateBackupJobRun(ctx, jobRun)
+		return nil, err
+	}
+	select {
+	case s.taskWake <- struct{}{}:
+	default:
+	}
 
 	return jobRun, nil
+}
+
+type queuedBackupTask struct {
+	Request backup.RunRequest `json:"request"`
+	Job     model.BackupJob   `json:"job"`
 }
 
 // claimJob помечает задание выполняющимся. Возвращает false, если оно уже
@@ -585,18 +733,183 @@ func (s *Scheduler) RunOnce(ctx context.Context, req backup.RunRequest) {
 	go s.executeOne(ctx, req, nil)
 }
 
+const backupTaskLease = 2 * time.Minute
+
+func (s *Scheduler) taskWorker(ctx context.Context, owner string) {
+	for {
+		tasks, err := s.store.ClaimBackupTasks(ctx, owner, 1, backupTaskLease)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			s.log.Warn().Err(err).Msg("не удалось получить задачу бэкапа из очереди")
+		}
+		if len(tasks) == 0 {
+			timer := time.NewTimer(time.Second)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-s.taskWake:
+				timer.Stop()
+			case <-timer.C:
+			}
+			continue
+		}
+		s.executeBackupTask(ctx, owner, tasks[0])
+	}
+}
+
+func (s *Scheduler) executeBackupTask(ctx context.Context, owner string, task *model.BackupTask) {
+	var payload queuedBackupTask
+	if err := json.Unmarshal(task.Payload, &payload); err != nil {
+		finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+		defer cancel()
+		_ = s.store.FinishBackupTask(finishCtx, task.ID, owner, model.BackupTaskFailed, err.Error())
+		s.maybeFinalizeBackupTaskGroup(finishCtx, task, nil)
+		return
+	}
+	s.mu.Lock()
+	s.active[task.JobID] = struct{}{}
+	s.mu.Unlock()
+
+	release, err := s.acquireTaskSlot(ctx, task.JobID, task.Concurrency)
+	if err != nil {
+		return // the lease expires and another leader can resume the work
+	}
+	defer release()
+
+	heartbeatDone := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(backupTaskLease / 3)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-heartbeatDone:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				_, _ = s.store.RenewBackupTaskLease(context.WithoutCancel(ctx), task.ID, owner, backupTaskLease)
+			}
+		}
+	}()
+	execErr := s.executeOne(ctx, payload.Request, &payload.Job)
+	close(heartbeatDone)
+	status, message := model.BackupTaskSucceeded, ""
+	if execErr != nil {
+		status, message = model.BackupTaskFailed, execErr.Error()
+	}
+	finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+	defer cancel()
+	if err := s.store.FinishBackupTask(finishCtx, task.ID, owner, status, message); err != nil {
+		s.log.Warn().Err(err).Str("task", task.ID).Msg("не удалось завершить задачу очереди")
+		return
+	}
+	s.maybeFinalizeBackupTaskGroup(finishCtx, task, &payload.Job)
+}
+
+func (s *Scheduler) maybeFinalizeBackupTaskGroup(ctx context.Context, task *model.BackupTask, job *model.BackupJob) {
+	open, err := s.store.HasOpenBackupTasks(ctx, "", task.JobRunID)
+	if err != nil || open {
+		return
+	}
+	claimed, err := s.store.ClaimBackupJobRunFinalization(ctx, task.JobRunID)
+	if err != nil || !claimed {
+		return
+	}
+	s.releaseJob(task.JobID)
+	if job == nil {
+		job, err = s.store.GetBackupJob(ctx, task.JobID)
+		if err != nil {
+			s.log.Error().Err(err).Str("запуск", task.JobRunID).Msg("не удалось завершить запуск задания")
+			return
+		}
+	}
+	jobRun, err := s.store.GetBackupJobRun(ctx, task.JobRunID)
+	if err == nil {
+		s.finishJob(ctx, job, jobRun)
+	}
+}
+
+// recoverTaskFinalizations completes task groups whose last worker finished
+// just before a crash. It also handles older queued groups created before the
+// durable finalization marker existed.
+func (s *Scheduler) recoverTaskFinalizations(ctx context.Context) error {
+	runs, err := s.store.ListBackupJobRuns(ctx, store.JobRunFilter{
+		Statuses: []model.RunStatus{model.RunRunning, model.RunWaitingCopies}, Limit: 1000,
+	})
+	if err != nil {
+		return err
+	}
+	for _, run := range runs {
+		open, openErr := s.store.HasOpenBackupTasks(ctx, "", run.ID)
+		if openErr != nil {
+			return openErr
+		}
+		if open {
+			continue
+		}
+		if run.Status == model.RunRunning {
+			claimed, claimErr := s.store.ClaimBackupJobRunFinalization(ctx, run.ID)
+			if claimErr != nil {
+				return claimErr
+			}
+			if !claimed {
+				continue
+			}
+		}
+		task, taskErr := s.store.GetBackupTaskForJobRun(ctx, run.ID)
+		if taskErr != nil {
+			s.log.Warn().Err(taskErr).Str("запуск", run.ID).Msg("нет payload для восстановления итога")
+			continue
+		}
+		var payload queuedBackupTask
+		if err := json.Unmarshal(task.Payload, &payload); err != nil {
+			job, jobErr := s.store.GetBackupJob(ctx, run.JobID)
+			if jobErr != nil {
+				return fmt.Errorf("запуск %s: повреждён payload: %w; задание: %v", run.ID, err, jobErr)
+			}
+			payload.Job = *job
+		}
+		s.releaseJob(run.JobID)
+		s.finishJob(ctx, &payload.Job, run)
+	}
+	return nil
+}
+
+func (s *Scheduler) acquireTaskSlot(ctx context.Context, jobID string, concurrency int) (func(), error) {
+	if concurrency <= 0 {
+		concurrency = 1
+	}
+	s.taskSlotsMu.Lock()
+	sem := s.taskSlots[jobID]
+	if sem == nil {
+		sem = make(chan struct{}, concurrency)
+		s.taskSlots[jobID] = sem
+	}
+	s.taskSlotsMu.Unlock()
+	select {
+	case sem <- struct{}{}:
+		return func() { <-sem }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
 // executeOne runs a single backup, respecting the worker limit.
-func (s *Scheduler) executeOne(ctx context.Context, req backup.RunRequest, job *model.BackupJob) {
+func (s *Scheduler) executeOne(ctx context.Context, req backup.RunRequest, job *model.BackupJob) (execErr error) {
 	select {
 	case s.workers <- struct{}{}:
 	case <-ctx.Done():
-		return
+		return ctx.Err()
 	}
 	defer func() { <-s.workers }()
 
 	defer func() {
 		if p := recover(); p != nil {
 			s.log.Error().Interface("паника", p).Str("вм", req.VMID).Msg("бэкап завершился аварийно")
+			execErr = fmt.Errorf("паника выполнения бэкапа: %v", p)
 		}
 	}()
 
@@ -642,7 +955,7 @@ func (s *Scheduler) executeOne(ctx context.Context, req backup.RunRequest, job *
 		if run != nil {
 			s.raiseBackupAlert(ctx, run, err)
 		}
-		return
+		return err
 	}
 
 	_ = s.store.ResolveAlert(ctx, run.ServerID, model.ScopeBackup,
@@ -672,6 +985,7 @@ func (s *Scheduler) executeOne(ctx context.Context, req backup.RunRequest, job *
 			s.log.Warn().Err(err).Str("вм", run.VMName).Msg("ретенция после бэкапа не отработала")
 		}
 	}
+	return nil
 }
 
 func (s *Scheduler) finishJob(ctx context.Context, job *model.BackupJob, jobRun *model.BackupJobRun) {
@@ -683,6 +997,7 @@ func (s *Scheduler) finishJob(ctx context.Context, job *model.BackupJob, jobRun 
 		return
 	}
 
+	jobRun.SucceededCount, jobRun.PartialCount, jobRun.FailedCount, jobRun.CanceledCount = 0, 0, 0, 0
 	status := model.RunSucceeded
 	primaryFailed := false
 	targets := make(map[string]struct{}, len(job.StorageTargetIDs))
@@ -690,7 +1005,7 @@ func (s *Scheduler) finishJob(ctx context.Context, job *model.BackupJob, jobRun 
 		targets[targetID] = struct{}{}
 	}
 	for _, r := range runs {
-		if job.ReplicationEnabled {
+		if job.StorageMode == model.StorageModeCopy || job.StorageMode == model.StorageModeParallel {
 			copies, copyErr := s.store.ListBackupCopies(ctx, r.ID)
 			if copyErr != nil {
 				jobRun.FailedCount += len(job.StorageTargetIDs)
@@ -739,6 +1054,11 @@ func (s *Scheduler) finishJob(ctx context.Context, job *model.BackupJob, jobRun 
 	switch {
 	case primaryFailed:
 		status = model.RunFailed
+	case jobRun.FailedCount > 0 && jobRun.SucceededCount == 0 && jobRun.PartialCount == 0:
+		// If no VM/copy produced a usable result, the whole job failed.  This
+		// also covers a worker that failed before it could create a BackupRun:
+		// the missing replica is accounted as failed just above.
+		status = model.RunFailed
 	case jobRun.FailedCount > 0 || jobRun.PartialCount > 0:
 		status = model.RunPartial
 	case jobRun.CanceledCount == jobRun.ReplicaCount:
@@ -786,26 +1106,14 @@ func (s *Scheduler) resolveVMs(ctx context.Context, job *model.BackupJob) ([]*mo
 		return nil, err
 	}
 
-	var nameRe *regexp.Regexp
-	if job.VMNameRegex != "" {
-		nameRe, err = regexp.Compile(job.VMNameRegex)
-		if err != nil {
-			return nil, fmt.Errorf("некорректное выражение отбора по имени %q: %w", job.VMNameRegex, err)
-		}
+	selector, err := model.NewVMSelector(job)
+	if err != nil {
+		return nil, err
 	}
-
-	selectorEmpty := len(job.VMIDs) == 0 && nameRe == nil && len(job.ClusterIDs) == 0
 
 	out := make([]*model.VM, 0, len(all))
 	for _, vm := range all {
-		if slices.Contains(job.ExcludeVMIDs, vm.ID) {
-			continue
-		}
-		match := selectorEmpty ||
-			slices.Contains(job.VMIDs, vm.ID) ||
-			slices.Contains(job.ClusterIDs, vm.ClusterID) ||
-			(nameRe != nil && nameRe.MatchString(vm.Name))
-		if match {
+		if match, _ := selector.Match(vm); match {
 			out = append(out, vm)
 		}
 	}
@@ -861,6 +1169,11 @@ func (s *Scheduler) runRetention(ctx context.Context) {
 						Int64("освобождено", plan.FreedBytes).Msg("ретенция выполнена")
 				}
 			}
+		}
+	}
+	if s.fileBackup != nil {
+		if err := s.fileBackup.ApplyRetention(ctx); err != nil {
+			s.log.Warn().Err(err).Msg("ретенция файловых бекапов не отработала")
 		}
 	}
 }

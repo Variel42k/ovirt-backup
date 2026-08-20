@@ -347,10 +347,10 @@ const stateColumns = [
 
 <style scoped>
 .jhv-quality-metric { min-height: 72px; }
-.jhv-chart { border: 1px solid #d8dde3; padding: 12px; background: #fff; }
+.jhv-chart { border: 1px solid var(--jhv-border); padding: 12px; background: var(--jhv-surface-panel); }
 .jhv-chart svg, .jhv-capacity-chart { width: 100%; aspect-ratio: 1000 / 220; display: block; }
 .jhv-capacity-chart { aspect-ratio: 600 / 130; }
-.jhv-chart__grid { stroke: #e6e9ed; stroke-width: 1; }
+.jhv-chart__grid { stroke: var(--jhv-chart-grid); stroke-width: 1; }
 .jhv-chart__line { fill: none; stroke-width: 4; vector-effect: non-scaling-stroke; }
 .jhv-chart__line--p50 { stroke: #1976d2; }
 .jhv-chart__line--p95 { stroke: #d1495b; }

@@ -194,7 +194,7 @@ onMounted(async () => {
   top: 72px;
   max-height: calc(100vh - 96px);
   overflow-y: auto;
-  border-right: 1px solid #d9dde3;
+  border-right: 1px solid var(--jhv-border);
   padding-right: 16px;
 }
 
@@ -210,7 +210,7 @@ onMounted(async () => {
   scroll-margin-top: 72px;
   padding: 8px 0 32px;
   margin-bottom: 28px;
-  border-bottom: 1px solid #d9dde3;
+  border-bottom: 1px solid var(--jhv-border);
 }
 
 .doc-article :deep(.q-table__middle) {

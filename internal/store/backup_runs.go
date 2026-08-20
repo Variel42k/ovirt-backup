@@ -476,7 +476,7 @@ func scanVerify(row rowScanner) (*model.VerifyRun, error) {
 
 const restoreColumns = `id, run_id, target, status, disk_ids, output_path, output_format,
 	target_server_id, target_disk_id, target_domain_id, target_vm_id, progress, error,
-	started_at, ended_at, created_at, copy_id`
+	started_at, ended_at, created_at, copy_id, target_vm_name, phase, cleanup_errors`
 
 // CreateRestoreRun records a restore request.
 func (s *Store) CreateRestoreRun(ctx context.Context, r *model.RestoreRun) error {
@@ -487,10 +487,11 @@ func (s *Store) CreateRestoreRun(ctx context.Context, r *model.RestoreRun) error
 		r.CreatedAt = time.Now().UTC()
 	}
 	_, err := s.db.Exec(ctx, `INSERT INTO restore_runs (`+restoreColumns+`)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		r.ID, r.RunID, string(r.Target), string(r.Status), encodeJSON(r.DiskIDs), r.OutputPath,
 		r.OutputFormat, r.TargetServerID, r.TargetDiskID, r.TargetDomainID, r.TargetVMID,
-		r.Progress, r.Error, r.StartedAt, r.EndedAt, r.CreatedAt, nullString(r.CopyID))
+		r.Progress, r.Error, r.StartedAt, r.EndedAt, r.CreatedAt, nullString(r.CopyID),
+		r.TargetVMName, r.Phase, encodeJSON(r.CleanupErrors))
 	if err != nil {
 		return fmt.Errorf("insert restore run: %w", err)
 	}
@@ -500,9 +501,10 @@ func (s *Store) CreateRestoreRun(ctx context.Context, r *model.RestoreRun) error
 // UpdateRestoreRun persists progress and outcome of a restore.
 func (s *Store) UpdateRestoreRun(ctx context.Context, r *model.RestoreRun) error {
 	_, err := s.db.Exec(ctx, `UPDATE restore_runs SET status=?, output_path=?, target_disk_id=?,
-		progress=?, error=?, started_at=?, ended_at=? WHERE id=?`,
-		string(r.Status), r.OutputPath, r.TargetDiskID, r.Progress, r.Error,
-		r.StartedAt, r.EndedAt, r.ID)
+		target_vm_id=?, target_vm_name=?, phase=?, cleanup_errors=?, progress=?, error=?,
+		started_at=?, ended_at=? WHERE id=?`,
+		string(r.Status), r.OutputPath, r.TargetDiskID, r.TargetVMID, r.TargetVMName,
+		r.Phase, encodeJSON(r.CleanupErrors), r.Progress, r.Error, r.StartedAt, r.EndedAt, r.ID)
 	return err
 }
 
@@ -552,9 +554,10 @@ func scanRestore(row rowScanner) (*model.RestoreRun, error) {
 		createdAt          time.Time
 	)
 	var copyID sql.NullString
+	var cleanupErrors string
 	err := row.Scan(&r.ID, &r.RunID, &target, &status, &diskIDs, &r.OutputPath, &r.OutputFormat,
 		&r.TargetServerID, &r.TargetDiskID, &r.TargetDomainID, &r.TargetVMID, &r.Progress,
-		&r.Error, &startedAt, &endedAt, &createdAt, &copyID)
+		&r.Error, &startedAt, &endedAt, &createdAt, &copyID, &r.TargetVMName, &r.Phase, &cleanupErrors)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -565,6 +568,7 @@ func scanRestore(row rowScanner) (*model.RestoreRun, error) {
 	r.CopyID = copyID.String
 	r.Status = model.RunStatus(status)
 	r.DiskIDs = decodeStrings(diskIDs)
+	r.CleanupErrors = decodeStrings(cleanupErrors)
 	r.StartedAt = nullTime(startedAt)
 	r.EndedAt = nullTime(endedAt)
 	r.CreatedAt = utc(createdAt)

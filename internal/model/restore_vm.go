@@ -37,8 +37,11 @@ const (
 
 // RestoreVMRequest describes a full VM restore.
 type RestoreVMRequest struct {
-	RunID  string `json:"run_id"`
-	CopyID string `json:"copy_id,omitempty"`
+	// RestoreID is assigned by the API before background execution so clients
+	// can subscribe to progress immediately. It is not part of the wire input.
+	RestoreID string `json:"-"`
+	RunID     string `json:"run_id"`
+	CopyID    string `json:"copy_id,omitempty"`
 	// ServerID — куда восстанавливать; пусто — туда же, откуда снималась копия.
 	ServerID string `json:"server_id,omitempty"`
 	// Name — имя новой машины. Пусто — предложенное службой.
@@ -47,7 +50,8 @@ type RestoreVMRequest struct {
 	ClusterID       string `json:"cluster_id,omitempty"`
 	StorageDomainID string `json:"storage_domain_id,omitempty"`
 
-	Network RestoreVMNetwork `json:"network,omitempty"`
+	Network         RestoreVMNetwork          `json:"network,omitempty"`
+	NetworkMappings []RestoreVMNetworkMapping `json:"network_mappings,omitempty"`
 	// Start — запустить сразу после сборки.
 	//
 	// По умолчанию нет: между «машина собрана» и «машина работает» оператор
@@ -57,6 +61,27 @@ type RestoreVMRequest struct {
 	Start bool `json:"start,omitempty"`
 	// Confirm требуется, когда восстановление затрагивает существующую машину.
 	Confirm bool `json:"confirm,omitempty"`
+}
+
+// RestoreVMNetworkMapping maps one saved NIC to an oVirt vNIC profile or a
+// libvirt network/bridge. MAC is intentionally not accepted: the target
+// platform generates a fresh address.
+type RestoreVMNetworkMapping struct {
+	NICID      string `json:"nic_id"`
+	TargetID   string `json:"target_id,omitempty"`
+	TargetKind string `json:"target_kind,omitempty"` // vnic_profile | network | bridge
+	Exclude    bool   `json:"exclude,omitempty"`
+	Connected  bool   `json:"connected,omitempty"`
+}
+
+// RestoreNetworkTarget is a live network choice offered for full VM restore.
+type RestoreNetworkTarget struct {
+	ID       string `json:"id"`
+	ServerID string `json:"server_id"`
+	Name     string `json:"name"`
+	Kind     string `json:"kind"` // vnic_profile | network
+	Network  string `json:"network,omitempty"`
+	Status   string `json:"status,omitempty"`
 }
 
 // RestoreVMPlan is what the service intends to do, shown before it starts.
@@ -74,6 +99,7 @@ type RestoreVMPlan struct {
 	Created  time.Time `json:"created_at"`
 
 	Disks []RestoreVMPlanDisk `json:"disks"`
+	NICs  []RestoreVMPlanNIC  `json:"nics,omitempty"`
 	// TotalBytes — сколько места потребуется в домене хранения.
 	TotalBytes int64 `json:"total_bytes"`
 	// FreeBytes — сколько там есть; -1, если движок не сообщил.
@@ -88,12 +114,24 @@ type RestoreVMPlan struct {
 	Blockers []string `json:"blockers,omitempty"`
 }
 
+type RestoreVMPlanNIC struct {
+	NICID      string `json:"nic_id"`
+	Name       string `json:"name,omitempty"`
+	Model      string `json:"model,omitempty"`
+	SourceMAC  string `json:"source_mac,omitempty"`
+	TargetID   string `json:"target_id,omitempty"`
+	TargetKind string `json:"target_kind,omitempty"`
+	Excluded   bool   `json:"excluded,omitempty"`
+	Connected  bool   `json:"connected,omitempty"`
+}
+
 // RestoreVMPlanDisk is one disk of the future VM.
 type RestoreVMPlanDisk struct {
 	DiskID      string `json:"disk_id"`
 	Alias       string `json:"alias"`
 	Target      string `json:"target"`
 	Bus         string `json:"bus"`
+	BootOrder   int    `json:"boot_order,omitempty"`
 	Bootable    bool   `json:"bootable"`
 	VirtualSize int64  `json:"virtual_size"`
 }
@@ -125,6 +163,24 @@ func (r *RestoreVMRequest) Validate() error {
 	default:
 		return fmt.Errorf("неизвестный режим сети %q: допустимы %s и %s",
 			r.Network, RestoreNetworkDetached, RestoreNetworkAttached)
+	}
+	seenNICs := map[string]bool{}
+	for _, mapping := range r.NetworkMappings {
+		if strings.TrimSpace(mapping.NICID) == "" {
+			return fmt.Errorf("в network_mappings не указан nic_id")
+		}
+		if seenNICs[mapping.NICID] {
+			return fmt.Errorf("NIC %q указан в network_mappings дважды", mapping.NICID)
+		}
+		seenNICs[mapping.NICID] = true
+		switch mapping.TargetKind {
+		case "", "vnic_profile", "network", "bridge":
+		default:
+			return fmt.Errorf("неизвестный тип сетевой цели %q", mapping.TargetKind)
+		}
+		if !mapping.Exclude && mapping.Connected && strings.TrimSpace(mapping.TargetID) == "" {
+			return fmt.Errorf("для подключённого NIC %q не указана целевая сеть", mapping.NICID)
+		}
 	}
 	// Имя проверяется здесь, а не движком: его сообщение о недопустимом имени
 	// приходит уже после создания дисков, и убирать за собой приходится руками.

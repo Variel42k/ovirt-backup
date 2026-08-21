@@ -30,6 +30,7 @@ import type {
   Host,
   ListResponse,
   Meta,
+  MeResponse,
   MountSample,
   OidcInfo,
   Recommendation,
@@ -51,6 +52,8 @@ import type {
   VM,
 } from './types'
 import type {
+  ApiToken,
+  ApiTokenCreated,
   AuditEntry,
   BackupQualitySettings,
   LogStatus,
@@ -237,7 +240,7 @@ export const api = {
   login: (username: string, password: string) =>
     http.post('/auth/login', { username, password }).then((r) => r.data),
   logout: () => http.post('/auth/logout').then((r) => r.data),
-  me: () => http.get('/auth/me').then((r) => r.data),
+  me: () => http.get<MeResponse>('/auth/me').then((r) => r.data),
   oidcInfo: () => http.get<OidcInfo>('/auth/oidc/info').then((r) => r.data),
   /**
    * Адрес начала внешнего входа.
@@ -478,4 +481,13 @@ export const api = {
   createUser: (payload: Record<string, unknown>) => http.post<User>('/users', payload).then((r) => r.data),
   updateUser: (id: string, payload: Record<string, unknown>) => http.put<User>(`/users/${id}`, payload).then((r) => r.data),
   deleteUser: (id: string) => http.delete(`/users/${id}`).then((r) => r.data),
+
+  listApiTokens: () => http.get<ListResponse<ApiToken>>('/api-tokens').then((r) => unwrap(r.data)),
+  // Ответ на создание — единственное место, где виден сам токен: в базе лежит
+  // только его хеш.
+  createApiToken: (payload: Record<string, unknown>) =>
+    http.post<ApiTokenCreated>('/api-tokens', payload).then((r) => r.data),
+  updateApiToken: (id: string, payload: Record<string, unknown>) =>
+    http.put<ApiToken>(`/api-tokens/${id}`, payload).then((r) => r.data),
+  deleteApiToken: (id: string) => http.delete(`/api-tokens/${id}`).then((r) => r.data),
 }

@@ -54,6 +54,9 @@ ovirt-backup — команды разработки и сборки
   ./run check           формат, go vet, тесты, проверка типов интерфейса
   ./run fmt             отформатировать код
 
+  ./run sbom            состав зависимостей в формате CycloneDX
+  ./run vuln            поиск уязвимостей: govulncheck, grype, trivy
+
   ./run docker          собрать docker-образ
   ./run version         показать версию, из которой соберётся бинарь
   ./run clean           удалить артефакты сборки
@@ -275,6 +278,187 @@ cmd_docker() {
     step "сборка образа ovirt-backup:$V"
     docker build --build-arg "VERSION=$V" -t "ovirt-backup:$V" .
     say "готово: ovirt-backup:$V"
+}
+
+# --- Состав зависимостей и уязвимости ---------------------------------------
+
+# Версии инструментов закреплены намеренно. У сканера обновляется не только
+# код, но и база правил, поэтому «последний» однажды красит вчера зелёную
+# сборку, ничего не изменив в проекте. Версию поднимают отдельным решением,
+# видя, что именно изменилось, — иначе разбираться приходится в тот момент,
+# когда чинить надо совсем другое.
+#
+# Эти же значения читает CI: он вытаскивает их отсюда, чтобы проверка на
+# машине разработчика и проверка в CI не разъехались молча.
+SYFT_VERSION="v1.51.0"
+GRYPE_VERSION="v0.117.0"
+TRIVY_VERSION="v0.74.0"
+GOVULNCHECK_VERSION="v1.7.0"
+
+SBOM_DIR="dist/sbom"
+
+# Запускает инструмент из PATH, а если его там нет — собирает go-модулем.
+#
+# Своих бинарей syft, grype и trivy здесь не скачивается: они раздаются
+# релизами на GitHub, а он доступен не из всякой сети, где этот проект
+# собирают. Через модульный прокси то же самое ставится везде, где уже
+# работает `go mod download`, — то есть везде, где проект вообще собирается.
+#
+# Первый такой запуск занимает минуты: инструмент собирается из исходников.
+# Дальше его забирает кэш сборки Go.
+run_tool() {
+    tool="$1"
+    module="$2"
+    shift 2
+    if command -v "$tool" >/dev/null 2>&1; then
+        "$tool" "$@"
+    else
+        go run "$module" "$@"
+    fi
+}
+
+# trivy собирается отдельно от прочих: с версии 0.7x он использует
+# encoding/json/v2, а тот в Go 1.26 ещё закрыт экспериментальным флагом. Без
+# GOEXPERIMENT сборка падает на «build constraints exclude all Go files» —
+# сообщение, по которому причина не угадывается вовсе.
+#
+# На готовый бинарь из PATH это не влияет: он уже собран.
+run_trivy() {
+    if command -v trivy >/dev/null 2>&1; then
+        trivy "$@"
+    else
+        GOEXPERIMENT=jsonv2 go run "github.com/aquasecurity/trivy/cmd/trivy@$TRIVY_VERSION" "$@"
+    fi
+}
+
+# Имя собранного образа, если он есть. Пусто — образа нет.
+built_image() {
+    command -v docker >/dev/null 2>&1 || return 0
+    IMG="ovirt-backup:$(version)"
+    docker image inspect "$IMG" >/dev/null 2>&1 && printf '%s\n' "$IMG"
+    return 0
+}
+
+cmd_sbom() {
+    need go "нужен Go 1.26+"
+    V="$(version)"
+    mkdir -p "$SBOM_DIR"
+
+    step "состав зависимостей исходников (CycloneDX)"
+    # Каталог целиком, а не go.mod и package-lock.json по отдельности: так в
+    # состав попадает и то, что лежит в дереве помимо объявленных зависимостей.
+    #
+    # node_modules исключены: их содержимое уже описано в package-lock.json, и
+    # без исключения каждый пакет попадает в состав дважды.
+    #
+    # bin и dist — результат прошлой сборки, и исключены они не для скорости.
+    # syft читает собранный бинарь и берёт версию stdlib из него, а не из
+    # go.mod. Бинарь, собранный месяц назад прошлым Go, приносит в состав
+    # исходников уязвимости того Go — которых в исходниках нет, а в следующей
+    # сборке не будет и в бинаре. Состав от этого перестаёт быть
+    # воспроизводимым: он зависит от того, что случайно осталось в каталоге.
+    # Настоящую версию stdlib показывает состав образа, где бинарь собран
+    # только что.
+    run_tool syft "github.com/anchore/syft/cmd/syft@$SYFT_VERSION" \
+        scan dir:. \
+        --exclude './web/node_modules' \
+        --exclude './bin' \
+        --exclude './dist' \
+        --exclude './web/dist' \
+        --source-name ovirt-backup --source-version "$V" \
+        -o "cyclonedx-json=$SBOM_DIR/source.cdx.json"
+    say "    $SBOM_DIR/source.cdx.json"
+
+    # Состав образа снимается отдельно. В нём есть то, чего нет в исходниках, —
+    # alpine, qemu-img, ca-certificates, — и уязвимость приходит оттуда не реже,
+    # чем из go.mod. По составу исходников её не видно вовсе.
+    IMG="$(built_image)"
+    if [ -n "$IMG" ]; then
+        step "состав образа $IMG (CycloneDX)"
+        run_tool syft "github.com/anchore/syft/cmd/syft@$SYFT_VERSION" \
+            scan "docker:$IMG" \
+            -o "cyclonedx-json=$SBOM_DIR/image.cdx.json"
+        say "    $SBOM_DIR/image.cdx.json"
+    else
+        say ""
+        say "состав образа пропущен: образа ovirt-backup:$V нет (соберёт ./run docker)"
+    fi
+}
+
+cmd_vuln() {
+    need go "нужен Go 1.26+"
+    failed=""
+
+    # govulncheck идёт первым и стоит особняком: он единственный смотрит не на
+    # версию модуля, а на то, вызывается ли уязвимая функция вообще. Его
+    # находка почти всегда настоящая, поэтому валит проверку любая.
+    step "govulncheck — достижимость уязвимого кода"
+    go run "golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION" ./... ||
+        failed="$failed govulncheck"
+
+    # Состав снимается заново, если его нет или если появился образ, которого
+    # не было в прошлый раз.
+    if [ ! -f "$SBOM_DIR/source.cdx.json" ] ||
+        { [ -n "$(built_image)" ] && [ ! -f "$SBOM_DIR/image.cdx.json" ]; }; then
+        cmd_sbom
+    fi
+
+    # Порог high и только исправимое. Без этого список растёт за счёт того,
+    # чего починить нельзя, к длинному списку привыкают и перестают читать — а
+    # вместе с ним перестают замечать и то, что починить как раз можно.
+    step "grype — объявленный состав исходников"
+    run_tool grype "github.com/anchore/grype/cmd/grype@$GRYPE_VERSION" \
+        "sbom:$SBOM_DIR/source.cdx.json" --fail-on high --only-fixed ||
+        failed="$failed grype"
+
+    # trivy держится рядом с grype намеренно: базы у них разные, и каждая
+    # регулярно знает то, чего не знает вторая. Разница в минуту прогона.
+    #
+    # misconfig читает Dockerfile — оба, свой и bundle, — и находит то, чего не
+    # найдёт ни один сканер пакетов: отсутствующий USER, лишние права, лишний
+    # порт.
+    #
+    # docker-compose.yml он при этом не смотрит: среди его типов настроек
+    # compose нет вовсе. Права контейнера, read_only и cap_drop заданы именно
+    # там, и проверять их приходится глазами — на автоматику здесь
+    # рассчитывать нельзя.
+    step "trivy — зависимости, секреты, настройки сборки"
+    # --no-progress: полоса загрузки рисуется возвратом каретки, а в журнале
+    # CI, где каретки нет, от неё остаются сотни строк с процентами. Среди них
+    # не видно ни находок, ни причины отказа.
+    run_trivy \
+        fs --scanners vuln,secret,misconfig --no-progress \
+        --ignore-unfixed --severity HIGH,CRITICAL --exit-code 1 \
+        --skip-dirs web/node_modules --skip-dirs bin --skip-dirs dist \
+        --skip-dirs web/dist \
+        . || failed="$failed trivy"
+
+    IMG="$(built_image)"
+    if [ -n "$IMG" ]; then
+        # Проверка образа не дополнительная, а основная. Полный состав есть
+        # только у него: в дереве исходников объявлен 61 модуль, а в графе,
+        # который попадает в бинарь, их около 280 — остальные транзитивные, и
+        # по go.mod их не видно. Плюс сам базовый образ.
+        step "grype — полный состав образа $IMG"
+        run_tool grype "github.com/anchore/grype/cmd/grype@$GRYPE_VERSION" \
+            "sbom:$SBOM_DIR/image.cdx.json" --fail-on high --only-fixed ||
+            failed="$failed grype-image"
+
+        step "trivy — образ $IMG"
+        run_trivy \
+            image --no-progress --ignore-unfixed --severity HIGH,CRITICAL \
+            --exit-code 1 "$IMG" ||
+            failed="$failed trivy-image"
+    else
+        say ""
+        say "образа нет, проверен только объявленный состав (соберёт ./run docker)."
+        say "весь граф модулей Go при этом всё равно прошёл через govulncheck,"
+        say "непроверенным остаётся базовый образ: alpine, qemu-img, ca-certificates"
+    fi
+
+    say ""
+    [ -z "$failed" ] || die "замечания нашли:$failed"
+    say "уязвимостей уровня high и выше, для которых есть исправление, не найдено"
 }
 
 cmd_clean() {
@@ -624,6 +808,8 @@ case "$COMMAND" in
     check)          cmd_check ;;
     fmt|format)     cmd_fmt ;;
     vet)            cmd_vet ;;
+    sbom)           cmd_sbom ;;
+    vuln)           cmd_vuln ;;
     docker)         cmd_docker ;;
     version)        cmd_version ;;
     clean)          cmd_clean ;;

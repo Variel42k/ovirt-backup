@@ -1,0 +1,10 @@
+justhpc-virt-manager (ovirt-backup)
+Copyright 2026 Variel42k
+
+Licensed under the Apache License, Version 2.0. See the LICENSE file.
+
+This product bundles a dependency distributed under the LGPL-3.0
+(github.com/cloudsoda/sddl, pulled in transitively by the SMB client
+github.com/cloudsoda/go-smb2). Binary distributions must be accompanied by a
+reference to the corresponding source code. See the "Лицензия и статус"
+section in README.md.

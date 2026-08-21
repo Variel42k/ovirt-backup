@@ -2920,6 +2920,10 @@ prepare_local_postgres() {
     runuser -u "$USER_NAME" -- psql -d jhvirt -Atc 'select 1' >/dev/null ||
         die "локальная база не принимает пользователя $USER_NAME через Unix socket"
 
+    # sslmode=disable здесь правильно, а не «пока так»: host не задан, значит
+    # соединение идёт через Unix socket и сеть не задействована вовсе.
+    # Шифровать нечего. Служба это распознаёт и не возражает — возражает она
+    # на disable до базы, до которой надо идти по сети.
     DATABASE_URL="user=$USER_NAME dbname=jhvirt sslmode=disable"
 }
 

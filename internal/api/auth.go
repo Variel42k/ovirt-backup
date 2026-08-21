@@ -62,8 +62,22 @@ const principalKey contextKey = "principal"
 type principal struct {
 	Username string
 	Role     model.Role
+	// Permissions разворачиваются из роли один раз, при аутентификации.
+	// Проверять их обращением к базе на каждом обработчике значило бы делать
+	// по запросу к базе на каждую кнопку интерфейса.
+	Permissions []model.Permission
 	// Token пуст для запросов, авторизованных статическим API-токеном.
 	Token string
+}
+
+// Can сообщает, есть ли у вызывающего право.
+func (p *principal) Can(perm model.Permission) bool {
+	for _, own := range p.Permissions {
+		if own == perm {
+			return true
+		}
+	}
+	return false
 }
 
 // principalFrom extracts the caller from the request context.
@@ -341,11 +355,16 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "не авторизован", Code: "unauthorized"})
 		return
 	}
+	// permissions — то, по чему интерфейс решает, что показывать. can_write и
+	// can_administer оставлены ради уже написанных снаружи скриптов и выведены
+	// из прав, а не из имени роли: у своей роли имя произвольное, и сравнение
+	// с «admin» соврало бы для любой из них.
 	writeJSON(w, http.StatusOK, map[string]any{
 		"username":       p.Username,
 		"role":           p.Role,
-		"can_write":      p.Role.CanWrite(),
-		"can_administer": p.Role.CanAdmin(),
+		"permissions":    p.Permissions,
+		"can_write":      model.HasAnyAction(p.Permissions, model.ActionWrite),
+		"can_administer": p.Can(model.PermUsersAdmin),
 	})
 }
 
@@ -357,7 +376,8 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 			// Authentication off means the service is expected to sit behind
 			// something else that does it; everyone is an administrator here.
 			ctx := context.WithValue(r.Context(), principalKey,
-				&principal{Username: "anonymous", Role: model.RoleAdmin})
+				&principal{Username: "anonymous", Role: model.RoleAdmin,
+					Permissions: model.AllPermissions()})
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
@@ -382,13 +402,20 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 		}
 		ctx := context.WithValue(r.Context(), principalKey, &principal{
 			Username: session.Username, Role: session.Role, Token: session.Token,
+			Permissions: s.permissionsFor(r.Context(), session.Role),
 		})
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
-// principalFromToken checks the Authorization header against the configured
-// static tokens, used by integrations that cannot hold a cookie.
+// principalFromToken resolves the caller from the Authorization header, used
+// by integrations that cannot hold a cookie.
+//
+// Проверяются две разновидности. Выданные из интерфейса живут в базе, имеют
+// имя, роль и срок, и отзываются нажатием кнопки. Перечисленные в файле
+// настроек — прежний способ: любой из них означает права администратора без
+// срока и без возможности отозвать иначе как перезапуском службы. Они приняты
+// ради тех интеграций, которые уже настроены, и объявлены устаревшими.
 func (s *Server) principalFromToken(r *http.Request) *principal {
 	header := r.Header.Get("Authorization")
 	if !strings.HasPrefix(header, "Bearer ") {
@@ -398,11 +425,20 @@ func (s *Server) principalFromToken(r *http.Request) *principal {
 	if presented == "" {
 		return nil
 	}
+
+	if p := s.principalFromAPIToken(r.Context(), presented); p != nil {
+		return p
+	}
+
 	for _, token := range s.cfg.Auth.APITokens {
 		// Constant-time comparison: a timing side channel on a bearer token is
 		// a real, demonstrated attack.
 		if subtle.ConstantTimeCompare([]byte(token), []byte(presented)) == 1 {
-			return &principal{Username: "api-token", Role: model.RoleAdmin}
+			// В аудите такой токен отличим от выданного: у него нет имени, и
+			// строка «api-token (файл настроек)» — единственное, что можно о
+			// нём сказать. Ровно поэтому он и устарел.
+			return &principal{Username: "api-token (файл настроек)", Role: model.RoleAdmin,
+				Permissions: model.AllPermissions()}
 		}
 	}
 	return nil
@@ -421,35 +457,13 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 	})
 }
 
-// requireRole guards a handler with a minimum role.
-func (s *Server) requireRole(check func(model.Role) bool, next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		p := principalFrom(r.Context())
-		if p == nil {
-			writeJSON(w, http.StatusUnauthorized, errorResponse{
-				Error: "требуется вход в систему", Code: "unauthorized",
-			})
-			return
-		}
-		if !check(p.Role) {
-			writeJSON(w, http.StatusForbidden, errorResponse{
-				Error: "недостаточно прав для этой операции", Code: "forbidden",
-			})
-			return
-		}
-		next(w, r)
-	}
-}
-
-// writer wraps a handler that changes state.
-func (s *Server) writer(next http.HandlerFunc) http.HandlerFunc {
-	return s.requireRole(model.Role.CanWrite, next)
-}
-
-// admin wraps a handler that changes configuration.
-func (s *Server) admin(next http.HandlerFunc) http.HandlerFunc {
-	return s.requireRole(model.Role.CanAdmin, next)
-}
+// Проверка по роли — requireRole вместе с обёртками writer и admin — убрана
+// намеренно, а не забыта. Доступ теперь решается правом: s.perm в routes.
+//
+// Держать обе схемы рядом опаснее, чем кажется. Обёртка admin сравнивала имя
+// роли со словом «admin», и маршрут, добавленный через неё, оказался бы закрыт
+// для любой настраиваемой роли и открыт мимо каталога прав — то есть выпал бы
+// из редактора ролей, не перестав работать.
 
 func newSessionToken() (string, error) {
 	buf := make([]byte, 32)

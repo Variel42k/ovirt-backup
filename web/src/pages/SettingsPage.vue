@@ -12,6 +12,7 @@ import { bytes, dateTime } from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import type {
+  ApiToken,
   AuditEntry,
   BackupQualitySettings,
   LogStatus,
@@ -30,6 +31,13 @@ const auth = useAuthStore()
 const tab = ref('system')
 const users = ref<User[]>([])
 const audit = ref<AuditEntry[]>([])
+const apiTokens = ref<ApiToken[]>([])
+const tokenDialog = ref(false)
+const tokenBusy = ref(false)
+const tokenForm = ref({ name: '', role: 'viewer', expires_in_days: 90 })
+// Выпущенный токен показывается ровно один раз: в базе лежит только его хеш.
+// Пока эта строка не пуста, диалог показывает её вместо формы.
+const issuedToken = ref('')
 const loading = ref(false)
 const runtimeSettings = ref<RuntimeSettings | null>(null)
 const compressionBusy = ref(false)
@@ -102,12 +110,13 @@ async function load() {
   loading.value = true
   try {
     if (auth.canAdmin()) {
-      const [userList, auditList, runtime, readiness, notifications, deliveries] = await Promise.all([
+      const [userList, auditList, runtime, readiness, notifications, deliveries, tokens] = await Promise.all([
 		api.listUsers(), api.audit(300), api.runtimeSettings(), api.drReadiness(),
-		api.notificationSettings(), api.notificationDeliveries(50),
+		api.notificationSettings(), api.notificationDeliveries(50), api.listApiTokens(),
       ])
       users.value = userList
       audit.value = auditList
+      apiTokens.value = tokens
       applyRuntimeSettings(runtime)
 		drReadiness.value = readiness
 		notificationConfig.value = notifications
@@ -387,6 +396,82 @@ async function save() {
   }
 }
 
+function openTokenDialog() {
+  tokenForm.value = { name: '', role: 'viewer', expires_in_days: 90 }
+  issuedToken.value = ''
+  tokenDialog.value = true
+}
+
+async function issueToken() {
+  if (!tokenForm.value.name.trim()) {
+    notifyError(null, 'Укажите имя токена: по нему он опознаётся в журнале аудита')
+    return
+  }
+  tokenBusy.value = true
+  try {
+    const created = await api.createApiToken({ ...tokenForm.value })
+    // Диалог не закрывается: это единственный показ токена, и закрыть его
+    // должен человек, который его забрал.
+    issuedToken.value = created.token
+    await load()
+  } catch (err) {
+    notifyError(err, 'Не удалось выпустить токен')
+  } finally {
+    tokenBusy.value = false
+  }
+}
+
+async function copyIssuedToken() {
+  try {
+    await navigator.clipboard.writeText(issuedToken.value)
+    notifyOk('Токен скопирован')
+  } catch {
+    // Буфер обмена недоступен без защищённого соединения. Токен показан на
+    // экране, поэтому потерять его это не даёт — но сказать об этом надо.
+    notifyError(null, 'Браузер не дал доступ к буферу обмена, скопируйте вручную')
+  }
+}
+
+async function toggleToken(token: ApiToken) {
+  try {
+    await api.updateApiToken(token.id, { disabled: !token.disabled })
+    notifyOk(token.disabled ? 'Токен включён' : 'Токен отозван')
+    await load()
+  } catch (err) {
+    notifyError(err, 'Не удалось изменить токен')
+  }
+}
+
+function confirmDeleteToken(token: ApiToken) {
+  $q.dialog({
+    title: 'Удалить токен',
+    message: `Токен «${token.name}» перестанет работать сразу. Интеграции, которые им пользуются, получат 401.`,
+    cancel: { label: 'Отмена', flat: true },
+    ok: { label: 'Удалить', color: 'negative' },
+  }).onOk(async () => {
+    try {
+      await api.deleteApiToken(token.id)
+      notifyOk('Токен удалён')
+      await load()
+    } catch (err) {
+      notifyError(err, 'Не удалось удалить токен')
+    }
+  })
+}
+
+/** Подпись под именем токена: роль, срок и когда им пользовались. */
+function tokenCaption(token: ApiToken): string {
+  const role = app.meta?.roles.find((r) => r.value === token.role)?.title ?? token.role
+  const expires = token.expires_at ? `до ${dateTime(token.expires_at)}` : 'бессрочно'
+  const used = token.last_used_at ? `использован ${dateTime(token.last_used_at)}` : 'ни разу не использован'
+  return `${role} · ${expires} · ${used}`
+}
+
+/** Просрочен ли токен. Отозванный показывается отдельной пометкой. */
+function tokenExpired(token: ApiToken): boolean {
+  return !!token.expires_at && new Date(token.expires_at).getTime() < Date.now()
+}
+
 function confirmDelete(user: User) {
   $q.dialog({
     title: 'Удалить пользователя',
@@ -560,6 +645,7 @@ onMounted(async () => {
 		<q-tab v-if="auth.canAdmin()" name="notifications" label="Уведомления" />
 		<q-tab v-if="auth.canAdmin()" name="dr" label="Аварийная готовность" />
         <q-tab v-if="auth.canAdmin()" name="users" :label="`Пользователи (${users.length})`" />
+        <q-tab v-if="auth.canAdmin()" name="tokens" :label="`Токены API (${apiTokens.length})`" />
         <q-tab v-if="auth.canAdmin()" name="audit" label="Аудит" />
         <q-tab v-if="auth.canAdmin()" name="logs" label="Журнал" />
       </q-tabs>
@@ -1018,6 +1104,59 @@ onMounted(async () => {
           </q-list>
         </q-tab-panel>
 
+        <q-tab-panel name="tokens" class="q-pa-none">
+          <div class="row items-center q-pa-md">
+            <div class="text-subtitle1">Токены доступа к API</div>
+            <q-space />
+            <q-btn color="primary" unelevated icon="add" label="Выпустить" @click="openTokenDialog" />
+          </div>
+          <div class="q-px-md q-pb-sm text-caption text-grey-7">
+            Для интеграций, которые не могут держать сессию: скриптов, мониторинга,
+            соседних служб. Заголовок <code>Authorization: Bearer &lt;токен&gt;</code>.
+            В журнале аудита действия такого токена отмечаются его именем.
+          </div>
+          <q-list separator dense>
+            <q-item v-for="token in apiTokens" :key="token.id">
+              <q-item-section avatar>
+                <q-icon name="key" :color="token.disabled || tokenExpired(token) ? 'grey-6' : 'primary'" />
+              </q-item-section>
+              <q-item-section>
+                <q-item-label>
+                  {{ token.name }}
+                  <span class="text-grey-6 q-ml-sm">{{ token.prefix }}…</span>
+                  <q-badge v-if="token.disabled" color="grey-7" class="q-ml-sm">отозван</q-badge>
+                  <q-badge v-else-if="tokenExpired(token)" color="orange-8" class="q-ml-sm">
+                    просрочен
+                  </q-badge>
+                  <q-badge v-else-if="!token.expires_at" color="amber-8" class="q-ml-sm">
+                    бессрочный
+                    <q-tooltip>
+                      Такой токен работает, пока его не отзовут руками. Срок избавляет от
+                      забытых токенов без участия человека.
+                    </q-tooltip>
+                  </q-badge>
+                </q-item-label>
+                <q-item-label caption>{{ tokenCaption(token) }}</q-item-label>
+              </q-item-section>
+              <q-item-section side>
+                <div class="row q-gutter-xs">
+                  <q-btn
+                    flat dense round
+                    :icon="token.disabled ? 'play_arrow' : 'block'"
+                    @click="toggleToken(token)"
+                  >
+                    <q-tooltip>{{ token.disabled ? 'Включить' : 'Отозвать' }}</q-tooltip>
+                  </q-btn>
+                  <q-btn flat dense round icon="delete" color="negative" @click="confirmDeleteToken(token)" />
+                </div>
+              </q-item-section>
+            </q-item>
+            <q-item v-if="!apiTokens.length">
+              <q-item-section class="text-grey-6">Токенов нет</q-item-section>
+            </q-item>
+          </q-list>
+        </q-tab-panel>
+
         <q-tab-panel name="audit" class="q-pa-none">
           <q-list separator dense>
             <q-item v-for="entry in audit" :key="entry.id">
@@ -1238,6 +1377,78 @@ onMounted(async () => {
         </q-card-actions>
       </q-card>
     </q-dialog>
+
+    <!-- Выпуск токена. Пока issuedToken пуст — форма; после выпуска диалог
+         показывает сам токен и больше не возвращается к форме: второй раз
+         узнать его неоткуда, в базе лежит только хеш. -->
+    <q-dialog v-model="tokenDialog" persistent>
+      <q-card style="width: 560px; max-width: 95vw">
+        <q-card-section class="text-h6">
+          {{ issuedToken ? 'Токен выпущен' : 'Новый токен доступа' }}
+        </q-card-section>
+        <q-separator />
+
+        <q-card-section v-if="!issuedToken" class="q-gutter-md">
+          <q-input
+            v-model="tokenForm.name"
+            label="Имя"
+            hint="Попадёт в журнал аудита: «токен:имя». Назовите по потребителю — prometheus, ansible"
+            outlined
+            dense
+            autofocus
+          />
+          <q-select
+            v-model="tokenForm.role"
+            :options="(app.meta?.roles ?? []).map((r) => ({ label: r.title, value: r.value }))"
+            emit-value
+            map-options
+            label="Роль"
+            hint="Выдавайте наименьшую, которой хватает: сбору метрик достаточно чтения"
+            outlined
+            dense
+          />
+          <q-input
+            v-model.number="tokenForm.expires_in_days"
+            type="number"
+            label="Срок, дней"
+            hint="0 — бессрочно. Такой токен придётся отзывать руками, когда о нём вспомнят"
+            outlined
+            dense
+          />
+        </q-card-section>
+
+        <q-card-section v-else class="q-gutter-md">
+          <q-banner dense class="bg-orange-1">
+            <template #avatar><q-icon name="warning" color="orange-9" /></template>
+            Токен показывается один раз. В базе хранится только его хеш — восстановить
+            выданное нельзя, потерян значит выпускайте новый.
+          </q-banner>
+          <q-input
+            :model-value="issuedToken"
+            readonly
+            outlined
+            dense
+            input-style="font-family: monospace"
+          >
+            <template #append>
+              <q-btn flat dense round icon="content_copy" @click="copyIssuedToken">
+                <q-tooltip>Скопировать</q-tooltip>
+              </q-btn>
+            </template>
+          </q-input>
+        </q-card-section>
+
+        <q-separator />
+        <q-card-actions align="right">
+          <template v-if="!issuedToken">
+            <q-btn flat label="Отмена" v-close-popup />
+            <q-btn color="primary" unelevated label="Выпустить" :loading="tokenBusy" @click="issueToken" />
+          </template>
+          <q-btn v-else color="primary" unelevated label="Готово, токен сохранён" v-close-popup />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
+
     <!-- Архив периода наблюдения -->
     <q-dialog v-model="archiveOpen">
       <q-card style="width: 900px; max-width: 96vw">

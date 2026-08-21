@@ -14,6 +14,27 @@ export interface User {
   updated_at: string
 }
 
+/** Токен доступа к API для интеграции, которая не может держать cookie. */
+export interface ApiToken {
+  id: string
+  name: string
+  /** Открытая часть токена. По ней он опознаётся в журнале и в списке. */
+  prefix: string
+  role: Role
+  created_by?: string
+  created_at: string
+  /** Пусто — бессрочный: такой отзывают только руками. */
+  expires_at?: string
+  /** Пусто — токеном ни разу не пользовались. */
+  last_used_at?: string
+  disabled: boolean
+}
+
+/** Ответ на выпуск токена — единственный раз, когда виден сам токен. */
+export interface ApiTokenCreated extends ApiToken {
+  token: string
+}
+
 export interface AuditEntry {
   id: number
   actor: string

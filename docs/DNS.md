@@ -232,9 +232,12 @@ docker compose exec -T ovirt-backup \
 - SSO может возвращать абсолютные URL с hostname;
 - смена IP снова потребует изменения подключения.
 
-## 8. Настройка тестового сервера `10.249.251.210`
+## 8. Пример постоянной настройки на сервере
 
-Для текущей сети используется постоянный файл:
+Адреса здесь — из диапазона, отведённого стандартом под документацию
+(RFC 5737). Подставьте свои.
+
+Для постоянной настройки используется файл:
 
 ```text
 /etc/netplan/90-jhvirt-corporate-dns.yaml
@@ -249,11 +252,11 @@ network:
     enp6s0:
       nameservers:
         addresses:
-          - 10.249.251.12
-          - 10.249.254.2
-          - 10.249.254.22
+          - 203.0.113.12
+          - 203.0.113.2
+          - 203.0.113.22
         search:
-          - "~pish.advengineering.local"
+          - "~pish.example.local"
 ```
 
 Контрольные команды:
@@ -261,14 +264,15 @@ network:
 ```bash
 sudo netplan get ethernets.enp6s0.nameservers
 resolvectl domain enp6s0
-resolvectl query dengine.pish.advengineering.local
+resolvectl query dengine.pish.example.local
 
 cd /home/user/ovirt-backup/deploy
 sudo docker compose exec -T ovirt-backup \
-  getent ahostsv4 dengine.pish.advengineering.local
+  getent ahostsv4 dengine.pish.example.local
 ```
 
-Ожидаемый адрес движка на момент проверки: `10.249.16.66`.
+Обе команды обязаны вернуть один и тот же адрес движка. Разошлись — значит
+контейнер разрешает имя не через те DNS-серверы, что хост: смотрите раздел 2.
 
 ## 9. DNS при переносе приложения
 

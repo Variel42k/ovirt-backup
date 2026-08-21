@@ -14,11 +14,9 @@ const (
 	RoleViewer Role = "viewer"
 )
 
-// CanWrite reports whether the role may change VM/backup state.
-func (r Role) CanWrite() bool { return r == RoleAdmin || r == RoleOperator }
-
-// CanAdmin reports whether the role may change connections, storages and users.
-func (r Role) CanAdmin() bool { return r == RoleAdmin }
+// Методов CanWrite и CanAdmin у роли больше нет: они сравнивали имя роли с
+// «admin» и «operator», а имя настраиваемой роли произвольно. Что роль может —
+// решает её набор прав, см. permission.go и role.go.
 
 // Откуда взялась учётная запись.
 const (
@@ -69,6 +67,41 @@ type Session struct {
 
 // Expired reports whether the session is no longer valid at t.
 func (s *Session) Expired(t time.Time) bool { return t.After(s.ExpiresAt) }
+
+// APIToken — доступ к API для того, кто не может держать куку: скрипта,
+// системы мониторинга, соседней службы.
+//
+// У токена есть имя, роль и срок, потому что все три однажды понадобятся: имя
+// — чтобы в журнале аудита было видно, кто именно это сделал; роль — чтобы
+// выгрузка отчётов не могла удалить задание; срок — чтобы забытый токен
+// переставал работать сам, а не ждал, пока о нём вспомнят.
+type APIToken struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	// Prefix — открытая часть токена. По ней строка находится в таблице, и
+	// только после этого сверяется секрет. По ней же токен узнаётся в журнале.
+	Prefix     string     `json:"prefix"`
+	Role       Role       `json:"role"`
+	CreatedBy  string     `json:"created_by,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
+	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
+	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
+	Disabled   bool       `json:"disabled"`
+
+	// SecretHash не отдаётся наружу никогда: восстановить по нему токен нельзя,
+	// но и показывать его незачем.
+	SecretHash []byte `json:"-"`
+}
+
+// Expired reports whether the token is past its expiry at t.
+func (t APIToken) Expired(at time.Time) bool {
+	return t.ExpiresAt != nil && at.After(*t.ExpiresAt)
+}
+
+// Usable reports whether the token may authenticate a request at t.
+func (t APIToken) Usable(at time.Time) bool {
+	return !t.Disabled && !t.Expired(at)
+}
 
 // AuditEntry records a state-changing API call for traceability.
 type AuditEntry struct {

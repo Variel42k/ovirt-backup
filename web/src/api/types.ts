@@ -6,7 +6,24 @@ export type RunStatus = 'pending' | 'running' | 'waiting_copies' | 'succeeded' |
 export type Severity = 'info' | 'warning' | 'critical'
 export type AlertState = 'firing' | 'acked' | 'resolved'
 export type DesiredState = 'as_is' | 'up' | 'down'
-export type Role = 'admin' | 'operator' | 'viewer'
+/**
+ * Имя роли. Три встроенные перечислены, но роль может быть и настраиваемой —
+ * тогда имя произвольное, поэтому тип открытый.
+ *
+ * Решать по имени, что показывать, нельзя: для своей роли любое сравнение с
+ * 'admin' даст false при полном наборе прав. Для этого есть auth.can().
+ */
+export type Role = 'admin' | 'operator' | 'viewer' | (string & {})
+
+/** Ответ /auth/me: кто вошёл и что ему разрешено. */
+export interface MeResponse {
+  username: string
+  role: Role
+  /** Права вида 'раздел.действие'. Единственный источник для показа разделов. */
+  permissions: string[]
+  can_write: boolean
+  can_administer: boolean
+}
 
 export interface Server {
   id: string

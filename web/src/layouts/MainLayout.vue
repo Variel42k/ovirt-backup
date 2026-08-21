@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   api,
@@ -32,20 +32,31 @@ const themeOptions: { value: ThemeMode; label: string; icon: string }[] = [
   { value: 'dark', label: 'Тёмная', icon: 'dark_mode' },
 ]
 
-const links = [
-  { name: 'dashboard', label: 'Обзор', icon: 'dashboard' },
-  { name: 'servers', label: 'Серверы', icon: 'dns' },
-  { name: 'jobs', label: 'Задания бэкапа', icon: 'event_repeat' },
-  { name: 'backups', label: 'Бэкапы', icon: 'backup' },
-  { name: 'engine-config', label: 'Конфигурация Engine', icon: 'account_tree' },
-	{ name: 'file-backups', label: 'Файловые бекапы', icon: 'folder_copy' },
-  { name: 'coverage', label: 'Защита', icon: 'shield' },
-  { name: 'retention', label: 'Хранение', icon: 'auto_delete' },
-  { name: 'storages', label: 'Хранилища', icon: 'inventory_2' },
-  { name: 'alerts', label: 'Оповещения', icon: 'notifications_active' },
-  { name: 'documentation', label: 'Документация', icon: 'menu_book' },
-  { name: 'settings', label: 'Настройки', icon: 'settings' },
+// perm — право, без которого пункт не показывается. Пустое означает «виден
+// всем вошедшим»: справка и настройки самого браузера прав не требуют, а
+// раздел «Настройки» держит в себе и общие вкладки, и администраторские —
+// закрывать его целиком значило бы спрятать выбор часового пояса от того, кому
+// он и нужен.
+//
+// Пункт без права всё равно упрётся в отказ сервера: меню решает, что показать,
+// а не что разрешить. Скрывать его надо не ради безопасности, а чтобы человек
+// не тыкался в разделы, которые ему всё равно ответят 403.
+const allLinks = [
+  { name: 'dashboard', label: 'Обзор', icon: 'dashboard', perm: 'monitoring.read' },
+  { name: 'servers', label: 'Серверы', icon: 'dns', perm: 'servers.read' },
+  { name: 'jobs', label: 'Задания бэкапа', icon: 'event_repeat', perm: 'jobs.read' },
+  { name: 'backups', label: 'Бэкапы', icon: 'backup', perm: 'backups.read' },
+  { name: 'engine-config', label: 'Конфигурация Engine', icon: 'account_tree', perm: 'engine_config.read' },
+	{ name: 'file-backups', label: 'Файловые бекапы', icon: 'folder_copy', perm: 'file_backups.read' },
+  { name: 'coverage', label: 'Защита', icon: 'shield', perm: 'monitoring.read' },
+  { name: 'retention', label: 'Хранение', icon: 'auto_delete', perm: 'backups.read' },
+  { name: 'storages', label: 'Хранилища', icon: 'inventory_2', perm: 'storages.read' },
+  { name: 'alerts', label: 'Оповещения', icon: 'notifications_active', perm: 'alerts.read' },
+  { name: 'documentation', label: 'Документация', icon: 'menu_book', perm: '' },
+  { name: 'settings', label: 'Настройки', icon: 'settings', perm: '' },
 ]
+
+const links = computed(() => allLinks.filter((l) => !l.perm || auth.can(l.perm)))
 
 async function refreshAlertCount() {
   try {

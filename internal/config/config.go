@@ -5,6 +5,8 @@ package config
 
 import (
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -296,6 +298,68 @@ func (d DatabaseConfig) Target() string {
 		d.Postgres.User, d.Postgres.Host, d.Postgres.Port, d.Postgres.Database)
 }
 
+// tlsSettings достаёт режим TLS и хост базы из любой из принимаемых форм.
+//
+// Разбор здесь нарочно мелкий и терпимый к незнакомому: строку целиком всё
+// равно разбирает pgx, и повторять его работу смысла нет. Ответить нужно на
+// один вопрос — не ходит ли служба к удалённой базе открытым текстом.
+func (d DatabaseConfig) tlsSettings() (mode, host string) {
+	raw := strings.TrimSpace(d.Postgres.URL)
+	if raw == "" {
+		return strings.ToLower(strings.TrimSpace(d.Postgres.SSLMode)), d.Postgres.Host
+	}
+
+	if strings.HasPrefix(raw, "postgres://") || strings.HasPrefix(raw, "postgresql://") {
+		u, err := url.Parse(raw)
+		if err != nil {
+			// Нечитаемый URL — забота pgx: он скажет о нём внятнее, чем
+			// проверка, которой от строки нужны два поля.
+			return "", ""
+		}
+		return strings.ToLower(u.Query().Get("sslmode")), u.Hostname()
+	}
+
+	for _, field := range strings.Fields(raw) {
+		key, value, ok := strings.Cut(field, "=")
+		if !ok {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(key)) {
+		case "sslmode":
+			mode = strings.ToLower(strings.TrimSpace(value))
+		case "host":
+			host = strings.TrimSpace(value)
+		}
+	}
+	return mode, host
+}
+
+// localDatabaseHost сообщает, остаётся ли соединение с базой внутри машины или
+// внутри сети контейнеров.
+//
+// Имя без точки — это служба compose или запись в /etc/hosts: снаружи такое имя
+// не разрешается, и трафик до него не покидает хост. Имя с точкой или адрес —
+// уже сеть, и пароль в ней открытым текстом ходить не должен.
+//
+// Провести границу точно нельзя: база на соседней машине в защищённом сегменте
+// и база через полстраны выглядят одинаково. Поэтому вывод здесь мягкий —
+// он запрещает не подключение, а молчаливый отказ от TLS.
+func localDatabaseHost(host string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	// Пусто — подключение через unix-сокет по умолчанию; путь — он же, но
+	// названный явно.
+	if host == "" || strings.HasPrefix(host, "/") {
+		return true
+	}
+	if ip := net.ParseIP(strings.Trim(host, "[]")); ip != nil {
+		return ip.IsLoopback()
+	}
+	if host == "localhost" {
+		return true
+	}
+	return !strings.Contains(host, ".")
+}
+
 // redactDSN прячет пароль в строке подключения любой из принимаемых форм.
 func redactDSN(raw string) string {
 	if strings.Contains(raw, "://") {
@@ -355,6 +419,14 @@ type PostgresConfig struct {
 	Database string `mapstructure:"database"`
 	SSLMode  string `mapstructure:"sslmode"`
 	MaxConns int32  `mapstructure:"max_conns"`
+
+	// Пути к сертификатам для sslmode verify-ca и verify-full. Без них
+	// проверить подлинность сервера нечем, а значит и режимы эти задать
+	// нельзя — до появления этих полей выразить их можно было только через
+	// database.url одной строкой.
+	SSLRootCert string `mapstructure:"sslrootcert"`
+	SSLCert     string `mapstructure:"sslcert"`
+	SSLKey      string `mapstructure:"sslkey"`
 }
 
 // DSN renders a connection string for pgx.
@@ -366,8 +438,22 @@ func (p PostgresConfig) DSN() string {
 	if p.URL != "" {
 		return p.URL
 	}
-	return fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
+	dsn := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
 		p.Host, p.Port, p.User, p.Password, p.Database, p.SSLMode)
+
+	// Дописываются только заданные пути. Пустое sslrootcert= — это не
+	// «умолчание», а имя файла из нуля символов, и подключение падает на
+	// попытке его открыть.
+	for _, pair := range [][2]string{
+		{"sslrootcert", p.SSLRootCert},
+		{"sslcert", p.SSLCert},
+		{"sslkey", p.SSLKey},
+	} {
+		if pair[1] != "" {
+			dsn += " " + pair[0] + "=" + pair[1]
+		}
+	}
+	return dsn
 }
 
 type LoggingConfig struct {
@@ -546,6 +632,24 @@ func (c *Config) Validate() error {
 	if c.Database.Postgres.URL == "" && c.Database.Postgres.Host == "" {
 		return fmt.Errorf("не задано подключение к базе: укажите database.url " +
 			"(или JHV_DATABASE_URL) либо блок database.postgres")
+	}
+	// Отказ от TLS до удалённой базы. В этой базе лежат пароли подключений к
+	// движкам и ключи хранилищ — зашифрованные, но расшифровать их может тот,
+	// кто прочитал трафик и добрался до secret.key. Плюс сам пароль базы,
+	// который при sslmode=disable уходит по сети как есть.
+	//
+	// Запрещается именно disable, а не отсутствие шифрования: prefer тоже
+	// может остаться открытым, если сервер не умеет TLS. Разница в том, что
+	// disable — это решение не пробовать вовсе, и принимается оно обычно не
+	// глядя, потому что стояло в примере.
+	if mode, host := c.Database.tlsSettings(); mode == "disable" && !localDatabaseHost(host) {
+		return fmt.Errorf("база %q подключена с sslmode=disable: пароль и данные "+
+			"пойдут по сети открытым текстом.\n"+
+			"  sslmode=prefer      — TLS, если сервер его умеет (безопасное умолчание)\n"+
+			"  sslmode=require     — только TLS, без проверки подлинности сервера\n"+
+			"  sslmode=verify-full — с проверкой; задайте database.postgres.sslrootcert\n"+
+			"disable допустим только для localhost и для базы в сети контейнеров",
+			host)
 	}
 	// Список повторён здесь строкой, а не взят из internal/backup: движок
 	// бэкапа настраивается этой структурой, и импорт в обратную сторону замкнул
@@ -765,7 +869,14 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("database.postgres.user", "jhvirt")
 	v.SetDefault("database.postgres.password", "")
 	v.SetDefault("database.postgres.database", "jhvirt")
-	v.SetDefault("database.postgres.sslmode", "disable")
+	// prefer, а не disable: шифрование включается само везде, где сервер его
+	// умеет, и ничего не ломает там, где не умеет. disable как умолчание
+	// доживал до боя чаще, чем заменялся, — его никто не менял просто потому,
+	// что установка и так работала.
+	v.SetDefault("database.postgres.sslmode", "prefer")
+	v.SetDefault("database.postgres.sslrootcert", "")
+	v.SetDefault("database.postgres.sslcert", "")
+	v.SetDefault("database.postgres.sslkey", "")
 	v.SetDefault("database.postgres.max_conns", 10)
 
 	v.SetDefault("logging.level", "info")

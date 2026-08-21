@@ -98,3 +98,61 @@ jobs:
       # root это не проявлялось, и дефект жил незамеченным.
       - name: docker build
         run: docker build -t ovirt-backup:ci .
+
+  vuln:
+    name: Состав и уязвимости
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # Готовые бинари, а не сборка из исходников. ./run умеет и так, и так, и
+      # запасной путь через модульный прокси заведён ради сетей, где GitHub
+      # недоступен. Здесь это раннер самого GitHub, а сборка трёх больших
+      # проектов заняла бы дольше всего остального прогона вместе взятого.
+      #
+      # Версии читаются из ./run: второй список версий рядом с первым однажды
+      # разойдётся, и разойдётся молча.
+      - name: Сканеры
+        run: |
+          set -eu
+          eval "$(sed -n 's/^\(SYFT_VERSION\|GRYPE_VERSION\|TRIVY_VERSION\)=/\1=/p' run)"
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh |
+            sh -s -- -b /usr/local/bin "$SYFT_VERSION"
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh |
+            sh -s -- -b /usr/local/bin "$GRYPE_VERSION"
+          curl -sSfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh |
+            sh -s -- -b /usr/local/bin "$TRIVY_VERSION"
+
+      # Образ собирается заново, хотя рядом есть задача «Образ». Намеренно:
+      # та проверяет, что сборка вообще проходит, и должна падать отдельно и
+      # быстро, а эта смотрит, что внутри. Между задачами образ иначе не
+      # передать — только через реестр, которого здесь нет.
+      #
+      # Имя образа берётся из версии, как и в built_image() внутри ./run:
+      # соберёт эту же команду, найдёт этот же образ.
+      - name: Образ для проверки содержимого
+        run: ./run docker
+
+      # Та же команда, что на машине разработчика. Инструменты она соберёт
+      # сама через модульный прокси: ставить их отдельными действиями значило
+      # бы завести второй список версий, который однажды разойдётся с первым.
+      - name: ./run vuln
+        run: ./run vuln
+
+      # Состав выкладывается всегда, в том числе когда проверка нашла
+      # уязвимость: разбираться в находке без списка того, что установлено,
+      # заметно дольше. Он же — то, что прикладывают к поставке.
+      - name: Состав зависимостей
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: sbom-cyclonedx
+          path: dist/sbom/*.cdx.json
+          if-no-files-found: warn
+          retention-days: 90

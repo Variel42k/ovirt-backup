@@ -23,7 +23,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
         -ldflags "-s -w -X main.version=${VERSION}" \
         -o /out/ovirt-backup-server ./cmd/ovirt-backup-server
 
-FROM docker.io/library/alpine:3.21
+FROM docker.io/library/alpine:3.24
 # qemu-img нужен только для экспорта восстановленных образов в qcow2 и для
 # режима проверки «qemu-img check»; всё остальное работает без него.
 RUN apk add --no-cache ca-certificates tzdata qemu-img && \
@@ -37,7 +37,10 @@ COPY config/ovirt-backup.yaml /app/config/ovirt-backup.yaml
 
 # Ключ шифрования секретов и временные файлы восстановления; при локальном
 # хранилище — сами копии. База живёт снаружи, в PostgreSQL.
-RUN mkdir -p /app/data /app/logs /backups && chown -R jhvirt:jhvirt /app /backups
+# /app/logs здесь не создаётся намеренно: каталог лежал бы в слое контейнера и
+# исчезал при каждом пересоздании вместе со всей историей, а при read_only
+# оказался бы ещё и недоступен для записи. Журнал пишется в /app/data/logs.
+RUN mkdir -p /app/data /backups && chown -R jhvirt:jhvirt /app /backups
 VOLUME ["/app/data", "/backups"]
 
 USER jhvirt

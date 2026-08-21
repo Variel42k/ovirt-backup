@@ -8,7 +8,7 @@
 # Корневой Dockerfile остаётся для сборки из репозитория; этот едет внутрь
 # комплекта и используется установщиком.
 
-FROM docker.io/library/alpine:3.21
+FROM docker.io/library/alpine:3.24
 
 # qemu-img нужен только для экспорта восстановленных образов в qcow2 и режима
 # проверки «qemu-img check»; всё остальное работает без него.
@@ -23,7 +23,10 @@ COPY config/ovirt-backup.yaml /app/config/ovirt-backup.yaml
 
 # Ключ шифрования секретов и временные файлы восстановления; при локальном
 # хранилище — сами копии. База живёт снаружи, в PostgreSQL.
-RUN mkdir -p /app/data /app/logs /backups /restores && \
+# /app/logs не создаётся: он лежал бы в слое контейнера и исчезал при каждом
+# пересоздании, а при read_only был бы недоступен для записи. Журнал пишется
+# в /app/data/logs, внутри тома.
+RUN mkdir -p /app/data /backups /restores && \
     chown -R jhvirt:jhvirt /app /backups /restores
 VOLUME ["/app/data", "/backups"]
 

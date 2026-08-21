@@ -30,6 +30,27 @@ ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=@READ_WRITE_PATHS@
 
+# Ограничения ниже отбирают то, чем служба не пользуется. Смысл тот же, что и
+# у read_only в compose: взлом процесса не должен превращаться во взлом хоста.
+#
+# Проверено по коду, а не выбрано по списку из статьи:
+#   PrivateDevices     — устройства не нужны. NBD здесь сетевой клиент, а не
+#                        /dev/nbd, и обращения к /dev в коде выполняются по SSH
+#                        на удалённых хостах, а не тут.
+#   CapabilityBoundingSet= — привилегий не нужно ни одной: служба работает от
+#                        своего пользователя и слушает порт выше 1024.
+#   RestrictAddressFamilies — сеть, unix-сокет к PostgreSQL и netlink, которым
+#                        пользуется сам runtime Go при разрешении имён.
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+
 # Восстановление и проверка держат много открытых объектов хранилища.
 LimitNOFILE=65536
 

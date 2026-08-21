@@ -21,6 +21,7 @@ import (
 	"adveng/jh_virt/internal/filebackup"
 	"adveng/jh_virt/internal/libvirtx"
 	"adveng/jh_virt/internal/logging"
+	"adveng/jh_virt/internal/model"
 	"adveng/jh_virt/internal/monitor"
 	"adveng/jh_virt/internal/notify"
 	"adveng/jh_virt/internal/ovirt"
@@ -60,6 +61,9 @@ type Server struct {
 	oidc *oidcClient
 	// oidcLogins помнит начатые внешние входы до возврата от провайдера.
 	oidcLogins *oidcPending
+	// roles кеширует настраиваемые роли: проверяются они на каждом запросе,
+	// а меняются редко.
+	roles *roleCache
 }
 
 // Deps bundles what the API needs, so adding a dependency does not change
@@ -110,7 +114,18 @@ func New(d Deps) *Server {
 		fileBackup: d.FileBackup,
 		logins:     newLoginLimiter(),
 		oidcLogins: newOIDCPending(),
+		roles:      newRoleCache(),
 	}
+	// Про токены из файла настроек служба говорит при каждом старте, а не
+	// один раз в документации. Забывают именно их: работают они бессрочно и с
+	// правами администратора, а в журнале аудита неотличимы друг от друга.
+	if n := len(d.Config.Auth.APITokens); n > 0 {
+		d.Logger.Warn().Int("количество", n).Msg(
+			"токены из auth.api_tokens устарели: каждый даёт права администратора, " +
+				"не имеет срока и отзывается только перезапуском. Выпустите именные " +
+				"токены запросом POST /api/v1/api-tokens и удалите список из настроек")
+	}
+
 	if d.Config.Auth.Enabled && d.Config.Auth.OIDC.Enabled {
 		// Проверка настроек уже прошла в config.Validate; здесь остаётся
 		// только запомнить их. К провайдеру обращаемся при первом входе.
@@ -151,171 +166,200 @@ func (s *Server) Handler() http.Handler {
 
 // routes registers the API surface. Paths here are relative to /api/v1.
 func (s *Server) routes(mux *http.ServeMux) {
+	// Кто вошёл, что умеет эта сборка и справка. Без права: интерфейсу нужно
+	// это, чтобы вообще отрисоваться, а роль с пустым набором прав всё равно
+	// не увидит ни одного раздела.
 	mux.HandleFunc("GET /auth/me", s.handleMe)
 	mux.HandleFunc("GET /meta", s.handleMeta)
 	mux.HandleFunc("GET /help", s.handleHelp)
-	mux.HandleFunc("GET /dashboard", s.handleDashboard)
-	mux.HandleFunc("GET /events", s.handleEvents)
-	mux.HandleFunc("GET /audit", s.admin(s.handleAudit))
+
+	mux.HandleFunc("GET /dashboard", s.perm(model.PermMonitoringRead, s.handleDashboard))
+	mux.HandleFunc("GET /events", s.perm(model.PermMonitoringRead, s.handleEvents))
+	mux.HandleFunc("GET /audit", s.perm(model.PermAuditRead, s.handleAudit))
 
 	// Подключения к движкам.
-	mux.HandleFunc("GET /servers", s.handleListServers)
-	mux.HandleFunc("POST /servers", s.admin(s.handleCreateServer))
-	mux.HandleFunc("GET /servers/{id}", s.handleGetServer)
-	mux.HandleFunc("PUT /servers/{id}", s.admin(s.handleUpdateServer))
-	mux.HandleFunc("DELETE /servers/{id}", s.admin(s.handleDeleteServer))
-	mux.HandleFunc("POST /servers/probe", s.admin(s.handleProbeServer))
-	mux.HandleFunc("POST /servers/ca-certificate", s.admin(s.handleFetchCA))
-	mux.HandleFunc("POST /servers/{id}/refresh", s.writer(s.handleRefreshServer))
-	mux.HandleFunc("GET /servers/{id}/summary", s.handleServerSummary)
+	mux.HandleFunc("GET /servers", s.perm(model.PermServersRead, s.handleListServers))
+	mux.HandleFunc("POST /servers", s.perm(model.PermServersAdmin, s.handleCreateServer))
+	mux.HandleFunc("GET /servers/{id}", s.perm(model.PermServersRead, s.handleGetServer))
+	mux.HandleFunc("PUT /servers/{id}", s.perm(model.PermServersAdmin, s.handleUpdateServer))
+	mux.HandleFunc("DELETE /servers/{id}", s.perm(model.PermServersAdmin, s.handleDeleteServer))
+	mux.HandleFunc("POST /servers/probe", s.perm(model.PermServersAdmin, s.handleProbeServer))
+	mux.HandleFunc("POST /servers/ca-certificate", s.perm(model.PermServersAdmin, s.handleFetchCA))
+	mux.HandleFunc("POST /servers/{id}/refresh", s.perm(model.PermServersWrite, s.handleRefreshServer))
+	mux.HandleFunc("GET /servers/{id}/summary", s.perm(model.PermServersRead, s.handleServerSummary))
 
 	// Инвентарь.
-	mux.HandleFunc("GET /servers/{id}/clusters", s.handleListClusters)
-	mux.HandleFunc("GET /servers/{id}/hosts", s.handleListHosts)
-	mux.HandleFunc("GET /servers/{id}/vms", s.handleListVMs)
-	mux.HandleFunc("GET /servers/{id}/vms/{vmID}", s.handleGetVM)
-	mux.HandleFunc("GET /servers/{id}/vms/{vmID}/disks", s.handleListVMDisks)
-	mux.HandleFunc("GET /servers/{id}/disks", s.handleListDisks)
-	mux.HandleFunc("GET /servers/{id}/storage-domains", s.handleListStorageDomains)
-	mux.HandleFunc("GET /servers/{id}/restore-networks", s.handleListRestoreNetworks)
+	mux.HandleFunc("GET /servers/{id}/clusters", s.perm(model.PermServersRead, s.handleListClusters))
+	mux.HandleFunc("GET /servers/{id}/hosts", s.perm(model.PermServersRead, s.handleListHosts))
+	mux.HandleFunc("GET /servers/{id}/vms", s.perm(model.PermServersRead, s.handleListVMs))
+	mux.HandleFunc("GET /servers/{id}/vms/{vmID}", s.perm(model.PermServersRead, s.handleGetVM))
+	mux.HandleFunc("GET /servers/{id}/vms/{vmID}/disks", s.perm(model.PermServersRead, s.handleListVMDisks))
+	mux.HandleFunc("GET /servers/{id}/disks", s.perm(model.PermServersRead, s.handleListDisks))
+	mux.HandleFunc("GET /servers/{id}/storage-domains", s.perm(model.PermServersRead, s.handleListStorageDomains))
+	mux.HandleFunc("GET /servers/{id}/restore-networks", s.perm(model.PermServersRead, s.handleListRestoreNetworks))
 
 	// Управление ВМ и хостами.
-	mux.HandleFunc("POST /servers/{id}/vms/{vmID}/action", s.writer(s.handleVMAction))
-	mux.HandleFunc("PUT /servers/{id}/vms/{vmID}/policy", s.writer(s.handleVMPolicy))
-	mux.HandleFunc("PUT /servers/{id}/vms/{vmID}/tags", s.writer(s.handleVMTags))
-	mux.HandleFunc("POST /servers/{id}/hosts/{hostID}/action", s.writer(s.handleHostAction))
-	mux.HandleFunc("PUT /servers/{id}/disks/{diskID}/backup-mode", s.writer(s.handleDiskBackupMode))
+	mux.HandleFunc("POST /servers/{id}/vms/{vmID}/action", s.perm(model.PermServersWrite, s.handleVMAction))
+	mux.HandleFunc("PUT /servers/{id}/vms/{vmID}/policy", s.perm(model.PermServersWrite, s.handleVMPolicy))
+	mux.HandleFunc("PUT /servers/{id}/vms/{vmID}/tags", s.perm(model.PermServersWrite, s.handleVMTags))
+	mux.HandleFunc("POST /servers/{id}/hosts/{hostID}/action", s.perm(model.PermServersWrite, s.handleHostAction))
+	mux.HandleFunc("PUT /servers/{id}/disks/{diskID}/backup-mode", s.perm(model.PermServersWrite, s.handleDiskBackupMode))
 
 	// Планирование бэкапа для конкретной ВМ.
-	mux.HandleFunc("GET /servers/{id}/vms/{vmID}/backup-options", s.handleBackupOptions)
+	mux.HandleFunc("GET /servers/{id}/vms/{vmID}/backup-options", s.perm(model.PermJobsRead, s.handleBackupOptions))
 
 	// Хранилища бэкапов.
-	mux.HandleFunc("GET /storages", s.handleListStorages)
-	mux.HandleFunc("POST /storages", s.admin(s.handleCreateStorage))
-	mux.HandleFunc("GET /storages/{id}", s.handleGetStorage)
-	mux.HandleFunc("PUT /storages/{id}", s.admin(s.handleUpdateStorage))
-	mux.HandleFunc("DELETE /storages/{id}", s.admin(s.handleDeleteStorage))
-	mux.HandleFunc("POST /storages/{id}/check", s.writer(s.handleCheckStorage))
-	mux.HandleFunc("POST /storages/{id}/catalog-scans", s.admin(s.handleStartCatalogScan))
-	mux.HandleFunc("GET /storages/{id}/catalog-scans", s.admin(s.handleListCatalogScans))
-	mux.HandleFunc("GET /catalog-scans/{id}", s.admin(s.handleGetCatalogScan))
-	mux.HandleFunc("POST /catalog-scans/{id}/import", s.admin(s.handleImportCatalogScan))
+	mux.HandleFunc("GET /storages", s.perm(model.PermStoragesRead, s.handleListStorages))
+	mux.HandleFunc("POST /storages", s.perm(model.PermStoragesAdmin, s.handleCreateStorage))
+	mux.HandleFunc("GET /storages/{id}", s.perm(model.PermStoragesRead, s.handleGetStorage))
+	mux.HandleFunc("PUT /storages/{id}", s.perm(model.PermStoragesAdmin, s.handleUpdateStorage))
+	mux.HandleFunc("DELETE /storages/{id}", s.perm(model.PermStoragesAdmin, s.handleDeleteStorage))
+	mux.HandleFunc("POST /storages/{id}/check", s.perm(model.PermStoragesWrite, s.handleCheckStorage))
+	mux.HandleFunc("POST /storages/{id}/catalog-scans", s.perm(model.PermStoragesAdmin, s.handleStartCatalogScan))
+	mux.HandleFunc("GET /storages/{id}/catalog-scans", s.perm(model.PermStoragesAdmin, s.handleListCatalogScans))
+	mux.HandleFunc("GET /catalog-scans/{id}", s.perm(model.PermStoragesAdmin, s.handleGetCatalogScan))
+	mux.HandleFunc("POST /catalog-scans/{id}/import", s.perm(model.PermStoragesAdmin, s.handleImportCatalogScan))
 
 	// Задания бэкапа.
-	mux.HandleFunc("GET /jobs", s.handleListJobs)
-	mux.HandleFunc("POST /jobs", s.writer(s.handleCreateJob))
-	mux.HandleFunc("GET /jobs/{id}", s.handleGetJob)
-	mux.HandleFunc("PUT /jobs/{id}", s.writer(s.handleUpdateJob))
-	mux.HandleFunc("DELETE /jobs/{id}", s.writer(s.handleDeleteJob))
-	mux.HandleFunc("POST /jobs/{id}/run", s.writer(s.handleRunJob))
-	mux.HandleFunc("GET /jobs/{id}/preview", s.handlePreviewJob)
-	mux.HandleFunc("POST /jobs/{id}/enable-replication", s.admin(s.handleEnableJobReplication))
-	mux.HandleFunc("POST /jobs/{id}/change-primary", s.admin(s.handleChangeJobPrimary))
+	mux.HandleFunc("GET /jobs", s.perm(model.PermJobsRead, s.handleListJobs))
+	mux.HandleFunc("POST /jobs", s.perm(model.PermJobsWrite, s.handleCreateJob))
+	mux.HandleFunc("GET /jobs/{id}", s.perm(model.PermJobsRead, s.handleGetJob))
+	mux.HandleFunc("PUT /jobs/{id}", s.perm(model.PermJobsWrite, s.handleUpdateJob))
+	mux.HandleFunc("DELETE /jobs/{id}", s.perm(model.PermJobsWrite, s.handleDeleteJob))
+	mux.HandleFunc("POST /jobs/{id}/run", s.perm(model.PermJobsWrite, s.handleRunJob))
+	mux.HandleFunc("GET /jobs/{id}/preview", s.perm(model.PermJobsRead, s.handlePreviewJob))
+	mux.HandleFunc("POST /jobs/{id}/enable-replication", s.perm(model.PermJobsAdmin, s.handleEnableJobReplication))
+	mux.HandleFunc("POST /jobs/{id}/change-primary", s.perm(model.PermJobsAdmin, s.handleChangeJobPrimary))
 
 	// Запуски бэкапа.
-	mux.HandleFunc("POST /backups", s.writer(s.handleAdHocBackup))
-	mux.HandleFunc("GET /backups", s.handleListRuns)
-	mux.HandleFunc("GET /backups/{id}", s.handleGetRun)
-	mux.HandleFunc("DELETE /backups/{id}", s.writer(s.handleDeleteRun))
-	mux.HandleFunc("POST /backups/{id}/cancel", s.writer(s.handleCancelRun))
-	mux.HandleFunc("GET /backups/{id}/chain", s.handleRunChain)
-	mux.HandleFunc("GET /backups/{id}/copies", s.handleListBackupCopies)
-	mux.HandleFunc("GET /backups/{id}/artifacts", s.handleListRepositoryArtifacts)
-	mux.HandleFunc("POST /backups/{id}/copies", s.writer(s.handleCreateBackupCopy))
-	mux.HandleFunc("POST /backup-copies/{id}/retry", s.writer(s.handleRetryBackupCopy))
-	mux.HandleFunc("POST /backup-copies/{id}/cancel", s.writer(s.handleCancelBackupCopy))
-	mux.HandleFunc("GET /replications", s.handleListReplications)
-	mux.HandleFunc("GET /replications/{id}", s.handleGetReplication)
+	mux.HandleFunc("POST /backups", s.perm(model.PermBackupsWrite, s.handleAdHocBackup))
+	mux.HandleFunc("GET /backups", s.perm(model.PermBackupsRead, s.handleListRuns))
+	mux.HandleFunc("GET /backups/{id}", s.perm(model.PermBackupsRead, s.handleGetRun))
+	mux.HandleFunc("DELETE /backups/{id}", s.perm(model.PermBackupsWrite, s.handleDeleteRun))
+	mux.HandleFunc("POST /backups/{id}/cancel", s.perm(model.PermBackupsWrite, s.handleCancelRun))
+	mux.HandleFunc("GET /backups/{id}/chain", s.perm(model.PermBackupsRead, s.handleRunChain))
+	mux.HandleFunc("GET /backups/{id}/copies", s.perm(model.PermBackupsRead, s.handleListBackupCopies))
+	mux.HandleFunc("GET /backups/{id}/artifacts", s.perm(model.PermBackupsRead, s.handleListRepositoryArtifacts))
+	mux.HandleFunc("POST /backups/{id}/copies", s.perm(model.PermBackupsWrite, s.handleCreateBackupCopy))
+	mux.HandleFunc("POST /backup-copies/{id}/retry", s.perm(model.PermBackupsWrite, s.handleRetryBackupCopy))
+	mux.HandleFunc("POST /backup-copies/{id}/cancel", s.perm(model.PermBackupsWrite, s.handleCancelBackupCopy))
+	mux.HandleFunc("GET /replications", s.perm(model.PermBackupsRead, s.handleListReplications))
+	mux.HandleFunc("GET /replications/{id}", s.perm(model.PermBackupsRead, s.handleGetReplication))
 
 	// Проверка и восстановление.
-	mux.HandleFunc("POST /backups/{id}/verify", s.writer(s.handleVerifyRun))
-	mux.HandleFunc("GET /verifications", s.handleListVerifications)
-	mux.HandleFunc("GET /verifications/{id}", s.handleGetVerification)
-	mux.HandleFunc("POST /backups/{id}/restore", s.writer(s.handleRestore))
+	mux.HandleFunc("POST /backups/{id}/verify", s.perm(model.PermBackupsWrite, s.handleVerifyRun))
+	mux.HandleFunc("GET /verifications", s.perm(model.PermBackupsRead, s.handleListVerifications))
+	mux.HandleFunc("GET /verifications/{id}", s.perm(model.PermBackupsRead, s.handleGetVerification))
+	mux.HandleFunc("POST /backups/{id}/restore", s.perm(model.PermBackupsWrite, s.handleRestore))
 	// Предпросмотр ничего не создаёт, но читает состав копии и место в домене
 	// хранения, поэтому закрыт теми же правами, что и сама сборка.
-	mux.HandleFunc("POST /backups/{id}/restore-vm/plan", s.writer(s.handlePlanRestoreVM))
-	mux.HandleFunc("POST /backups/{id}/restore-vm", s.writer(s.handleRestoreVM))
-	mux.HandleFunc("GET /restores", s.handleListRestores)
-	mux.HandleFunc("GET /restores/{id}", s.handleGetRestore)
+	mux.HandleFunc("POST /backups/{id}/restore-vm/plan", s.perm(model.PermBackupsWrite, s.handlePlanRestoreVM))
+	mux.HandleFunc("POST /backups/{id}/restore-vm", s.perm(model.PermBackupsWrite, s.handleRestoreVM))
+	mux.HandleFunc("GET /restores", s.perm(model.PermBackupsRead, s.handleListRestores))
+	mux.HandleFunc("GET /restores/{id}", s.perm(model.PermBackupsRead, s.handleGetRestore))
 
-	// Ретенция.
-	mux.HandleFunc("POST /retention/preview", s.handleRetentionPreview)
-	mux.HandleFunc("POST /retention/apply", s.writer(s.handleRetentionApply))
+	// Ретенция — это удаление копий, поэтому право то же, что на их удаление.
+	mux.HandleFunc("POST /retention/preview", s.perm(model.PermBackupsRead, s.handleRetentionPreview))
+	mux.HandleFunc("POST /retention/apply", s.perm(model.PermBackupsWrite, s.handleRetentionApply))
 
-	// Мониторинг.
-	mux.HandleFunc("GET /alerts", s.handleListAlerts)
-	mux.HandleFunc("POST /alerts/{id}/ack", s.writer(s.handleAckAlert))
-	mux.HandleFunc("POST /alerts/{id}/notifications", s.writer(s.handleAlertNotifications))
-	mux.HandleFunc("GET /settings/notifications", s.admin(s.handleGetNotificationSettings))
-	mux.HandleFunc("PUT /settings/notifications", s.admin(s.handleSetNotificationSettings))
-	mux.HandleFunc("DELETE /settings/notifications", s.admin(s.handleResetNotificationSettings))
-	mux.HandleFunc("GET /notification-deliveries", s.admin(s.handleListNotificationDeliveries))
-	mux.HandleFunc("GET /remediations", s.handleListRemediations)
-	mux.HandleFunc("GET /remediation/mode", s.handleGetRemediationMode)
-	mux.HandleFunc("PUT /remediation/mode", s.admin(s.handleSetRemediationMode))
-	mux.HandleFunc("GET /remediation/periods/{id}/archive", s.handleGetRemediationArchive)
-	mux.HandleFunc("POST /remediations", s.writer(s.handleManualRemediation))
-	mux.HandleFunc("GET /coverage", s.handleCoverage)
-	mux.HandleFunc("GET /monitoring/backup-quality", s.handleBackupQuality)
-	mux.HandleFunc("GET /monitoring/backup-series", s.handleBackupSeries)
-	mux.HandleFunc("GET /monitoring/storage-capacity", s.handleStorageCapacity)
-	mux.HandleFunc("GET /job-runs", s.handleListJobRuns)
-	mux.HandleFunc("GET /disaster-recovery/readiness", s.admin(s.handleDRReadiness))
-	mux.HandleFunc("POST /disaster-recovery/check", s.admin(s.handleDRCheck))
-	mux.HandleFunc("GET /health-samples", s.handleHealthSamples)
-	mux.HandleFunc("GET /disk-samples", s.handleDiskSamples)
-	mux.HandleFunc("GET /mount-samples", s.handleMountSamples)
-	mux.HandleFunc("GET /servers/{id}/storage-paths", s.handleStoragePaths)
+	// Оповещения.
+	mux.HandleFunc("GET /alerts", s.perm(model.PermAlertsRead, s.handleListAlerts))
+	mux.HandleFunc("POST /alerts/{id}/ack", s.perm(model.PermAlertsWrite, s.handleAckAlert))
+	mux.HandleFunc("POST /alerts/{id}/notifications", s.perm(model.PermAlertsWrite, s.handleAlertNotifications))
+	mux.HandleFunc("GET /settings/notifications", s.perm(model.PermAlertsAdmin, s.handleGetNotificationSettings))
+	mux.HandleFunc("PUT /settings/notifications", s.perm(model.PermAlertsAdmin, s.handleSetNotificationSettings))
+	mux.HandleFunc("DELETE /settings/notifications", s.perm(model.PermAlertsAdmin, s.handleResetNotificationSettings))
+	mux.HandleFunc("GET /notification-deliveries", s.perm(model.PermAlertsAdmin, s.handleListNotificationDeliveries))
 
-	// Журнал службы. Только администратор: журнал не содержит секретов, но
-	// перечисляет все ВМ, хосты и операторов установки.
-	mux.HandleFunc("GET /logs", s.admin(s.handleLogStatus))
-	mux.HandleFunc("GET /logs/tail", s.admin(s.handleLogTail))
-	mux.HandleFunc("PUT /logs/level", s.admin(s.handleSetLogLevel))
-	mux.HandleFunc("POST /logs/rotate", s.admin(s.handleRotateLog))
+	// Авто-восстановление: смена режима меняет то, что служба делает сама, и
+	// остаётся администраторским правом раздела оповещений.
+	mux.HandleFunc("GET /remediations", s.perm(model.PermAlertsRead, s.handleListRemediations))
+	mux.HandleFunc("GET /remediation/mode", s.perm(model.PermAlertsRead, s.handleGetRemediationMode))
+	mux.HandleFunc("PUT /remediation/mode", s.perm(model.PermAlertsAdmin, s.handleSetRemediationMode))
+	mux.HandleFunc("GET /remediation/periods/{id}/archive", s.perm(model.PermAlertsRead, s.handleGetRemediationArchive))
+	mux.HandleFunc("POST /remediations", s.perm(model.PermAlertsWrite, s.handleManualRemediation))
+
+	// Обзор, покрытие и показатели.
+	mux.HandleFunc("GET /coverage", s.perm(model.PermMonitoringRead, s.handleCoverage))
+	mux.HandleFunc("GET /monitoring/backup-quality", s.perm(model.PermMonitoringRead, s.handleBackupQuality))
+	mux.HandleFunc("GET /monitoring/backup-series", s.perm(model.PermMonitoringRead, s.handleBackupSeries))
+	mux.HandleFunc("GET /monitoring/storage-capacity", s.perm(model.PermMonitoringRead, s.handleStorageCapacity))
+	mux.HandleFunc("GET /job-runs", s.perm(model.PermJobsRead, s.handleListJobRuns))
+	mux.HandleFunc("GET /health-samples", s.perm(model.PermMonitoringRead, s.handleHealthSamples))
+	mux.HandleFunc("GET /disk-samples", s.perm(model.PermMonitoringRead, s.handleDiskSamples))
+	mux.HandleFunc("GET /mount-samples", s.perm(model.PermMonitoringRead, s.handleMountSamples))
+	mux.HandleFunc("GET /servers/{id}/storage-paths", s.perm(model.PermServersRead, s.handleStoragePaths))
+
+	// Аварийная готовность.
+	mux.HandleFunc("GET /disaster-recovery/readiness", s.perm(model.PermDRRead, s.handleDRReadiness))
+	mux.HandleFunc("POST /disaster-recovery/check", s.perm(model.PermDRAdmin, s.handleDRCheck))
+
+	// Журнал службы. Секретов он не содержит, но перечисляет все ВМ, хосты и
+	// операторов установки — поэтому у него своё право, а не общее «чтение».
+	mux.HandleFunc("GET /logs", s.perm(model.PermLogsRead, s.handleLogStatus))
+	mux.HandleFunc("GET /logs/tail", s.perm(model.PermLogsRead, s.handleLogTail))
+	mux.HandleFunc("PUT /logs/level", s.perm(model.PermLogsAdmin, s.handleSetLogLevel))
+	mux.HandleFunc("POST /logs/rotate", s.perm(model.PermLogsAdmin, s.handleRotateLog))
 
 	// Параметры, которые применяются без перезапуска и переживают его в БД.
-	mux.HandleFunc("GET /settings/runtime", s.admin(s.handleRuntimeSettings))
-	mux.HandleFunc("PUT /settings/runtime/compression", s.admin(s.handleSetRuntimeCompression))
-	mux.HandleFunc("DELETE /settings/runtime/compression", s.admin(s.handleResetRuntimeCompression))
-	mux.HandleFunc("PUT /settings/runtime/timezone", s.admin(s.handleSetRuntimeTimezone))
-	mux.HandleFunc("DELETE /settings/runtime/timezone", s.admin(s.handleResetRuntimeTimezone))
-	mux.HandleFunc("GET /engine-config/jobs", s.handleListEngineConfigJobs)
-	mux.HandleFunc("POST /engine-config/jobs", s.admin(s.handleCreateEngineConfigJob))
-	mux.HandleFunc("PUT /engine-config/jobs/{id}", s.admin(s.handleUpdateEngineConfigJob))
-	mux.HandleFunc("DELETE /engine-config/jobs/{id}", s.admin(s.handleDeleteEngineConfigJob))
-	mux.HandleFunc("POST /engine-config/jobs/{id}/run", s.admin(s.handleRunEngineConfigJob))
-	mux.HandleFunc("GET /engine-config/runs", s.handleListEngineConfigRuns)
-	mux.HandleFunc("POST /engine-config/runs", s.admin(s.handleRunEngineConfig))
-	mux.HandleFunc("GET /engine-config/runs/{id}", s.handleGetEngineConfigRun)
-	mux.HandleFunc("GET /engine-config/runs/{id}/download", s.handleDownloadEngineConfig)
-	mux.HandleFunc("GET /engine-config/compare", s.handleCompareEngineConfig)
+	mux.HandleFunc("GET /settings/runtime", s.perm(model.PermSettingsRead, s.handleRuntimeSettings))
+	mux.HandleFunc("PUT /settings/runtime/compression", s.perm(model.PermSettingsAdmin, s.handleSetRuntimeCompression))
+	mux.HandleFunc("DELETE /settings/runtime/compression", s.perm(model.PermSettingsAdmin, s.handleResetRuntimeCompression))
+	mux.HandleFunc("PUT /settings/runtime/timezone", s.perm(model.PermSettingsAdmin, s.handleSetRuntimeTimezone))
+	mux.HandleFunc("DELETE /settings/runtime/timezone", s.perm(model.PermSettingsAdmin, s.handleResetRuntimeTimezone))
+	mux.HandleFunc("PUT /settings/runtime/log-rotation", s.perm(model.PermSettingsAdmin, s.handleSetRuntimeLogRotation))
+	mux.HandleFunc("DELETE /settings/runtime/log-rotation", s.perm(model.PermSettingsAdmin, s.handleResetRuntimeLogRotation))
+	mux.HandleFunc("PUT /settings/runtime/backup-quality", s.perm(model.PermSettingsAdmin, s.handleSetRuntimeBackupQuality))
+	mux.HandleFunc("DELETE /settings/runtime/backup-quality", s.perm(model.PermSettingsAdmin, s.handleResetRuntimeBackupQuality))
+
+	// Снимки конфигурации Engine.
+	mux.HandleFunc("GET /engine-config/jobs", s.perm(model.PermEngineConfigRead, s.handleListEngineConfigJobs))
+	mux.HandleFunc("POST /engine-config/jobs", s.perm(model.PermEngineConfigAdmin, s.handleCreateEngineConfigJob))
+	mux.HandleFunc("PUT /engine-config/jobs/{id}", s.perm(model.PermEngineConfigAdmin, s.handleUpdateEngineConfigJob))
+	mux.HandleFunc("DELETE /engine-config/jobs/{id}", s.perm(model.PermEngineConfigAdmin, s.handleDeleteEngineConfigJob))
+	mux.HandleFunc("POST /engine-config/jobs/{id}/run", s.perm(model.PermEngineConfigAdmin, s.handleRunEngineConfigJob))
+	mux.HandleFunc("GET /engine-config/runs", s.perm(model.PermEngineConfigRead, s.handleListEngineConfigRuns))
+	mux.HandleFunc("POST /engine-config/runs", s.perm(model.PermEngineConfigAdmin, s.handleRunEngineConfig))
+	mux.HandleFunc("GET /engine-config/runs/{id}", s.perm(model.PermEngineConfigRead, s.handleGetEngineConfigRun))
+	mux.HandleFunc("GET /engine-config/runs/{id}/download", s.perm(model.PermEngineConfigRead, s.handleDownloadEngineConfig))
+	mux.HandleFunc("GET /engine-config/compare", s.perm(model.PermEngineConfigRead, s.handleCompareEngineConfig))
 
 	// Native file backups are isolated from VM jobs and guarded by the
 	// file_backup.enabled feature gate.
-	mux.HandleFunc("GET /file-backup/roots", s.handleListFileBackupRoots)
-	mux.HandleFunc("GET /file-backup/jobs", s.handleListFileBackupJobs)
-	mux.HandleFunc("POST /file-backup/jobs", s.admin(s.handleCreateFileBackupJob))
-	mux.HandleFunc("GET /file-backup/jobs/{id}", s.handleGetFileBackupJob)
-	mux.HandleFunc("PUT /file-backup/jobs/{id}", s.admin(s.handleUpdateFileBackupJob))
-	mux.HandleFunc("DELETE /file-backup/jobs/{id}", s.admin(s.handleDeleteFileBackupJob))
-	mux.HandleFunc("POST /file-backup/jobs/{id}/run", s.writer(s.handleRunFileBackupJob))
-	mux.HandleFunc("GET /file-backup/runs", s.handleListFileBackupRuns)
-	mux.HandleFunc("GET /file-backup/runs/{id}", s.handleGetFileBackupRun)
-	mux.HandleFunc("DELETE /file-backup/runs/{id}", s.admin(s.handleDeleteFileBackupRun))
-	mux.HandleFunc("GET /file-backup/runs/{id}/tree", s.handleGetFileBackupTree)
-	mux.HandleFunc("POST /file-backup/runs/{id}/restore", s.writer(s.handleRestoreFiles))
-	mux.HandleFunc("PUT /settings/runtime/log-rotation", s.admin(s.handleSetRuntimeLogRotation))
-	mux.HandleFunc("DELETE /settings/runtime/log-rotation", s.admin(s.handleResetRuntimeLogRotation))
-	mux.HandleFunc("PUT /settings/runtime/backup-quality", s.admin(s.handleSetRuntimeBackupQuality))
-	mux.HandleFunc("DELETE /settings/runtime/backup-quality", s.admin(s.handleResetRuntimeBackupQuality))
+	mux.HandleFunc("GET /file-backup/roots", s.perm(model.PermFileBackupsRead, s.handleListFileBackupRoots))
+	mux.HandleFunc("GET /file-backup/jobs", s.perm(model.PermFileBackupsRead, s.handleListFileBackupJobs))
+	mux.HandleFunc("POST /file-backup/jobs", s.perm(model.PermFileBackupsAdmin, s.handleCreateFileBackupJob))
+	mux.HandleFunc("GET /file-backup/jobs/{id}", s.perm(model.PermFileBackupsRead, s.handleGetFileBackupJob))
+	mux.HandleFunc("PUT /file-backup/jobs/{id}", s.perm(model.PermFileBackupsAdmin, s.handleUpdateFileBackupJob))
+	mux.HandleFunc("DELETE /file-backup/jobs/{id}", s.perm(model.PermFileBackupsAdmin, s.handleDeleteFileBackupJob))
+	mux.HandleFunc("POST /file-backup/jobs/{id}/run", s.perm(model.PermFileBackupsWrite, s.handleRunFileBackupJob))
+	mux.HandleFunc("GET /file-backup/runs", s.perm(model.PermFileBackupsRead, s.handleListFileBackupRuns))
+	mux.HandleFunc("GET /file-backup/runs/{id}", s.perm(model.PermFileBackupsRead, s.handleGetFileBackupRun))
+	mux.HandleFunc("DELETE /file-backup/runs/{id}", s.perm(model.PermFileBackupsAdmin, s.handleDeleteFileBackupRun))
+	mux.HandleFunc("GET /file-backup/runs/{id}/tree", s.perm(model.PermFileBackupsRead, s.handleGetFileBackupTree))
+	mux.HandleFunc("POST /file-backup/runs/{id}/restore", s.perm(model.PermFileBackupsWrite, s.handleRestoreFiles))
 
-	// Пользователи.
-	mux.HandleFunc("GET /users", s.admin(s.handleListUsers))
-	mux.HandleFunc("POST /users", s.admin(s.handleCreateUser))
-	mux.HandleFunc("PUT /users/{id}", s.admin(s.handleUpdateUser))
-	mux.HandleFunc("DELETE /users/{id}", s.admin(s.handleDeleteUser))
+	// Права, роли, учётные записи и токены — всё под одним правом.
+	//
+	// Разделять их не следует: кто может править роли, тот может выдать себе
+	// любое другое право, а кто может выпустить токен — выдать его с любой
+	// ролью. Раздельные права создавали бы видимость ограничения там, где его
+	// нет.
+	mux.HandleFunc("GET /permissions", s.perm(model.PermUsersAdmin, s.handlePermissionCatalog))
+	mux.HandleFunc("GET /roles", s.perm(model.PermUsersAdmin, s.handleListRoles))
+	mux.HandleFunc("POST /roles", s.perm(model.PermUsersAdmin, s.handleCreateRole))
+	mux.HandleFunc("PUT /roles/{id}", s.perm(model.PermUsersAdmin, s.handleUpdateRole))
+	mux.HandleFunc("DELETE /roles/{id}", s.perm(model.PermUsersAdmin, s.handleDeleteRole))
+
+	mux.HandleFunc("GET /api-tokens", s.perm(model.PermUsersAdmin, s.handleListAPITokens))
+	mux.HandleFunc("POST /api-tokens", s.perm(model.PermUsersAdmin, s.handleCreateAPIToken))
+	mux.HandleFunc("PUT /api-tokens/{id}", s.perm(model.PermUsersAdmin, s.handleUpdateAPIToken))
+	mux.HandleFunc("DELETE /api-tokens/{id}", s.perm(model.PermUsersAdmin, s.handleDeleteAPIToken))
+
+	mux.HandleFunc("GET /users", s.perm(model.PermUsersAdmin, s.handleListUsers))
+	mux.HandleFunc("POST /users", s.perm(model.PermUsersAdmin, s.handleCreateUser))
+	mux.HandleFunc("PUT /users/{id}", s.perm(model.PermUsersAdmin, s.handleUpdateUser))
+	mux.HandleFunc("DELETE /users/{id}", s.perm(model.PermUsersAdmin, s.handleDeleteUser))
 }
 
 // spaHandler serves the built single-page app, falling back to index.html so

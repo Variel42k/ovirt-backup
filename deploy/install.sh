@@ -22,6 +22,9 @@
 #                                      пакет для репетиции; старый узел продолжит работу
 #   ./install.sh --migrate-from /root/jhvirt-migration.tar.gz
 #                                      восстановить пакет на новом сервере
+#   ./install.sh --migration-export /root/jhvirt.tar.gz \
+#                --migration-to user@10.0.0.5:/home/user
+#                                      создать пакет и сразу отправить его
 #   ./install.sh --backup-dir /srv/backups --restore-dir /srv/restores
 #                                      хранилище копий и каталог восстановления
 #                                      лежат по другим путям, чем на прежнем узле
@@ -69,6 +72,8 @@ MIGRATION_ACTION=""; MIGRATION_EXPORT_FILE=""; MIGRATION_IMPORT_FILE=""
 # Пусто — брать пути из .env: при обычной установке они складываются рядом, при
 # переносе приезжают из пакета. Заданы — заменить, о чём установщик скажет вслух.
 BACKUP_DIR_OVERRIDE=""; RESTORE_DIR_OVERRIDE=""
+# Куда отправить пакет переноса: user@сервер:/каталог. Пусто — оставить рядом.
+MIGRATION_TO=""
 MIGRATION_TMP=""; MIGRATION_ACTIVE=0; MIGRATION_SOURCE_MODE=""
 MIGRATION_SOURCE_PREFIX=""; MIGRATION_SOURCE_USER=""; MIGRATION_DATABASE_KIND=""
 MIGRATION_SOURCE_UID=""; MIGRATION_SOURCE_GID=""; MIGRATION_MARKER=""; MIGRATION_RESUME=0
@@ -106,6 +111,11 @@ while [ $# -gt 0 ]; do
         --migrate-from) [ $# -ge 2 ] || die "--migrate-from требует путь"; MIGRATION_ACTION="import"; MIGRATION_IMPORT_FILE="$2"; shift 2 ;;
         --migrate-from=*) MIGRATION_ACTION="import"; MIGRATION_IMPORT_FILE="${1#--migrate-from=}"; shift ;;
         --keep-source-running) MIGRATION_KEEP_SOURCE=1; shift ;;
+        # Куда отправить готовый пакет: пользователь, сервер и каталог одной
+        # строкой, как у scp. Пакет остаётся и здесь — неудачная передача не
+        # должна означать потерю единственной копии состояния.
+        --migration-to) [ $# -ge 2 ] || die "--migration-to требует user@сервер:/каталог"; MIGRATION_TO="$2"; shift 2 ;;
+        --migration-to=*) MIGRATION_TO="${1#--migration-to=}"; shift ;;
         # Пути к данным на этом узле. Нужны прежде всего при переносе: диск на
         # новом сервере называется иначе, монтируется в другое место или вовсе
         # заменён сетевым хранилищем. Путь внутри контейнера при этом не
@@ -848,8 +858,17 @@ migration_export() {
     say ""
     say "Пакет миграции создан: $MIGRATION_EXPORT_FILE"
     say "Права: 0600. Внутри находятся пароль БД, secret.key и настройки."
+
+    if [ -n "$MIGRATION_TO" ]; then
+        migration_send_package
+        return
+    fi
+
     say "Передайте его на новый сервер защищённым каналом и выполните:"
     say "  sudo sh ./ovirt-backup-*.run --migrate-from $MIGRATION_EXPORT_FILE"
+    say ""
+    say "Либо сразу отправьте его отсюда:"
+    say "  $SELF --migration-export $MIGRATION_EXPORT_FILE --migration-to user@сервер:/каталог"
     say "Локальные каталоги бекапов не копировались; подключите их на новом узле отдельно."
     if [ "$MIGRATION_KEEP_SOURCE" -eq 1 ]; then
         say "Исходное приложение снова запущено: пакет предназначен для репетиции."
@@ -932,6 +951,87 @@ migration_validate_archive() {
         base64 -d 2>/dev/null | wc -c | tr -d ' ')"
     [ "$MSK_BYTES" = 32 ] || die "secret.key в пакете повреждён: ожидается ключ AES-256"
     rm -f "$MIGRATION_TMP/archive.list" "$MIGRATION_TMP/archive.types"
+}
+
+# migration_send_package передаёт пакет на новый сервер.
+#
+# Раньше это делал оператор руками, и на ровном месте спотыкался: пакет лежит с
+# правами 0600 под root, обычный scp его не прочитает, а scp из-под sudo идёт
+# уже от root — с его ключами и его known_hosts, которых обычно нет.
+#
+# Внутри пакета secret.key и пароль базы. Поэтому отправка обставлена двумя
+# условиями: ключ хоста должен быть известен заранее, и после передачи
+# сверяются контрольные суммы.
+migration_send_package() {
+    MSP_DEST="$MIGRATION_TO"
+    case "$MSP_DEST" in
+        *:*) ;;
+        *) die "формат назначения: user@сервер:/каталог (получено: $MSP_DEST)" ;;
+    esac
+    MSP_LOGIN="${MSP_DEST%%:*}"
+    MSP_DIR="${MSP_DEST#*:}"
+    MSP_HOST="${MSP_LOGIN#*@}"
+    [ -n "$MSP_DIR" ] || die "не указан каталог назначения: $MSP_DEST"
+    [ -n "$MSP_HOST" ] || die "не указан сервер назначения: $MSP_DEST"
+    have scp || die "для отправки пакета нужен scp"
+
+    # Ключ хоста проверяется заранее и намеренно не принимается автоматически.
+    # Отправить secret.key на сервер, подлинность которого не подтверждена, —
+    # это отдать ключ от всех копий тому, кто окажется на том адресе. Сверять
+    # отпечаток должен человек, один раз.
+    if ! ssh-keygen -F "$MSP_HOST" >/dev/null 2>&1; then
+        die "ключ хоста $MSP_HOST не известен этому пользователю ($(id -un)).
+В пакете лежит secret.key — отправлять его на непроверенный сервер нельзя.
+
+Сверьте отпечаток и запомните ключ:
+  ssh-keyscan -t ed25519 $MSP_HOST | ssh-keygen -lf -
+  ssh-keyscan -t ed25519 $MSP_HOST >> ~/.ssh/known_hosts
+
+Отпечаток должен совпасть с тем, что показывает сам сервер:
+  ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub"
+    fi
+
+    MSP_NAME="$(basename "$MIGRATION_EXPORT_FILE")"
+    MSP_REMOTE="${MSP_DIR%/}/$MSP_NAME"
+
+    say ""
+    say "==> отправка пакета на $MSP_HOST"
+    say "    $MIGRATION_EXPORT_FILE -> $MSP_LOGIN:$MSP_REMOTE"
+    # -p сохраняет режим 0600: пакет не должен доехать читаемым для всех.
+    scp -p "$MIGRATION_EXPORT_FILE" "$MSP_LOGIN:$MSP_REMOTE" ||
+        die "не удалось передать пакет. Он остался здесь: $MIGRATION_EXPORT_FILE"
+
+    # Сверка после передачи: обрезанный пакет провалит импорт позже и куда
+    # непонятнее — уже на разборе архива, на другом сервере.
+    if have sha256sum; then
+        MSP_LOCAL_SUM="$(sha256sum "$MIGRATION_EXPORT_FILE" | awk '{print $1}')"
+        MSP_REMOTE_SUM="$(ssh "$MSP_LOGIN" "sha256sum '$MSP_REMOTE' 2>/dev/null | awk '{print \$1}'" 2>/dev/null || true)"
+        if [ -z "$MSP_REMOTE_SUM" ]; then
+            say "    предупреждение: не удалось сверить контрольную сумму на той стороне"
+        elif [ "$MSP_LOCAL_SUM" != "$MSP_REMOTE_SUM" ]; then
+            die "пакет доехал повреждённым: суммы не совпали.
+Здесь:  $MSP_LOCAL_SUM
+Там:    $MSP_REMOTE_SUM
+Повторите отправку; локальный пакет цел."
+        else
+            say "    контрольная сумма совпала"
+        fi
+    fi
+
+    say ""
+    say "Пакет на месте. На новом сервере выполните:"
+    say "  sudo bash deploy/install.sh --migrate-from $MSP_REMOTE \\"
+    say "    --url http://<адрес нового сервера>:8080 \\"
+    say "    --backup-dir /путь/к/копиям --restore-dir /путь/к/восстановлению"
+    say ""
+    say "Локальные каталоги бекапов не копировались; подключите их на новом узле отдельно."
+    say "После успешного импорта уничтожьте пакет с обеих машин: он содержит secret.key."
+    say "  shred -u $MIGRATION_EXPORT_FILE"
+    if [ "$MIGRATION_KEEP_SOURCE" -eq 1 ]; then
+        say "Исходное приложение снова запущено: пакет предназначен для репетиции."
+    elif [ -n "$MIGRATION_SOURCE_STOPPED" ]; then
+        say "Исходное приложение оставлено остановленным, чтобы состояние больше не расходилось."
+    fi
 }
 
 migration_prepare_import() {
@@ -1391,6 +1491,16 @@ elif [ "$MODE" = migration-export ]; then
     MODE=""
     migration_ask_nonempty "Куда записать пакет миграции: "
     MIGRATION_EXPORT_FILE="$ANSWER"
+    # Отправку предлагаем сразу: нести пакет руками — это scp из-под sudo,
+    # чужие ключи и права 0600, на чём спотыкаются в первый же раз.
+    if [ -z "$MIGRATION_TO" ]; then
+        say ""
+        say "Отправить пакет на новый сервер сразу после создания?"
+        say "Укажите user@сервер:/каталог либо оставьте пустым — тогда пакет"
+        say "останется здесь и его нужно будет перенести самостоятельно."
+        printf 'Куда отправить: '
+        read -r MIGRATION_TO || MIGRATION_TO=""
+    fi
 fi
 
 case "$MIGRATION_ACTION" in

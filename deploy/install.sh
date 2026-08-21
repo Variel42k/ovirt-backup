@@ -184,6 +184,36 @@ is_real_docker() {
     docker info >/dev/null 2>&1 || return 1
 }
 
+# docker_unavailable_reason объясняет, почему вариант с Docker недоступен.
+#
+# Три причины выглядят одинаково для проверки и совершенно по-разному для того,
+# кто это читает: программы нет, программа есть но демон не запущен, вместо
+# docker стоит podman. Общее «нет Docker Compose» отправляет искать пакет,
+# который на самом деле установлен, — а всё лечится запуском службы.
+docker_unavailable_reason() {
+    if ! have docker; then
+        printf 'docker не установлен'
+        return
+    fi
+    if docker --version 2>&1 | grep -qi podman; then
+        printf 'вместо docker установлен podman: этот способ рассчитан на docker'
+        return
+    fi
+    if ! docker info >/dev/null 2>&1; then
+        if have systemctl && [ "$(systemctl is-active docker 2>/dev/null)" != active ]; then
+            printf 'служба docker не запущена — sudo systemctl enable --now docker'
+        else
+            printf 'демон docker не отвечает: проверьте systemctl status docker и права на /var/run/docker.sock'
+        fi
+        return
+    fi
+    if ! docker compose version >/dev/null 2>&1 && ! have docker-compose; then
+        printf 'нет docker compose: установите плагин docker-compose-plugin'
+        return
+    fi
+    printf 'docker доступен'
+}
+
 has_docker()    { is_real_docker && docker compose version >/dev/null 2>&1; }
 has_dockerc()   { is_real_docker && have docker-compose; }
 has_systemd()   { have systemctl && [ -d /run/systemd/system ]; }
@@ -1071,7 +1101,8 @@ migration_prepare_import() {
         docker:"")
             if has_docker; then MODE=docker
             elif has_dockerc; then MODE=docker-compose
-            else die "на новом сервере нет Docker Compose"
+            else die "пакет создан Docker-установкой, а здесь запустить её нечем: $(docker_unavailable_reason).
+Способ запуска при переносе сменить нельзя — сначала подготовьте Docker."
             fi
             ;;
         docker:docker|docker:docker-compose) ;;
@@ -1461,6 +1492,14 @@ choose() {
     say "  $u) удалить          — выбрать Docker Compose, systemd или оба варианта"
     say ""
     say "Для установки показаны только доступные на этой машине способы."
+    # Скрытый вариант без объяснения выглядит как отсутствие возможности.
+    # Чаще всего Docker установлен, а служба просто не запущена — и это видно
+    # только тому, кто догадается проверить сам.
+    if ! has_docker && ! has_dockerc; then
+        DOCKER_WHY="$(docker_unavailable_reason)"
+        [ "$DOCKER_WHY" = "docker не установлен" ] ||
+            say "Вариант с Docker скрыт: $DOCKER_WHY"
+    fi
     say ""
     while :; do
         printf 'Номер [1]: '

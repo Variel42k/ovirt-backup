@@ -22,6 +22,9 @@
 #                                      пакет для репетиции; старый узел продолжит работу
 #   ./install.sh --migrate-from /root/jhvirt-migration.tar.gz
 #                                      восстановить пакет на новом сервере
+#   ./install.sh --backup-dir /srv/backups --restore-dir /srv/restores
+#                                      хранилище копий и каталог восстановления
+#                                      лежат по другим путям, чем на прежнем узле
 #   ./install.sh --tls self-signed      создать и подключить локальный сертификат
 #   ./install.sh --tls files --tls-cert-file /root/server.crt \
 #                --tls-key-file /root/server.key
@@ -63,6 +66,9 @@ MODE=""; URL=""; DATABASE_URL_FILE=""; UNINSTALL_TARGET=""; START=1; PORT=8080
 URL_EXPLICIT=0; PORT_EXPLICIT=0
 UNINSTALL_REMOVE_CONFIG=0; UNINSTALL_REMOVE_DATA=0
 MIGRATION_ACTION=""; MIGRATION_EXPORT_FILE=""; MIGRATION_IMPORT_FILE=""
+# Пусто — брать пути из .env: при обычной установке они складываются рядом, при
+# переносе приезжают из пакета. Заданы — заменить, о чём установщик скажет вслух.
+BACKUP_DIR_OVERRIDE=""; RESTORE_DIR_OVERRIDE=""
 MIGRATION_TMP=""; MIGRATION_ACTIVE=0; MIGRATION_SOURCE_MODE=""
 MIGRATION_SOURCE_PREFIX=""; MIGRATION_SOURCE_USER=""; MIGRATION_DATABASE_KIND=""
 MIGRATION_SOURCE_UID=""; MIGRATION_SOURCE_GID=""; MIGRATION_MARKER=""; MIGRATION_RESUME=0
@@ -100,6 +106,14 @@ while [ $# -gt 0 ]; do
         --migrate-from) [ $# -ge 2 ] || die "--migrate-from требует путь"; MIGRATION_ACTION="import"; MIGRATION_IMPORT_FILE="$2"; shift 2 ;;
         --migrate-from=*) MIGRATION_ACTION="import"; MIGRATION_IMPORT_FILE="${1#--migrate-from=}"; shift ;;
         --keep-source-running) MIGRATION_KEEP_SOURCE=1; shift ;;
+        # Пути к данным на этом узле. Нужны прежде всего при переносе: диск на
+        # новом сервере называется иначе, монтируется в другое место или вовсе
+        # заменён сетевым хранилищем. Путь внутри контейнера при этом не
+        # меняется, поэтому записанные в базе хранилища остаются рабочими.
+        --backup-dir) [ $# -ge 2 ] || die "--backup-dir требует путь"; BACKUP_DIR_OVERRIDE="$2"; shift 2 ;;
+        --backup-dir=*) BACKUP_DIR_OVERRIDE="${1#--backup-dir=}"; shift ;;
+        --restore-dir) [ $# -ge 2 ] || die "--restore-dir требует путь"; RESTORE_DIR_OVERRIDE="$2"; shift 2 ;;
+        --restore-dir=*) RESTORE_DIR_OVERRIDE="${1#--restore-dir=}"; shift ;;
         --tls) [ $# -ge 2 ] || die "--tls требует none, self-signed или files"; TLS_MODE="$2"; shift 2 ;;
         --tls=*) TLS_MODE="${1#--tls=}"; shift ;;
         --self-signed) TLS_MODE=self-signed; shift ;;
@@ -2221,6 +2235,49 @@ docker_host_path() {
     esac
 }
 
+# apply_data_dir_overrides подставляет пути к данным, заданные ключами.
+#
+# Нужно прежде всего при переносе: пакет несёт пути прежнего сервера, а на новом
+# диск монтируется в другое место или заменён сетевым хранилищем. Меняется
+# только сторона хоста — внутри контейнера каталоги по-прежнему /backups и
+# /restores, поэтому хранилища, записанные в базе, остаются рабочими и трогать
+# их не нужно.
+apply_data_dir_overrides() {
+    ADO_WORK="$1"
+    for ADO_PAIR in "JHV_BACKUP_DIR:$BACKUP_DIR_OVERRIDE" "JHV_RESTORE_DIR:$RESTORE_DIR_OVERRIDE"; do
+        ADO_KEY="${ADO_PAIR%%:*}"; ADO_VALUE="${ADO_PAIR#*:}"
+        [ -n "$ADO_VALUE" ] || continue
+        ADO_OLD="$(env_file_value "$ADO_WORK/.env" "$ADO_KEY")"
+        set_plain_env "$ADO_KEY" "$ADO_VALUE" "$ADO_WORK/.env"
+        if [ -n "$ADO_OLD" ] && [ "$ADO_OLD" != "$ADO_VALUE" ]; then
+            say "    $ADO_KEY: $ADO_OLD -> $ADO_VALUE"
+        else
+            say "    $ADO_KEY: $ADO_VALUE"
+        fi
+    done
+}
+
+# ask_data_dir спрашивает путь, когда каталог из пакета на этом узле не найден.
+#
+# Отказ здесь был бы формально правильным, но заставлял бы оператора городить
+# симлинк или монтировать в чужое место только ради совпадения строки. Спросить
+# дешевле и честнее: перенос на сервер с другой разметкой — обычное дело, а не
+# исключение.
+ask_data_dir() {
+    ADD_KEY="$1"; ADD_MISSING="$2"; ADD_ANSWER=""
+    say ""
+    say "Каталог из пакета не найден на этом сервере:"
+    say "  $ADD_KEY = $ADD_MISSING"
+    say ""
+    say "Так бывает, когда диск с копиями монтируется здесь в другое место."
+    say "Укажите путь на этом сервере либо оставьте пустым, чтобы прервать импорт"
+    say "и подключить прежнее хранилище."
+    say ""
+    printf 'Путь: '
+    read -r ADD_ANSWER || ADD_ANSWER=""
+    printf '%s' "$ADD_ANSWER"
+}
+
 prepare_docker_data_paths() {
     PDP_WORK="$1"
     for PDP_KEY in JHV_BACKUP_DIR JHV_RESTORE_DIR; do
@@ -2230,8 +2287,20 @@ prepare_docker_data_paths() {
         if [ "$MIGRATION_ACTIVE" -eq 1 ] && [ ! -d "$PDP_PATH" ]; then
             case "$PDP_PATH" in
                 "$PREFIX"/*|"$PDP_WORK"/*) ;;
-                *) die "внешний каталог из $PDP_KEY не найден: $PDP_PATH
-Сначала подключите прежнее хранилище или создайте каталог, затем повторите импорт." ;;
+                *)
+                    # В диалоге предлагаем указать другой путь: перенос на
+                    # сервер с иной разметкой — обычное дело. Без терминала
+                    # спрашивать некого, поэтому там прежний отказ.
+                    PDP_NEW=""
+                    [ -t 0 ] && PDP_NEW="$(ask_data_dir "$PDP_KEY" "$PDP_PATH")"
+                    [ -n "$PDP_NEW" ] || die "внешний каталог из $PDP_KEY не найден: $PDP_PATH
+Подключите прежнее хранилище, создайте каталог или укажите другой путь:
+  $SELF --migrate-from ... --backup-dir /путь --restore-dir /путь"
+                    set_plain_env "$PDP_KEY" "$PDP_NEW" "$PDP_WORK/.env"
+                    PDP_VALUE="$PDP_NEW"
+                    PDP_PATH="$(docker_host_path "$PDP_WORK" "$PDP_NEW")"
+                    say "    $PDP_KEY: $PDP_NEW"
+                    ;;
             esac
         fi
         mkdir -p "$PDP_PATH" || die "не удалось создать каталог $PDP_PATH"
@@ -2246,6 +2315,15 @@ prepare_docker_data_paths() {
             docker run --rm --network none --user 10001:10001 -v "$PDP_PATH:/target" \
                 docker.io/library/postgres:17-alpine test -w /target >/dev/null 2>&1 ||
                 die "контейнерный UID 10001 не получил право записи в $PDP_PATH"
+        fi
+        # Пустой каталог при переносе — почти всегда забытое хранилище: база
+        # приехала и знает о копиях, а самих копий на новом узле нет. Служба
+        # при этом поднимется и покажет их в списке, а «файл не найден» вылезет
+        # позже, при первом восстановлении. Сказать сразу дешевле.
+        if [ "$MIGRATION_ACTIVE" -eq 1 ] && [ "$PDP_KEY" = JHV_BACKUP_DIR ] &&
+                [ -z "$(ls -A "$PDP_PATH" 2>/dev/null)" ]; then
+            say "    внимание: $PDP_PATH пуст — копии на этот сервер ещё не подключены"
+            say "    база будет знать о них, но восстановление не найдёт данных"
         fi
     done
 }
@@ -2423,6 +2501,7 @@ PostgreSQL хранит пароль внутри тома и новый не п
 	ensure_docker_metrics_token
 	migration_restore_docker_data
 	install_tls_docker "$WORK/.env"
+	apply_data_dir_overrides "$WORK"
 	prepare_docker_data_paths "$WORK"
 	migration_restore_docker_database "$WORK" "$RUN"
 

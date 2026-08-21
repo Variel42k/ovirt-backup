@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"adveng/jh_virt/internal/model"
-	"adveng/jh_virt/internal/repo"
+	"github.com/Variel42k/ovirt-backup/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/repo"
 )
 
 // The scanning path is what disaster recovery depends on: no database, no

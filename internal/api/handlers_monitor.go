@@ -7,10 +7,10 @@ import (
 	"net/http"
 	"time"
 
-	"adveng/jh_virt/internal/events"
-	"adveng/jh_virt/internal/model"
-	"adveng/jh_virt/internal/monitor"
-	"adveng/jh_virt/internal/store"
+	"github.com/Variel42k/ovirt-backup/internal/events"
+	"github.com/Variel42k/ovirt-backup/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/monitor"
+	"github.com/Variel42k/ovirt-backup/internal/store"
 )
 
 func (s *Server) handleListAlerts(w http.ResponseWriter, r *http.Request) {

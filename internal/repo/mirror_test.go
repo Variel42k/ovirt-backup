@@ -9,7 +9,7 @@ import (
 	"sync"
 	"testing"
 
-	"adveng/jh_virt/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
 // memBackend — хранилище в памяти: зеркалирование проверяется на поведении, а

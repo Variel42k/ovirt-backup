@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	"adveng/jh_virt/internal/model"
-	"adveng/jh_virt/internal/store"
+	"github.com/Variel42k/ovirt-backup/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/store"
 )
 
 // The planner answers the question an operator actually has in front of a VM:

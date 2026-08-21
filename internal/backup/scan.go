@@ -7,8 +7,8 @@ import (
 	"sort"
 	"strings"
 
-	"adveng/jh_virt/internal/model"
-	"adveng/jh_virt/internal/repo"
+	"github.com/Variel42k/ovirt-backup/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/repo"
 )
 
 // RunManifestSHA256 fingerprints the exact portable manifest representation.

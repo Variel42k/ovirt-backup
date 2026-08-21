@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"adveng/jh_virt/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
 func TestBackupJobRoundTripKeepsBootVerifyOptions(t *testing.T) {

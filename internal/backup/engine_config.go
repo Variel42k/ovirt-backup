@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"adveng/jh_virt/internal/model"
-	"adveng/jh_virt/internal/repo"
-	"adveng/jh_virt/internal/retention"
+	"github.com/Variel42k/ovirt-backup/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/repo"
+	"github.com/Variel42k/ovirt-backup/internal/retention"
 )
 
 func (e *Engine) SnapshotEngineConfig(ctx context.Context, serverID, targetID string, encrypt bool) (*model.EngineConfigRun, error) {

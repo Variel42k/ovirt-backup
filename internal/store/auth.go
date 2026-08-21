@@ -9,7 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"adveng/jh_virt/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
 const userColumns = `id, username, password_hash, role, disabled, last_login_at, created_at, updated_at, provider, external_id`

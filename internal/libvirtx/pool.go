@@ -8,7 +8,7 @@ import (
 
 	"github.com/rs/zerolog"
 
-	"adveng/jh_virt/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
 // ServerLoader fetches a connection definition by id. Taking it as a function

@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 
-	"adveng/jh_virt/internal/model"
-	"adveng/jh_virt/internal/secret"
+	"github.com/Variel42k/ovirt-backup/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/secret"
 )
 
 // ErrNotFound is returned by every Get* method when the row is absent.

@@ -17,7 +17,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"adveng/jh_virt/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
 // ErrNotExist is returned by Get, GetRange and Stat for a missing object.

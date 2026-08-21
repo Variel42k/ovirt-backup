@@ -9,8 +9,8 @@ import (
 	"io"
 	"time"
 
-	"adveng/jh_virt/internal/repo"
-	"adveng/jh_virt/internal/secret"
+	"github.com/Variel42k/ovirt-backup/internal/repo"
+	"github.com/Variel42k/ovirt-backup/internal/secret"
 )
 
 // WriterOptions configures a disk writer.

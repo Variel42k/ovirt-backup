@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"adveng/jh_virt/internal/backup"
+	"github.com/Variel42k/ovirt-backup/internal/backup"
 )
 
 func TestBootTestDefaults(t *testing.T) {

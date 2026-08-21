@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"adveng/jh_virt/internal/backup"
+	"github.com/Variel42k/ovirt-backup/internal/backup"
 )
 
 func TestRestoreDomainXMLDoesNotReplayMACAndEscapesValues(t *testing.T) {

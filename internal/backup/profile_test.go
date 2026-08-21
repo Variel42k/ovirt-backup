@@ -3,7 +3,7 @@ package backup
 import (
 	"testing"
 
-	"adveng/jh_virt/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
 func TestProfileFromOVirtConfigPreservesBootHardware(t *testing.T) {

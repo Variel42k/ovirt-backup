@@ -17,7 +17,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
-	"adveng/jh_virt/internal/config"
+	"github.com/Variel42k/ovirt-backup/internal/config"
 )
 
 // Manager owns the log output: the rotating file, the level, and the answers to

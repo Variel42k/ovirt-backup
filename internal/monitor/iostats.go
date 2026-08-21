@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
-	"adveng/jh_virt/internal/libvirtx"
-	"adveng/jh_virt/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/libvirtx"
+	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
 // Collecting input/output metrics from a libvirt host.

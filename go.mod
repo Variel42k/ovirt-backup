@@ -1,4 +1,4 @@
-module adveng/jh_virt
+module github.com/Variel42k/ovirt-backup
 
 go 1.26.6
 

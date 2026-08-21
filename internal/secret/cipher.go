@@ -14,7 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"adveng/jh_virt/internal/config"
+	"github.com/Variel42k/ovirt-backup/internal/config"
 )
 
 const keySize = 32 // AES-256

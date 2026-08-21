@@ -11,7 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"adveng/jh_virt/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
 // local stores backups on a filesystem path. Anything mounted there works the

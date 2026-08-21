@@ -11,10 +11,10 @@ import (
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
-	drcheck "adveng/jh_virt/internal/dr"
-	"adveng/jh_virt/internal/model"
-	"adveng/jh_virt/internal/quality"
-	"adveng/jh_virt/internal/store"
+	drcheck "github.com/Variel42k/ovirt-backup/internal/dr"
+	"github.com/Variel42k/ovirt-backup/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/quality"
+	"github.com/Variel42k/ovirt-backup/internal/store"
 )
 
 func (s *Server) metricsHandler() http.Handler {

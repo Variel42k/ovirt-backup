@@ -9,7 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"adveng/jh_virt/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
 const backupTaskColumns = `id, job_run_id, job_id, server_id, vm_id, priority, concurrency,

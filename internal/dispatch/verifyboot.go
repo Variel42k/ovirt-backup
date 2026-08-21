@@ -8,9 +8,9 @@ import (
 	"path"
 	"time"
 
-	"adveng/jh_virt/internal/backup"
-	"adveng/jh_virt/internal/kvm"
-	"adveng/jh_virt/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/backup"
+	"github.com/Variel42k/ovirt-backup/internal/kvm"
+	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
 // The boot test: reassemble the backup, put it on a hypervisor, start it as an

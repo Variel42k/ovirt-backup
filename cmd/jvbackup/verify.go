@@ -8,10 +8,10 @@ import (
 	"path/filepath"
 	"time"
 
-	"adveng/jh_virt/internal/backup"
-	"adveng/jh_virt/internal/config"
-	"adveng/jh_virt/internal/repo"
-	"adveng/jh_virt/internal/secret"
+	"github.com/Variel42k/ovirt-backup/internal/backup"
+	"github.com/Variel42k/ovirt-backup/internal/config"
+	"github.com/Variel42k/ovirt-backup/internal/repo"
+	"github.com/Variel42k/ovirt-backup/internal/secret"
 )
 
 // Verification and restore work entirely from the repository. Nothing here

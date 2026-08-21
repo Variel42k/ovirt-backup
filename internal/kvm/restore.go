@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"adveng/jh_virt/internal/backup"
+	"github.com/Variel42k/ovirt-backup/internal/backup"
 )
 
 // RestoreDomain is the whitelisted, portable description used to define a

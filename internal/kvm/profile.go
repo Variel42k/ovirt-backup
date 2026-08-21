@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"adveng/jh_virt/internal/backup"
-	"adveng/jh_virt/internal/libvirtx"
+	"github.com/Variel42k/ovirt-backup/internal/backup"
+	"github.com/Variel42k/ovirt-backup/internal/libvirtx"
 )
 
 func profileForDomain(info *libvirtx.Domain, manifests []*backup.DiskManifest) *backup.VMProfile {

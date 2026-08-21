@@ -6,11 +6,11 @@ import (
 	"slices"
 	"time"
 
-	"adveng/jh_virt/internal/model"
-	"adveng/jh_virt/internal/ovirt"
-	"adveng/jh_virt/internal/repo"
-	"adveng/jh_virt/internal/retention"
-	"adveng/jh_virt/internal/store"
+	"github.com/Variel42k/ovirt-backup/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/ovirt"
+	"github.com/Variel42k/ovirt-backup/internal/repo"
+	"github.com/Variel42k/ovirt-backup/internal/retention"
+	"github.com/Variel42k/ovirt-backup/internal/store"
 )
 
 // ApplyRetention evaluates a policy over one VM's backups in one repository

@@ -23,7 +23,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
 
-	"adveng/jh_virt/internal/config"
+	"github.com/Variel42k/ovirt-backup/internal/config"
 )
 
 //go:embed migrations/*.sql

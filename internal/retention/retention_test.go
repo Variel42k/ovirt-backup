@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"adveng/jh_virt/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
 var base = time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)

@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"time"
 
-	"adveng/jh_virt/internal/events"
-	"adveng/jh_virt/internal/libvirtx"
-	"adveng/jh_virt/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/events"
+	"github.com/Variel42k/ovirt-backup/internal/libvirtx"
+	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
 // Polling a bare libvirt host.

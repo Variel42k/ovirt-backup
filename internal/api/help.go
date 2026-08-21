@@ -3,7 +3,7 @@ package api
 import (
 	"net/http"
 
-	"adveng/jh_virt/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
 // The in-app reference.

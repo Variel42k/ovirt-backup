@@ -5,8 +5,8 @@ import (
 	"strconv"
 	"strings"
 
-	"adveng/jh_virt/internal/quality"
-	"adveng/jh_virt/internal/store"
+	"github.com/Variel42k/ovirt-backup/internal/quality"
+	"github.com/Variel42k/ovirt-backup/internal/store"
 )
 
 func (s *Server) handleBackupQuality(w http.ResponseWriter, r *http.Request) {

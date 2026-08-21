@@ -9,11 +9,11 @@ import (
 
 	"github.com/rs/zerolog"
 
-	"adveng/jh_virt/internal/config"
-	"adveng/jh_virt/internal/model"
-	"adveng/jh_virt/internal/repo"
-	"adveng/jh_virt/internal/secret"
-	"adveng/jh_virt/internal/store/storetest"
+	"github.com/Variel42k/ovirt-backup/internal/config"
+	"github.com/Variel42k/ovirt-backup/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/repo"
+	"github.com/Variel42k/ovirt-backup/internal/secret"
+	"github.com/Variel42k/ovirt-backup/internal/store/storetest"
 )
 
 func TestExportQcow2ArtifactsCreatesVerifiableManagedArtifact(t *testing.T) {

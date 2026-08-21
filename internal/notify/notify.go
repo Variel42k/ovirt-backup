@@ -16,8 +16,8 @@ import (
 
 	"github.com/rs/zerolog"
 
-	"adveng/jh_virt/internal/config"
-	"adveng/jh_virt/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/config"
+	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
 // Message — то, что уходит человеку.

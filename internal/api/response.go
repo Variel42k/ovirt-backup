@@ -9,10 +9,10 @@ import (
 	"strconv"
 	"strings"
 
-	"adveng/jh_virt/internal/ovirt"
-	"adveng/jh_virt/internal/repo"
-	"adveng/jh_virt/internal/scheduler"
-	"adveng/jh_virt/internal/store"
+	"github.com/Variel42k/ovirt-backup/internal/ovirt"
+	"github.com/Variel42k/ovirt-backup/internal/repo"
+	"github.com/Variel42k/ovirt-backup/internal/scheduler"
+	"github.com/Variel42k/ovirt-backup/internal/store"
 )
 
 // maxBodyBytes bounds request bodies. Nothing this API accepts is large — the

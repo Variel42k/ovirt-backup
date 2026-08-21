@@ -17,10 +17,10 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 
-	"adveng/jh_virt/internal/events"
-	"adveng/jh_virt/internal/model"
-	"adveng/jh_virt/internal/repo"
-	"adveng/jh_virt/internal/store"
+	"github.com/Variel42k/ovirt-backup/internal/events"
+	"github.com/Variel42k/ovirt-backup/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/repo"
+	"github.com/Variel42k/ovirt-backup/internal/store"
 )
 
 // copyLease — на сколько worker забирает задачу.

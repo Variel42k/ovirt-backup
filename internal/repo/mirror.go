@@ -7,7 +7,7 @@ import (
 	"io"
 	"sync"
 
-	"adveng/jh_virt/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
 // Mirror пишет одни и те же объекты в основное хранилище и в зеркала за один

@@ -9,7 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"adveng/jh_virt/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
 const roleColumns = `id, name, title, description, permissions, created_by, created_at, updated_at`

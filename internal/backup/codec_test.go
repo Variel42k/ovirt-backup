@@ -5,8 +5,8 @@ import (
 	"crypto/rand"
 	"testing"
 
-	"adveng/jh_virt/internal/config"
-	"adveng/jh_virt/internal/secret"
+	"github.com/Variel42k/ovirt-backup/internal/config"
+	"github.com/Variel42k/ovirt-backup/internal/secret"
 )
 
 // compressibleChunk imitates a chunk of a real filesystem: repeating structure

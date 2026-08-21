@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"adveng/jh_virt/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
 // apiTokenPayload — то, что задаёт администратор при выпуске и правке токена.

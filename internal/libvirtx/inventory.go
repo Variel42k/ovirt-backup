@@ -6,7 +6,7 @@ import (
 
 	golibvirt "github.com/digitalocean/go-libvirt"
 
-	"adveng/jh_virt/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
 // Mapping libvirt onto the shared inventory model.

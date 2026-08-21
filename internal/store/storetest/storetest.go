@@ -13,10 +13,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	"adveng/jh_virt/internal/config"
-	"adveng/jh_virt/internal/secret"
-	"adveng/jh_virt/internal/store"
-	"adveng/jh_virt/internal/testdb"
+	"github.com/Variel42k/ovirt-backup/internal/config"
+	"github.com/Variel42k/ovirt-backup/internal/secret"
+	"github.com/Variel42k/ovirt-backup/internal/store"
+	"github.com/Variel42k/ovirt-backup/internal/testdb"
 )
 
 // New открывает базу этого тестового бинаря, применяет схему, очищает таблицы

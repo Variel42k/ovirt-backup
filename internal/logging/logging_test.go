@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"adveng/jh_virt/internal/config"
+	"github.com/Variel42k/ovirt-backup/internal/config"
 )
 
 func testManager(t *testing.T) (*Manager, string) {

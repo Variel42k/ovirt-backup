@@ -11,10 +11,10 @@ import (
 
 	"github.com/google/uuid"
 
-	"adveng/jh_virt/internal/imageio"
-	"adveng/jh_virt/internal/model"
-	"adveng/jh_virt/internal/ovirt"
-	"adveng/jh_virt/internal/repo"
+	"github.com/Variel42k/ovirt-backup/internal/imageio"
+	"github.com/Variel42k/ovirt-backup/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/ovirt"
+	"github.com/Variel42k/ovirt-backup/internal/repo"
 )
 
 // ErrOutputDirNotAllowed сообщает, что запрошенный каталог восстановления вне

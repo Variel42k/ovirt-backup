@@ -10,7 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"adveng/jh_virt/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
 const periodColumns = `id, dry_run, started_at, ended_at, changed_by, note, archive_path, summary, created_at`

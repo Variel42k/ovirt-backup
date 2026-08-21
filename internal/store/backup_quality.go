@@ -10,7 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"adveng/jh_virt/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
 const jobRunColumns = `id, job_id, job_name, server_id, triggered_by, scheduled_at,

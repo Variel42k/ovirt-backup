@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"adveng/jh_virt/internal/model"
-	"adveng/jh_virt/internal/store"
-	"adveng/jh_virt/internal/store/storetest"
+	"github.com/Variel42k/ovirt-backup/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/store"
+	"github.com/Variel42k/ovirt-backup/internal/store/storetest"
 )
 
 func qualityDefaults() model.BackupQualitySettings {

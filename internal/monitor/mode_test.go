@@ -9,11 +9,11 @@ import (
 
 	"github.com/rs/zerolog"
 
-	"adveng/jh_virt/internal/config"
-	"adveng/jh_virt/internal/model"
-	"adveng/jh_virt/internal/secret"
-	"adveng/jh_virt/internal/store"
-	"adveng/jh_virt/internal/testdb"
+	"github.com/Variel42k/ovirt-backup/internal/config"
+	"github.com/Variel42k/ovirt-backup/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/secret"
+	"github.com/Variel42k/ovirt-backup/internal/store"
+	"github.com/Variel42k/ovirt-backup/internal/testdb"
 )
 
 func testRemediator(t *testing.T) (*Remediator, *store.Store, string) {

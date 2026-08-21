@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"adveng/jh_virt/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
 func planInput(free int64, req *model.RestoreVMRequest) RestoreVMInput {

@@ -11,11 +11,11 @@ import (
 	golibvirt "github.com/digitalocean/go-libvirt"
 	googleuuid "github.com/google/uuid"
 
-	"adveng/jh_virt/internal/backup"
-	"adveng/jh_virt/internal/kvm"
-	"adveng/jh_virt/internal/libvirtx"
-	"adveng/jh_virt/internal/model"
-	"adveng/jh_virt/internal/store"
+	"github.com/Variel42k/ovirt-backup/internal/backup"
+	"github.com/Variel42k/ovirt-backup/internal/kvm"
+	"github.com/Variel42k/ovirt-backup/internal/libvirtx"
+	"github.com/Variel42k/ovirt-backup/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/store"
 )
 
 // PlanRestoreVM routes full-VM planning to the target platform. The embedded

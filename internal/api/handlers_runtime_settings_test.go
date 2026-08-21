@@ -10,13 +10,13 @@ import (
 
 	"github.com/rs/zerolog"
 
-	"adveng/jh_virt/internal/backup"
-	"adveng/jh_virt/internal/config"
-	"adveng/jh_virt/internal/dispatch"
-	"adveng/jh_virt/internal/events"
-	"adveng/jh_virt/internal/logging"
-	"adveng/jh_virt/internal/model"
-	"adveng/jh_virt/internal/scheduler"
+	"github.com/Variel42k/ovirt-backup/internal/backup"
+	"github.com/Variel42k/ovirt-backup/internal/config"
+	"github.com/Variel42k/ovirt-backup/internal/dispatch"
+	"github.com/Variel42k/ovirt-backup/internal/events"
+	"github.com/Variel42k/ovirt-backup/internal/logging"
+	"github.com/Variel42k/ovirt-backup/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/scheduler"
 )
 
 func TestRuntimeSettingsHandlersApplyAndReset(t *testing.T) {

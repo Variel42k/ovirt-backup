@@ -13,7 +13,7 @@ import (
 	"github.com/klauspost/compress/s2"
 	"github.com/klauspost/compress/zstd"
 
-	"adveng/jh_virt/internal/secret"
+	"github.com/Variel42k/ovirt-backup/internal/secret"
 )
 
 // codec turns a plaintext chunk into the bytes stored in the blob and back.

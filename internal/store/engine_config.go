@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"adveng/jh_virt/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/model"
 	"github.com/google/uuid"
 )
 

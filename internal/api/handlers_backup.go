@@ -7,12 +7,12 @@ import (
 	"strings"
 	"time"
 
-	"adveng/jh_virt/internal/backup"
-	"adveng/jh_virt/internal/events"
-	"adveng/jh_virt/internal/model"
-	"adveng/jh_virt/internal/retention"
-	"adveng/jh_virt/internal/scheduler"
-	"adveng/jh_virt/internal/store"
+	"github.com/Variel42k/ovirt-backup/internal/backup"
+	"github.com/Variel42k/ovirt-backup/internal/events"
+	"github.com/Variel42k/ovirt-backup/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/retention"
+	"github.com/Variel42k/ovirt-backup/internal/scheduler"
+	"github.com/Variel42k/ovirt-backup/internal/store"
 )
 
 // jobPayload is the write shape of a backup job.

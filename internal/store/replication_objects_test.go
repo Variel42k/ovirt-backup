@@ -3,7 +3,7 @@ package store
 import (
 	"testing"
 
-	"adveng/jh_virt/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
 // Основную копию пишет движок бэкапа, реплики — копировщик, и считать объекты

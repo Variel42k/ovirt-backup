@@ -15,8 +15,8 @@ import (
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 
-	"adveng/jh_virt/internal/model"
-	"adveng/jh_virt/internal/repo"
+	"github.com/Variel42k/ovirt-backup/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/repo"
 )
 
 // TestExternalBackendMatrix is opt-in because it needs MinIO and SFTP. The

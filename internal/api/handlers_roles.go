@@ -6,7 +6,7 @@ import (
 	"slices"
 	"strings"
 
-	"adveng/jh_virt/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
 // roleNamePattern ограничивает имя роли тем, что безопасно подставлять в URL,

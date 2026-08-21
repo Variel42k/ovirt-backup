@@ -5,8 +5,8 @@ import (
 	"context"
 	"testing"
 
-	"adveng/jh_virt/internal/backup"
-	"adveng/jh_virt/internal/repo"
+	"github.com/Variel42k/ovirt-backup/internal/backup"
+	"github.com/Variel42k/ovirt-backup/internal/repo"
 )
 
 // Edge cases of the image serialisation.

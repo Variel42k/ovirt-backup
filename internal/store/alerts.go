@@ -10,7 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"adveng/jh_virt/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
 const alertColumns = `id, server_id, scope, object_id, object_name, kind, severity, message,

@@ -11,8 +11,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 
-	"adveng/jh_virt/internal/backup"
-	"adveng/jh_virt/internal/libvirtx"
+	"github.com/Variel42k/ovirt-backup/internal/backup"
+	"github.com/Variel42k/ovirt-backup/internal/libvirtx"
 )
 
 // TestRealKVMGuestAgentBoot is an opt-in acceptance test against a real

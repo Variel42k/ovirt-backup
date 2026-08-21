@@ -3,9 +3,9 @@ package kvm
 import (
 	"testing"
 
-	"adveng/jh_virt/internal/libvirtx"
-	"adveng/jh_virt/internal/model"
-	"adveng/jh_virt/pkg/nbd"
+	"github.com/Variel42k/ovirt-backup/internal/libvirtx"
+	"github.com/Variel42k/ovirt-backup/internal/model"
+	"github.com/Variel42k/ovirt-backup/pkg/nbd"
 )
 
 const (

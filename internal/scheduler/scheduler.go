@@ -15,16 +15,16 @@ import (
 	"github.com/robfig/cron/v3"
 	"github.com/rs/zerolog"
 
-	"adveng/jh_virt/internal/backup"
-	"adveng/jh_virt/internal/config"
-	"adveng/jh_virt/internal/dispatch"
-	"adveng/jh_virt/internal/events"
-	"adveng/jh_virt/internal/filebackup"
-	"adveng/jh_virt/internal/model"
-	"adveng/jh_virt/internal/quality"
-	"adveng/jh_virt/internal/replication"
-	"adveng/jh_virt/internal/repo"
-	"adveng/jh_virt/internal/store"
+	"github.com/Variel42k/ovirt-backup/internal/backup"
+	"github.com/Variel42k/ovirt-backup/internal/config"
+	"github.com/Variel42k/ovirt-backup/internal/dispatch"
+	"github.com/Variel42k/ovirt-backup/internal/events"
+	"github.com/Variel42k/ovirt-backup/internal/filebackup"
+	"github.com/Variel42k/ovirt-backup/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/quality"
+	"github.com/Variel42k/ovirt-backup/internal/replication"
+	"github.com/Variel42k/ovirt-backup/internal/repo"
+	"github.com/Variel42k/ovirt-backup/internal/store"
 )
 
 // ErrJobBusy сообщает, что задание уже выполняется и повторный запуск

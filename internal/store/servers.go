@@ -10,7 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"adveng/jh_virt/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
 const serverColumns = `id, name, kind, engine_url, username, password_enc, ca_cert, insecure_tls,

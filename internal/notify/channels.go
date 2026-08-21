@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"adveng/jh_virt/internal/config"
+	"github.com/Variel42k/ovirt-backup/internal/config"
 )
 
 // httpClient общий для webhook и Telegram: свой на канал не нужен, а предел

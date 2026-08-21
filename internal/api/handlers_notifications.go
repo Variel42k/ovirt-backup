@@ -5,9 +5,9 @@ import (
 	"strings"
 	"time"
 
-	"adveng/jh_virt/internal/events"
-	"adveng/jh_virt/internal/model"
-	"adveng/jh_virt/internal/notify"
+	"github.com/Variel42k/ovirt-backup/internal/events"
+	"github.com/Variel42k/ovirt-backup/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/notify"
 )
 
 var knownNotificationKinds = []string{

@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"adveng/jh_virt/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
 // Тип хранилища, добавленный в модель и забытый в /meta, попал бы в интерфейс

@@ -6,7 +6,7 @@ import (
 	"sort"
 	"time"
 
-	"adveng/jh_virt/internal/imageio"
+	"github.com/Variel42k/ovirt-backup/internal/imageio"
 )
 
 // maxReadBatch caps how much is pulled from ovirt-imageio in one ranged GET.

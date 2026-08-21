@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"adveng/jh_virt/internal/config"
-	"adveng/jh_virt/internal/testdb"
+	"github.com/Variel42k/ovirt-backup/internal/config"
+	"github.com/Variel42k/ovirt-backup/internal/testdb"
 )
 
 // Обновление существующей установки — путь, который обычные тесты не

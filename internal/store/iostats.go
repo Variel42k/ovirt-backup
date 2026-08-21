@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"adveng/jh_virt/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
 const diskSampleColumns = `id, server_id, vm_id, vm_name, disk, read_bps, write_bps,

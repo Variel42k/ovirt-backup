@@ -9,8 +9,8 @@ import (
 
 	"github.com/rs/zerolog"
 
-	"adveng/jh_virt/internal/config"
-	"adveng/jh_virt/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/config"
+	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
 // Перевод маршрутов с проверки по роли на проверку по праву не должен был

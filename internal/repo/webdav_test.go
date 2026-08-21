@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"adveng/jh_virt/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
 // Поддельный сервер WebDAV. Смысл в том, чтобы проверять бэкенд целиком —

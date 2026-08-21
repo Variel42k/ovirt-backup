@@ -14,7 +14,7 @@ import (
 
 	"github.com/cloudsoda/go-smb2"
 
-	"adveng/jh_virt/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
 // smbBackend stores backups on an SMB/CIFS share: сетевая папка Windows,

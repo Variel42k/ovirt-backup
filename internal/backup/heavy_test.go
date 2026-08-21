@@ -8,7 +8,7 @@ import (
 
 	"github.com/rs/zerolog"
 
-	"adveng/jh_virt/internal/config"
+	"github.com/Variel42k/ovirt-backup/internal/config"
 )
 
 func newHeavyEngine(limit int) *Engine {

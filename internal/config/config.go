@@ -14,7 +14,7 @@ import (
 
 	"github.com/spf13/viper"
 
-	"adveng/jh_virt/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
 const envPrefix = "JHV"

@@ -6,10 +6,10 @@ import (
 	"net/http"
 	"time"
 
-	"adveng/jh_virt/internal/events"
-	"adveng/jh_virt/internal/libvirtx"
-	"adveng/jh_virt/internal/model"
-	"adveng/jh_virt/internal/ovirt"
+	"github.com/Variel42k/ovirt-backup/internal/events"
+	"github.com/Variel42k/ovirt-backup/internal/libvirtx"
+	"github.com/Variel42k/ovirt-backup/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/ovirt"
 )
 
 // serverPayload is the write shape of a connection. It is separate from the

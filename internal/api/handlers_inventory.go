@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"adveng/jh_virt/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
 func (s *Server) handleListClusters(w http.ResponseWriter, r *http.Request) {

@@ -8,11 +8,11 @@ import (
 	"strings"
 	"testing"
 
-	"adveng/jh_virt/internal/config"
-	"adveng/jh_virt/internal/imageio"
-	"adveng/jh_virt/internal/model"
-	"adveng/jh_virt/internal/repo"
-	"adveng/jh_virt/internal/secret"
+	"github.com/Variel42k/ovirt-backup/internal/config"
+	"github.com/Variel42k/ovirt-backup/internal/imageio"
+	"github.com/Variel42k/ovirt-backup/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/repo"
+	"github.com/Variel42k/ovirt-backup/internal/secret"
 )
 
 const (

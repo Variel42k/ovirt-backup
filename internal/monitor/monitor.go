@@ -10,12 +10,12 @@ import (
 
 	"github.com/rs/zerolog"
 
-	"adveng/jh_virt/internal/config"
-	"adveng/jh_virt/internal/events"
-	"adveng/jh_virt/internal/libvirtx"
-	"adveng/jh_virt/internal/model"
-	"adveng/jh_virt/internal/ovirt"
-	"adveng/jh_virt/internal/store"
+	"github.com/Variel42k/ovirt-backup/internal/config"
+	"github.com/Variel42k/ovirt-backup/internal/events"
+	"github.com/Variel42k/ovirt-backup/internal/libvirtx"
+	"github.com/Variel42k/ovirt-backup/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/ovirt"
+	"github.com/Variel42k/ovirt-backup/internal/store"
 )
 
 // Thresholds for storage domain capacity alerts.

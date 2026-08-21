@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"adveng/jh_virt/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
 // A reference that quietly falls behind the code is worse than none: it teaches

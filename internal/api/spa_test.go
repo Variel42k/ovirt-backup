@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"adveng/jh_virt/internal/config"
+	"github.com/Variel42k/ovirt-backup/internal/config"
 )
 
 // Оболочку приложения браузер обязан перепроверять, файлы сборки — нет.

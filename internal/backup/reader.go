@@ -8,8 +8,8 @@ import (
 	"io"
 	"sort"
 
-	"adveng/jh_virt/internal/repo"
-	"adveng/jh_virt/internal/secret"
+	"github.com/Variel42k/ovirt-backup/internal/repo"
+	"github.com/Variel42k/ovirt-backup/internal/secret"
 )
 
 // maxBatchBytes caps how much of a data object is pulled in one request when

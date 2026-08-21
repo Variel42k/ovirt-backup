@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"adveng/jh_virt/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
 const runtimeSettingsColumns = `backup_compression, scheduler_timezone, log_max_size_mb, log_max_backups,

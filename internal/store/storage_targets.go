@@ -9,7 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"adveng/jh_virt/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
 const storageColumns = `id, name, kind, enabled, base_path, endpoint, region, bucket, prefix,

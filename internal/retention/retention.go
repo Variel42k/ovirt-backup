@@ -11,7 +11,7 @@ import (
 	"sort"
 	"time"
 
-	"adveng/jh_virt/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
 // Decision is the outcome of evaluating a policy over one VM's backups.

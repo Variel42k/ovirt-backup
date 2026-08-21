@@ -8,7 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"adveng/jh_virt/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
 const artifactColumns = `id, run_id, disk_id, disk_alias, kind, storage_target_id, status,

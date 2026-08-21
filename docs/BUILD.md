@@ -171,6 +171,18 @@ ssh server 'sudo sh /tmp/ovirt-backup-1.0.0-linux-amd64.run'
 `--extract` нужен, когда установку выполняет не этот скрипт: свой Ansible,
 образ, каталог без systemd.
 
+Экспорт/импорт поддерживает одинаковый runtime-режим (Docker→Docker либо
+systemd→systemd). Пакет переносит конфигурацию, PostgreSQL, `secret.key`, токены
+и управляемый TLS, но не терабайтные backup/file/restore roots. Установщик
+сохраняет исходные `PREFIX`, пользователя и, если возможно, UID/GID; другой путь
+или имя задаются окружением при импорте. Оборванный импорт продолжается только
+с тем же архивом по marker с его SHA-256.
+
+Миграционный tar имеет права `0600`, но не зашифрован и не подписан. Встроенные
+checksum ловят повреждение отдельных entries после упаковки, но не
+аутентифицируют архив целиком. Полная процедура и cutover-чек-лист находятся в
+[DEPLOY.md](DEPLOY.md#перенос-приложения-на-другой-сервер).
+
 В unattended-режиме `--url` обязателен: от его схемы зависит флаг `Secure` у
 сессионной cookie. Для systemd установщик на Ubuntu/Debian или RHEL/Alma/Rocky
 ставит PostgreSQL, создаёт локальную роль и базу, формирует env и unit,
@@ -250,6 +262,19 @@ npm run e2e
 
 `JHV_E2E_INSECURE_TLS=true` нужен только для тестовой инсталляции с самоподписанным
 сертификатом; по умолчанию Chromium сохраняет обычную проверку доверия.
+
+Текущий Playwright-набор проверяет system/light/dark и контраст, немедленную
+смену часового пояса в нескольких сессиях, доступность страниц Engine/file
+backup и основные controls репликации, каталога, Object Lock и DR. Он не
+заменяет стендовые прогоны реального backup/restore, installer migration и
+доставки SMTP/Telegram/webhook.
+
+Минимальная приёмка стабилизационного релиза: миграция копии production-БД,
+Docker Desktop smoke, oVirt→oVirt и KVM→KVM restore с rollback, обязательные
+реплики при отказе одной цели, файловый incremental/selective restore и
+уведомление с транспортным retry. Команды эксплуатации приведены в
+[DEPLOY.md](DEPLOY.md#11-production-чек-лист), а статус восстановления — в
+[PLAN-RECOVERY.md](PLAN-RECOVERY.md).
 
 ### Тестам нужна PostgreSQL
 

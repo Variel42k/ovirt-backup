@@ -114,6 +114,8 @@ func TestKeyTopicsArePresent(t *testing.T) {
 	for _, id := range []string{
 		"backup-pipeline", "disk-layers", "disk-formats", "ovirt-data-path", "kvm-data-path", "consistency-levels",
 		"changed-blocks", "quiesce", "hot-backup", "retention", "verify", "chains",
+		"physical-copies", "storage-modes", "restore-new-vm", "file-backups", "managed-artifacts",
+		"outside-alerts", "server-migration", "system-time-and-theme",
 	} {
 		if !known[id] {
 			t.Errorf("в справке нет статьи %q", id)

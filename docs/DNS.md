@@ -270,7 +270,20 @@ sudo docker compose exec -T ovirt-backup \
 
 Ожидаемый адрес движка на момент проверки: `10.249.16.66`.
 
-## 9. Официальные справочники
+## 9. DNS при переносе приложения
+
+Installer переносит конфигурацию и может изменить `--url`, но DNS/NAT он не
+меняет. Для cutover заранее уменьшите TTL, выпустите TLS с SAN итогового имени
+и добавьте новый callback во внешний OIDC provider. После импорта проверьте имя
+из браузера и со стороны сервера, затем переключите запись и не запускайте
+старый экземпляр против общей PostgreSQL.
+
+Если имя остаётся прежним, сохранённый сертификат можно использовать только
+после успешной SAN-проверки установщика. Если меняется — выберите новый
+self-signed или PEM через installer. Полная последовательность:
+[DEPLOY.md](DEPLOY.md#перенос-приложения-на-другой-сервер).
+
+## 10. Официальные справочники
 
 - [Netplan: YAML configuration](https://netplan.readthedocs.io/en/stable/netplan-yaml/)
 - [systemd-resolved: `Domains=` и route-only domains](https://www.freedesktop.org/software/systemd/man/latest/resolved.conf.html)

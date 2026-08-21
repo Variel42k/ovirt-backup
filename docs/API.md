@@ -432,6 +432,7 @@ Symlink хранится и восстанавливается как ссылк
 |---|---|---|
 | `GET` | `/alerts` | оповещения; по умолчанию только активные |
 | `POST` | `/alerts/{id}/ack` | принять в работу |
+| `POST` | `/alerts/{id}/notifications` | `mute`, `snooze` или `unmute` внешней доставки отдельного случая |
 | `GET` | `/remediations` | журнал восстановительных действий |
 | `POST` | `/remediations` | выполнить действие вручную |
 | `GET` | `/health-samples` | история проб состояния |
@@ -460,6 +461,62 @@ Symlink хранится и восстанавливается как ссылк
 ```json
 {"status":"queued","job_run_id":"…","vms":4,"replicas":8}
 ```
+
+Жизненный цикл общего запуска: `running` → `waiting_copies` → `success`.
+`waiting_copies` означает, что primary уже может быть пригоден, но обязательные
+реплики или производные артефакты ещё не завершены. Конечные альтернативы —
+`partial` и `failed`; успех primary не подменяет ими требование всех целей.
+
+### Настройки и история уведомлений (admin)
+
+| Метод | Путь | Описание |
+|---|---|---|
+| `GET` | `/settings/notifications` | эффективная глобальная настройка, per-kind policies и известные типы |
+| `PUT` | `/settings/notifications` | атомарно заменить runtime-настройку и правила |
+| `DELETE` | `/settings/notifications` | удалить database override и вернуться к YAML/default |
+| `GET` | `/notification-deliveries?limit=100` | последние строки durable outbox по каналам |
+
+```jsonc
+// PUT /settings/notifications
+{
+  "settings": {
+    "enabled": true,
+    "min_severity": "critical",
+    "default_repeat_minutes": 120,
+    "notify_on_resolved": true,
+    "ack_stops_repeats": true,
+    "max_repeats": 5
+  },
+  "policies": [
+    {
+      "kind": "backup_unprotected",
+      "enabled": false,
+      "repeat_minutes": 0,
+      "notify_resolved": false,
+      "stop_on_ack": true,
+      "max_repeats": 0,
+      "channels": []
+    }
+  ]
+}
+```
+
+`configured_channels` и `source` присутствуют в ответе, но credentials
+SMTP/Telegram/webhook никогда не возвращаются и по этому API не меняются.
+Пустой `channels` у policy означает все настроенные каналы. Значение
+`default_repeat_minutes: 0` отключает напоминания, `max_repeats: 0` не
+ограничивает их количество, если интервал ненулевой.
+
+```jsonc
+// POST /alerts/{id}/notifications
+{ "action": "snooze", "until": "2026-08-22T06:00:00Z", "reason": "окно работ" }
+// либо { "action": "mute", "reason": "принятый риск" }
+// либо { "action": "unmute" }
+```
+
+Mute/snooze не скрывает alert в web и не меняет его state. Outbox создаёт
+отдельную строку на канал и доставляет at-least-once; webhook-получатель может
+дедуплицировать по `alert_id`, `event` и `sequence`.
 
 ### Runtime-пороги (admin)
 

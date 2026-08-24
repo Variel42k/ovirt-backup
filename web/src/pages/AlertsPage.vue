@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useQuasar } from 'quasar'
 import { api, notify, notifyError, notifyOk } from '@/api/client'
 import { ago, dateTime } from '@/api/format'
@@ -16,6 +16,28 @@ const alerts = ref<Alert[]>([])
 const remediations = ref<RemediationRecord[]>([])
 const loading = ref(false)
 const includeResolved = ref(false)
+
+/**
+ * Отбор по адресату. Пусто — показывать всё.
+ *
+ * Считается на месте, а не запросом к серверу: список уже загружен, и
+ * переключение должно быть мгновенным. Заодно видно, сколько оповещений у
+ * каждого адресата — ради этого разделение и затевалось, чтобы человек сразу
+ * понимал, к нему это или нет. Отбор на сервере тоже есть (`?audience=`), он
+ * нужен внешним потребителям API.
+ */
+const audienceFilter = ref('')
+
+const visibleAlerts = computed(() =>
+  audienceFilter.value ? alerts.value.filter((a) => a.audience === audienceFilter.value) : alerts.value,
+)
+
+/** Сколько оповещений у каждого адресата — для подписей на переключателе. */
+const audienceCounts = computed(() => {
+  const counts: Record<string, number> = {}
+  for (const alert of alerts.value) counts[alert.audience] = (counts[alert.audience] ?? 0) + 1
+  return counts
+})
 let liveSource: EventSource | null = null
 let fallbackPoll: number | undefined
 
@@ -92,13 +114,24 @@ function notificationAction(alert: Alert) {
   })
 }
 
+// Ручное восстановление ведёт к тем же операциям, что и управление ВМ, поэтому
+// подчиняется тому же выключателю: где управление отключено, кнопки нет.
+const canManage = computed(
+  () => auth.canWrite() && app.meta?.capabilities.management_enabled !== false,
+)
+const canDisrupt = computed(() => canManage.value && auth.can('servers.disruptive'))
+
 /** Ручной запуск того же действия, что выполнил бы мониторинг. */
 function remediate(alert: Alert) {
-  const actions = (app.meta?.remediation_actions ?? []).map((a) => ({
-    label: a.title,
-    value: a.value,
-    description: a.description,
-  }))
+  const actions = (app.meta?.remediation_actions ?? [])
+    // Сброс ВМ и фенсинг хоста требуют отдельного права. Показывать их тому,
+    // у кого его нет, значит предложить выбор, который закончится отказом.
+    .filter((a) => canDisrupt.value || !['vm_reset', 'host_fence'].includes(a.value))
+    .map((a) => ({
+      label: a.title,
+      value: a.value,
+      description: a.description,
+    }))
   $q.dialog({
     title: `Действие для «${alert.object_name}»`,
     message:
@@ -167,15 +200,48 @@ onBeforeUnmount(() => {
 
     <q-card flat bordered>
       <q-tabs v-model="tab" align="left" active-color="primary" indicator-color="primary" dense>
-        <q-tab name="alerts" :label="`Оповещения (${alerts.length})`" />
+        <q-tab name="alerts" :label="`Оповещения (${visibleAlerts.length})`" />
         <q-tab name="remediations" :label="`Журнал действий (${remediations.length})`" />
       </q-tabs>
       <q-separator />
 
       <q-tab-panels v-model="tab" animated>
         <q-tab-panel name="alerts" class="q-pa-none">
+          <!-- Отбор по адресату. Одна лента одинаково будит и того, кто
+               отвечает за бэкапы, и того, кто отвечает за гипервизоры; человек,
+               которому девять из десяти сообщений не адресованы, перестаёт
+               читать все десять. -->
+          <div class="row items-center q-pa-sm q-gutter-xs">
+            <q-chip
+              :outline="audienceFilter !== ''"
+              clickable
+              color="primary"
+              :text-color="audienceFilter === '' ? 'white' : 'primary'"
+              @click="audienceFilter = ''"
+            >
+              Все ({{ alerts.length }})
+            </q-chip>
+            <q-chip
+              v-for="audience in app.meta?.alert_audiences ?? []"
+              :key="audience.key"
+              :outline="audienceFilter !== audience.key"
+              clickable
+              color="primary"
+              :text-color="audienceFilter === audience.key ? 'white' : 'primary'"
+              @click="audienceFilter = audience.key"
+            >
+              {{ audience.title }} ({{ audienceCounts[audience.key] ?? 0 }})
+              <q-tooltip>{{ audience.description }}</q-tooltip>
+            </q-chip>
+          </div>
+          <q-separator />
           <q-list separator>
-            <q-item v-for="alert in alerts" :key="alert.id">
+            <q-item v-if="!visibleAlerts.length" class="text-grey-6">
+              <q-item-section>
+                {{ audienceFilter ? 'Для этого адресата оповещений нет' : 'Оповещений нет' }}
+              </q-item-section>
+            </q-item>
+            <q-item v-for="alert in visibleAlerts" :key="alert.id">
               <q-item-section avatar top>
                 <q-icon
                   :name="alert.severity === 'critical' ? 'error' : alert.severity === 'warning' ? 'warning' : 'info'"
@@ -234,7 +300,7 @@ onBeforeUnmount(() => {
                     @click="notificationAction(alert)"
                   />
                   <q-btn
-                    v-if="auth.canWrite() && ['vm', 'host'].includes(alert.scope)"
+                    v-if="canManage && ['vm', 'host'].includes(alert.scope)"
                     flat
                     dense
                     size="sm"

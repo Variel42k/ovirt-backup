@@ -149,7 +149,7 @@ const stateColumns = [
 <template>
   <q-page padding>
     <div class="row items-center q-mb-sm">
-      <div class="text-h5">Защита</div>
+      <div class="text-h5">Покрытие бэкапами</div>
       <q-space />
       <q-btn flat dense round icon="refresh" :loading="loading" @click="load">
         <q-tooltip>Обновить</q-tooltip>

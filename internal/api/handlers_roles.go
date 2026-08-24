@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"regexp"
 	"slices"
@@ -18,6 +19,36 @@ type rolePayload struct {
 	Title       string             `json:"title"`
 	Description string             `json:"description"`
 	Permissions []model.Permission `json:"permissions"`
+}
+
+// roleOptions собирает роли для выпадающих списков интерфейса: сначала
+// встроенные, затем настраиваемые.
+//
+// Список берётся отсюда, а не пишется рядом заново. Раньше /meta перечислял
+// три роли собственным списком, и настраиваемая роль в него не попадала —
+// завести её было можно, а назначить кому-нибудь уже нет.
+//
+// Отказ базы не скрывает встроенные роли: без них не назначить вообще никакую,
+// а это единственный способ вернуть доступ, когда что-то пошло не так.
+func (s *Server) roleOptions(ctx context.Context) []optionDescriptor {
+	out := []optionDescriptor{}
+	for _, role := range model.BuiltinRoles() {
+		out = append(out, optionDescriptor{
+			Value: string(role.Name), Title: role.Title, Description: role.Description,
+		})
+	}
+
+	custom, err := s.store.ListRoles(ctx)
+	if err != nil {
+		s.log.Warn().Err(err).Msg("не удалось прочитать настраиваемые роли")
+		return out
+	}
+	for _, role := range custom {
+		out = append(out, optionDescriptor{
+			Value: string(role.Name), Title: role.Title, Description: role.Description,
+		})
+	}
+	return out
 }
 
 // handlePermissionCatalog отдаёт разделы и права для редактора ролей.

@@ -18,6 +18,16 @@ const storageColumns = `id, name, kind, enabled, base_path, endpoint, region, bu
 	last_check_msg, free_bytes, used_bytes, created_at, updated_at,
 	object_lock_enabled, object_lock_days, share, domain, insecure_tls`
 
+// storageSelectColumns — то же плюс итог проверки неизменяемости.
+//
+// Отдельно от storageColumns намеренно. Тот используется в INSERT со списком
+// подстановок, и любая добавленная в него колонка обязана получить там своё
+// значение — иначе запрос ломается на числе аргументов, чего компилятор не
+// увидит. Итог проверки заполняется своим запросом, а читается со всем
+// остальным.
+const storageSelectColumns = storageColumns + `,
+	immutability_state, immutability_detail, immutability_checked_at`
+
 // CreateStorageTarget stores a new backup repository definition.
 func (s *Store) CreateStorageTarget(ctx context.Context, t *model.StorageTarget) error {
 	if t.ID == "" {
@@ -129,13 +139,13 @@ func (s *Store) DeleteStorageTarget(ctx context.Context, id string) error {
 
 // GetStorageTarget loads a repository definition with decrypted credentials.
 func (s *Store) GetStorageTarget(ctx context.Context, id string) (*model.StorageTarget, error) {
-	row := s.db.QueryRow(ctx, `SELECT `+storageColumns+` FROM storage_targets WHERE id=?`, id)
+	row := s.db.QueryRow(ctx, `SELECT `+storageSelectColumns+` FROM storage_targets WHERE id=?`, id)
 	return s.scanStorageTarget(row)
 }
 
 // ListStorageTargets returns every repository definition ordered by name.
 func (s *Store) ListStorageTargets(ctx context.Context) ([]*model.StorageTarget, error) {
-	rows, err := s.db.Query(ctx, `SELECT `+storageColumns+` FROM storage_targets ORDER BY name`)
+	rows, err := s.db.Query(ctx, `SELECT `+storageSelectColumns+` FROM storage_targets ORDER BY name`)
 	if err != nil {
 		return nil, fmt.Errorf("list storage targets: %w", err)
 	}
@@ -185,19 +195,39 @@ func (s *Store) JobsOnTarget(ctx context.Context, targetID string) ([]string, er
 	return names, nil
 }
 
+// SetStorageImmutability сохраняет итог проверки неизменяемости.
+//
+// Отдельным запросом, а не через общий UpdateStorageTarget: тот перезаписывает
+// учётные данные и настройки, а проверка не должна иметь к ним доступа —
+// достаточно трёх колонок с результатом.
+func (s *Store) SetStorageImmutability(ctx context.Context, id, state, detail string, checkedAt time.Time) error {
+	res, err := s.db.Exec(ctx,
+		`UPDATE storage_targets SET immutability_state=?, immutability_detail=?,
+			immutability_checked_at=? WHERE id=?`,
+		state, detail, checkedAt.UTC(), id)
+	if err != nil {
+		return fmt.Errorf("сохранение итога проверки неизменяемости: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (s *Store) scanStorageTarget(row rowScanner) (*model.StorageTarget, error) {
 	var (
 		t                               model.StorageTarget
 		kind                            string
 		secretKey, password, privateKey string
-		lastCheck                       sql.NullTime
+		lastCheck, immutabilityChecked  sql.NullTime
 		createdAt, updatedAt            time.Time
 	)
 	err := row.Scan(&t.ID, &t.Name, &kind, &t.Enabled, &t.BasePath, &t.Endpoint, &t.Region,
 		&t.Bucket, &t.Prefix, &t.AccessKey, &secretKey, &t.UseSSL, &t.PathStyle, &t.StorageClass,
 		&t.Host, &t.Port, &t.Username, &password, &privateKey, &t.HostKey, &t.RateLimit,
 		&lastCheck, &t.LastCheckOK, &t.LastCheckMsg, &t.FreeBytes, &t.UsedBytes, &createdAt, &updatedAt,
-		&t.ObjectLockEnabled, &t.ObjectLockDays, &t.Share, &t.Domain, &t.InsecureTLS)
+		&t.ObjectLockEnabled, &t.ObjectLockDays, &t.Share, &t.Domain, &t.InsecureTLS,
+		&t.ImmutabilityState, &t.ImmutabilityDetail, &immutabilityChecked)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -217,6 +247,7 @@ func (s *Store) scanStorageTarget(row rowScanner) (*model.StorageTarget, error) 
 
 	t.Kind = model.StorageKind(kind)
 	t.LastCheckAt = nullTime(lastCheck)
+	t.ImmutabilityCheckedAt = nullTime(immutabilityChecked)
 	t.CreatedAt = utc(createdAt)
 	t.UpdatedAt = utc(updatedAt)
 	return &t, nil

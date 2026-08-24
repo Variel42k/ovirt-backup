@@ -180,6 +180,14 @@ func (s *Server) handleVMAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Сброс обрывает работу гостя без остановки его ОС — для этого своё право.
+	// Проверка здесь, а не на маршруте: адрес у всех действий над ВМ один, и
+	// какое из них разрушительное, видно только из тела запроса.
+	if model.DisruptiveVMAction(req.Action) && !s.allowedDisruptive(r) {
+		s.writeError(w, r, forbiddenDisruptive("сброс виртуальной машины"))
+		return
+	}
+
 	vm, err := s.store.GetVM(r.Context(), serverID, vmID)
 	if err != nil {
 		s.writeError(w, r, err)
@@ -378,6 +386,13 @@ func (s *Server) handleHostAction(w http.ResponseWriter, r *http.Request) {
 	var req hostActionRequest
 	if err := decodeJSON(r, &req); err != nil {
 		s.writeError(w, r, err)
+		return
+	}
+
+	// Фенсинг уносит все машины на хосте разом — самое разрушительное, что
+	// служба умеет. Право на него отдельное от обычного управления.
+	if model.DisruptiveHostAction(req.Action, req.FenceType) && !s.allowedDisruptive(r) {
+		s.writeError(w, r, forbiddenDisruptive("перезагрузка хоста по питанию"))
 		return
 	}
 

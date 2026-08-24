@@ -148,6 +148,17 @@ type StorageTarget struct {
 	ObjectLockEnabled bool `json:"object_lock_enabled"`
 	ObjectLockDays    int  `json:"object_lock_days"`
 
+	// Итог последней проверки неизменяемости: protected, none или unknown.
+	//
+	// Заполняется проверкой, а не оператором. ObjectLockEnabled выше — это
+	// намерение; здесь то, что получилось на самом деле, выясненное попыткой
+	// перезаписать и удалить пробный объект. Права на шаре могли не
+	// примениться, ACL — не сработать, срок удержания — истечь, и галочка при
+	// этом осталась бы стоять.
+	ImmutabilityState     string     `json:"immutability_state,omitempty"`
+	ImmutabilityDetail    string     `json:"immutability_detail,omitempty"`
+	ImmutabilityCheckedAt *time.Time `json:"immutability_checked_at,omitempty"`
+
 	// SFTP и SMB
 	Host       string `json:"host,omitempty"`
 	Port       int    `json:"port,omitempty"`
@@ -179,6 +190,44 @@ type StorageTarget struct {
 
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// Retargeted сообщает, изменилась ли у хранилища сама цель: куда пишутся копии
+// и под какими учётными данными.
+//
+// Нужна затем, что правка хранилища — это две разные операции под одним
+// адресом. Переименовать «Ночные копии» в «Ночные копии (NAS)» безобидно.
+// Поменять endpoint, bucket или ключ — значит увести будущие копии в другое
+// место, а старые сделать недоступными: ровно то, что делают перед тем, как
+// потребовать выкуп. Требовать кворум за переименование — сделать согласование
+// помехой; не требовать за подмену адреса — сделать его украшением.
+//
+// Сравнивается только адресная часть. Расписание проверок, ограничение полосы,
+// признак enabled и результаты последней проверки сюда не входят: они не
+// меняют, где лежат данные.
+func (t *StorageTarget) Retargeted(other *StorageTarget) bool {
+	switch {
+	case t.Kind != other.Kind,
+		t.BasePath != other.BasePath,
+		t.Endpoint != other.Endpoint,
+		t.Region != other.Region,
+		t.Bucket != other.Bucket,
+		t.Prefix != other.Prefix,
+		t.AccessKey != other.AccessKey,
+		t.Host != other.Host,
+		t.Port != other.Port,
+		t.Username != other.Username,
+		t.Share != other.Share,
+		t.Domain != other.Domain:
+		return true
+	}
+	// Секреты сравниваются по факту замены, а не по значению: в запросе
+	// приходит либо новый секрет, либо пустая строка «оставить прежний», и
+	// сравнивать пустую строку с сохранённой означало бы объявлять сменой
+	// ключа любое сохранение формы.
+	return t.SecretKey != other.SecretKey ||
+		t.Password != other.Password ||
+		t.PrivateKey != other.PrivateKey
 }
 
 // HasSecret reports whether credentials are stored for this target.
@@ -509,7 +558,15 @@ type BackupRun struct {
 	EndedAt   *time.Time `json:"ended_at,omitempty"`
 	ExpiresAt *time.Time `json:"expires_at,omitempty"`
 	Deleted   bool       `json:"deleted"`
-	Imported  bool       `json:"imported"`
+	// PurgeAfter — момент, когда данные копии будут стёрты физически.
+	//
+	// Заполнен — копия в карантине: помечена удалённой, но данные на месте и её
+	// можно вернуть. Именно ради этого промежутка карантин и существует:
+	// удаление копий — первое, что делают перед тем, как зашифровать
+	// инфраструктуру, и секунды между командой и потерей истории слишком мало,
+	// чтобы кто-то успел вмешаться.
+	PurgeAfter *time.Time `json:"purge_after,omitempty"`
+	Imported   bool       `json:"imported"`
 	// ManifestSHA256 позволяет отличить ту же точку в другом хранилище от
 	// конфликта идентификаторов при восстановлении каталога.
 	ManifestSHA256 string    `json:"manifest_sha256,omitempty"`

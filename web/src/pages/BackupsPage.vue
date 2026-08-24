@@ -444,13 +444,37 @@ function confirmDelete(run: BackupRun) {
     ok: { label: 'Удалить', color: 'negative' },
   }).onOk(async () => {
     try {
-      await api.deleteRun(run.id)
-      notifyOk('Данные удалены')
+      const result = await api.deleteRun(run.id)
+      // Карантин и стирание — разные исходы, и путать их нельзя: «данные
+      // удалены» там, где они целы, заставит думать, что место освободилось.
+      if (result.status === 'quarantined') {
+        notify({
+          type: 'info',
+          message:
+            `Копия помещена в карантин${result.purge_after ? ' до ' + dateTime(result.purge_after) : ''}. ` +
+            'Данные пока целы — её можно вернуть кнопкой «Восстановить».',
+          timeout: 12000,
+          multiLine: true,
+        })
+      } else {
+        notifyOk('Данные удалены')
+      }
       await load()
     } catch (err) {
       notifyError(err, 'Не удалось удалить')
     }
   })
+}
+
+/** Возвращает копию из карантина, пока её данные ещё целы. */
+async function undelete(run: BackupRun) {
+  try {
+    await api.undeleteRun(run.id)
+    notifyOk('Копия возвращена из карантина')
+    await load()
+  } catch (err) {
+    notifyError(err, 'Не удалось вернуть копию')
+  }
 }
 
 async function cancel(run: BackupRun) {
@@ -697,7 +721,13 @@ const replicationColumns = [
           <a href="#" class="text-primary" @click.prevent="openDetail(props.row)">{{ props.row.vm_name }}</a>
           <div class="text-caption text-grey-7">
             {{ props.row.job_name || 'разовый запуск' }}
-            <q-badge v-if="props.row.deleted" color="grey-6" class="q-ml-xs">данные удалены</q-badge>
+            <!-- Карантин и стирание различаются: в первом случае данные ещё
+                 целы и копию можно вернуть, во втором возвращать нечего. -->
+            <q-badge v-if="props.row.purge_after" color="warning" class="q-ml-xs">
+              в карантине до {{ dateTime(props.row.purge_after) }}
+              <q-tooltip>Данные пока целы — копию можно вернуть</q-tooltip>
+            </q-badge>
+            <q-badge v-else-if="props.row.deleted" color="grey-6" class="q-ml-xs">данные удалены</q-badge>
             <q-badge v-if="props.row.skipped_disks?.length" color="warning" class="q-ml-xs">
               не всё: пропущено {{ props.row.skipped_disks.length }}
             </q-badge>
@@ -785,6 +815,15 @@ const replicationColumns = [
               <q-tooltip>Восстановить</q-tooltip>
             </q-btn>
           </template>
+          <!-- Возврат из карантина. Кнопка появляется, только пока данные целы:
+               после стирания возвращать нечего. -->
+          <q-btn
+            v-if="auth.canWrite() && props.row.purge_after"
+            flat dense round icon="undo" color="warning"
+            @click="undelete(props.row)"
+          >
+            <q-tooltip>Вернуть копию из карантина</q-tooltip>
+          </q-btn>
           <q-btn
             v-if="auth.canWrite() && !props.row.deleted"
             flat

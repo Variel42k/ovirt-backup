@@ -194,6 +194,15 @@ type probeResult struct {
 	Latency     string `json:"latency,omitempty"`
 	// Hint даёт понятное объяснение частым ошибкам вместо текста от библиотеки.
 	Hint string `json:"hint,omitempty"`
+	// ExcessPrivileges перечисляет то, что эта учётная запись может сверх
+	// нужного резервному копированию. Заполняется фактической проверкой, а не
+	// догадкой по имени: административную запись называют как угодно.
+	//
+	// Подключение с такой записью не запрещается — бывает, что завести
+	// отдельную негде и некогда. Но оператор должен увидеть, чем платит:
+	// пароль ляжет в базу службы и будет годиться для любых действий с
+	// виртуализацией, включая те, которых у самой службы в интерфейсе нет.
+	ExcessPrivileges []ovirt.ExcessPrivilege `json:"excess_privileges,omitempty"`
 }
 
 // handleProbeServer tests a connection without storing it, so an operator can
@@ -270,6 +279,10 @@ func (s *Server) handleProbeServer(w http.ResponseWriter, r *http.Request) {
 		Hosts:       info.Summary.Hosts.Total.Int(),
 		VMs:         info.Summary.VMs.Total.Int(),
 		Latency:     time.Since(started).Round(time.Millisecond).String(),
+		// Проверка прав идёт после успешного входа и только чтением. Она не
+		// мешает подключиться — её дело показать оператору, что учётная запись
+		// может больше, чем нужно, пока он ещё не нажал «Сохранить».
+		ExcessPrivileges: client.CheckExcessPrivileges(ctx),
 	})
 }
 

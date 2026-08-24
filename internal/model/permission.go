@@ -20,6 +20,11 @@ const (
 	ActionRead  = "read"
 	ActionWrite = "write"
 	ActionAdmin = "admin"
+	// ActionDisruptive — четвёртое действие, и заведено оно ровно для одного
+	// случая: операций, которые обрывают чужую работу без остановки гостевой
+	// ОС. Складывать их в write нельзя — тогда право «перезапустить ВМ» несёт
+	// в себе и право обесточить хост со всеми машинами на нём.
+	ActionDisruptive = "disruptive"
 )
 
 // Разделы.
@@ -46,6 +51,14 @@ const (
 	PermServersRead  Permission = "servers.read"
 	PermServersWrite Permission = "servers.write"
 	PermServersAdmin Permission = "servers.admin"
+	// PermServersDisruptive — действия, которые обрывают работу без остановки
+	// гостевой ОС: перезагрузка хоста по питанию и сброс ВМ.
+	//
+	// Отдельно от servers.write намеренно. Оператору бэкапов нужно уметь
+	// запустить машину и снять её с паузы; фенсинг хоста, уносящий все ВМ на
+	// нём разом, ему не нужен никогда, а одно общее право выдавало и то и
+	// другое.
+	PermServersDisruptive Permission = "servers.disruptive"
 
 	PermJobsRead  Permission = "jobs.read"
 	PermJobsWrite Permission = "jobs.write"
@@ -110,6 +123,9 @@ var permissionCatalog = []SectionInfo{
 			"Список серверов, кластеров, хостов, ВМ и дисков"},
 		{PermServersWrite, ActionWrite, "Управлять ВМ и хостами",
 			"Пуск, остановка, миграция, теги, режим бэкапа диска, обновление инвентаря"},
+		{PermServersDisruptive, ActionDisruptive, "Перезагружать хосты по питанию и сбрасывать ВМ",
+			"Действия, обрывающие работу без остановки гостевой ОС: фенсинг хоста уносит " +
+				"все машины на нём разом"},
 		{PermServersAdmin, ActionAdmin, "Настраивать подключения",
 			"Добавление и удаление движков, пароли и сертификаты"},
 	}},
@@ -140,7 +156,7 @@ var permissionCatalog = []SectionInfo{
 		{PermEngineConfigRead, ActionRead, "Видеть снимки конфигурации", ""},
 		{PermEngineConfigAdmin, ActionAdmin, "Снимать и настраивать", ""},
 	}},
-	{Key: SectionMonitoring, Title: "Обзор и защита", Permissions: []PermissionInfo{
+	{Key: SectionMonitoring, Title: "Обзор и покрытие", Permissions: []PermissionInfo{
 		{PermMonitoringRead, ActionRead, "Видеть обзор, покрытие и показатели", ""},
 	}},
 	{Key: SectionAlerts, Title: "Оповещения", Permissions: []PermissionInfo{

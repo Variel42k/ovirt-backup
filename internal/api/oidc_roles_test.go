@@ -65,6 +65,59 @@ func TestOIDCUnmappedGroupsAreRefused(t *testing.T) {
 	}
 }
 
+// Группа может отображаться и в настраиваемую роль. До появления таких ролей
+// перебор шёл только по трём встроенным, и своя роль из role_mapping молча
+// проваливалась в default_role — то есть завести её было можно, а войти с ней
+// нельзя.
+func TestOIDCRoleAcceptsCustomRole(t *testing.T) {
+	cfg := testOIDC()
+	cfg.RoleMapping["backup-team"] = "backup-operator"
+
+	role, err := mapOIDCRole(cfg, []string{"backup-team"})
+	if err != nil {
+		t.Fatalf("сопоставление: %v", err)
+	}
+	if role != model.Role("backup-operator") {
+		t.Errorf("роль %q, ожидалась backup-operator", role)
+	}
+}
+
+// Встроенная роль сильнее настраиваемой: членство в группе администраторов
+// остаётся решением выдать администраторские права.
+func TestOIDCBuiltinRoleWinsOverCustom(t *testing.T) {
+	cfg := testOIDC()
+	cfg.RoleMapping["backup-team"] = "backup-operator"
+
+	role, err := mapOIDCRole(cfg, []string{"backup-team", "virt-admins"})
+	if err != nil {
+		t.Fatalf("сопоставление: %v", err)
+	}
+	if role != model.RoleAdmin {
+		t.Errorf("роль %q, ожидалась %q", role, model.RoleAdmin)
+	}
+}
+
+// Две своих роли сразу — выбор должен быть один и тот же при каждом входе.
+//
+// Прогоняется много раз намеренно: перебор map в Go случаен, и без сортировки
+// человек получал бы то одну роль, то другую от входа к входу, без единого
+// изменения в настройках. Один прогон такое пропускает.
+func TestOIDCCustomRoleChoiceIsStable(t *testing.T) {
+	cfg := testOIDC()
+	cfg.RoleMapping["team-b"] = "zeta-role"
+	cfg.RoleMapping["team-a"] = "alpha-role"
+
+	for range 200 {
+		role, err := mapOIDCRole(cfg, []string{"team-a", "team-b"})
+		if err != nil {
+			t.Fatalf("сопоставление: %v", err)
+		}
+		if role != model.Role("alpha-role") {
+			t.Fatalf("выбор роли неустойчив: получено %q, ожидалось alpha-role", role)
+		}
+	}
+}
+
 // Умолчание — осознанный выбор администратора, и тогда оно применяется.
 func TestOIDCDefaultRoleApplies(t *testing.T) {
 	cfg := testOIDC()

@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"sync"
 	"time"
@@ -108,6 +109,53 @@ func (s *Server) requirePermission(perm model.Permission, next http.HandlerFunc)
 			writeJSON(w, http.StatusForbidden, errorResponse{
 				Error: "недостаточно прав для этой операции: требуется " + string(perm),
 				Code:  "forbidden",
+			})
+			return
+		}
+		next(w, r)
+	}
+}
+
+// allowedDisruptive сообщает, вправе ли вызывающий обрывать чужую работу.
+//
+// Проверяется не на маршруте, а внутри обработчика: у всех действий над ВМ и
+// хостом один адрес, и какое из них разрушительное, видно только из тела
+// запроса.
+func (s *Server) allowedDisruptive(r *http.Request) bool {
+	p := principalFrom(r.Context())
+	return p != nil && p.Can(model.PermServersDisruptive)
+}
+
+// forbiddenDisruptive — отказ с объяснением, какого права не хватило.
+//
+// errForbidden, а не errBadRequest: запрос составлен верно, не хватило права,
+// и интерфейсу это две разные вещи.
+func forbiddenDisruptive(what string) error {
+	return fmt.Errorf("%w: %s обрывает работу без остановки гостевой системы и требует "+
+		"права %s; обычного управления ВМ для этого недостаточно",
+		errForbidden, what, model.PermServersDisruptive)
+}
+
+// managementEnabled сообщает, разрешено ли этой установке управлять
+// виртуализацией.
+//
+// Значение берётся из файла настроек и не меняется через API намеренно.
+// Выключатель, который можно вернуть в исходное положение тем же ключом,
+// которым захватили службу, не защищает ни от чего.
+func (s *Server) managementEnabled() bool { return s.cfg.Management.Enabled }
+
+// management закрывает маршрут, когда управление виртуализацией выключено.
+//
+// Отвечает 403, а не 404: молчащий маршрут неотличим от опечатки в адресе, и
+// разбор «почему кнопка не работает» уходит в чтение исходников вместо чтения
+// ответа.
+func (s *Server) management(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.managementEnabled() {
+			writeJSON(w, http.StatusForbidden, errorResponse{
+				Error: "управление виртуализацией отключено настройкой management.enabled; " +
+					"эта установка выполняет только резервное копирование",
+				Code: "management_disabled",
 			})
 			return
 		}

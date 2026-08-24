@@ -5,7 +5,7 @@ import { api, notify, notifyError, notifyOk } from '@/api/client'
 import { ago, connState } from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
-import type { Server } from '@/api/types'
+import type { ProvisionResult, Server } from '@/api/types'
 
 const $q = useQuasar()
 const app = useAppStore()
@@ -16,6 +16,15 @@ const dialog = ref(false)
 const editing = ref<Server | null>(null)
 const probing = ref(false)
 const probeResult = ref<Record<string, unknown> | null>(null)
+
+/**
+ * Что учётная запись может сверх нужного. Определяет сервер фактической
+ * проверкой при probe, а не догадкой по имени: административную запись
+ * называют как угодно, а безобидное имя может нести роль уровня системы.
+ */
+const excessPrivileges = computed(
+  () => (probeResult.value?.excess_privileges as { what: string; why: string }[]) ?? [],
+)
 
 const emptyForm = () => ({
   name: '',
@@ -71,6 +80,50 @@ async function load() {
     notifyError(err, 'Не удалось загрузить список серверов')
   } finally {
     loading.value = false
+  }
+}
+
+const provisionOpen = ref(false)
+const provisionBusy = ref(false)
+const provisionResult = ref<ProvisionResult | null>(null)
+const provisionForm = ref({
+  name: '',
+  engine_url: '',
+  ca_cert: '',
+  insecure_tls: false,
+  admin_username: '',
+  admin_password: '',
+  service_username: '',
+  service_password: '',
+})
+
+function openProvision() {
+  provisionResult.value = null
+  provisionForm.value = {
+    name: '', engine_url: '', ca_cert: '', insecure_tls: false,
+    admin_username: '', admin_password: '', service_username: '', service_password: '',
+  }
+  provisionOpen.value = true
+}
+
+async function runProvision() {
+  provisionBusy.value = true
+  provisionResult.value = null
+  try {
+    const result = await api.provisionServer({ ...provisionForm.value })
+    provisionResult.value = result
+    if (result.ok) {
+      notifyOk('Подключение настроено: сохранена только сервисная учётная запись')
+      await app.loadServers()
+      // Пароли не должны пережить диалог даже в памяти вкладки: настройка
+      // прошла, держать их больше незачем.
+      provisionForm.value.admin_password = ''
+      provisionForm.value.service_password = ''
+    }
+  } catch (err) {
+    notifyError(err, 'Не удалось настроить подключение')
+  } finally {
+    provisionBusy.value = false
   }
 }
 
@@ -206,6 +259,20 @@ onMounted(load)
         class="q-ml-sm"
         @click="openCreate"
       />
+      <q-btn
+        v-if="auth.canAdmin()"
+        outline
+        color="primary"
+        icon="verified_user"
+        label="Безопасное подключение"
+        class="q-ml-sm"
+        @click="openProvision"
+      >
+        <q-tooltip>
+          Административная учётная запись понадобится один раз и сохранена не будет:
+          под ней создаётся роль с минимальными правами для отдельной сервисной записи
+        </q-tooltip>
+      </q-btn>
     </div>
 
     <q-table
@@ -453,6 +520,30 @@ onMounted(load)
               </template>
             </q-banner>
           </div>
+
+          <!-- Предупреждение о рисках. Подключиться такой записью не
+               запрещается: бывает, что завести отдельную негде и некогда. Но
+               оператор должен увидеть, чем платит, до того как нажмёт
+               «Сохранить», а не узнать об этом при разборе инцидента. -->
+          <div v-if="excessPrivileges.length" class="col-12">
+            <q-banner dense class="bg-orange-1">
+              <template #avatar><q-icon name="warning" color="orange-9" /></template>
+              <div class="text-weight-medium">
+                Эта учётная запись может больше, чем нужно для резервного копирования
+              </div>
+              <ul class="q-my-xs q-pl-md">
+                <li v-for="item in excessPrivileges" :key="item.what">
+                  {{ item.what }} — {{ item.why }}
+                </li>
+              </ul>
+              <div>
+                Её пароль будет сохранён в базе службы. Тот, кто получит доступ к службе,
+                получит вместе с ним и эти возможности — включая те, которых в самом
+                интерфейсе нет. Безопаснее подключиться отдельной учётной записью:
+                административная понадобится один раз и сохранена не будет.
+              </div>
+            </q-banner>
+          </div>
         </q-card-section>
 
         <q-separator />
@@ -461,6 +552,107 @@ onMounted(load)
           <q-space />
           <q-btn flat label="Отмена" v-close-popup />
           <q-btn color="primary" unelevated label="Сохранить" @click="save" />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
+
+    <!-- Безопасное подключение: административная запись вводится один раз и не
+         сохраняется, служба заводит под ней роль с минимальными правами и
+         выдаёт её сервисной записи. В базу попадает только сервисная. -->
+    <q-dialog v-model="provisionOpen" persistent>
+      <q-card style="width: 680px; max-width: 96vw">
+        <q-card-section class="text-h6">Безопасное подключение движка</q-card-section>
+        <q-separator />
+
+        <q-card-section class="q-gutter-md">
+          <q-banner dense class="bg-blue-1">
+            <template #avatar><q-icon name="info" color="primary" /></template>
+            Административные данные нужны только на время настройки и нигде не сохраняются.
+            Сервисная запись должна уже существовать в каталоге: движок пользователями
+            не управляет, и создать её через API нельзя — во встроенном домене она
+            заводится командой <code>ovirt-aaa-jdbc-tool user add</code> на самом движке.
+          </q-banner>
+
+          <q-input v-model="provisionForm.name" label="Название подключения" outlined dense autofocus />
+          <q-input
+            v-model="provisionForm.engine_url"
+            label="Адрес движка"
+            hint="https://engine.example.org — без /ovirt-engine/api"
+            outlined
+            dense
+          />
+
+          <div class="text-subtitle2">Административная запись — только на время настройки</div>
+          <q-input v-model="provisionForm.admin_username" label="Пользователь" hint="например admin@internal" outlined dense />
+          <q-input v-model="provisionForm.admin_password" label="Пароль" type="password" outlined dense />
+
+          <div class="text-subtitle2">Сервисная запись — под ней служба будет работать</div>
+          <q-input
+            v-model="provisionForm.service_username"
+            label="Пользователь"
+            hint="Обязательно с доменом: jhvirt-backup@internal"
+            outlined
+            dense
+          />
+          <q-input v-model="provisionForm.service_password" label="Пароль" type="password" outlined dense />
+
+          <q-toggle
+            v-model="provisionForm.insecure_tls"
+            label="Не проверять сертификат движка"
+            color="negative"
+          />
+        </q-card-section>
+
+        <q-card-section v-if="provisionResult" class="q-pt-none">
+          <q-list dense bordered separator>
+            <q-item v-for="step in provisionResult.steps" :key="step.step">
+              <q-item-section avatar>
+                <q-icon
+                  :name="step.ok ? 'check_circle' : 'error'"
+                  :color="step.ok ? 'positive' : 'negative'"
+                />
+              </q-item-section>
+              <q-item-section>
+                <q-item-label>{{ step.step }}</q-item-label>
+                <q-item-label caption class="jhv-wrap">{{ step.note || step.error }}</q-item-label>
+              </q-item-section>
+            </q-item>
+          </q-list>
+
+          <!-- Проверка идёт уже под сервисной записью: «роль создана» слишком
+               легко принять за «бэкап заработает». -->
+          <div v-if="provisionResult.access" class="q-mt-sm">
+            <div class="text-subtitle2">Что доступно сервисной записи</div>
+            <q-list dense>
+              <q-item v-for="check in provisionResult.access.checks" :key="check.what">
+                <q-item-section avatar>
+                  <q-icon
+                    :name="check.ok ? 'check' : check.required ? 'close' : 'remove'"
+                    :color="check.ok ? 'positive' : check.required ? 'negative' : 'grey-6'"
+                  />
+                </q-item-section>
+                <q-item-section>
+                  <q-item-label>
+                    {{ check.what }}
+                    <span v-if="!check.required" class="text-grey-6">(необязательно)</span>
+                  </q-item-label>
+                  <q-item-label v-if="check.error" caption class="jhv-wrap">{{ check.error }}</q-item-label>
+                </q-item-section>
+              </q-item>
+            </q-list>
+          </div>
+        </q-card-section>
+
+        <q-separator />
+        <q-card-actions align="right">
+          <q-btn flat label="Закрыть" v-close-popup />
+          <q-btn
+            color="primary"
+            unelevated
+            label="Настроить и подключить"
+            :loading="provisionBusy"
+            @click="runProvision"
+          />
         </q-card-actions>
       </q-card>
     </q-dialog>

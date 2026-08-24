@@ -48,7 +48,7 @@ const allLinks = [
   { name: 'backups', label: 'Бэкапы', icon: 'backup', perm: 'backups.read' },
   { name: 'engine-config', label: 'Конфигурация Engine', icon: 'account_tree', perm: 'engine_config.read' },
 	{ name: 'file-backups', label: 'Файловые бекапы', icon: 'folder_copy', perm: 'file_backups.read' },
-  { name: 'coverage', label: 'Защита', icon: 'shield', perm: 'monitoring.read' },
+  { name: 'coverage', label: 'Покрытие бэкапами', icon: 'shield', perm: 'monitoring.read' },
   { name: 'retention', label: 'Хранение', icon: 'auto_delete', perm: 'backups.read' },
   { name: 'storages', label: 'Хранилища', icon: 'inventory_2', perm: 'storages.read' },
   { name: 'alerts', label: 'Оповещения', icon: 'notifications_active', perm: 'alerts.read' },

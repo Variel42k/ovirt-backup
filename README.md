@@ -497,8 +497,15 @@ jvbackup list -repo 'webdavs://backup:pass@cloud.example.org/remote.php/dav/file
 - [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) — ошибки установки и
   запуска, авторизация/cookie, PostgreSQL, Docker, systemd, oVirt и KVM.
 - [`docs/API.md`](docs/API.md) — REST API.
+- [`docs/ROLES.md`](docs/ROLES.md) — ролевая модель: матрица прав по разделам,
+  встроенные роли, свои роли и сопоставление групп внешнего провайдера.
+- [`docs/INTEGRATIONS.md`](docs/INTEGRATIONS.md) — сценарии встраивания в чужой
+  контур: SIEM, Prometheus, оповещения, OIDC, CI, защищённое хранилище.
 - [`docs/PLAN-RECOVERY.md`](docs/PLAN-RECOVERY.md) — что уже реализовано в
   восстановлении, что требует стендовой приёмки и что остаётся в roadmap.
+- [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) — что не проверено на живой
+  системе, что сделано с оговорками и что невыполнимо в принципе. Читать до
+  того, как положиться на функцию, а не после.
 
 ## Лицензия и статус
 

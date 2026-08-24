@@ -33,6 +33,7 @@ import type {
   MeResponse,
   MountSample,
   OidcInfo,
+  ProvisionResult,
   Recommendation,
   RemediationArchive,
   RemediationMode,
@@ -54,11 +55,18 @@ import type {
 import type {
   ApiToken,
   ApiTokenCreated,
+  ApprovalDelegation,
+  ApprovalGroup,
+  ApprovalRequest,
   AuditEntry,
   BackupQualitySettings,
+  BreakGlassEvent,
+  GuardedActionInfo,
   LogStatus,
   NotificationDelivery,
   NotificationSettingsResponse,
+  PermissionSection,
+  RoleDefinition,
   RuntimeSettings,
   User,
 } from './settings-types'
@@ -346,9 +354,31 @@ export const api = {
   createStorage: (payload: Record<string, unknown>) => http.post<StorageTarget>('/storages', payload).then((r) => r.data),
   updateStorage: (id: string, payload: Record<string, unknown>) =>
     http.put<StorageTarget>(`/storages/${id}`, payload).then((r) => r.data),
-  deleteStorage: (id: string, force = false) =>
-    http.delete(`/storages/${id}${force ? '?force=true' : ''}`).then((r) => r.data),
+  /**
+   * Удаление хранилища.
+   *
+   * Возвращает не только данные, но и код ответа: 202 означает, что действие
+   * не выполнено, а заведена заявка на согласование. Без различения кодов
+   * интерфейс сообщил бы «удалено» там, где ничего не произошло.
+   */
+  deleteStorage: (id: string, force = false, reason = '') => {
+    const params = new URLSearchParams()
+    if (force) params.set('force', 'true')
+    if (reason) params.set('reason', reason)
+    const query = params.toString()
+    return http
+      .delete(`/storages/${id}${query ? '?' + query : ''}`)
+      .then((r) => ({ status: r.status, data: r.data }))
+  },
   checkStorage: (id: string) => http.post(`/storages/${id}/check`, {}, { timeout: 90_000 }).then((r) => r.data),
+  // Отдельно от checkStorage: эта проверка пишет пробный объект, который на
+  // защищённом хранилище останется до конца срока удержания.
+  checkImmutability: (id: string) =>
+    http
+      .post<{ state: string; detail: string; leftover?: string }>(
+        `/storages/${id}/immutability-check`, {}, { timeout: 120_000 },
+      )
+      .then((r) => r.data),
   startCatalogScan: (id: string) => http.post<CatalogScan>(`/storages/${id}/catalog-scans`, {}).then((r) => r.data),
   listCatalogScans: (id: string) => http.get<ListResponse<CatalogScan>>(`/storages/${id}/catalog-scans`).then((r) => unwrap(r.data)),
   getCatalogScan: (id: string) => http.get<CatalogScanDetail>(`/catalog-scans/${id}`).then((r) => r.data),
@@ -374,7 +404,22 @@ export const api = {
   getRun: (id: string) => http.get<BackupRun>(`/backups/${id}`).then((r) => r.data),
   runChain: (id: string) => http.get<ListResponse<BackupRun>>(`/backups/${id}/chain`).then((r) => unwrap(r.data)),
   startBackup: (payload: Record<string, unknown>) => http.post('/backups', payload).then((r) => r.data),
-  deleteRun: (id: string) => http.delete(`/backups/${id}`).then((r) => r.data),
+  /**
+   * Удаление копии.
+   *
+   * По умолчанию попадает в карантин: данные остаются целыми до срока, и
+   * ответ приходит со статусом `quarantined` вместо `deleted`. purge=true
+   * стирает сразу — когда место нужно прямо сейчас.
+   */
+  deleteRun: (id: string, purge = false) =>
+    http
+      .delete<{ status: string; purge_after?: string }>(
+        `/backups/${id}${purge ? '?purge=true' : ''}`,
+      )
+      .then((r) => r.data),
+  /** Вернуть копию из карантина, пока данные ещё целы. */
+  undeleteRun: (id: string) =>
+    http.post<{ status: string }>(`/backups/${id}/undelete`).then((r) => r.data),
   cancelRun: (id: string) => http.post(`/backups/${id}/cancel`, {}).then((r) => r.data),
   listBackupCopies: (id: string) => http.get<ListResponse<BackupCopy>>(`/backups/${id}/copies`).then((r) => unwrap(r.data)),
   createBackupCopy: (id: string, storageTargetId: string) =>
@@ -481,6 +526,72 @@ export const api = {
   createUser: (payload: Record<string, unknown>) => http.post<User>('/users', payload).then((r) => r.data),
   updateUser: (id: string, payload: Record<string, unknown>) => http.put<User>(`/users/${id}`, payload).then((r) => r.data),
   deleteUser: (id: string) => http.delete(`/users/${id}`).then((r) => r.data),
+
+  // Каталог прав приходит с сервера: свой список в интерфейсе разошёлся бы с
+  // тем, что реально проверяется на маршрутах.
+  permissionCatalog: () =>
+    http.get<{ sections: PermissionSection[] }>('/permissions').then((r) => r.data.sections ?? []),
+  listRoles: () => http.get<ListResponse<RoleDefinition>>('/roles').then((r) => unwrap(r.data)),
+  createRole: (payload: Record<string, unknown>) =>
+    http.post<RoleDefinition>('/roles', payload).then((r) => r.data),
+  updateRole: (id: string, payload: Record<string, unknown>) =>
+    http.put<RoleDefinition>(`/roles/${id}`, payload).then((r) => r.data),
+  deleteRole: (id: string) => http.delete(`/roles/${id}`).then((r) => r.data),
+
+  /**
+   * Безопасное подключение движка.
+   *
+   * Административные учётные данные уходят на сервер один раз и не
+   * сохраняются: под ними создаётся роль с минимальными правами и выдаётся
+   * сервисной записи. В базу попадает только сервисная.
+   */
+  provisionServer: (payload: Record<string, unknown>) =>
+    http.post<ProvisionResult>('/servers/provision', payload).then((r) => r.data),
+
+  // Согласование опасных действий.
+  listApprovals: (includeClosed = false) =>
+    http
+      .get<ListResponse<ApprovalRequest>>(`/approvals?include_closed=${includeClosed}`)
+      .then((r) => unwrap(r.data)),
+  voteApproval: (
+    id: string,
+    approve: boolean,
+    comment = '',
+    // Делегирование идёт в теле запроса, а не заголовком: заголовки попадают
+    // в журналы прокси, а тело — нет.
+    delegation?: { delegation_token: string; delegation_password: string },
+  ) =>
+    http
+      .post<ApprovalRequest>(`/approvals/${id}/vote`, { approve, comment, ...delegation })
+      .then((r) => r.data),
+  cancelApproval: (id: string) =>
+    http.post<ApprovalRequest>(`/approvals/${id}/cancel`).then((r) => r.data),
+  guardedActions: () =>
+    http
+      .get<{ actions: GuardedActionInfo[]; policies: unknown[] }>('/approval-actions')
+      .then((r) => r.data),
+  listApprovalGroups: () =>
+    http.get<ListResponse<ApprovalGroup>>('/approval-groups').then((r) => unwrap(r.data)),
+  createApprovalGroup: (payload: Record<string, unknown>) =>
+    http.post<ApprovalGroup>('/approval-groups', payload).then((r) => r.data),
+  updateApprovalGroup: (id: string, payload: Record<string, unknown>) =>
+    http.put<ApprovalGroup>(`/approval-groups/${id}`, payload).then((r) => r.data),
+  deleteApprovalGroup: (id: string) => http.delete(`/approval-groups/${id}`).then((r) => r.data),
+  listApprovalDelegations: (all = false) =>
+    http
+      .get<ListResponse<ApprovalDelegation>>(`/approval-delegations?all=${all}`)
+      .then((r) => unwrap(r.data)),
+  createApprovalDelegation: (payload: Record<string, unknown>) =>
+    http
+      .post<{ delegation: ApprovalDelegation; token: string; warning: string }>(
+        '/approval-delegations',
+        payload,
+      )
+      .then((r) => r.data),
+  revokeApprovalDelegation: (id: string) =>
+    http.post<ApprovalDelegation>(`/approval-delegations/${id}/revoke`).then((r) => r.data),
+  listBreakGlass: (limit = 100) =>
+    http.get<ListResponse<BreakGlassEvent>>(`/break-glass?limit=${limit}`).then((r) => unwrap(r.data)),
 
   listApiTokens: () => http.get<ListResponse<ApiToken>>('/api-tokens').then((r) => unwrap(r.data)),
   // Ответ на создание — единственное место, где виден сам токен: в базе лежит

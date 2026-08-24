@@ -4,6 +4,7 @@ import { useQuasar } from 'quasar'
 import { api, notifyError, notifyOk } from '@/api/client'
 import { ago, bytes, connState, hostStatus, percent, statusColor, vmStatus } from '@/api/format'
 import { useAuthStore } from '@/stores/auth'
+import { useAppStore } from '@/stores/app'
 import HealthChart from '@/components/HealthChart.vue'
 import IOChart, { type IOPoint } from '@/components/IOChart.vue'
 import type { Disk, DiskSample, HealthSample, Host, MountSample, Server, StorageDomain, VM } from '@/api/types'
@@ -12,6 +13,19 @@ const props = defineProps<{ serverId: string }>()
 
 const $q = useQuasar()
 const auth = useAuthStore()
+const app = useAppStore()
+
+// canManage — можно ли вообще управлять ВМ и хостами в этой установке.
+// Управление выключается настройкой на сервере: там, где нужен только бэкап,
+// служба не должна давать рычаг для остановки production. Кнопка, которая
+// гарантированно вернёт 403, хуже отсутствующей.
+const canManage = computed(
+  () => auth.canWrite() && app.meta?.capabilities.management_enabled !== false,
+)
+
+// canDisrupt — отдельное право на действия, обрывающие работу без остановки
+// гостевой ОС: аппаратный сброс ВМ и перезагрузка хоста по питанию.
+const canDisrupt = computed(() => canManage.value && auth.can('servers.disruptive'))
 
 const tab = ref('vms')
 const health = ref<HealthSample[]>([])
@@ -427,7 +441,7 @@ const domainColumns = [
             <template #body-cell-actions="props">
               <q-td :props="props">
                 <q-btn
-                  v-if="auth.canWrite()"
+                  v-if="canManage"
                   flat
                   dense
                   round
@@ -440,32 +454,32 @@ const domainColumns = [
                 </q-btn>
                 <q-btn-dropdown v-if="auth.canWrite()" flat dense round dropdown-icon="more_vert">
                   <q-list dense style="min-width: 220px">
-                    <q-item clickable v-close-popup @click="vmAction(props.row, 'shutdown')">
+                    <q-item v-if="canManage" clickable v-close-popup @click="vmAction(props.row, 'shutdown')">
                       <q-item-section avatar><q-icon name="power_settings_new" /></q-item-section>
                       <q-item-section>Штатное выключение</q-item-section>
                     </q-item>
-                    <q-item clickable v-close-popup @click="vmAction(props.row, 'reboot')">
+                    <q-item v-if="canManage" clickable v-close-popup @click="vmAction(props.row, 'reboot')">
                       <q-item-section avatar><q-icon name="restart_alt" /></q-item-section>
                       <q-item-section>Перезагрузка</q-item-section>
                     </q-item>
-                    <q-item clickable v-close-popup @click="vmAction(props.row, 'suspend')">
+                    <q-item v-if="canManage" clickable v-close-popup @click="vmAction(props.row, 'suspend')">
                       <q-item-section avatar><q-icon name="pause" /></q-item-section>
                       <q-item-section>Приостановить</q-item-section>
                     </q-item>
-                    <q-item clickable v-close-popup @click="vmAction(props.row, 'migrate')">
+                    <q-item v-if="canManage" clickable v-close-popup @click="vmAction(props.row, 'migrate')">
                       <q-item-section avatar><q-icon name="swap_horiz" /></q-item-section>
                       <q-item-section>Мигрировать</q-item-section>
                     </q-item>
-                    <q-separator />
-                    <q-item clickable v-close-popup @click="vmAction(props.row, 'stop')">
+                    <q-separator v-if="canManage" />
+                    <q-item v-if="canManage" clickable v-close-popup @click="vmAction(props.row, 'stop')">
                       <q-item-section avatar><q-icon name="power_off" color="negative" /></q-item-section>
                       <q-item-section class="text-negative">Выключить питание</q-item-section>
                     </q-item>
-                    <q-item clickable v-close-popup @click="vmAction(props.row, 'reset')">
+                    <q-item v-if="canDisrupt" clickable v-close-popup @click="vmAction(props.row, 'reset')">
                       <q-item-section avatar><q-icon name="restart_alt" color="negative" /></q-item-section>
                       <q-item-section class="text-negative">Аппаратный сброс</q-item-section>
                     </q-item>
-                    <q-separator />
+                    <q-separator v-if="canManage || canDisrupt" />
                     <q-item clickable v-close-popup @click="toggleOptOut(props.row)">
                       <q-item-section avatar>
                         <q-icon :name="props.row.remediation_opt_out ? 'smart_toy' : 'block'" />
@@ -519,7 +533,7 @@ const domainColumns = [
             </template>
             <template #body-cell-actions="props">
               <q-td :props="props">
-                <template v-if="auth.canWrite()">
+                <template v-if="canManage">
                   <q-btn
                     flat
                     dense
@@ -541,6 +555,7 @@ const domainColumns = [
                     <q-tooltip>Перевести в обслуживание</q-tooltip>
                   </q-btn>
                   <q-btn
+                    v-if="canDisrupt"
                     flat
                     dense
                     round

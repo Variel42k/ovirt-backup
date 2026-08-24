@@ -478,13 +478,64 @@ func (s *Server) handleRunChain(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDeleteRun(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+
+	// purge=true стирает данные немедленно, минуя карантин. Нужно, когда место
+	// требуется прямо сейчас; в остальных случаях промежуток, за который можно
+	// передумать, важнее освободившихся гигабайт.
+	if queryBool(r, "purge") {
+		if err := s.engine.PurgeRunData(context.WithoutCancel(r.Context()), id); err != nil {
+			s.audit(r, "backup.purge", model.ScopeBackup, id, false, err.Error())
+			s.writeError(w, r, err)
+			return
+		}
+		s.audit(r, "backup.purge", model.ScopeBackup, id, true, "данные стёрты без карантина")
+		writeJSON(w, http.StatusOK, map[string]string{"status": "purged"})
+		return
+	}
+
 	if err := s.engine.DeleteRunData(context.WithoutCancel(r.Context()), id); err != nil {
 		s.audit(r, "backup.delete", model.ScopeBackup, id, false, err.Error())
 		s.writeError(w, r, err)
 		return
 	}
+
+	// Ответ различает карантин и стирание: «deleted» там, где данные ещё целы,
+	// ввело бы в заблуждение — оператор решил бы, что место освободилось.
+	run, err := s.store.GetBackupRun(r.Context(), id)
+	if err == nil && run.PurgeAfter != nil {
+		s.audit(r, "backup.delete", model.ScopeBackup, id, true,
+			"в карантине до "+run.PurgeAfter.Format(time.RFC3339))
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":      "quarantined",
+			"purge_after": run.PurgeAfter,
+		})
+		return
+	}
+
 	s.audit(r, "backup.delete", model.ScopeBackup, id, true, "")
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// handleListTrash отдаёт копии, которые ещё можно вернуть.
+func (s *Server) handleListTrash(w http.ResponseWriter, r *http.Request) {
+	runs, err := s.store.QuarantinedRuns(r.Context(), queryInt(r, "limit", 200))
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeList(w, runs)
+}
+
+// handleRestoreFromTrash возвращает копию из карантина.
+func (s *Server) handleRestoreFromTrash(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := s.store.RestoreRunFromQuarantine(r.Context(), id); err != nil {
+		s.audit(r, "backup.undelete", model.ScopeBackup, id, false, err.Error())
+		s.writeError(w, r, err)
+		return
+	}
+	s.audit(r, "backup.undelete", model.ScopeBackup, id, true, "возвращено из карантина")
+	writeJSON(w, http.StatusOK, map[string]string{"status": "restored"})
 }
 
 func (s *Server) handleCancelRun(w http.ResponseWriter, r *http.Request) {
@@ -814,13 +865,47 @@ func (s *Server) handleRetentionPreview(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) handleRetentionApply(w http.ResponseWriter, r *http.Request) {
-	plan, err := s.evaluateRetention(r, false)
-	if err != nil {
+	var req retentionRequest
+	if err := decodeJSON(r, &req); err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	s.audit(r, "retention.apply", model.ScopeVM, plan.VMID, true, "")
-	writeJSON(w, http.StatusOK, plan)
+	if err := req.validate(); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+
+	// Продолжение не читает тело: оно уже разобрано, а согласование может
+	// вызвать его позже — повторным запросом со ссылкой на заявку или само,
+	// когда выйдет окно отмены.
+	apply := func(w http.ResponseWriter, r *http.Request) {
+		plan, err := s.applyRetention(context.WithoutCancel(r.Context()), req)
+		if err != nil {
+			s.writeError(w, r, err)
+			return
+		}
+		s.audit(r, "retention.apply", model.ScopeVM, plan.VMID, true, "")
+		writeJSON(w, http.StatusOK, plan)
+	}
+
+	s.guardAction(w, r, model.GuardRetentionApply, retentionTarget(req), apply)
+}
+
+// validate проверяет запрос ретенции до того, как он попадёт в заявку.
+//
+// Отдельно от выполнения: заявка на действие, которое всё равно отвергнут,
+// зря отнимает у согласующих внимание, а обнаруживается это через сутки.
+func (r retentionRequest) validate() error {
+	if r.ServerID == "" || r.VMID == "" || r.StorageTargetID == "" {
+		return badRequest("нужны server_id, vm_id и storage_target_id")
+	}
+	return nil
+}
+
+// applyRetention выполняет ретенцию по разобранному запросу.
+func (s *Server) applyRetention(ctx context.Context, req retentionRequest) (retention.Plan, error) {
+	return s.engine.ApplyRetention(ctx, req.ServerID, req.VMID, req.StorageTargetID,
+		req.Policy, false)
 }
 
 func (s *Server) evaluateRetention(r *http.Request, dryRun bool) (retention.Plan, error) {
@@ -828,8 +913,8 @@ func (s *Server) evaluateRetention(r *http.Request, dryRun bool) (retention.Plan
 	if err := decodeJSON(r, &req); err != nil {
 		return retention.Plan{}, err
 	}
-	if req.ServerID == "" || req.VMID == "" || req.StorageTargetID == "" {
-		return retention.Plan{}, badRequest("нужны server_id, vm_id и storage_target_id")
+	if err := req.validate(); err != nil {
+		return retention.Plan{}, err
 	}
 	return s.engine.ApplyRetention(context.WithoutCancel(r.Context()),
 		req.ServerID, req.VMID, req.StorageTargetID, req.Policy, dryRun)

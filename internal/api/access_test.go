@@ -2,8 +2,10 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -162,6 +164,10 @@ func newAccessServer(t *testing.T) (*Server, *httptest.Server) {
 	cfg := config.Config{}
 	cfg.Auth.Enabled = true
 	cfg.Server.ServeSPA = false
+	// Управление включается явно: у нулевого config.Config выключатель стоит в
+	// «выключено», и маршруты действий отвечали бы 403 независимо от прав.
+	// Тест доступа проверяет права, выключатель проверяется отдельно.
+	cfg.Management.Enabled = true
 
 	srv := New(Deps{Config: cfg, Store: testStore(t), Logger: zerolog.Nop()})
 	ts := httptest.NewServer(srv.Handler())
@@ -208,4 +214,116 @@ func callAs(t *testing.T, ts *httptest.Server, method, path, cookie string) int 
 	}
 	defer resp.Body.Close()
 	return resp.StatusCode
+}
+
+// newServerWithConfig — сервер с заданной конфигурацией. Нужен тестам, которые
+// проверяют не права, а поведение выключателей.
+func newServerWithConfig(t *testing.T, cfg config.Config) (*Server, *httptest.Server) {
+	t.Helper()
+	cfg.Auth.Enabled = true
+	cfg.Server.ServeSPA = false
+
+	srv := New(Deps{Config: cfg, Store: testStore(t), Logger: zerolog.Nop()})
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+	return srv, ts
+}
+
+// postAs отправляет тело и возвращает код ответа вместе с кодом ошибки из
+// тела: у отказа по правам и отказа по выключателю разные коды, и различать их
+// по одному лишь 403 нельзя.
+func postAs(t *testing.T, ts *httptest.Server, method, path, cookie, body string) (int, string) {
+	t.Helper()
+	req, err := http.NewRequest(method, ts.URL+"/api/v1"+path, strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("запрос: %v", err)
+	}
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: cookie})
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("обращение: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var payload struct {
+		Code string `json:"code"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&payload)
+	return resp.StatusCode, payload.Code
+}
+
+// Выключенное управление закрывает действия над ВМ и хостами даже
+// администратору: настройка говорит «эта установка только копирует», и права
+// тут ни при чём.
+func TestManagementSwitchClosesActions(t *testing.T) {
+	srv, ts := newServerWithConfig(t, config.Config{})
+	admin := sessionFor(t, srv, model.RoleAdmin)
+
+	closed := []struct {
+		method, path, body string
+	}{
+		{"POST", "/servers/x/vms/y/action", `{"action":"start"}`},
+		{"POST", "/servers/x/hosts/y/action", `{"action":"activate"}`},
+		{"POST", "/remediations", `{"server_id":"x","object_id":"y","action":"vm_start"}`},
+	}
+	for _, tc := range closed {
+		status, code := postAs(t, ts, tc.method, tc.path, admin, tc.body)
+		if status != http.StatusForbidden || code != "management_disabled" {
+			t.Errorf("%s %s: получено %d/%q, ожидалось 403/management_disabled",
+				tc.method, tc.path, status, code)
+		}
+	}
+
+	// Бэкап при этом работать не перестаёт — иначе выключатель отнимал бы то,
+	// ради чего службу и ставили.
+	if got := callAs(t, ts, "GET", "/backups", admin); got == http.StatusForbidden {
+		t.Error("выключатель управления не должен закрывать бэкапы")
+	}
+	if got := callAs(t, ts, "GET", "/servers", admin); got == http.StatusForbidden {
+		t.Error("выключатель управления не должен закрывать чтение инвентаря")
+	}
+}
+
+// Сброс ВМ и фенсинг хоста требуют servers.disruptive. У оператора его нет, и
+// три пути к этим операциям должны быть закрыты все три: маршрут ВМ, маршрут
+// хоста и ручное восстановление, которое ведёт к тем же вызовам движка.
+func TestDisruptiveActionsNeedTheirOwnPermission(t *testing.T) {
+	srv, ts := newAccessServer(t)
+	operator := sessionFor(t, srv, model.RoleOperator)
+
+	denied := []struct {
+		name, path, body string
+	}{
+		{"сброс ВМ", "/servers/x/vms/y/action", `{"action":"reset","confirm":true}`},
+		{"фенсинг хоста", "/servers/x/hosts/y/action", `{"action":"fence","confirm":true}`},
+		{"фенсинг через восстановление", "/remediations",
+			`{"server_id":"x","object_id":"y","action":"host_fence","confirm":true}`},
+		{"сброс через восстановление", "/remediations",
+			`{"server_id":"x","object_id":"y","action":"vm_reset","confirm":true}`},
+	}
+	for _, tc := range denied {
+		status, code := postAs(t, ts, "POST", tc.path, operator, tc.body)
+		if status != http.StatusForbidden || code != "forbidden" {
+			t.Errorf("%s: получено %d/%q, ожидалось 403/forbidden", tc.name, status, code)
+		}
+	}
+
+	// Безобидные действия оператору по-прежнему доступны: проверка права не
+	// должна была закрыть весь маршрут. 403 здесь означал бы, что закрыла.
+	allowed := []struct {
+		name, path, body string
+	}{
+		{"запуск ВМ", "/servers/x/vms/y/action", `{"action":"start"}`},
+		{"обслуживание хоста", "/servers/x/hosts/y/action", `{"action":"deactivate"}`},
+		{"опрос питания", "/servers/x/hosts/y/action", `{"action":"fence","fence_type":"status"}`},
+	}
+	for _, tc := range allowed {
+		// Сервера x не существует, поэтому ответ будет 404 или 502 — важно
+		// лишь то, что запрос дошёл до обработчика, а не был отсечён правом.
+		if status, _ := postAs(t, ts, "POST", tc.path, operator, tc.body); status == http.StatusForbidden {
+			t.Errorf("%s: оператор получил 403, хотя отдельного права здесь не нужно", tc.name)
+		}
+	}
 }

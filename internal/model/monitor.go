@@ -64,27 +64,48 @@ const (
 	AlertStoragePathDegraded = "storage_path_degraded"
 	// AlertDiskIOErrors — гипервизор сам зафиксировал отказ операции.
 	AlertDiskIOErrors = "disk_io_errors"
+	// AlertApprovalPending — заявка на опасное действие ждёт подтверждения.
+	//
+	// Оповещение здесь не «на всякий случай»: заявка, о которой согласующие не
+	// узнали, доживает до истечения срока и закрывается сама. Тогда вся
+	// конструкция превращается в способ не дать сделать работу, а не в защиту.
+	AlertApprovalPending = "approval_pending"
+	// AlertApprovalFailed — согласованное действие не удалось выполнить.
+	//
+	// Заявка при этом не закрывается и будет повторена. Оповещение нужно
+	// потому, что для согласующих действие уже состоялось: они подтвердили
+	// его сутки назад и больше о нём не думают.
+	AlertApprovalFailed = "approval_failed"
+	// AlertBreakGlassUsed — действие выполнено в обход согласования.
+	//
+	// Смысл аварийного доступа в том, что тихо им воспользоваться нельзя.
+	// Оповещение — вторая половина этого обещания, первая — запись в журнале.
+	AlertBreakGlassUsed = "break_glass_used"
 )
 
 // Alert is a deduplicated problem statement about one object. Repeated
 // detections bump Count and LastSeen instead of creating new rows.
 type Alert struct {
-	ID         string     `json:"id"`
-	ServerID   string     `json:"server_id,omitempty"`
-	Scope      Scope      `json:"scope"`
-	ObjectID   string     `json:"object_id"`
-	ObjectName string     `json:"object_name"`
-	Kind       string     `json:"kind"`
-	Severity   Severity   `json:"severity"`
-	Message    string     `json:"message"`
-	Details    string     `json:"details,omitempty"`
-	State      AlertState `json:"state"`
-	Count      int        `json:"count"`
-	FirstSeen  time.Time  `json:"first_seen"`
-	LastSeen   time.Time  `json:"last_seen"`
-	ResolvedAt *time.Time `json:"resolved_at,omitempty"`
-	AckedBy    string     `json:"acked_by,omitempty"`
-	AckedAt    *time.Time `json:"acked_at,omitempty"`
+	ID         string   `json:"id"`
+	ServerID   string   `json:"server_id,omitempty"`
+	Scope      Scope    `json:"scope"`
+	ObjectID   string   `json:"object_id"`
+	ObjectName string   `json:"object_name"`
+	Kind       string   `json:"kind"`
+	Severity   Severity `json:"severity"`
+	// Audience выводится из Kind и в базе не хранится: заполняется при чтении.
+	// Колонка означала бы миграцию на каждое изменение раскладки и расхождение
+	// между старыми записями и новыми.
+	Audience   AlertAudience `json:"audience"`
+	Message    string        `json:"message"`
+	Details    string        `json:"details,omitempty"`
+	State      AlertState    `json:"state"`
+	Count      int           `json:"count"`
+	FirstSeen  time.Time     `json:"first_seen"`
+	LastSeen   time.Time     `json:"last_seen"`
+	ResolvedAt *time.Time    `json:"resolved_at,omitempty"`
+	AckedBy    string        `json:"acked_by,omitempty"`
+	AckedAt    *time.Time    `json:"acked_at,omitempty"`
 	// Notification fields describe external delivery, independently from the
 	// alert lifecycle shown in the UI. Muting an email must not hide the alert.
 	NotificationsMuted      bool       `json:"notifications_muted"`
@@ -130,6 +151,26 @@ func (a RemediationAction) Title() string {
 // therefore needs an explicit opt-in.
 func (a RemediationAction) Disruptive() bool {
 	return a == ActionHostFence || a == ActionVMReset
+}
+
+// DisruptiveVMAction сообщает, обрывает ли действие над ВМ работу гостя без
+// остановки его ОС.
+//
+// Здесь имена такие, какими их присылает API инвентаря ("reset"), а не такие,
+// какими их знает авто-восстановление ("vm_reset"). Словари разные, но ответ на
+// вопрос «прервёт ли это работу» должен быть один: два списка разойдутся молча
+// и ровно в том месте, где право что-то закрывает.
+func DisruptiveVMAction(action string) bool {
+	return action == "reset"
+}
+
+// DisruptiveHostAction — то же для действий над хостом.
+//
+// fenceType учитывается намеренно: "status" только опрашивает питание и ничего
+// не выключает. Требовать за опрос право на фенсинг значит закрыть диагностику
+// тем, кому она и нужна, чтобы решить, звать ли того, у кого право есть.
+func DisruptiveHostAction(action, fenceType string) bool {
+	return action == "fence" && fenceType != "status"
 }
 
 // RemediationStatus is the outcome of an attempted corrective action.

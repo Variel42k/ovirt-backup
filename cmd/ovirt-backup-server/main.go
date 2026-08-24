@@ -19,6 +19,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/Variel42k/ovirt-backup/internal/api"
+	"github.com/Variel42k/ovirt-backup/internal/auditlog"
 	"github.com/Variel42k/ovirt-backup/internal/backup"
 	"github.com/Variel42k/ovirt-backup/internal/config"
 	"github.com/Variel42k/ovirt-backup/internal/dispatch"
@@ -252,6 +253,24 @@ func run() error {
 	st.OnAlertRaised(func(model.Alert) { notificationManager.Wake() })
 	go notificationManager.Run(ctx)
 	engine := backup.NewEngine(st, pool, cfg.Backup, cipher, log)
+
+	// Карантин удаления: копии, помеченные удалёнными, лежат нетронутыми до
+	// срока, и только потом их данные стираются. Без этого сборщика они
+	// остались бы в хранилище навсегда, занимая место.
+	if cfg.Backup.PurgeDelay > 0 {
+		purgeCtx, stopPurge := context.WithCancel(ctx)
+		purgeDone := make(chan struct{})
+		go func() {
+			defer close(purgeDone)
+			engine.RunPurgeCollector(purgeCtx)
+		}()
+		defer func() {
+			stopPurge()
+			<-purgeDone
+		}()
+		log.Info().Dur("карантин", cfg.Backup.PurgeDelay).
+			Msg("удалённые копии стираются не сразу: до срока их можно вернуть")
+	}
 	// The dispatcher adds the libvirt path on top of the oVirt engine; it
 	// cannot live inside the backup package because the KVM driver builds on
 	// that package's storage format.
@@ -269,6 +288,24 @@ func run() error {
 	// those VMs from failing.
 	if err := engine.ReconcileStaleRuns(ctx); err != nil {
 		log.Warn().Err(err).Msg("не удалось разобрать незавершённые бэкапы предыдущего запуска")
+	}
+
+	// Выключенное управление гасит и робота восстановления. Иначе выключатель
+	// закрывал бы только людей: маршрутов нет, а служба сама продолжает
+	// перезапускать ВМ и обесточивать хосты — ровно те действия, ради запрета
+	// которых его и передвинули.
+	if !cfg.Management.Enabled {
+		if cfg.Monitor.Remediation.Enabled {
+			log.Warn().Msg("управление виртуализацией выключено (management.enabled=false) — " +
+				"авто-восстановление ВМ и хостов не запускается")
+		} else {
+			log.Info().Msg("управление виртуализацией выключено (management.enabled=false) — " +
+				"служба выполняет только резервное копирование")
+		}
+		// Гасится в самом cfg, а не в копии: тот же флаг читают монитор и
+		// ответ /meta, и разойдись они — интерфейс показывал бы включённое
+		// авто-восстановление, которого нет.
+		cfg.Monitor.Remediation.Enabled = false
 	}
 
 	remediator := monitor.NewRemediator(st, pool, libvirtPool, cfg.Monitor.Remediation, bus, log)
@@ -313,13 +350,39 @@ func run() error {
 	}
 	defer background.stop()
 
+	// Журнал аудита для внешнего сборщика. Отказ открыть файл — причина не
+	// стартовать: настроенный и не работающий вывод аудита хуже отсутствующего,
+	// потому что на него рассчитывают.
+	auditFile, err := auditlog.Open(cfg.Audit.File)
+	if err != nil {
+		log.Fatal().Err(err).Msg("журнал аудита не открывается")
+	}
+	if auditFile != nil {
+		defer auditFile.Close()
+		log.Info().Str("файл", cfg.Audit.File).Msg("журнал аудита дублируется наружу")
+	}
+
 	apiServer := api.New(api.Deps{
 		Config: *cfg, BaseConfig: baseCfg, Store: st, Pool: pool, LibvirtPool: libvirtPool, Engine: dispatcher,
 		Scheduler: sched, Monitor: mon, Remediator: remediator, Bus: bus, Logger: log,
 		Logs: logs, Quality: qualityService, Replicator: replicator, Notifier: notifier,
 		Notifications: notificationManager, DR: drChecker,
-		FileBackup: fileBackupEngine,
+		FileBackup: fileBackupEngine, AuditFile: auditFile,
 	})
+
+	// Сроки согласования: эскалация на резервную группу и закрытие заявок,
+	// которые никто не подтвердил. Без этого просроченная заявка висела бы
+	// вечно, а резервная группа не узнала бы о ней никогда.
+	approvalCtx, stopApprovals := context.WithCancel(ctx)
+	approvalsDone := make(chan struct{})
+	go func() {
+		defer close(approvalsDone)
+		apiServer.RunApprovalSweeper(approvalCtx)
+	}()
+	defer func() {
+		stopApprovals()
+		<-approvalsDone
+	}()
 
 	httpServer := &http.Server{
 		Addr:        cfg.Server.ListenAddr(),

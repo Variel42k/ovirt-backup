@@ -19,6 +19,9 @@ func (s *Server) handleListAlerts(w http.ResponseWriter, r *http.Request) {
 		Scope:    model.Scope(r.URL.Query().Get("scope")),
 		ObjectID: r.URL.Query().Get("object_id"),
 		Severity: model.Severity(r.URL.Query().Get("severity")),
+		// Адресат: backup, infrastructure или service. Пусто — показываются все,
+		// как было до разделения.
+		Audience: model.AlertAudience(r.URL.Query().Get("audience")),
 		Limit:    queryInt(r, "limit", 200),
 	}
 	// By default the list shows what still needs attention; resolved alerts
@@ -233,6 +236,13 @@ func (s *Server) handleManualRemediation(w http.ResponseWriter, r *http.Request)
 	}
 
 	action := model.RemediationAction(req.Action)
+	// Ручное восстановление ведёт к тем же операциям, что и управление ВМ, но
+	// маршрут закрыт правом на оповещения. Без этой проверки право на фенсинг
+	// обходилось бы запросом сюда, и разделение прав ничего бы не значило.
+	if action.Disruptive() && !s.allowedDisruptive(r) {
+		s.writeError(w, r, forbiddenDisruptive(action.Title()))
+		return
+	}
 	if action.Disruptive() && !req.Confirm {
 		s.writeError(w, r, badRequest(
 			"действие «%s» прерывает работу и требует подтверждения (confirm=true)", action.Title()))

@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -227,6 +228,9 @@ func (s *Server) handleUpdateStorage(w http.ResponseWriter, r *http.Request) {
 	}
 	secretKey, password, privateKey := existing.SecretKey, existing.Password, existing.PrivateKey
 	objectLockWasEnabled := existing.ObjectLockEnabled
+	// Копия до правки: по ней решается, менялась ли сама цель — куда пишутся
+	// копии и под какими учётными данными.
+	before := *existing
 	payload.apply(existing)
 	if payload.SecretKey == "" {
 		existing.SecretKey = secretKey
@@ -262,15 +266,67 @@ func (s *Server) handleUpdateStorage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.store.UpdateStorageTarget(r.Context(), existing); err != nil {
-		s.audit(r, "storage.update", model.ScopeStorageTarget, id, false, err.Error())
-		s.writeError(w, r, err)
+	// Продолжение не читает тело: оно уже разобрано выше, а согласование
+	// может вызвать его позже — повторным запросом со ссылкой на заявку.
+	save := func(w http.ResponseWriter, r *http.Request) {
+		if err := s.store.UpdateStorageTarget(r.Context(), existing); err != nil {
+			s.audit(r, "storage.update", model.ScopeStorageTarget, id, false, err.Error())
+			s.writeError(w, r, err)
+			return
+		}
+		s.audit(r, "storage.update", model.ScopeStorageTarget, id, true, existing.Name)
+
+		go s.checkStorage(context.WithoutCancel(r.Context()), id)
+		writeJSON(w, http.StatusOK, existing)
+	}
+
+	// Смена адреса или учётных данных уводит будущие копии в другое место, а
+	// старые делает недоступными. Переименование — нет, и требовать за него
+	// кворум значило бы сделать согласование помехой вместо защиты.
+	if before.Retargeted(existing) {
+		s.guardAction(w, r, model.GuardStorageRetarget, retargetTarget(&before, existing), save)
 		return
 	}
-	s.audit(r, "storage.update", model.ScopeStorageTarget, id, true, existing.Name)
+	save(w, r)
+}
 
-	go s.checkStorage(context.WithoutCancel(r.Context()), id)
-	writeJSON(w, http.StatusOK, existing)
+// retargetTarget описывает смену цели словами: согласующий должен видеть, что
+// именно подтверждает.
+//
+// Секреты в описание не попадают — ни старые, ни новые. Заявка живёт в базе и
+// уходит в оповещения, то есть ключ из неё оказался бы сразу в двух местах,
+// откуда его не отозвать.
+func retargetTarget(before, after *model.StorageTarget) guardedTarget {
+	changes := []string{}
+	add := func(what, was, now string) {
+		if was != now {
+			changes = append(changes, what+": «"+was+"» → «"+now+"»")
+		}
+	}
+	add("тип", string(before.Kind), string(after.Kind))
+	add("каталог", before.BasePath, after.BasePath)
+	add("адрес", before.Endpoint, after.Endpoint)
+	add("регион", before.Region, after.Region)
+	add("bucket", before.Bucket, after.Bucket)
+	add("префикс", before.Prefix, after.Prefix)
+	add("ключ доступа", before.AccessKey, after.AccessKey)
+	add("узел", before.Host, after.Host)
+	add("пользователь", before.Username, after.Username)
+	add("шара", before.Share, after.Share)
+	add("домен", before.Domain, after.Domain)
+	if before.Port != after.Port {
+		changes = append(changes, fmt.Sprintf("порт: %d → %d", before.Port, after.Port))
+	}
+	if before.SecretKey != after.SecretKey || before.Password != after.Password ||
+		before.PrivateKey != after.PrivateKey {
+		changes = append(changes, "заменены учётные данные")
+	}
+
+	summary := "смена цели хранилища «" + before.Name + "»"
+	if len(changes) > 0 {
+		summary += " — " + strings.Join(changes, "; ")
+	}
+	return guardedTarget{ID: before.ID, Name: before.Name, Summary: summary}
 }
 
 // ensureLocalPathUsable refuses to save a local repository whose directory
@@ -366,6 +422,45 @@ type storageCheckResult struct {
 	Latency           string `json:"latency"`
 	ObjectLockEnabled bool   `json:"object_lock_enabled"`
 	ObjectLockOK      bool   `json:"object_lock_ok"`
+}
+
+// handleCheckImmutability выясняет, может ли служба стереть записанное.
+//
+// Проверка отдельная от обычной, а не часть её, по двум причинам. Она пишет
+// пробный объект, который на защищённом хранилище останется лежать до конца
+// срока удержания — делать это при каждой периодической проверке доступности
+// значило бы засыпать хранилище неудаляемым мусором. И она отвечает на другой
+// вопрос: обычная проверяет, что хранилище работает, эта — что оно защищает.
+func (s *Server) handleCheckImmutability(w http.ResponseWriter, r *http.Request) {
+	target, err := s.store.GetStorageTarget(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+	defer cancel()
+
+	backend, err := repo.Open(ctx, target)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	defer backend.Close()
+
+	report := repo.CheckImmutability(ctx, backend)
+
+	if err := s.store.SetStorageImmutability(context.WithoutCancel(ctx), target.ID,
+		string(report.State), report.Detail, report.CheckedAt); err != nil {
+		// Итог уже получен: не отдать его из-за неудачной записи в базу было бы
+		// хуже, чем отдать несохранённым.
+		s.log.Warn().Err(err).Str("хранилище", target.Name).
+			Msg("итог проверки неизменяемости не сохранён")
+	}
+
+	s.audit(r, "storage.immutability_check", model.ScopeStorageTarget, target.ID, true,
+		report.Describe())
+	writeJSON(w, http.StatusOK, report)
 }
 
 func (s *Server) handleCheckStorage(w http.ResponseWriter, r *http.Request) {

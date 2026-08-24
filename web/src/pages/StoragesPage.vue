@@ -2,7 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useQuasar } from 'quasar'
 import { api, notify, notifyError, notifyOk } from '@/api/client'
-import { ago, bytes, storageKindIcon } from '@/api/format'
+import { ago, bytes, dateTime, storageKindIcon } from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import type { CatalogScanDetail, StorageKind, StorageTarget } from '@/api/types'
@@ -126,6 +126,75 @@ async function check(target: StorageTarget) {
   }
 }
 
+const checkingImmutability = ref<string | null>(null)
+
+/**
+ * Проверка неизменяемости: может ли служба стереть уже записанное.
+ *
+ * Спрашивает подтверждение не из вежливости. На защищённом хранилище пробный
+ * объект удалить не удастся — в этом и смысл проверки, — и он останется лежать
+ * до конца срока удержания. Оператор должен знать об этом заранее, иначе потом
+ * найдёт непонятный объект и будет гадать, откуда он.
+ */
+function checkImmutability(target: StorageTarget) {
+  $q.dialog({
+    title: 'Проверить защиту от удаления',
+    message:
+      `Служба запишет в «${target.name}» небольшой пробный объект и попробует его ` +
+      'перезаписать и удалить. Если хранилище действительно защищено, удалить его ' +
+      'не выйдет — объект останется до конца срока удержания.',
+    cancel: { label: 'Отмена', flat: true },
+    ok: { label: 'Проверить', color: 'primary' },
+  }).onOk(async () => {
+    checkingImmutability.value = target.id
+    try {
+      const report = await api.checkImmutability(target.id)
+      if (report.state === 'protected') {
+        notifyOk(`«${target.name}»: ${report.detail}`)
+      } else {
+        notify({ type: 'warning', message: `«${target.name}»: ${report.detail}`, timeout: 12000, multiLine: true })
+      }
+      if (report.leftover) {
+        notify({
+          type: 'info',
+          message: `Пробный объект остался в хранилище: ${report.leftover}`,
+          timeout: 12000,
+          multiLine: true,
+        })
+      }
+      await load()
+    } catch (err) {
+      notifyError(err, 'Проверка защиты не выполнена')
+    } finally {
+      checkingImmutability.value = null
+    }
+  })
+}
+
+/** Как показать итог проверки в строке хранилища. */
+function immutabilityBadge(target: StorageTarget): { label: string; color: string; hint: string } | null {
+  switch (target.immutability_state) {
+    case 'protected':
+      return {
+        label: 'защищено',
+        color: 'positive',
+        hint: target.immutability_detail || 'записанное нельзя перезаписать или удалить',
+      }
+    case 'none':
+      return {
+        label: 'без защиты',
+        color: 'orange-8',
+        hint:
+          (target.immutability_detail || '') +
+          '. Тот, кто получит доступ к службе, сможет удалить копии.',
+      }
+    case 'unknown':
+      return { label: 'не выяснено', color: 'grey-6', hint: target.immutability_detail || '' }
+    default:
+      return null
+  }
+}
+
 async function scanCatalog(target: StorageTarget) {
 	catalogOpen.value = true
 	catalogLoading.value = true
@@ -170,18 +239,44 @@ function catalogColor(status: string): string {
 	return 'negative'
 }
 
+/**
+ * Сообщает об итоге удаления.
+ *
+ * Код 202 означает, что действие не выполнено, а заведена заявка на
+ * согласование. Сказать «удалено» в этом случае — худшее, что может сделать
+ * интерфейс: человек уйдёт уверенным, что хранилища больше нет.
+ */
+function reportDeletion(result: { status: number; data: unknown }): void {
+  if (result.status === 202) {
+    notify({
+      type: 'info',
+      message:
+        'Удаление отправлено на согласование: нужны подтверждения других участников ' +
+        'группы. Заявка видна в разделе «Настройки → Согласования».',
+      timeout: 12000,
+      multiLine: true,
+    })
+    return
+  }
+  notifyOk('Хранилище удалено')
+}
+
 function confirmDelete(target: StorageTarget) {
+  // Причина спрашивается сразу: удаление хранилища может потребовать
+  // согласования, а заявка без объяснения подтверждается не глядя. Если
+  // согласование не настроено, поле просто не используется.
   $q.dialog({
     title: 'Удалить хранилище',
     message:
       `Определение хранилища «${target.name}» будет удалено. Данные бэкапов в самом хранилище ` +
-      'останутся, но перестанут быть доступны через интерфейс.',
+      'останутся, но перестанут быть доступны через интерфейс.\n\n' +
+      'Укажите причину — она попадёт в журнал и в заявку на согласование, если оно требуется.',
+    prompt: { model: '', type: 'text', label: 'Причина', isValid: (v: string) => v.trim().length >= 10 },
     cancel: { label: 'Отмена', flat: true },
     ok: { label: 'Удалить', color: 'negative' },
-  }).onOk(async () => {
+  }).onOk(async (reason: string) => {
     try {
-      await api.deleteStorage(target.id)
-      notifyOk('Хранилище удалено')
+      reportDeletion(await api.deleteStorage(target.id, false, reason))
       await load()
     } catch (err) {
       // Бэкенд отказывается удалять хранилище с живыми бэкапами — предлагаем
@@ -193,8 +288,7 @@ function confirmDelete(target: StorageTarget) {
         ok: { label: 'Удалить принудительно', color: 'negative' },
       }).onOk(async () => {
         try {
-          await api.deleteStorage(target.id, true)
-          notifyOk('Хранилище удалено')
+          reportDeletion(await api.deleteStorage(target.id, true, reason))
           await load()
         } catch (e) {
           notifyError(e, 'Не удалось удалить')
@@ -274,6 +368,21 @@ function location(target: StorageTarget): string {
           {{ props.row.name }}
           <q-badge v-if="!props.row.enabled" color="grey-7" class="q-ml-sm">выключено</q-badge>
 			<q-badge v-if="props.row.object_lock_enabled" color="warning" class="q-ml-sm">Object Lock {{ props.row.object_lock_days }} дн.</q-badge>
+          <!-- Итог проверки, а не настройка: Object Lock рядом говорит о
+               намерении, этот бейдж — о том, что вышло на самом деле. -->
+          <q-badge
+            v-if="immutabilityBadge(props.row)"
+            :color="immutabilityBadge(props.row)!.color"
+            class="q-ml-sm"
+          >
+            {{ immutabilityBadge(props.row)!.label }}
+            <q-tooltip>
+              {{ immutabilityBadge(props.row)!.hint }}
+              <template v-if="props.row.immutability_checked_at">
+                <br />Проверено {{ dateTime(props.row.immutability_checked_at) }}
+              </template>
+            </q-tooltip>
+          </q-badge>
         </q-td>
       </template>
 
@@ -319,6 +428,16 @@ function location(target: StorageTarget): string {
             @click="check(props.row)"
           >
             <q-tooltip>Проверить доступность и запись</q-tooltip>
+          </q-btn>
+          <q-btn
+            flat
+            dense
+            round
+            icon="lock_clock"
+            :loading="checkingImmutability === props.row.id"
+            @click="checkImmutability(props.row)"
+          >
+            <q-tooltip>Проверить защиту от удаления и перезаписи</q-tooltip>
           </q-btn>
 			<q-btn v-if="auth.canAdmin()" flat dense round icon="manage_search" @click="scanCatalog(props.row)">
 				<q-tooltip>Просмотреть каталог и импортировать найденные точки</q-tooltip>

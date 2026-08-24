@@ -15,6 +15,32 @@ export type DesiredState = 'as_is' | 'up' | 'down'
  */
 export type Role = 'admin' | 'operator' | 'viewer' | (string & {})
 
+/** Одна проверка доступа под сервисной учётной записью. */
+export interface AccessCheck {
+  what: string
+  ok: boolean
+  error?: string
+  /** Без этого бэкап не работает вовсе. */
+  required: boolean
+}
+
+/** Один шаг настройки безопасного подключения. */
+export interface ProvisionStep {
+  step: string
+  ok: boolean
+  note?: string
+  error?: string
+}
+
+/** Результат безопасного подключения движка. */
+export interface ProvisionResult {
+  ok: boolean
+  steps: ProvisionStep[]
+  access?: { checks: AccessCheck[]; ready: boolean }
+  server_id?: string
+  error?: string
+}
+
 /** Ответ /auth/me: кто вошёл и что ему разрешено. */
 export interface MeResponse {
   username: string
@@ -168,6 +194,17 @@ export interface StorageTarget {
   last_check_msg?: string
   free_bytes: number
   used_bytes: number
+  object_lock_enabled?: boolean
+  object_lock_days?: number
+  /**
+   * Итог проверки неизменяемости: protected | none | unknown.
+   *
+   * object_lock_enabled — намерение оператора, это — что получилось на самом
+   * деле, выясненное попыткой перезаписать и удалить пробный объект.
+   */
+  immutability_state?: string
+  immutability_detail?: string
+  immutability_checked_at?: string
 }
 
 export interface RetentionPolicy {
@@ -272,6 +309,13 @@ export interface BackupRun {
   ended_at?: string
   expires_at?: string
   deleted: boolean
+  /**
+   * Момент, когда данные копии сотрут физически.
+   *
+   * Заполнен — копия в карантине: помечена удалённой, но данные целы и её
+   * можно вернуть. Пусто при deleted=true — данные уже стёрты.
+   */
+  purge_after?: string
   created_at: string
   disks?: BackupDisk[]
   skipped_disks?: SkippedDisk[]
@@ -764,6 +808,13 @@ export interface Alert {
   object_name: string
   kind: string
   severity: Severity
+  /**
+   * Кому адресовано: backup | infrastructure | service.
+   *
+   * Выводится сервером из kind, в базе не хранится. Список адресатов приходит
+   * в /meta — повторять раскладку здесь нельзя, она разойдётся.
+   */
+  audience: string
   message: string
   details?: string
   state: AlertState
@@ -916,6 +967,8 @@ export interface Meta {
   storage_kinds: OptionDescriptor[]
   remediation_actions: OptionDescriptor[]
   roles: OptionDescriptor[]
+  /** Кому адресованы оповещения: ключ, название, пояснение. */
+  alert_audiences: { key: string; title: string; description: string }[]
   capabilities: {
     qemu_img: boolean
     encryption: boolean
@@ -924,6 +977,8 @@ export interface Meta {
     database_type: string
     scheduler_timezone: string
     timezone: string
+    /** false — управление ВМ и хостами выключено, действия вернут 403. */
+    management_enabled: boolean
     remediation_enabled: boolean
     remediation_dry_run: boolean
     auth_enabled: boolean

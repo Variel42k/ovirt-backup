@@ -31,21 +31,29 @@ type metaResponse struct {
 	StorageKinds []optionDescriptor `json:"storage_kinds"`
 	Actions      []optionDescriptor `json:"remediation_actions"`
 	Roles        []optionDescriptor `json:"roles"`
+	// AlertAudiences — кому адресованы оповещения. Список приходит с сервера:
+	// раскладка типов по адресатам живёт в коде, и повторять её в интерфейсе
+	// значило бы завести второй список, который разойдётся с первым.
+	AlertAudiences []model.AudienceInfo `json:"alert_audiences"`
 
 	Capabilities struct {
-		QemuImg           bool   `json:"qemu_img"`
-		Encryption        bool   `json:"encryption"`
-		Compression       string `json:"compression"`
-		ChunkSize         int    `json:"chunk_size"`
-		DatabaseType      string `json:"database_type"`
-		SchedulerTZ       string `json:"scheduler_timezone"`
-		Timezone          string `json:"timezone"`
-		RemediationOn     bool   `json:"remediation_enabled"`
-		RemediationDryRun bool   `json:"remediation_dry_run"`
-		AuthEnabled       bool   `json:"auth_enabled"`
-		OIDCEnabled       bool   `json:"oidc_enabled"`
-		LocalLogin        bool   `json:"local_login"`
-		FileBackup        bool   `json:"file_backup"`
+		QemuImg      bool   `json:"qemu_img"`
+		Encryption   bool   `json:"encryption"`
+		Compression  string `json:"compression"`
+		ChunkSize    int    `json:"chunk_size"`
+		DatabaseType string `json:"database_type"`
+		SchedulerTZ  string `json:"scheduler_timezone"`
+		Timezone     string `json:"timezone"`
+		// ManagementOn — включено ли управление виртуализацией. Интерфейс по
+		// нему прячет действия над ВМ и хостами: кнопка, которая гарантированно
+		// вернёт 403, хуже отсутствующей.
+		ManagementOn      bool `json:"management_enabled"`
+		RemediationOn     bool `json:"remediation_enabled"`
+		RemediationDryRun bool `json:"remediation_dry_run"`
+		AuthEnabled       bool `json:"auth_enabled"`
+		OIDCEnabled       bool `json:"oidc_enabled"`
+		LocalLogin        bool `json:"local_login"`
+		FileBackup        bool `json:"file_backup"`
 	} `json:"capabilities"`
 
 	DefaultRetention model.RetentionPolicy `json:"default_retention"`
@@ -126,11 +134,8 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	resp.Roles = []optionDescriptor{
-		{Value: string(model.RoleAdmin), Title: "Администратор", Description: "Полный доступ, включая подключения, хранилища и пользователей."},
-		{Value: string(model.RoleOperator), Title: "Оператор", Description: "Управление ВМ и бэкапами без правки конфигурации."},
-		{Value: string(model.RoleViewer), Title: "Наблюдатель", Description: "Только чтение."},
-	}
+	resp.Roles = s.roleOptions(r.Context())
+	resp.AlertAudiences = model.AlertAudiences()
 
 	resp.Capabilities.QemuImg = backup.QemuImgAvailable(s.cfg.Backup.QemuImgPath)
 	resp.Capabilities.Encryption = true
@@ -139,6 +144,7 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 	resp.Capabilities.DatabaseType = "postgres"
 	resp.Capabilities.SchedulerTZ = s.schedulerTimezone()
 	resp.Capabilities.Timezone = resp.Capabilities.SchedulerTZ
+	resp.Capabilities.ManagementOn = s.managementEnabled()
 	resp.Capabilities.RemediationOn = s.cfg.Monitor.Remediation.Enabled
 	// Живое значение, а не настройка: режим переключается на ходу, и
 	// интерфейс должен показывать то, что действует сейчас.

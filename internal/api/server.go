@@ -14,6 +14,7 @@ import (
 
 	"github.com/rs/zerolog"
 
+	"github.com/Variel42k/ovirt-backup/internal/auditlog"
 	"github.com/Variel42k/ovirt-backup/internal/config"
 	"github.com/Variel42k/ovirt-backup/internal/dispatch"
 	drcheck "github.com/Variel42k/ovirt-backup/internal/dr"
@@ -64,6 +65,8 @@ type Server struct {
 	// roles кеширует настраиваемые роли: проверяются они на каждом запросе,
 	// а меняются редко.
 	roles *roleCache
+	// auditFile дублирует журнал аудита наружу. Пуст, когда вывод не настроен.
+	auditFile *auditlog.Writer
 }
 
 // Deps bundles what the API needs, so adding a dependency does not change
@@ -89,6 +92,8 @@ type Deps struct {
 	Notifications *notify.Manager
 	DR            *drcheck.Checker
 	FileBackup    *filebackup.Engine
+	// AuditFile — журнал аудита для внешнего сборщика. Может быть nil.
+	AuditFile *auditlog.Writer
 }
 
 // New builds the API server.
@@ -115,6 +120,7 @@ func New(d Deps) *Server {
 		logins:     newLoginLimiter(),
 		oidcLogins: newOIDCPending(),
 		roles:      newRoleCache(),
+		auditFile:  d.AuditFile,
 	}
 	// Про токены из файла настроек служба говорит при каждом старте, а не
 	// один раз в документации. Забывают именно их: работают они бессрочно и с
@@ -182,8 +188,10 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /servers", s.perm(model.PermServersAdmin, s.handleCreateServer))
 	mux.HandleFunc("GET /servers/{id}", s.perm(model.PermServersRead, s.handleGetServer))
 	mux.HandleFunc("PUT /servers/{id}", s.perm(model.PermServersAdmin, s.handleUpdateServer))
-	mux.HandleFunc("DELETE /servers/{id}", s.perm(model.PermServersAdmin, s.handleDeleteServer))
+	mux.HandleFunc("DELETE /servers/{id}", s.perm(model.PermServersAdmin,
+		s.guarded(model.GuardServerDelete, s.serverTarget, s.handleDeleteServer)))
 	mux.HandleFunc("POST /servers/probe", s.perm(model.PermServersAdmin, s.handleProbeServer))
+	mux.HandleFunc("POST /servers/provision", s.perm(model.PermServersAdmin, s.handleProvisionServer))
 	mux.HandleFunc("POST /servers/ca-certificate", s.perm(model.PermServersAdmin, s.handleFetchCA))
 	mux.HandleFunc("POST /servers/{id}/refresh", s.perm(model.PermServersWrite, s.handleRefreshServer))
 	mux.HandleFunc("GET /servers/{id}/summary", s.perm(model.PermServersRead, s.handleServerSummary))
@@ -199,10 +207,19 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /servers/{id}/restore-networks", s.perm(model.PermServersRead, s.handleListRestoreNetworks))
 
 	// Управление ВМ и хостами.
-	mux.HandleFunc("POST /servers/{id}/vms/{vmID}/action", s.perm(model.PermServersWrite, s.handleVMAction))
+	//
+	// Действия над ВМ и хостами закрыты выключателем management.enabled:
+	// установке, которая только снимает бэкапы, они не нужны, а службе, до
+	// которой добрались, дают рычаг остановить production. Политика, теги и
+	// режим бэкапа диска остаются: без них не выбрать машины в задание и не
+	// включить инкрементальный бэкап, то есть это часть копирования, а не
+	// управления.
+	mux.HandleFunc("POST /servers/{id}/vms/{vmID}/action",
+		s.perm(model.PermServersWrite, s.management(s.handleVMAction)))
 	mux.HandleFunc("PUT /servers/{id}/vms/{vmID}/policy", s.perm(model.PermServersWrite, s.handleVMPolicy))
 	mux.HandleFunc("PUT /servers/{id}/vms/{vmID}/tags", s.perm(model.PermServersWrite, s.handleVMTags))
-	mux.HandleFunc("POST /servers/{id}/hosts/{hostID}/action", s.perm(model.PermServersWrite, s.handleHostAction))
+	mux.HandleFunc("POST /servers/{id}/hosts/{hostID}/action",
+		s.perm(model.PermServersWrite, s.management(s.handleHostAction)))
 	mux.HandleFunc("PUT /servers/{id}/disks/{diskID}/backup-mode", s.perm(model.PermServersWrite, s.handleDiskBackupMode))
 
 	// Планирование бэкапа для конкретной ВМ.
@@ -213,8 +230,10 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /storages", s.perm(model.PermStoragesAdmin, s.handleCreateStorage))
 	mux.HandleFunc("GET /storages/{id}", s.perm(model.PermStoragesRead, s.handleGetStorage))
 	mux.HandleFunc("PUT /storages/{id}", s.perm(model.PermStoragesAdmin, s.handleUpdateStorage))
-	mux.HandleFunc("DELETE /storages/{id}", s.perm(model.PermStoragesAdmin, s.handleDeleteStorage))
+	mux.HandleFunc("DELETE /storages/{id}", s.perm(model.PermStoragesAdmin,
+		s.guarded(model.GuardStorageDelete, s.storageTarget, s.handleDeleteStorage)))
 	mux.HandleFunc("POST /storages/{id}/check", s.perm(model.PermStoragesWrite, s.handleCheckStorage))
+	mux.HandleFunc("POST /storages/{id}/immutability-check", s.perm(model.PermStoragesWrite, s.handleCheckImmutability))
 	mux.HandleFunc("POST /storages/{id}/catalog-scans", s.perm(model.PermStoragesAdmin, s.handleStartCatalogScan))
 	mux.HandleFunc("GET /storages/{id}/catalog-scans", s.perm(model.PermStoragesAdmin, s.handleListCatalogScans))
 	mux.HandleFunc("GET /catalog-scans/{id}", s.perm(model.PermStoragesAdmin, s.handleGetCatalogScan))
@@ -225,7 +244,8 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /jobs", s.perm(model.PermJobsWrite, s.handleCreateJob))
 	mux.HandleFunc("GET /jobs/{id}", s.perm(model.PermJobsRead, s.handleGetJob))
 	mux.HandleFunc("PUT /jobs/{id}", s.perm(model.PermJobsWrite, s.handleUpdateJob))
-	mux.HandleFunc("DELETE /jobs/{id}", s.perm(model.PermJobsWrite, s.handleDeleteJob))
+	mux.HandleFunc("DELETE /jobs/{id}", s.perm(model.PermJobsWrite,
+		s.guarded(model.GuardJobDelete, s.jobTarget, s.handleDeleteJob)))
 	mux.HandleFunc("POST /jobs/{id}/run", s.perm(model.PermJobsWrite, s.handleRunJob))
 	mux.HandleFunc("GET /jobs/{id}/preview", s.perm(model.PermJobsRead, s.handlePreviewJob))
 	mux.HandleFunc("POST /jobs/{id}/enable-replication", s.perm(model.PermJobsAdmin, s.handleEnableJobReplication))
@@ -236,6 +256,9 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /backups", s.perm(model.PermBackupsRead, s.handleListRuns))
 	mux.HandleFunc("GET /backups/{id}", s.perm(model.PermBackupsRead, s.handleGetRun))
 	mux.HandleFunc("DELETE /backups/{id}", s.perm(model.PermBackupsWrite, s.handleDeleteRun))
+	// Корзина: копии, помеченные удалёнными, но с целыми данными.
+	mux.HandleFunc("GET /backups/trash", s.perm(model.PermBackupsRead, s.handleListTrash))
+	mux.HandleFunc("POST /backups/{id}/undelete", s.perm(model.PermBackupsWrite, s.handleRestoreFromTrash))
 	mux.HandleFunc("POST /backups/{id}/cancel", s.perm(model.PermBackupsWrite, s.handleCancelRun))
 	mux.HandleFunc("GET /backups/{id}/chain", s.perm(model.PermBackupsRead, s.handleRunChain))
 	mux.HandleFunc("GET /backups/{id}/copies", s.perm(model.PermBackupsRead, s.handleListBackupCopies))
@@ -260,6 +283,9 @@ func (s *Server) routes(mux *http.ServeMux) {
 
 	// Ретенция — это удаление копий, поэтому право то же, что на их удаление.
 	mux.HandleFunc("POST /retention/preview", s.perm(model.PermBackupsRead, s.handleRetentionPreview))
+	// Согласование здесь внутри обработчика, а не обёрткой: заявке нужны
+	// параметры из тела запроса, чтобы выполниться самой по истечении окна
+	// отмены, а прочитать тело дважды нельзя.
 	mux.HandleFunc("POST /retention/apply", s.perm(model.PermBackupsWrite, s.handleRetentionApply))
 
 	// Оповещения.
@@ -277,7 +303,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /remediation/mode", s.perm(model.PermAlertsRead, s.handleGetRemediationMode))
 	mux.HandleFunc("PUT /remediation/mode", s.perm(model.PermAlertsAdmin, s.handleSetRemediationMode))
 	mux.HandleFunc("GET /remediation/periods/{id}/archive", s.perm(model.PermAlertsRead, s.handleGetRemediationArchive))
-	mux.HandleFunc("POST /remediations", s.perm(model.PermAlertsWrite, s.handleManualRemediation))
+	mux.HandleFunc("POST /remediations", s.perm(model.PermAlertsWrite, s.management(s.handleManualRemediation)))
 
 	// Обзор, покрытие и показатели.
 	mux.HandleFunc("GET /coverage", s.perm(model.PermMonitoringRead, s.handleCoverage))
@@ -345,6 +371,34 @@ func (s *Server) routes(mux *http.ServeMux) {
 	// любое другое право, а кто может выпустить токен — выдать его с любой
 	// ролью. Раздельные права создавали бы видимость ограничения там, где его
 	// нет.
+	// Согласование опасных действий.
+	//
+	// Заявки и голоса не требуют отдельного права: их видят все вошедшие, а
+	// подтверждать может только тот, кто состоит в группе согласующих, и это
+	// проверяется при голосовании. Отдельное право сюда добавило бы вторую
+	// систему допуска поверх уже существующего членства в группе.
+	mux.HandleFunc("GET /approvals", s.handleListApprovals)
+	mux.HandleFunc("GET /approvals/{id}", s.handleGetApproval)
+	mux.HandleFunc("POST /approvals/{id}/vote", s.handleVoteApproval)
+	mux.HandleFunc("POST /approvals/{id}/cancel", s.handleCancelApproval)
+
+	// Делегирование права голоса. Прав администратора не требует намеренно:
+	// передаёт своё право сам согласующий, а он администратором быть не обязан.
+	mux.HandleFunc("GET /approval-delegations", s.handleListDelegations)
+	mux.HandleFunc("POST /approval-delegations", s.handleCreateDelegation)
+	mux.HandleFunc("POST /approval-delegations/{id}/revoke", s.handleRevokeDelegation)
+
+	mux.HandleFunc("GET /approval-actions", s.perm(model.PermUsersAdmin, s.handleGuardedActions))
+	// Правка политики согласования сама проходит согласование: иначе достаточно
+	// понизить уровень нужного действия и выполнить его в одиночку.
+	mux.HandleFunc("PUT /approval-policies", s.perm(model.PermUsersAdmin,
+		s.guarded(model.GuardPolicyUpdate, policyTarget, s.handleSetApprovalPolicy)))
+	mux.HandleFunc("GET /approval-groups", s.perm(model.PermUsersAdmin, s.handleListApprovalGroups))
+	mux.HandleFunc("POST /approval-groups", s.perm(model.PermUsersAdmin, s.handleCreateApprovalGroup))
+	mux.HandleFunc("PUT /approval-groups/{id}", s.perm(model.PermUsersAdmin, s.handleUpdateApprovalGroup))
+	mux.HandleFunc("DELETE /approval-groups/{id}", s.perm(model.PermUsersAdmin, s.handleDeleteApprovalGroup))
+	mux.HandleFunc("GET /break-glass", s.perm(model.PermAuditRead, s.handleListBreakGlass))
+
 	mux.HandleFunc("GET /permissions", s.perm(model.PermUsersAdmin, s.handlePermissionCatalog))
 	mux.HandleFunc("GET /roles", s.perm(model.PermUsersAdmin, s.handleListRoles))
 	mux.HandleFunc("POST /roles", s.perm(model.PermUsersAdmin, s.handleCreateRole))

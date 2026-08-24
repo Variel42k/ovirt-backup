@@ -127,6 +127,9 @@ type AlertFilter struct {
 	ObjectID string
 	States   []model.AlertState
 	Severity model.Severity
+	// Audience отбирает оповещения по адресату. Отбор идёт по списку типов, а
+	// не по колонке: адресата в базе нет, он выводится из типа.
+	Audience model.AlertAudience
 	Limit    int
 }
 
@@ -158,6 +161,26 @@ func (s *Store) ListAlerts(ctx context.Context, f AlertFilter) ([]*model.Alert, 
 			args = append(args, string(st))
 		}
 		where = append(where, `state IN (`+strings.Join(ph, ",")+`)`)
+	}
+	// Отбор по адресату разворачивается в список типов: колонки с адресатом в
+	// таблице нет, он выводится из типа. Пустой список означал бы, что адресату
+	// не отвечает ни один тип, — тогда и выбирать нечего.
+	if f.Audience != "" {
+		kinds := []string{}
+		for _, kind := range model.KnownAlertKinds() {
+			if model.AudienceOf(kind) == f.Audience {
+				kinds = append(kinds, kind)
+			}
+		}
+		if len(kinds) == 0 {
+			return []*model.Alert{}, nil
+		}
+		ph := make([]string, len(kinds))
+		for i, kind := range kinds {
+			ph[i] = "?"
+			args = append(args, kind)
+		}
+		where = append(where, `kind IN (`+strings.Join(ph, ",")+`)`)
 	}
 
 	query := `SELECT ` + alertColumns + ` FROM alerts`
@@ -193,6 +216,9 @@ func (s *Store) ListAlerts(ctx context.Context, f AlertFilter) ([]*model.Alert, 
 		a.Scope = model.Scope(scope)
 		a.Severity = model.Severity(severity)
 		a.State = model.AlertState(st)
+		// Адресат выводится из типа при чтении: в базе его нет намеренно,
+		// см. model.AlertAudience.
+		a.Audience = model.AudienceOf(a.Kind)
 		a.FirstSeen = utc(firstSeen)
 		a.LastSeen = utc(lastSeen)
 		a.ResolvedAt = nullTime(resolvedAt)

@@ -20,6 +20,14 @@ const runColumns = `id, job_run_id, job_id, job_name, server_id, vm_id, vm_name,
 	encrypted, compression, verify_status, verified_at, error, started_at, ended_at, expires_at,
 	deleted, created_at, skipped_disks, manifest_sha256, imported`
 
+// runSelectColumns — то же плюс срок карантина.
+//
+// Отдельно от runColumns намеренно: тот идёт в INSERT со списком подстановок, и
+// добавленная в него колонка обязана получить там значение — иначе запрос
+// ломается на числе аргументов, чего компилятор не увидит. Срок карантина
+// проставляется своим запросом, а читается со всем остальным.
+const runSelectColumns = runColumns + `, purge_after`
+
 // CreateBackupRun records a new run in the pending state.
 func (s *Store) CreateBackupRun(ctx context.Context, r *model.BackupRun) error {
 	if r.ID == "" {
@@ -112,7 +120,7 @@ func (s *Store) SetRunProgress(ctx context.Context, runID string, progress int, 
 
 // GetBackupRun loads a run without its disks.
 func (s *Store) GetBackupRun(ctx context.Context, id string) (*model.BackupRun, error) {
-	row := s.db.QueryRow(ctx, `SELECT `+runColumns+` FROM backup_runs WHERE id=?`, id)
+	row := s.db.QueryRow(ctx, `SELECT `+runSelectColumns+` FROM backup_runs WHERE id=?`, id)
 	return scanRun(row)
 }
 
@@ -202,7 +210,7 @@ func (s *Store) ListBackupRuns(ctx context.Context, f RunFilter) ([]*model.Backu
 		add(`created_at <= ?`, *f.Until)
 	}
 
-	query := `SELECT ` + runColumns + ` FROM backup_runs`
+	query := `SELECT ` + runSelectColumns + ` FROM backup_runs`
 	if len(where) > 0 {
 		query += ` WHERE ` + strings.Join(where, ` AND `)
 	}
@@ -240,7 +248,7 @@ func (s *Store) ListBackupRuns(ctx context.Context, f RunFilter) ([]*model.Backu
 // onlyFull selects the base for a differential backup (the chain's full run);
 // otherwise any successful link of the chain is acceptable.
 func (s *Store) LatestUsableRun(ctx context.Context, serverID, vmID, targetID string, onlyFull bool) (*model.BackupRun, error) {
-	query := `SELECT ` + runColumns + ` FROM backup_runs
+	query := `SELECT ` + runSelectColumns + ` FROM backup_runs
 		WHERE server_id=? AND vm_id=? AND storage_target_id=? AND deleted=?
 		  AND status IN (?, ?) AND to_checkpoint_id <> ''`
 	args := []any{serverID, vmID, targetID, false, string(model.RunSucceeded), string(model.RunPartial)}
@@ -258,6 +266,99 @@ func (s *Store) LatestUsableRun(ctx context.Context, serverID, vmID, targetID st
 func (s *Store) MarkRunDeleted(ctx context.Context, id string) error {
 	_, err := s.db.Exec(ctx, `UPDATE backup_runs SET deleted=? WHERE id=?`, true, id)
 	return err
+}
+
+// QuarantineRun помечает копию удалённой, но данные оставляет на месте.
+//
+// Разница с MarkRunDeleted в том, что здесь назначается срок: до него копию
+// можно вернуть, после — сборщик сотрёт данные. Ради этого промежутка карантин
+// и существует — удаление копий делают перед тем, как зашифровать
+// инфраструктуру, и секунды между командой и потерей истории слишком мало,
+// чтобы кто-то успел вмешаться.
+func (s *Store) QuarantineRun(ctx context.Context, id string, purgeAfter time.Time) error {
+	res, err := s.db.Exec(ctx,
+		`UPDATE backup_runs SET deleted=?, purge_after=? WHERE id=?`, true, purgeAfter.UTC(), id)
+	if err != nil {
+		return fmt.Errorf("карантин копии: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// RestoreRunFromQuarantine возвращает копию из карантина.
+//
+// Возможно только пока данные целы: сборщик, стерев их, снимает purge_after и
+// оставляет deleted, так что вернуть уже нечего.
+func (s *Store) RestoreRunFromQuarantine(ctx context.Context, id string) error {
+	res, err := s.db.Exec(ctx,
+		`UPDATE backup_runs SET deleted=?, purge_after=NULL
+		 WHERE id=? AND purge_after IS NOT NULL`, false, id)
+	if err != nil {
+		return fmt.Errorf("возврат копии из карантина: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// ClearRunPurge снимает срок карантина, не трогая признак удаления.
+//
+// Вызывается сборщиком после того, как данные стёрты: срока больше нет, а
+// удалённой копия остаётся навсегда.
+func (s *Store) ClearRunPurge(ctx context.Context, id string) error {
+	_, err := s.db.Exec(ctx, `UPDATE backup_runs SET purge_after=NULL WHERE id=?`, id)
+	return err
+}
+
+// RunsDueForPurge возвращает копии, чей карантин истёк.
+func (s *Store) RunsDueForPurge(ctx context.Context, now time.Time, limit int) ([]*model.BackupRun, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.Query(ctx, `SELECT `+runSelectColumns+` FROM backup_runs
+		WHERE purge_after IS NOT NULL AND purge_after <= ? ORDER BY purge_after LIMIT ?`,
+		now.UTC(), limit)
+	if err != nil {
+		return nil, fmt.Errorf("list runs due for purge: %w", err)
+	}
+	defer rows.Close()
+
+	var out []*model.BackupRun
+	for rows.Next() {
+		run, err := scanRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, run)
+	}
+	return out, rows.Err()
+}
+
+// QuarantinedRuns возвращает содержимое корзины: копии, которые ещё можно
+// вернуть.
+func (s *Store) QuarantinedRuns(ctx context.Context, limit int) ([]*model.BackupRun, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	rows, err := s.db.Query(ctx, `SELECT `+runSelectColumns+` FROM backup_runs
+		WHERE purge_after IS NOT NULL ORDER BY purge_after LIMIT ?`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list quarantined runs: %w", err)
+	}
+	defer rows.Close()
+
+	out := []*model.BackupRun{}
+	for rows.Next() {
+		run, err := scanRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, run)
+	}
+	return out, rows.Err()
 }
 
 // PurgeRunRecord removes the history row entirely, used when an operator asks
@@ -282,6 +383,7 @@ func scanRun(row rowScanner) (*model.BackupRun, error) {
 		r                                         model.BackupRun
 		typ, status, verifyStatus                 string
 		verifiedAt, startedAt, endedAt, expiresAt sql.NullTime
+		purgeAfter                                sql.NullTime
 		createdAt                                 time.Time
 		skipped                                   string
 	)
@@ -291,7 +393,7 @@ func scanRun(row rowScanner) (*model.BackupRun, error) {
 		&r.EngineBackupID, &r.FromCheckpointID, &r.ToCheckpointID, &r.SnapshotID, &r.DiskCount,
 		&r.LogicalBytes, &r.ReadBytes, &r.StoredBytes, &r.Progress, &r.Encrypted, &r.Compression,
 		&verifyStatus, &verifiedAt, &r.Error, &startedAt, &endedAt, &expiresAt, &r.Deleted, &createdAt,
-		&skipped, &r.ManifestSHA256, &r.Imported)
+		&skipped, &r.ManifestSHA256, &r.Imported, &purgeAfter)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -307,6 +409,7 @@ func scanRun(row rowScanner) (*model.BackupRun, error) {
 	r.StartedAt = nullTime(startedAt)
 	r.EndedAt = nullTime(endedAt)
 	r.ExpiresAt = nullTime(expiresAt)
+	r.PurgeAfter = nullTime(purgeAfter)
 	r.CreatedAt = utc(createdAt)
 	r.SkippedDisks = decodeSkipped(skipped)
 	return &r, nil

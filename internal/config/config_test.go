@@ -271,3 +271,30 @@ func TestDSNCarriesCertificatePathsOnlyWhenSet(t *testing.T) {
 		t.Fatalf("незаданные пути дописаны: %s", got)
 	}
 }
+
+// Управление включено по умолчанию: обновление не должно молча отобрать у
+// оператора кнопку запуска ВМ. Небезопасное состояние объясняется в журнале, а
+// не создаётся втихую обратное.
+func TestManagementEnabledByDefault(t *testing.T) {
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("загрузка конфигурации: %v", err)
+	}
+	if !cfg.Management.Enabled {
+		t.Fatal("управление должно быть включено по умолчанию")
+	}
+}
+
+// Выключатель обязан читаться из окружения: в контейнере файла настроек может
+// не быть вовсе, и настройка, доступная только через YAML, там недостижима.
+func TestManagementDisabledFromEnv(t *testing.T) {
+	t.Setenv("JHV_MANAGEMENT_ENABLED", "false")
+
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("загрузка конфигурации: %v", err)
+	}
+	if cfg.Management.Enabled {
+		t.Fatal("JHV_MANAGEMENT_ENABLED=false не выключил управление")
+	}
+}

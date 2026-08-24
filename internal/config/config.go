@@ -27,7 +27,9 @@ type Config struct {
 	Logging          LoggingConfig          `mapstructure:"logging"`
 	Secrets          SecretsConfig          `mapstructure:"secrets"`
 	Monitor          MonitorConfig          `mapstructure:"monitor"`
+	Management       ManagementConfig       `mapstructure:"management"`
 	Metrics          MetricsConfig          `mapstructure:"metrics"`
+	Audit            AuditConfig            `mapstructure:"audit"`
 	Notifications    NotificationsConfig    `mapstructure:"notifications"`
 	Cluster          ClusterConfig          `mapstructure:"cluster"`
 	Backup           BackupConfig           `mapstructure:"backup"`
@@ -179,6 +181,18 @@ type ClusterConfig struct {
 type MetricsConfig struct {
 	Enabled   bool   `mapstructure:"enabled"`
 	TokenFile string `mapstructure:"token_file"`
+}
+
+// AuditConfig — вывод журнала аудита наружу.
+//
+// Журнал и так пишется в PostgreSQL, но она — та самая база, до которой
+// добрался получивший права администратора. Затирание следов идёт первым
+// делом, и журнал, который злоумышленник может отредактировать, при разборе
+// инцидента бесполезен. Файл рассчитан на каталог в режиме «только дозапись»
+// и на внешний сборщик, который его забирает.
+type AuditConfig struct {
+	// File — путь к журналу в формате JSON Lines. Пусто — наружу не пишется.
+	File string `mapstructure:"file"`
 }
 
 type DisasterRecoveryConfig struct {
@@ -470,6 +484,22 @@ type SecretsConfig struct {
 	KeyFile   string `mapstructure:"key_file"`
 }
 
+// ManagementConfig отключает управление виртуализацией целиком.
+//
+// Изначально стояла задача убрать управление ВМ и хостами из продукта: служба
+// бэкапа, до которой добрались, не должна давать вдобавок рычаг для остановки
+// production. Вырезать оказалось нельзя — управление используют, — поэтому
+// сделан выключатель. Установка, которой управление не нужно, выключает его и
+// получает то же, что дал бы выпил: маршрутов нет, робот восстановления не
+// запускается, кнопок в интерфейсе не видно.
+//
+// По умолчанию включено. Обновление, которое молча отберёт у оператора кнопку
+// запуска ВМ, — поломка, а не ужесточение: небезопасное состояние надо
+// объяснять в журнале, а не создавать втихую обратное.
+type ManagementConfig struct {
+	Enabled bool `mapstructure:"enabled"`
+}
+
 type MonitorConfig struct {
 	Enabled          bool          `mapstructure:"enabled"`
 	Interval         time.Duration `mapstructure:"interval"`
@@ -513,10 +543,21 @@ type BackupConfig struct {
 	// HeavyWorkers ограничивает число одновременных проверок и восстановлений.
 	// Обе операции читают цепочку целиком из хранилища, поэтому предел общий и
 	// отдельный от workers: бэкапы упираются в гипервизор, а эти — в хранилище.
-	HeavyWorkers int            `mapstructure:"heavy_workers"`
-	TempDir      string         `mapstructure:"temp_dir"`
-	QemuImgPath  string         `mapstructure:"qemu_img_path"`
-	Transfer     TransferConfig `mapstructure:"transfer"`
+	HeavyWorkers int    `mapstructure:"heavy_workers"`
+	TempDir      string `mapstructure:"temp_dir"`
+	QemuImgPath  string `mapstructure:"qemu_img_path"`
+	// PurgeDelay — сколько удалённая копия лежит в карантине, прежде чем её
+	// данные сотрут физически.
+	//
+	// Удаление копий — первое, что делают перед тем, как зашифровать
+	// инфраструктуру. Без карантина между командой и потерей истории проходят
+	// секунды, и вмешаться не успевает никто. Ноль отключает карантин: удаление
+	// снова становится немедленным.
+	//
+	// Цена — место: копия в карантине его занимает. Поэтому срок задаётся
+	// сутками, а не неделями.
+	PurgeDelay time.Duration  `mapstructure:"purge_delay"`
+	Transfer   TransferConfig `mapstructure:"transfer"`
 
 	// RestoreDirs ограничивает каталоги, куда разрешено восстанавливать
 	// образы. Каталог приходит из запроса, а восстановленный образ — это
@@ -843,6 +884,10 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("auth.oidc.allow_local_login", true)
 	v.SetDefault("metrics.enabled", false)
 	v.SetDefault("metrics.token_file", "")
+	// Пусто — журнал аудита пишется только в PostgreSQL. Включать вывод наружу
+	// умолчанием нельзя: путь зависит от установки, а созданный «на всякий
+	// случай» файл в неожиданном месте хуже отсутствующего.
+	v.SetDefault("audit.file", "")
 	v.SetDefault("cluster.leader_election", false)
 	v.SetDefault("cluster.poll_interval", 15*time.Second)
 	v.SetDefault("notifications.enabled", false)
@@ -915,6 +960,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("monitor.remediation.allow_vm_unpause", true)
 	v.SetDefault("monitor.remediation.allow_host_activate", true)
 	v.SetDefault("monitor.remediation.allow_host_fence", false)
+	v.SetDefault("management.enabled", true)
 
 	v.SetDefault("backup.workers", 2)
 	v.SetDefault("backup.replication_workers", 2)
@@ -923,6 +969,9 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("backup.compression_level", 3)
 	v.SetDefault("backup.heavy_workers", 2)
 	v.SetDefault("backup.temp_dir", "./data/tmp")
+	// Трое суток: за меньший срок ошибочное удаление можно не заметить, за
+	// больший карантин начинает заметно держать место.
+	v.SetDefault("backup.purge_delay", "72h")
 	v.SetDefault("backup.restore_dirs", []string{})
 	v.SetDefault("backup.qemu_img_path", "")
 

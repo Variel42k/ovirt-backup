@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { useQuasar } from 'quasar'
 import {
   api,
@@ -13,7 +14,14 @@ import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import type {
   ApiToken,
+  ApprovalDelegation,
+  ApprovalGroup,
+  ApprovalRequest,
+  ApprovalVote,
   AuditEntry,
+  BreakGlassEvent,
+  PermissionSection,
+  RoleDefinition,
   BackupQualitySettings,
   LogStatus,
   NotificationDelivery,
@@ -32,6 +40,27 @@ const tab = ref('system')
 const users = ref<User[]>([])
 const audit = ref<AuditEntry[]>([])
 const apiTokens = ref<ApiToken[]>([])
+const roles = ref<RoleDefinition[]>([])
+const approvals = ref<ApprovalRequest[]>([])
+const approvalGroups = ref<ApprovalGroup[]>([])
+const breakGlass = ref<BreakGlassEvent[]>([])
+const approvalBusy = ref<string | null>(null)
+const delegations = ref<ApprovalDelegation[]>([])
+const delegationDialog = ref(false)
+const delegationBusy = ref(false)
+const delegationForm = ref({ delegate: '', group_name: '', reason: '', ttl_hours: 168, password: '' })
+// Токен делегирования показывается ровно один раз: в базе лежит только хеш.
+const issuedDelegationToken = ref('')
+// Голосование по чужому праву: токен и пароль вводятся каждый раз и нигде не
+// сохраняются. Запомнить их «для удобства» значило бы свести второй фактор к
+// одному — тому, который лежит в браузере.
+const voteDelegationDialog = ref(false)
+const voteDelegationForm = ref({ token: '', password: '', approve: true, request: '' })
+const permissionSections = ref<PermissionSection[]>([])
+const roleDialog = ref(false)
+const roleBusy = ref(false)
+const editingRole = ref<RoleDefinition | null>(null)
+const roleForm = ref({ name: '', title: '', description: '', permissions: [] as string[] })
 const tokenDialog = ref(false)
 const tokenBusy = ref(false)
 const tokenForm = ref({ name: '', role: 'viewer', expires_in_days: 90 })
@@ -110,13 +139,22 @@ async function load() {
   loading.value = true
   try {
     if (auth.canAdmin()) {
-      const [userList, auditList, runtime, readiness, notifications, deliveries, tokens] = await Promise.all([
+      const [userList, auditList, runtime, readiness, notifications, deliveries, tokens, roleList, sections] =
+        await Promise.all([
 		api.listUsers(), api.audit(300), api.runtimeSettings(), api.drReadiness(),
 		api.notificationSettings(), api.notificationDeliveries(50), api.listApiTokens(),
+		api.listRoles(), api.permissionCatalog(),
       ])
       users.value = userList
       audit.value = auditList
       apiTokens.value = tokens
+      roles.value = roleList
+      permissionSections.value = sections
+
+      // Согласования грузятся отдельно от основного набора: список заявок
+      // обновляется чаще прочего, и связывать его с общей загрузкой значило бы
+      // перечитывать заодно всё остальное.
+      await loadApprovals()
       applyRuntimeSettings(runtime)
 		drReadiness.value = readiness
 		notificationConfig.value = notifications
@@ -396,6 +434,249 @@ async function save() {
   }
 }
 
+async function loadApprovals() {
+  try {
+    // Группы и обходы согласования требуют users.admin, а вкладка открыта
+    // всем: согласующий администратором быть не обязан. Запрашивать их у него
+    // значило бы показывать ошибку вместо списка заявок.
+    const [requests, mine] = await Promise.all([
+      api.listApprovals(true),
+      api.listApprovalDelegations(),
+    ])
+    approvals.value = requests
+    delegations.value = mine
+
+    if (auth.canAdmin()) {
+      const [groups, events] = await Promise.all([
+        api.listApprovalGroups(),
+        api.listBreakGlass(50),
+      ])
+      approvalGroups.value = groups
+      breakGlass.value = events
+    }
+  } catch (err) {
+    notifyError(err, 'Не удалось загрузить согласования')
+  }
+}
+
+/** Заявки, ждущие решения прямо сейчас. */
+const openApprovals = computed(() =>
+  approvals.value.filter((r) => ['pending', 'escalated', 'approved', 'scheduled'].includes(r.state)),
+)
+
+async function voteApproval(request: ApprovalRequest, approve: boolean) {
+  approvalBusy.value = request.id
+  try {
+    const updated = await api.voteApproval(request.id, approve)
+    notifyOk(approve ? `Заявка подтверждена: ${updated.state}` : 'Заявка отклонена')
+    await loadApprovals()
+  } catch (err) {
+    notifyError(err, 'Голос не принят')
+  } finally {
+    approvalBusy.value = null
+  }
+}
+
+/** Действующие делегирования, полученные мной: по ним можно голосовать. */
+const receivedDelegations = computed(() =>
+  delegations.value.filter(
+    (d) => d.delegate === auth.username && !d.revoked_at && new Date(d.expires_at) > new Date(),
+  ),
+)
+
+/** Срок вышел — делегирование остаётся видимым неделю, но уже не работает. */
+function delegationExpired(d: ApprovalDelegation): boolean {
+  return new Date(d.expires_at) < new Date()
+}
+
+function openDelegationCreate() {
+  delegationForm.value = { delegate: '', group_name: '', reason: '', ttl_hours: 168, password: '' }
+  issuedDelegationToken.value = ''
+  delegationDialog.value = true
+}
+
+async function submitDelegation() {
+  delegationBusy.value = true
+  try {
+    const result = await api.createApprovalDelegation({ ...delegationForm.value })
+    issuedDelegationToken.value = result.token
+    await loadApprovals()
+  } catch (err) {
+    notifyError(err, 'Делегирование не выдано')
+  } finally {
+    delegationBusy.value = false
+  }
+}
+
+function confirmRevokeDelegation(d: ApprovalDelegation) {
+  $q.dialog({
+    title: 'Отозвать делегирование',
+    message: `Право голоса, переданное ${d.delegate}, перестанет работать сразу.`,
+    cancel: { label: 'Отмена', flat: true },
+    ok: { label: 'Отозвать', color: 'negative' },
+  }).onOk(async () => {
+    try {
+      await api.revokeApprovalDelegation(d.id)
+      notifyOk('Делегирование отозвано')
+      await loadApprovals()
+    } catch (err) {
+      notifyError(err, 'Не удалось отозвать')
+    }
+  })
+}
+
+function openVoteByDelegation(request: ApprovalRequest, approve: boolean) {
+  voteDelegationForm.value = { token: '', password: '', approve, request: request.id }
+  voteDelegationDialog.value = true
+}
+
+async function submitVoteByDelegation() {
+  const form = voteDelegationForm.value
+  approvalBusy.value = form.request
+  try {
+    const updated = await api.voteApproval(form.request, form.approve, '', {
+      delegation_token: form.token,
+      delegation_password: form.password,
+    })
+    notifyOk(`Голос подан по делегированию: ${updated.state}`)
+    voteDelegationDialog.value = false
+    await loadApprovals()
+  } catch (err) {
+    notifyError(err, 'Голос не принят')
+  } finally {
+    approvalBusy.value = null
+  }
+}
+
+/** Кто фактически подал голос — для подписи под заявкой. */
+function voteAuthor(vote: ApprovalVote): string {
+  return vote.cast_by ? `${vote.voter} (подал ${vote.cast_by})` : vote.voter
+}
+
+function confirmCancelApproval(request: ApprovalRequest) {
+  const veto = request.state === 'scheduled'
+  $q.dialog({
+    title: veto ? 'Наложить вето' : 'Отозвать заявку',
+    message: veto
+      ? 'Запланированное действие не будет выполнено.'
+      : 'Заявка будет закрыта без выполнения действия.',
+    cancel: { label: 'Отмена', flat: true },
+    ok: { label: veto ? 'Наложить вето' : 'Отозвать', color: 'negative' },
+  }).onOk(async () => {
+    try {
+      await api.cancelApproval(request.id)
+      notifyOk(veto ? 'Вето наложено' : 'Заявка отозвана')
+      await loadApprovals()
+    } catch (err) {
+      notifyError(err, 'Не удалось отменить')
+    }
+  })
+}
+
+const APPROVAL_STATE_RU: Record<string, { label: string; color: string }> = {
+  pending: { label: 'ждёт подтверждений', color: 'primary' },
+  escalated: { label: 'передана резервной группе', color: 'orange-8' },
+  approved: { label: 'согласовано', color: 'positive' },
+  scheduled: { label: 'запланировано, можно отменить', color: 'warning' },
+  rejected: { label: 'отклонено', color: 'negative' },
+  vetoed: { label: 'отменено вето', color: 'negative' },
+  expired: { label: 'срок вышел, не выполнено', color: 'grey-7' },
+  executed: { label: 'выполнено', color: 'grey-7' },
+}
+
+function approvalState(request: ApprovalRequest) {
+  return APPROVAL_STATE_RU[request.state] ?? { label: request.state, color: 'grey-7' }
+}
+
+/** Сколько подтверждений собрано из нужных. */
+function approvalProgress(request: ApprovalRequest): string {
+  const yes = (request.votes ?? []).filter((v) => v.approve).length
+  return `${yes} из ${request.quorum}`
+}
+
+function openRoleCreate() {
+  editingRole.value = null
+  roleForm.value = { name: '', title: '', description: '', permissions: [] }
+  roleDialog.value = true
+}
+
+function openRoleEdit(role: RoleDefinition) {
+  editingRole.value = role
+  roleForm.value = {
+    name: role.name,
+    title: role.title,
+    description: role.description ?? '',
+    permissions: [...role.permissions],
+  }
+  roleDialog.value = true
+}
+
+async function saveRole() {
+  roleBusy.value = true
+  try {
+    if (editingRole.value) {
+      // Имя не отправляется: сервер его не меняет, на него ссылаются учётные
+      // записи и сопоставление групп у провайдера.
+      await api.updateRole(editingRole.value.id, {
+        title: roleForm.value.title,
+        description: roleForm.value.description,
+        permissions: roleForm.value.permissions,
+      })
+      notifyOk('Роль обновлена')
+    } else {
+      await api.createRole({ ...roleForm.value })
+      notifyOk('Роль создана')
+    }
+    roleDialog.value = false
+    await load()
+    // Список ролей в форме пользователя приходит из /meta — обновляем и его,
+    // иначе новую роль нельзя будет назначить до перезагрузки страницы.
+    await app.reloadMeta()
+  } catch (err) {
+    notifyError(err, 'Не удалось сохранить роль')
+  } finally {
+    roleBusy.value = false
+  }
+}
+
+function confirmDeleteRole(role: RoleDefinition) {
+  $q.dialog({
+    title: 'Удалить роль',
+    message: `Роль «${role.title}» будет удалена. Если она кому-то назначена, сервер откажет — сначала переведите этих пользователей на другую роль.`,
+    cancel: { label: 'Отмена', flat: true },
+    ok: { label: 'Удалить', color: 'negative' },
+  }).onOk(async () => {
+    try {
+      await api.deleteRole(role.id)
+      notifyOk('Роль удалена')
+      await load()
+      await app.reloadMeta()
+    } catch (err) {
+      notifyError(err, 'Не удалось удалить роль')
+    }
+  })
+}
+
+/** Все ли права раздела выбраны. */
+function sectionFullySelected(section: PermissionSection): boolean {
+  return section.permissions.every((p) => roleForm.value.permissions.includes(p.key))
+}
+
+/** Выбрать или снять весь раздел разом. */
+function toggleSection(section: PermissionSection, value: boolean) {
+  const keys = section.permissions.map((p) => p.key)
+  const rest = roleForm.value.permissions.filter((p) => !keys.includes(p))
+  roleForm.value.permissions = value ? [...rest, ...keys] : rest
+}
+
+/** Сколько прав у роли — для строки списка. */
+function roleSummary(role: RoleDefinition): string {
+  const total = permissionSections.value.reduce((n, s) => n + s.permissions.length, 0)
+  const count = role.permissions.length
+  if (total && count === total) return 'все права'
+  return `прав: ${count}${total ? ' из ' + total : ''}`
+}
+
 function openTokenDialog() {
   tokenForm.value = { name: '', role: 'viewer', expires_in_days: 90 }
   issuedToken.value = ''
@@ -627,11 +908,27 @@ watch(tab, (value) => {
   if (value === 'logs' && !logStatus.value) void loadLogs()
 })
 
+// Ссылка из оповещения ведёт сюда: ?tab=approvals&approval=<id>. Она не
+// выполняет действие и не пускает без входа — одноразовый токен в адресе
+// оседал бы в журналах почтового сервера, прокси и в истории браузера. Она
+// экономит навигацию: человек входит под собой и видит нужную заявку сразу.
+const route = useRoute()
+const highlightedApproval = ref('')
+
+function applyDeepLink() {
+  const wanted = String(route.query.tab ?? '')
+  if (wanted) tab.value = wanted
+  highlightedApproval.value = String(route.query.approval ?? '')
+}
+
 onMounted(async () => {
+  applyDeepLink()
   await app.loadMeta()
   await loadMode()
   await load()
 })
+
+watch(() => route.query, applyDeepLink)
 </script>
 
 <template>
@@ -645,6 +942,8 @@ onMounted(async () => {
 		<q-tab v-if="auth.canAdmin()" name="notifications" label="Уведомления" />
 		<q-tab v-if="auth.canAdmin()" name="dr" label="Аварийная готовность" />
         <q-tab v-if="auth.canAdmin()" name="users" :label="`Пользователи (${users.length})`" />
+        <q-tab v-if="auth.canAdmin()" name="roles" :label="`Роли (${roles.length})`" />
+        <q-tab name="approvals" :label="`Согласования (${openApprovals.length})`" />
         <q-tab v-if="auth.canAdmin()" name="tokens" :label="`Токены API (${apiTokens.length})`" />
         <q-tab v-if="auth.canAdmin()" name="audit" label="Аудит" />
         <q-tab v-if="auth.canAdmin()" name="logs" label="Журнал" />
@@ -1104,6 +1403,251 @@ onMounted(async () => {
           </q-list>
         </q-tab-panel>
 
+        <q-tab-panel name="approvals" class="q-pa-none">
+          <div class="row items-center q-pa-md">
+            <div class="text-subtitle1">Заявки на опасные действия</div>
+            <q-space />
+            <q-btn flat dense round icon="refresh" @click="loadApprovals" />
+          </div>
+          <div class="q-px-md q-pb-sm text-caption text-grey-7">
+            Утечка одной учётной записи не должна давать возможности уничтожить копии.
+            Подтвердить заявку может участник группы согласующих, кроме её инициатора.
+            Истечение срока действие <b>не</b> выполняет.
+          </div>
+
+          <q-list separator dense>
+            <q-item
+              v-for="request in approvals"
+              :key="request.id"
+              :class="request.id === highlightedApproval ? 'bg-blue-1' : ''"
+            >
+              <q-item-section avatar>
+                <q-icon
+                  :name="request.state === 'scheduled' ? 'schedule' : 'gavel'"
+                  :color="approvalState(request).color"
+                />
+              </q-item-section>
+              <q-item-section>
+                <q-item-label>
+                  {{ request.summary || request.action }}
+                  <q-badge :color="approvalState(request).color" class="q-ml-sm">
+                    {{ approvalState(request).label }}
+                  </q-badge>
+                  <q-badge v-if="request.escalated" color="orange-8" class="q-ml-sm">
+                    эскалация
+                  </q-badge>
+                </q-item-label>
+                <q-item-label caption>
+                  {{ request.requester }} · {{ dateTime(request.created_at) }} ·
+                  подтверждений {{ approvalProgress(request) }} · группа {{ request.group_name }}
+                </q-item-label>
+                <q-item-label caption class="jhv-wrap">Причина: {{ request.reason }}</q-item-label>
+                <q-item-label v-if="request.votes?.length" caption>
+                  Голоса:
+                  <span v-for="(vote, i) in request.votes" :key="vote.voter">
+                    <span v-if="i">, </span>
+                    <span :class="vote.approve ? 'text-positive' : 'text-negative'">
+                      {{ voteAuthor(vote) }}
+                    </span>
+                  </span>
+                </q-item-label>
+                <q-item-label v-if="request.execute_after" caption class="text-warning">
+                  Будет выполнено {{ dateTime(request.execute_after) }}, до этого можно отменить
+                </q-item-label>
+              </q-item-section>
+              <q-item-section side>
+                <div class="row q-gutter-xs">
+                  <q-btn
+                    v-if="['pending', 'escalated'].includes(request.state)"
+                    flat dense round icon="check" color="positive"
+                    :loading="approvalBusy === request.id"
+                    @click="voteApproval(request, true)"
+                  >
+                    <q-tooltip>Подтвердить</q-tooltip>
+                  </q-btn>
+                  <q-btn
+                    v-if="['pending', 'escalated'].includes(request.state)"
+                    flat dense round icon="close" color="negative"
+                    :loading="approvalBusy === request.id"
+                    @click="voteApproval(request, false)"
+                  >
+                    <q-tooltip>Отклонить</q-tooltip>
+                  </q-btn>
+                  <q-btn
+                    v-if="receivedDelegations.length && ['pending', 'escalated'].includes(request.state)"
+                    flat dense round icon="how_to_vote" color="primary"
+                    :loading="approvalBusy === request.id"
+                    @click="openVoteByDelegation(request, true)"
+                  >
+                    <q-tooltip>Проголосовать по переданному праву</q-tooltip>
+                  </q-btn>
+                  <q-btn
+                    v-if="!['rejected','vetoed','expired','executed'].includes(request.state)"
+                    flat dense round icon="block" color="grey-7"
+                    @click="confirmCancelApproval(request)"
+                  >
+                    <q-tooltip>
+                      {{ request.state === 'scheduled' ? 'Наложить вето' : 'Отозвать заявку' }}
+                    </q-tooltip>
+                  </q-btn>
+                </div>
+              </q-item-section>
+            </q-item>
+            <q-item v-if="!approvals.length">
+              <q-item-section class="text-grey-6">Заявок нет</q-item-section>
+            </q-item>
+          </q-list>
+
+          <q-separator />
+          <div class="q-pa-md">
+            <div class="row items-center q-mb-xs">
+              <div class="text-subtitle1">Делегирование права голоса</div>
+              <q-space />
+              <q-btn
+                flat dense no-caps icon="person_add" label="Передать право"
+                color="primary" @click="openDelegationCreate"
+              />
+            </div>
+            <div class="text-caption text-grey-7 q-mb-sm">
+              Согласующий уезжает — кворум перестаёт собираться, и работа встаёт.
+              Передайте своё право голоса на срок отсутствия: делегат назван поимённо,
+              входит под собой, а к токену нужен отдельный пароль. Голос засчитывается
+              вам, а в журнале видно обоих.
+            </div>
+
+            <q-list dense bordered separator>
+              <q-item v-for="d in delegations" :key="d.id">
+                <q-item-section avatar>
+                  <q-icon
+                    :name="d.revoked_at ? 'link_off' : 'swap_horiz'"
+                    :color="d.revoked_at ? 'grey-6' : 'primary'"
+                  />
+                </q-item-section>
+                <q-item-section>
+                  <q-item-label>
+                    {{ d.delegator }} &rarr; {{ d.delegate }}
+                    <q-badge v-if="d.revoked_at" color="grey-7" class="q-ml-sm">отозвано</q-badge>
+                    <q-badge v-else-if="delegationExpired(d)" color="grey-7" class="q-ml-sm">
+                      срок вышел
+                    </q-badge>
+                  </q-item-label>
+                  <q-item-label caption>
+                    до {{ dateTime(d.expires_at) }} &middot;
+                    {{ d.group_name ? 'группа ' + d.group_name : 'все группы' }} &middot;
+                    использовано раз: {{ d.used_count }}
+                  </q-item-label>
+                  <q-item-label v-if="d.reason" caption class="jhv-wrap">{{ d.reason }}</q-item-label>
+                </q-item-section>
+                <q-item-section side>
+                  <q-btn
+                    v-if="!d.revoked_at && d.delegator === auth.username"
+                    flat dense round icon="block" color="negative"
+                    @click="confirmRevokeDelegation(d)"
+                  >
+                    <q-tooltip>Отозвать</q-tooltip>
+                  </q-btn>
+                </q-item-section>
+              </q-item>
+              <q-item v-if="!delegations.length">
+                <q-item-section class="text-grey-6">
+                  Делегирований нет — ни выданных вами, ни полученных.
+                </q-item-section>
+              </q-item>
+            </q-list>
+          </div>
+
+          <q-separator />
+          <div v-if="auth.canAdmin()" class="q-pa-md">
+            <div class="text-subtitle1">Группы согласующих</div>
+            <div class="text-caption text-grey-7 q-mb-sm">
+              Пока группа не заведена, опасные действия выполняются без согласования —
+              это видно в журнале аудита отдельной пометкой.
+            </div>
+            <q-list dense bordered separator>
+              <q-item v-for="group in approvalGroups" :key="group.id">
+                <q-item-section>
+                  <q-item-label>{{ group.title }} <span class="text-grey-6">{{ group.name }}</span></q-item-label>
+                  <q-item-label caption>{{ group.members.join(', ') }}</q-item-label>
+                </q-item-section>
+              </q-item>
+              <q-item v-if="!approvalGroups.length">
+                <q-item-section class="text-grey-6">
+                  Групп нет. Заведите её запросом POST /api/v1/approval-groups —
+                  не меньше двух участников.
+                </q-item-section>
+              </q-item>
+            </q-list>
+          </div>
+
+          <template v-if="breakGlass.length">
+            <q-separator />
+            <div class="q-pa-md">
+              <div class="text-subtitle1">Выполнено в обход согласования</div>
+              <q-list dense bordered separator>
+                <q-item v-for="event in breakGlass" :key="event.id">
+                  <q-item-section avatar><q-icon name="warning" color="orange-9" /></q-item-section>
+                  <q-item-section>
+                    <q-item-label>{{ event.action }} · {{ event.actor }}</q-item-label>
+                    <q-item-label caption>{{ dateTime(event.at) }}</q-item-label>
+                    <q-item-label caption class="jhv-wrap">{{ event.reason }}</q-item-label>
+                  </q-item-section>
+                </q-item>
+              </q-list>
+            </div>
+          </template>
+        </q-tab-panel>
+
+        <q-tab-panel name="roles" class="q-pa-none">
+          <div class="row items-center q-pa-md">
+            <div class="text-subtitle1">Роли и права</div>
+            <q-space />
+            <q-btn color="primary" unelevated icon="add" label="Новая роль" @click="openRoleCreate" />
+          </div>
+          <div class="q-px-md q-pb-sm text-caption text-grey-7">
+            Право имеет вид <code>раздел.действие</code>. Три роли встроены и меняться не могут:
+            их набор прав повторяет то, что эти роли могли всегда. Свои роли создаются рядом.
+          </div>
+          <q-list separator dense>
+            <q-item v-for="role in roles" :key="role.name">
+              <q-item-section avatar>
+                <q-icon :name="role.builtin ? 'lock' : 'badge'" :color="role.builtin ? 'grey-6' : 'primary'" />
+              </q-item-section>
+              <q-item-section>
+                <q-item-label>
+                  {{ role.title }}
+                  <span class="text-grey-6 q-ml-sm">{{ role.name }}</span>
+                  <q-badge v-if="role.builtin" color="grey-7" class="q-ml-sm">
+                    встроенная
+                    <q-tooltip>
+                      Живёт в коде, а не в базе. Так новый раздел сразу доступен администратору —
+                      иначе он оказался бы закрыт для всех.
+                    </q-tooltip>
+                  </q-badge>
+                </q-item-label>
+                <q-item-label caption>
+                  {{ roleSummary(role) }}{{ role.description ? ' · ' + role.description : '' }}
+                </q-item-label>
+              </q-item-section>
+              <q-item-section side>
+                <div class="row q-gutter-xs">
+                  <q-btn
+                    flat dense round
+                    :icon="role.builtin ? 'visibility' : 'edit'"
+                    @click="openRoleEdit(role)"
+                  >
+                    <q-tooltip>{{ role.builtin ? 'Посмотреть права' : 'Изменить' }}</q-tooltip>
+                  </q-btn>
+                  <q-btn
+                    v-if="!role.builtin"
+                    flat dense round icon="delete" color="negative"
+                    @click="confirmDeleteRole(role)"
+                  />
+                </div>
+              </q-item-section>
+            </q-item>
+          </q-list>
+        </q-tab-panel>
+
         <q-tab-panel name="tokens" class="q-pa-none">
           <div class="row items-center q-pa-md">
             <div class="text-subtitle1">Токены доступа к API</div>
@@ -1378,9 +1922,205 @@ onMounted(async () => {
       </q-card>
     </q-dialog>
 
+    <!-- Роль: состав прав. Для встроенной роли диалог открывается только на
+         просмотр — её набор задан в коде и меняться не должен. -->
+    <q-dialog v-model="roleDialog" persistent>
+      <q-card style="width: 720px; max-width: 96vw">
+        <q-card-section class="text-h6">
+          {{ editingRole ? `Роль «${editingRole.title}»` : 'Новая роль' }}
+          <div v-if="editingRole?.builtin" class="text-caption text-grey-7">
+            Встроенная роль: только просмотр
+          </div>
+        </q-card-section>
+        <q-separator />
+
+        <q-card-section class="q-gutter-md">
+          <q-input
+            v-if="!editingRole"
+            v-model="roleForm.name"
+            label="Имя"
+            hint="Латиница, цифры, дефис и подчёркивание. Подставляется в учётные записи и в сопоставление групп провайдера — потом не меняется"
+            outlined
+            dense
+            autofocus
+          />
+          <q-input
+            v-model="roleForm.title"
+            label="Название"
+            hint="Видно в списке пользователей"
+            outlined
+            dense
+            :readonly="editingRole?.builtin"
+          />
+          <q-input
+            v-model="roleForm.description"
+            label="Описание"
+            outlined
+            dense
+            :readonly="editingRole?.builtin"
+          />
+        </q-card-section>
+
+        <q-separator />
+        <q-card-section style="max-height: 52vh" class="scroll q-pt-none">
+          <div v-for="section in permissionSections" :key="section.key" class="q-mt-md">
+            <div class="row items-center">
+              <q-checkbox
+                :model-value="sectionFullySelected(section)"
+                :label="section.title"
+                :disable="editingRole?.builtin"
+                dense
+                @update:model-value="(v) => toggleSection(section, v)"
+              />
+            </div>
+            <div class="q-pl-lg">
+              <q-checkbox
+                v-for="perm in section.permissions"
+                :key="perm.key"
+                v-model="roleForm.permissions"
+                :val="perm.key"
+                :disable="editingRole?.builtin"
+                dense
+                class="block"
+              >
+                <span>{{ perm.title }}</span>
+                <span class="text-grey-6 q-ml-sm">{{ perm.key }}</span>
+                <q-tooltip v-if="perm.hint">{{ perm.hint }}</q-tooltip>
+              </q-checkbox>
+            </div>
+          </div>
+        </q-card-section>
+
+        <q-separator />
+        <q-card-actions align="right">
+          <q-btn flat :label="editingRole?.builtin ? 'Закрыть' : 'Отмена'" v-close-popup />
+          <q-btn
+            v-if="!editingRole?.builtin"
+            color="primary"
+            unelevated
+            label="Сохранить"
+            :loading="roleBusy"
+            @click="saveRole"
+          />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
+
     <!-- Выпуск токена. Пока issuedToken пуст — форма; после выпуска диалог
          показывает сам токен и больше не возвращается к форме: второй раз
          узнать его неоткуда, в базе лежит только хеш. -->
+    <q-dialog v-model="delegationDialog" persistent>
+      <q-card style="width: 560px; max-width: 95vw">
+        <q-card-section class="text-h6">
+          {{ issuedDelegationToken ? 'Делегирование выдано' : 'Передать право голоса' }}
+        </q-card-section>
+        <q-separator />
+
+        <q-card-section v-if="!issuedDelegationToken" class="q-gutter-md">
+          <q-input
+            v-model="delegationForm.delegate"
+            label="Кому"
+            hint="Имя заведённой учётной записи: делегат сначала входит под собой"
+            outlined dense autofocus
+          />
+          <q-select
+            v-model="delegationForm.group_name"
+            :options="[{ label: 'Все мои группы', value: '' },
+                       ...approvalGroups.map((g) => ({ label: g.title, value: g.name }))]"
+            emit-value map-options
+            label="Группа"
+            hint="Можно сузить одной группой согласующих"
+            outlined dense
+          />
+          <q-input
+            v-model.number="delegationForm.ttl_hours"
+            type="number"
+            label="Срок, часов"
+            hint="Не больше 30 суток. Бессрочная передача — это вторая учётная запись у того же человека"
+            outlined dense
+          />
+          <q-input
+            v-model="delegationForm.reason"
+            label="Причина"
+            hint="Видна делегату и в журнале: «отпуск до 12-го» объясняет чужой голос"
+            outlined dense
+          />
+          <q-input
+            v-model="delegationForm.password"
+            type="password"
+            label="Пароль делегирования"
+            hint="Второй фактор к токену. Передайте его делегату ДРУГИМ каналом, иначе он не защищает"
+            outlined dense
+          />
+        </q-card-section>
+
+        <q-card-section v-else class="q-gutter-md">
+          <q-banner dense class="bg-orange-1">
+            <template #avatar><q-icon name="warning" color="orange-9" /></template>
+            Токен показывается один раз. Передайте его делегату отдельно от пароля —
+            перехваченный токен без пароля бесполезен, а вместе они дают право голоса.
+          </q-banner>
+          <q-input
+            :model-value="issuedDelegationToken"
+            readonly outlined dense
+            input-style="font-family: monospace"
+          />
+        </q-card-section>
+
+        <q-separator />
+        <q-card-actions align="right">
+          <template v-if="!issuedDelegationToken">
+            <q-btn flat label="Отмена" v-close-popup />
+            <q-btn
+              color="primary" unelevated label="Передать"
+              :loading="delegationBusy" @click="submitDelegation"
+            />
+          </template>
+          <q-btn v-else color="primary" unelevated label="Готово" v-close-popup />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
+
+    <q-dialog v-model="voteDelegationDialog" persistent>
+      <q-card style="width: 520px; max-width: 95vw">
+        <q-card-section class="text-h6">Голос по переданному праву</q-card-section>
+        <q-separator />
+        <q-card-section class="q-gutter-md">
+          <div class="text-caption text-grey-7">
+            Голос будет засчитан тому, кто передал вам право. В журнале аудита
+            видно обоих. Токен и пароль нигде не сохраняются — вводите их каждый раз.
+          </div>
+          <q-option-group
+            v-model="voteDelegationForm.approve"
+            :options="[{ label: 'Подтвердить', value: true },
+                       { label: 'Отклонить', value: false }]"
+            inline
+          />
+          <q-input
+            v-model="voteDelegationForm.token"
+            label="Токен делегирования"
+            outlined dense autofocus
+            input-style="font-family: monospace"
+          />
+          <q-input
+            v-model="voteDelegationForm.password"
+            type="password"
+            label="Пароль делегирования"
+            outlined dense
+          />
+        </q-card-section>
+        <q-separator />
+        <q-card-actions align="right">
+          <q-btn flat label="Отмена" v-close-popup />
+          <q-btn
+            color="primary" unelevated label="Проголосовать"
+            :disable="!voteDelegationForm.token || !voteDelegationForm.password"
+            @click="submitVoteByDelegation"
+          />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
+
     <q-dialog v-model="tokenDialog" persistent>
       <q-card style="width: 560px; max-width: 95vw">
         <q-card-section class="text-h6">

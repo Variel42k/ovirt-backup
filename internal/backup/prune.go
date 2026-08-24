@@ -69,6 +69,98 @@ func (e *Engine) DeleteRunData(ctx context.Context, runID string) error {
 		return nil
 	}
 
+	// Карантин: копия помечается удалённой, данные остаются на месте до срока.
+	//
+	// Проверка зависимостей идёт до него, а не после: инкремент без своей
+	// опорной точки не восстанавливается, и узнавать об этом через трое суток,
+	// когда данные уже стёрты, — худший из возможных вариантов.
+	if e.cfg.PurgeDelay > 0 {
+		dependents, depErr := e.dependents(ctx, run)
+		if depErr != nil {
+			return depErr
+		}
+		if len(dependents) > 0 {
+			return fmt.Errorf("бэкап %s нельзя удалить: от него зависят %d более поздних копий (%s)",
+				runID, len(dependents), dependents[0])
+		}
+		purgeAt := time.Now().UTC().Add(e.cfg.PurgeDelay)
+		if err := e.store.QuarantineRun(ctx, runID, purgeAt); err != nil {
+			return err
+		}
+		e.log.Info().Str("run", runID).Time("будет стёрт", purgeAt).
+			Msg("копия помещена в карантин: данные пока целы и её можно вернуть")
+		return nil
+	}
+
+	return e.purgeRunData(ctx, run)
+}
+
+// RunPurgeCollector стирает данные копий, чей карантин истёк, пока жив контекст.
+//
+// Раз в пять минут: сроки здесь измеряются сутками, и более частый перебор
+// нагружал бы базу впустую. Первый проход сразу после запуска — служба могла
+// простоять выключенной дольше всего карантина.
+func (e *Engine) RunPurgeCollector(ctx context.Context) {
+	e.PurgeExpired(ctx)
+
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			e.PurgeExpired(ctx)
+		}
+	}
+}
+
+// PurgeExpired стирает данные копий, чей карантин истёк.
+//
+// За проход берётся ограниченная пачка: удаление обращается к хранилищу, и
+// вычистить разом тысячу копий значило бы занять им сеть на часы, пока идут
+// ночные бэкапы.
+func (e *Engine) PurgeExpired(ctx context.Context) {
+	runs, err := e.store.RunsDueForPurge(ctx, time.Now().UTC(), 50)
+	if err != nil {
+		e.log.Error().Err(err).Msg("не удалось перебрать копии с истёкшим карантином")
+		return
+	}
+
+	for _, run := range runs {
+		if err := e.purgeRunData(ctx, run); err != nil {
+			// Ошибка не снимает срок: копия останется в очереди и попадёт в
+			// следующий проход. Хранилище с Object Lock так и будет отказывать
+			// до конца удержания — это верное поведение, а не затор.
+			e.log.Warn().Err(err).Str("run", run.ID).
+				Msg("данные копии с истёкшим карантином стереть не удалось")
+			continue
+		}
+		if err := e.store.ClearRunPurge(ctx, run.ID); err != nil {
+			e.log.Error().Err(err).Str("run", run.ID).Msg("срок карантина не снят")
+			continue
+		}
+		e.log.Info().Str("run", run.ID).Msg("карантин истёк, данные копии стёрты")
+	}
+}
+
+// PurgeRunData стирает данные копии немедленно, минуя карантин.
+//
+// Нужна двум вызывающим: сборщику, у которого срок уже вышел, и оператору,
+// которому место нужно прямо сейчас. Проверка зависимостей внутри остаётся —
+// истёкший срок не делает удаление опорной точки безопасным.
+func (e *Engine) PurgeRunData(ctx context.Context, runID string) error {
+	run, err := e.store.GetBackupRun(ctx, runID)
+	if err != nil {
+		return err
+	}
+	return e.purgeRunData(ctx, run)
+}
+
+// purgeRunData — собственно удаление объектов из хранилищ.
+func (e *Engine) purgeRunData(ctx context.Context, run *model.BackupRun) error {
+	runID := run.ID
+
 	dependents, err := e.dependents(ctx, run)
 	if err != nil {
 		return err

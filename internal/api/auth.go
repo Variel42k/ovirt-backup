@@ -14,6 +14,7 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
+	"github.com/Variel42k/ovirt-backup/internal/auditlog"
 	"github.com/Variel42k/ovirt-backup/internal/model"
 	"github.com/Variel42k/ovirt-backup/internal/store"
 )
@@ -475,6 +476,41 @@ func newSessionToken() (string, error) {
 
 // audit records a state-changing call. Failures to write the audit line are
 // logged but never fail the request.
+// auditSystem записывает действие, у которого нет запроса и человека.
+//
+// Так выглядят действия, доведённые самой службой: заявка, у которой вышло
+// окно отмены, выполняется без чьего-либо участия. Приписать её тому, кто
+// подтвердил, нельзя — он нажал кнопку сутки назад и в момент выполнения
+// ничего не делал.
+func (s *Server) auditSystem(ctx context.Context, action string, scope model.Scope,
+	objectID string, success bool, detail string) {
+
+	entry := model.AuditEntry{
+		Actor: systemActor, Action: action, Scope: scope, ObjectID: objectID,
+		Detail: detail, Success: success,
+	}
+	if err := s.store.Audit(context.WithoutCancel(ctx), entry); err != nil {
+		s.log.Debug().Err(err).Str("действие", action).Msg("не удалось записать событие аудита")
+	}
+	// Второй экземпляр — в файл для внешнего сборщика, тот же путь, что и у
+	// обычного аудита: действие, доведённое службой, теряться не должно
+	// именно потому, что за ним никто не следил.
+	if err := s.auditFile.Write(auditlog.Entry{
+		Actor: entry.Actor, Action: entry.Action, Scope: string(entry.Scope),
+		ObjectID: entry.ObjectID, Detail: entry.Detail, Success: entry.Success,
+	}); err != nil {
+		s.log.Error().Err(err).Str("действие", action).
+			Msg("журнал аудита не пишется во внешний файл")
+	}
+}
+
+// systemActor — как служба называет себя в журнале аудита.
+//
+// Отличается от имени учётной записи намеренно: строка «удалил admin» про
+// действие, которое выполнил планировщик, отправляет разбор инцидента по
+// ложному следу.
+const systemActor = "служба"
+
 func (s *Server) audit(r *http.Request, action string, scope model.Scope, objectID string, success bool, detail string) {
 	actor := "anonymous"
 	if p := principalFrom(r.Context()); p != nil {
@@ -486,5 +522,22 @@ func (s *Server) audit(r *http.Request, action string, scope model.Scope, object
 	}
 	if err := s.store.Audit(context.WithoutCancel(r.Context()), entry); err != nil {
 		s.log.Debug().Err(err).Str("действие", action).Msg("не удалось записать событие аудита")
+	}
+
+	// Второй экземпляр — в файл для внешнего сборщика. Он и есть та копия,
+	// которую нельзя отредактировать изнутри: запись в базе доступна тому, кто
+	// получил права администратора, и правится первой.
+	//
+	// Отказ записи не прерывает запрос: действие уже разрешено, и отказать в
+	// нём из-за журнала было бы странно. Но и промолчать нельзя — уровень
+	// error, потому что переставший писаться аудит это потеря следа, а не
+	// мелкая неисправность.
+	if err := s.auditFile.Write(auditlog.Entry{
+		Actor: entry.Actor, Action: entry.Action, Scope: string(entry.Scope),
+		ObjectID: entry.ObjectID, Detail: entry.Detail,
+		Success: entry.Success, RemoteIP: entry.RemoteIP,
+	}); err != nil {
+		s.log.Error().Err(err).Str("действие", action).
+			Msg("журнал аудита не пишется во внешний файл")
 	}
 }

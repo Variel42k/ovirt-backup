@@ -2,6 +2,7 @@ package api
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/Variel42k/ovirt-backup/internal/config"
@@ -40,6 +41,29 @@ func mapOIDCRole(cfg config.OIDCConfig, groups []string) (model.Role, error) {
 		if mapped[role] {
 			return role, nil
 		}
+	}
+
+	// Настраиваемые роли идут после встроенных и между собой упорядочены по
+	// имени.
+	//
+	// Порядок нужен не ради красоты. Перебор map в Go намеренно случаен, и без
+	// сортировки человек, состоящий в двух группах с разными своими ролями,
+	// получал бы то одну, то другую — от входа к входу, без единого изменения
+	// в настройках. Разбирать такое по журналу почти невозможно.
+	//
+	// Старшинства у своих ролей нет и быть не может: набор прав произвольный,
+	// и «больше прав» — не порядок, а решётка. Имя даёт хотя бы предсказуемый
+	// выбор, а разложить группы по ролям однозначно — забота того, кто
+	// заполняет role_mapping.
+	custom := make([]string, 0, len(mapped))
+	for role := range mapped {
+		if !model.IsBuiltinRole(role) {
+			custom = append(custom, string(role))
+		}
+	}
+	if len(custom) > 0 {
+		slices.Sort(custom)
+		return model.Role(custom[0]), nil
 	}
 
 	if cfg.DefaultRole != "" {

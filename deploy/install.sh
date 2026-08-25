@@ -66,6 +66,12 @@ COMPOSE_SERVICE="ovirt-backup"
 LEGACY_COMPOSE_SERVICE="justhpc-virt-manager"
 CONFIG_NAME="ovirt-backup.yaml"
 LEGACY_CONFIG_NAME="virt-manager.yaml"
+# Один digest используется и Compose, и служебными одноразовыми контейнерами.
+# Так установка не получает другой образ только потому, что тег обновился
+# между двумя командами.
+POSTGRES_HELPER_IMAGE="docker.io/library/postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73"
+APP_DB_USER="ovirt_backup_app"
+KEYCLOAK_DB_USER="keycloak_app"
 
 MODE=""; URL=""; DATABASE_URL_FILE=""; UNINSTALL_TARGET=""; START=1; PORT=8080
 URL_EXPLICIT=0; PORT_EXPLICIT=0
@@ -88,6 +94,7 @@ TLS_DAYS=825; TLS_MATERIAL_DIR=""; TLS_RESTART_REQUIRED=0; READY_SCHEME=http
 OIDC_MODE=""; OIDC_EXISTING=0; OIDC_ISSUER=""; OIDC_BACKCHANNEL_URL=""; OIDC_CLIENT_ID=""; OIDC_CLIENT_SECRET_FILE=""
 KEYCLOAK_PORT=8081; KEYCLOAK_REALM="jhvirt"; KEYCLOAK_URL=""; KEYCLOAK_API_URL=""
 KEYCLOAK_ADMIN_USER="admin"; KEYCLOAK_ADMIN_PASSWORD=""; OIDC_CLIENT_SECRET=""
+KEYCLOAK_DIRECT_TLS=0; KEYCLOAK_BIND_ADDRESS=127.0.0.1; KEYCLOAK_CONTAINER_PORT=8080
 # Имена групп допуска. Пользователь, не попавший ни в одну, в систему не
 # допускается: default_role остаётся пустым.
 GROUP_ADMIN="virt-admins"; GROUP_OPERATOR="virt-operators"; GROUP_VIEWER="virt-readers"
@@ -271,6 +278,42 @@ volume_exists() {
     docker volume inspect "$1" >/dev/null 2>&1
 }
 
+ensure_labeled_volume() {
+    ELV_NAME="$1"; ELV_SUFFIX="$2"
+    volume_exists "$ELV_NAME" && return 0
+    docker volume create \
+        --label "com.docker.compose.project=$(project_name)" \
+        --label "com.docker.compose.volume=$ELV_SUFFIX" "$ELV_NAME" >/dev/null
+}
+
+docker_volume_value() {
+    DVV_VOLUME="$1"; DVV_PATH="$2"
+    volume_exists "$DVV_VOLUME" || return 0
+    docker run --rm --network none --user root -v "$DVV_VOLUME:/data:ro" \
+        "$POSTGRES_HELPER_IMAGE" sh -c 'test -s "/data/$1" && cat "/data/$1"' sh "$DVV_PATH" 2>/dev/null || true
+}
+
+docker_volume_write() {
+    DVW_VOLUME="$1"; DVW_PATH="$2"; DVW_OWNER="$3"; DVW_MODE="$4"
+    ensure_labeled_volume "$DVW_VOLUME" "${DVW_VOLUME#$(project_name)_}"
+    docker run --rm -i --network none --user root -v "$DVW_VOLUME:/data" \
+        -e DVW_PATH="$DVW_PATH" -e DVW_OWNER="$DVW_OWNER" -e DVW_MODE="$DVW_MODE" \
+        "$POSTGRES_HELPER_IMAGE" sh -c '
+            target="/data/$DVW_PATH"
+            mkdir -p "$(dirname "$target")"
+            umask 077
+            cat > "$target"
+            chown "$DVW_OWNER" "$target"
+            chmod "$DVW_MODE" "$target"' || die "не удалось записать $DVW_PATH в том $DVW_VOLUME"
+}
+
+docker_volume_remove() {
+    DVR_VOLUME="$1"; DVR_PATH="$2"
+    volume_exists "$DVR_VOLUME" || return 0
+    docker run --rm --network none --user root -v "$DVR_VOLUME:/data" \
+        "$POSTGRES_HELPER_IMAGE" rm -f "/data/$DVR_PATH" >/dev/null 2>&1 || true
+}
+
 # Случайная строка в шестнадцатеричном виде: годится и в URL, и в .env, где нет
 # кавычек и спецсимволы вышли бы боком.
 gen_secret() {
@@ -285,6 +328,75 @@ docker_metrics_volume() {
 	printf '%s_jhvirt-data' "$(project_name)"
 }
 
+postgres_secrets_volume() {
+    printf '%s_postgres-secrets' "$(project_name)"
+}
+
+keycloak_data_volume() {
+    printf '%s_keycloak-data' "$(project_name)"
+}
+
+# Переносит runtime-секреты из .env в тома, доступные только нужному
+# контейнеру. Функция идемпотентна и одновременно обновляет старые установки,
+# где приложение и PostgreSQL пользовались одним паролем из environment.
+prepare_docker_runtime_secrets() {
+    PDRS_WORK="$1"
+    PDRS_APP_VOL="$(docker_metrics_volume)"
+    PDRS_PG_VOL="$(postgres_secrets_volume)"
+    ensure_labeled_volume "$PDRS_APP_VOL" jhvirt-data
+    ensure_labeled_volume "$PDRS_PG_VOL" postgres-secrets
+
+    PGPASS="$(env_file_value "$PDRS_WORK/.env" POSTGRES_PASSWORD)"
+    [ -n "$PGPASS" ] || PGPASS="$(docker_volume_value "$PDRS_PG_VOL" admin-password)"
+    [ -n "$PGPASS" ] || PGPASS="$(gen_secret 24)"
+    [ -n "$PGPASS" ] || die "не удалось подготовить административный пароль PostgreSQL"
+    printf '%s\n' "$PGPASS" | docker_volume_write "$PDRS_PG_VOL" admin-password 0:0 0400
+
+    APP_DB_PASSWORD="$(docker_volume_value "$PDRS_APP_VOL" database.password)"
+    [ -n "$APP_DB_PASSWORD" ] || APP_DB_PASSWORD="$(gen_secret 24)"
+    [ -n "$APP_DB_PASSWORD" ] || die "не удалось подготовить пароль роли приложения"
+    printf '%s\n' "$APP_DB_PASSWORD" | docker_volume_write "$PDRS_APP_VOL" database.password 10001:10001 0600
+
+    PDRS_DATABASE_URL="$(env_file_value "$PDRS_WORK/.env" JHV_DATABASE_URL)"
+    if [ -n "$DATABASE_URL_FILE" ]; then
+        read_external_database_url
+        PDRS_DATABASE_URL="$DATABASE_URL"
+    fi
+    if [ -n "$PDRS_DATABASE_URL" ]; then
+        printf '%s\n' "$PDRS_DATABASE_URL" | docker_volume_write "$PDRS_APP_VOL" database.url 10001:10001 0600
+        set_plain_env JHV_DATABASE_URL_FILE /app/data/database.url "$PDRS_WORK/.env"
+    else
+        docker_volume_remove "$PDRS_APP_VOL" database.url
+        set_plain_env JHV_DATABASE_URL_FILE "" "$PDRS_WORK/.env"
+    fi
+
+    if [ -n "${ADMPASS:-}" ]; then
+        printf '%s\n' "$ADMPASS" | docker_volume_write "$PDRS_APP_VOL" bootstrap-admin.password 10001:10001 0600
+        set_plain_env JHV_ADMIN_PASSWORD_FILE /app/data/bootstrap-admin.password "$PDRS_WORK/.env"
+    else
+        set_plain_env JHV_ADMIN_PASSWORD_FILE "" "$PDRS_WORK/.env"
+    fi
+
+    PDRS_OIDC_SECRET="$(docker_volume_value "$PDRS_APP_VOL" oidc-client.secret)"
+    [ -n "$PDRS_OIDC_SECRET" ] || PDRS_OIDC_SECRET="$(env_file_value "$PDRS_WORK/.env" JHV_OIDC_CLIENT_SECRET)"
+    [ -n "$PDRS_OIDC_SECRET" ] || PDRS_OIDC_SECRET="${OIDC_CLIENT_SECRET:-}"
+    if [ -n "$PDRS_OIDC_SECRET" ]; then
+        OIDC_CLIENT_SECRET="$PDRS_OIDC_SECRET"
+        printf '%s\n' "$OIDC_CLIENT_SECRET" | docker_volume_write "$PDRS_APP_VOL" oidc-client.secret 10001:10001 0600
+        set_plain_env JHV_OIDC_CLIENT_SECRET_FILE /app/data/oidc-client.secret "$PDRS_WORK/.env"
+    else
+        set_plain_env JHV_OIDC_CLIENT_SECRET_FILE "" "$PDRS_WORK/.env"
+    fi
+
+    # Старые имена оставляются пустыми ради понятного обновления .env, но
+    # секретов в выводе docker inspect после пересоздания уже нет.
+    set_plain_env POSTGRES_PASSWORD "" "$PDRS_WORK/.env"
+    set_plain_env POSTGRES_APP_USER "$APP_DB_USER" "$PDRS_WORK/.env"
+    set_plain_env JHV_DATABASE_URL "" "$PDRS_WORK/.env"
+    set_plain_env JHV_ADMIN_PASSWORD "" "$PDRS_WORK/.env"
+    set_plain_env JHV_OIDC_CLIENT_SECRET "" "$PDRS_WORK/.env"
+}
+
 ensure_docker_metrics_token() {
 	VOL="$(docker_metrics_volume)"
 	if ! volume_exists "$VOL"; then
@@ -295,7 +407,7 @@ ensure_docker_metrics_token() {
 	TOKEN="$(gen_secret 32)"
 	[ -n "$TOKEN" ] || die "не удалось сгенерировать токен Prometheus"
 	printf '%s\n' "$TOKEN" | docker run --rm -i --network none --user root \
-		-v "$VOL:/data" docker.io/library/postgres:17-alpine sh -c '
+		-v "$VOL:/data" "$POSTGRES_HELPER_IMAGE" sh -c '
 		if [ -s /data/metrics.token ]; then
 			cat >/dev/null
 		else
@@ -312,7 +424,7 @@ remove_docker_metrics_token() {
 	VOL="$(docker_metrics_volume)"
 	volume_exists "$VOL" || return 0
 	docker run --rm --network none --user root -v "$VOL:/data" \
-		docker.io/library/postgres:17-alpine rm -f /data/metrics.token >/dev/null 2>&1 || {
+		"$POSTGRES_HELPER_IMAGE" rm -f /data/metrics.token >/dev/null 2>&1 || {
 		say "    предупреждение: не удалось удалить metrics.token из тома $VOL"
 		return 1
 	}
@@ -347,7 +459,7 @@ reset_db_password() {
     docker rm -f "$RDB_NAME" >/dev/null 2>&1
     docker run -d --name "$RDB_NAME" --network none \
         -v "$RDB_VOL:/var/lib/postgresql/data" \
-        docker.io/library/postgres:17-alpine >/dev/null 2>&1 ||
+        "$POSTGRES_HELPER_IMAGE" >/dev/null 2>&1 ||
         { say "    не удалось поднять временный контейнер базы"; return 1; }
 
     RDB_READY=0; RDB_TRY=0
@@ -709,7 +821,7 @@ migration_detect_source_identity() {
 migration_volume_file() {
     MV_VOLUME="$1"; MV_SOURCE="$2"; MV_DEST="$3"; MV_REQUIRED="$4"
     if docker run --rm --network none --user root -v "$MV_VOLUME:/data:ro" \
-            docker.io/library/postgres:17-alpine \
+            "$POSTGRES_HELPER_IMAGE" \
             sh -c "test -f '/data/$MV_SOURCE' && cat '/data/$MV_SOURCE'" \
             > "$MV_DEST.tmp" 2>/dev/null; then
         mv "$MV_DEST.tmp" "$MV_DEST"
@@ -1852,7 +1964,7 @@ install_tls_docker() {
     esac
     [ -n "$TLS_MATERIAL_DIR" ] || die "TLS-материалы не подготовлены"
     docker run --rm -i --network none --user root -v "$ITD_VOL:/data" \
-        docker.io/library/postgres:17-alpine sh -c '
+        "$POSTGRES_HELPER_IMAGE" sh -c '
             mkdir -p /data/tls
             umask 077
             cat > /data/tls/server.key
@@ -1860,7 +1972,7 @@ install_tls_docker() {
             chmod 600 /data/tls/server.key' < "$TLS_MATERIAL_DIR/server.key" ||
         die "не удалось записать TLS-ключ в том $ITD_VOL"
     docker run --rm -i --network none --user root -v "$ITD_VOL:/data" \
-        docker.io/library/postgres:17-alpine sh -c '
+        "$POSTGRES_HELPER_IMAGE" sh -c '
             cat > /data/tls/server.crt
             chown 10001:10001 /data/tls/server.crt /data/tls
             chmod 700 /data/tls
@@ -2089,6 +2201,7 @@ load_existing_oidc() {
     OIDC_BACKCHANNEL_URL="$(env_file_value "$WORK/.env" JHV_OIDC_BACKCHANNEL_URL)"
     OIDC_CLIENT_ID="$(env_file_value "$WORK/.env" JHV_OIDC_CLIENT_ID)"
     OIDC_CLIENT_SECRET="$(env_file_value "$WORK/.env" JHV_OIDC_CLIENT_SECRET)"
+    [ -n "$OIDC_CLIENT_SECRET" ] || OIDC_CLIENT_SECRET="$(docker_volume_value "$(docker_metrics_volume)" oidc-client.secret)"
     case "$(env_file_value "$WORK/.env" COMPOSE_PROFILES)" in
         *keycloak*)
             OIDC_MODE=keycloak
@@ -2097,6 +2210,12 @@ load_existing_oidc() {
             [ -n "$KEYCLOAK_ADMIN_USER" ] || KEYCLOAK_ADMIN_USER=admin
             KEYCLOAK_PORT="$(env_file_value "$WORK/.env" KEYCLOAK_PORT)"
             [ -n "$KEYCLOAK_PORT" ] || KEYCLOAK_PORT=8081
+            KEYCLOAK_DIRECT_TLS="$(env_file_value "$WORK/.env" KEYCLOAK_DIRECT_TLS)"
+            [ "$KEYCLOAK_DIRECT_TLS" = 1 ] || KEYCLOAK_DIRECT_TLS=0
+            KEYCLOAK_BIND_ADDRESS="$(env_file_value "$WORK/.env" KEYCLOAK_BIND_ADDRESS)"
+            [ -n "$KEYCLOAK_BIND_ADDRESS" ] || KEYCLOAK_BIND_ADDRESS=127.0.0.1
+            KEYCLOAK_CONTAINER_PORT="$(env_file_value "$WORK/.env" KEYCLOAK_CONTAINER_PORT)"
+            [ -n "$KEYCLOAK_CONTAINER_PORT" ] || KEYCLOAK_CONTAINER_PORT=8080
             say "    сохраняется вход через встроенный Keycloak"
             ;;
         *)
@@ -2149,27 +2268,68 @@ prepare_oidc() {
         # Keycloak. Именно он попадёт в issuer, поэтому браузер и служба будут
         # звать провайдера одинаково.
         if [ -z "$KEYCLOAK_URL" ]; then
-            # Схема здесь всегда http, даже когда у самой службы включён свой
-            # TLS. Причина простая: контейнер Keycloak из docker-compose.yml
-            # поднимается командой `start --http-enabled=true`, сертификата ему
-            # никто не даёт — HTTPS он не слушает вовсе.
-            #
-            # Раньше схема наследовалась от внешнего адреса службы. С
-            # включённым TLS получался https://host:8081, curl упирался в
-            # TLS-рукопожатие с HTTP-сервером, и установка молча висела на
-            # «настройка Keycloak» все девяносто попыток. Хуже того, тот же
-            # адрес уходил в KC_HOSTNAME, то есть в issuer токенов, — вход не
-            # заработал бы и после успешной настройки.
             KC_HOSTPORT="${URL#*://}"; KC_HOSTPORT="${KC_HOSTPORT%%/*}"
-            KEYCLOAK_URL="http://${KC_HOSTPORT%%:*}:$KEYCLOAK_PORT"
             case "$URL" in
                 https://*)
-                    say "    Keycloak поднимается по HTTP на порту $KEYCLOAK_PORT: своего"
-                    say "    сертификата у него здесь нет, пароли пользователей пойдут по"
-                    say "    сети открытым текстом. Для боя поставьте его за тот же"
-                    say "    reverse proxy, что и службу, и укажите адрес прокси:"
-                    say "      $SELF --keycloak-url https://keycloak.example.org"
+                    case "$TLS_MODE" in
+                        self-signed|files|preserve)
+                            KEYCLOAK_DIRECT_TLS=1
+                            KEYCLOAK_BIND_ADDRESS=0.0.0.0
+                            KEYCLOAK_CONTAINER_PORT=8443
+                            KEYCLOAK_URL="https://${KC_HOSTPORT%%:*}:$KEYCLOAK_PORT"
+                            KEYCLOAK_API_URL="https://127.0.0.1:$KEYCLOAK_PORT"
+                            ;;
+                        *)
+                            die "для встроенного Keycloak за HTTPS reverse proxy укажите его публичный адрес:
+  --keycloak-url https://keycloak.example.org
+Прокси должен направлять этот адрес на 127.0.0.1:$KEYCLOAK_PORT. Либо включите
+собственный TLS: --tls self-signed"
+                            ;;
+                    esac
                     ;;
+                *)
+                    case "${KC_HOSTPORT%%:*}" in
+                        localhost|127.*|\[::1\]) ;;
+                        *) die "встроенный Keycloak нельзя публиковать по HTTP: пароль входа пойдёт по сети открытым текстом.
+Используйте --tls self-signed, сертификат из файлов или HTTPS reverse proxy." ;;
+                    esac
+                    KEYCLOAK_BIND_ADDRESS=127.0.0.1
+                    KEYCLOAK_URL="http://${KC_HOSTPORT%%:*}:$KEYCLOAK_PORT"
+                    KEYCLOAK_API_URL="http://127.0.0.1:$KEYCLOAK_PORT"
+                    ;;
+            esac
+        elif [ "$OIDC_EXISTING" -eq 1 ] && [ "$KEYCLOAK_DIRECT_TLS" -eq 0 ] &&
+                [ "$TLS_MODE" != none ]; then
+            # Безопасно обновляем прежнюю встроенную HTTP-установку: тот же
+            # сертификат уже выбран для приложения и подходит тому же хосту.
+            KC_HOSTPORT="${URL#*://}"; KC_HOSTPORT="${KC_HOSTPORT%%/*}"
+            KEYCLOAK_DIRECT_TLS=1
+            KEYCLOAK_BIND_ADDRESS=0.0.0.0
+            KEYCLOAK_CONTAINER_PORT=8443
+            KEYCLOAK_URL="https://${KC_HOSTPORT%%:*}:$KEYCLOAK_PORT"
+            KEYCLOAK_API_URL="https://127.0.0.1:$KEYCLOAK_PORT"
+            say "    встроенный Keycloak переводится с HTTP на HTTPS"
+        elif [ "$OIDC_EXISTING" -eq 1 ] && [ "$KEYCLOAK_DIRECT_TLS" -eq 1 ]; then
+            KEYCLOAK_BIND_ADDRESS=0.0.0.0
+            KEYCLOAK_CONTAINER_PORT=8443
+            KEYCLOAK_API_URL="https://127.0.0.1:$KEYCLOAK_PORT"
+        else
+            case "$KEYCLOAK_URL" in
+                https://*)
+                    # Явный адрес означает TLS-терминацию на reverse proxy.
+                    # Внутренний HTTP-порт доступен только через loopback.
+                    KEYCLOAK_BIND_ADDRESS=127.0.0.1
+                    KEYCLOAK_CONTAINER_PORT=8080
+                    KEYCLOAK_API_URL="http://127.0.0.1:$KEYCLOAK_PORT"
+                    ;;
+                http://localhost*|http://127.*|http://\[::1\]*)
+                    KEYCLOAK_BIND_ADDRESS=127.0.0.1
+                    KEYCLOAK_API_URL="http://127.0.0.1:$KEYCLOAK_PORT"
+                    ;;
+                http://*)
+                    die "публичный --keycloak-url должен использовать HTTPS"
+                    ;;
+                *) die "--keycloak-url должен начинаться с http:// или https://" ;;
             esac
         fi
         validate_port "$KEYCLOAK_PORT" || die "--keycloak-port: нужен номер от 1 до 65535"
@@ -2182,7 +2342,7 @@ prepare_oidc() {
         # самой службы проверяется по 127.0.0.1 ровно по этой причине.
         #
         # Внешний адрес остаётся тем, чем и был: issuer токенов и KC_HOSTNAME.
-        KEYCLOAK_API_URL="http://127.0.0.1:$KEYCLOAK_PORT"
+        [ -n "$KEYCLOAK_API_URL" ] || KEYCLOAK_API_URL="http://127.0.0.1:$KEYCLOAK_PORT"
         OIDC_BACKCHANNEL_URL="http://keycloak:8080"
         OIDC_ISSUER="$KEYCLOAK_URL/realms/$KEYCLOAK_REALM"
         OIDC_CLIENT_ID="jhvirt"
@@ -2255,7 +2415,8 @@ write_oidc_env() {
     # «Keycloak не принял пароль администратора», а если бы прошёл, то развёл
     # бы секрет клиента в .env и в самом Keycloak, и вход перестал бы работать
     # молча.
-    OIDC_PREV="$(env_file_value "$OIDC_ENV_FILE" JHV_OIDC_CLIENT_SECRET)"
+    OIDC_PREV="$(docker_volume_value "$(docker_metrics_volume)" oidc-client.secret)"
+    [ -n "$OIDC_PREV" ] || OIDC_PREV="$(env_file_value "$OIDC_ENV_FILE" JHV_OIDC_CLIENT_SECRET)"
     if [ -n "$OIDC_PREV" ]; then OIDC_CLIENT_SECRET="$OIDC_PREV"; fi
     OIDC_PREV="$(env_file_value "$OIDC_ENV_FILE" KEYCLOAK_ADMIN_PASSWORD)"
     if [ -n "$OIDC_PREV" ]; then
@@ -2271,17 +2432,24 @@ write_oidc_env() {
     set_plain_env JHV_OIDC_ISSUER "$OIDC_ISSUER" "$OIDC_ENV_FILE"
     set_plain_env JHV_OIDC_BACKCHANNEL_URL "$OIDC_BACKCHANNEL_URL" "$OIDC_ENV_FILE"
     set_plain_env JHV_OIDC_CLIENT_ID "$OIDC_CLIENT_ID" "$OIDC_ENV_FILE"
-    set_plain_env JHV_OIDC_CLIENT_SECRET "$OIDC_CLIENT_SECRET" "$OIDC_ENV_FILE"
+    set_plain_env JHV_OIDC_CLIENT_SECRET "" "$OIDC_ENV_FILE"
+    if [ -n "$OIDC_CLIENT_SECRET" ]; then
+        set_plain_env JHV_OIDC_CLIENT_SECRET_FILE /app/data/oidc-client.secret "$OIDC_ENV_FILE"
+    fi
     set_plain_env JHV_OIDC_REDIRECT_URL "$URL/api/v1/auth/oidc/callback" "$OIDC_ENV_FILE"
     set_plain_env JHV_OIDC_POST_LOGOUT_URL "$URL/login" "$OIDC_ENV_FILE"
 
     if [ "$OIDC_MODE" = keycloak ]; then
         set_plain_env COMPOSE_PROFILES keycloak "$OIDC_ENV_FILE"
         set_plain_env KEYCLOAK_PORT "$KEYCLOAK_PORT" "$OIDC_ENV_FILE"
+        set_plain_env KEYCLOAK_BIND_ADDRESS "$KEYCLOAK_BIND_ADDRESS" "$OIDC_ENV_FILE"
+        set_plain_env KEYCLOAK_CONTAINER_PORT "$KEYCLOAK_CONTAINER_PORT" "$OIDC_ENV_FILE"
+        set_plain_env KEYCLOAK_DIRECT_TLS "$KEYCLOAK_DIRECT_TLS" "$OIDC_ENV_FILE"
         set_plain_env KEYCLOAK_DB keycloak "$OIDC_ENV_FILE"
+        set_plain_env KEYCLOAK_DB_USER "$KEYCLOAK_DB_USER" "$OIDC_ENV_FILE"
         set_plain_env JHV_KEYCLOAK_URL "$KEYCLOAK_URL" "$OIDC_ENV_FILE"
         set_plain_env KEYCLOAK_ADMIN_USER "$KEYCLOAK_ADMIN_USER" "$OIDC_ENV_FILE"
-        set_plain_env KEYCLOAK_ADMIN_PASSWORD "$KEYCLOAK_ADMIN_PASSWORD" "$OIDC_ENV_FILE"
+        set_plain_env KEYCLOAK_ADMIN_PASSWORD "" "$OIDC_ENV_FILE"
         set_plain_env JHV_OIDC_BUTTON_LABEL "Войти через Keycloak" "$OIDC_ENV_FILE"
     fi
 }
@@ -2425,7 +2593,7 @@ docker_volume_put() {
     DVP_VOLUME="$1"; DVP_SOURCE="$2"; DVP_TARGET="$3"; DVP_MODE="$4"
     docker run --rm -i --network none --user root -v "$DVP_VOLUME:/data" \
         -e DVP_TARGET="$DVP_TARGET" -e DVP_MODE="$DVP_MODE" \
-        docker.io/library/postgres:17-alpine sh -c '
+        "$POSTGRES_HELPER_IMAGE" sh -c '
             target="/data/$DVP_TARGET"
             mkdir -p "$(dirname "$target")"
             umask 077
@@ -2600,14 +2768,14 @@ prepare_docker_data_paths() {
         mkdir -p "$PDP_PATH" || die "не удалось создать каталог $PDP_PATH"
         # Меняется только сам корень, не содержимое подключённого хранилища.
         if ! docker run --rm --network none --user 10001:10001 -v "$PDP_PATH:/target" \
-                docker.io/library/postgres:17-alpine test -w /target >/dev/null 2>&1; then
+                "$POSTGRES_HELPER_IMAGE" test -w /target >/dev/null 2>&1; then
             # Для пустого локального каталога установщик может исправить сам
             # корень. Содержимое и ACL подключённого хранилища не меняются.
             docker run --rm --network none --user root -v "$PDP_PATH:/target" \
-                docker.io/library/postgres:17-alpine \
+                "$POSTGRES_HELPER_IMAGE" \
                 sh -c 'chown 10001:10001 /target && chmod u+rwx /target' >/dev/null 2>&1 || true
             docker run --rm --network none --user 10001:10001 -v "$PDP_PATH:/target" \
-                docker.io/library/postgres:17-alpine test -w /target >/dev/null 2>&1 ||
+                "$POSTGRES_HELPER_IMAGE" test -w /target >/dev/null 2>&1 ||
                 die "контейнерный UID 10001 не получил право записи в $PDP_PATH"
         fi
         # Пустой каталог при переносе — почти всегда забытое хранилище: база
@@ -2620,6 +2788,135 @@ prepare_docker_data_paths() {
             say "    база будет знать о них, но восстановление не найдёт данных"
         fi
     done
+}
+
+prepare_keycloak_runtime() {
+    [ "$OIDC_MODE" = keycloak ] || return 0
+    PKR_VOL="$(keycloak_data_volume)"
+    PKR_APP_VOL="$(docker_metrics_volume)"
+    ensure_labeled_volume "$PKR_VOL" keycloak-data
+
+    KEYCLOAK_DB_PASSWORD="$(docker_volume_value "$PKR_VOL" ovirt-backup/database.password)"
+    [ -n "$KEYCLOAK_DB_PASSWORD" ] || KEYCLOAK_DB_PASSWORD="$(gen_secret 24)"
+    [ -n "$KEYCLOAK_DB_PASSWORD" ] || die "не удалось подготовить пароль базы Keycloak"
+    printf '%s\n' "$KEYCLOAK_DB_PASSWORD" |
+        docker_volume_write "$PKR_VOL" ovirt-backup/database.password 1000:0 0400
+
+    if [ "$KEYCLOAK_DIRECT_TLS" -eq 1 ]; then
+        docker run --rm --network none --user root \
+            -v "$PKR_APP_VOL:/source:ro" -v "$PKR_VOL:/target" \
+            "$POSTGRES_HELPER_IMAGE" sh -c '
+                test -s /source/tls/server.crt && test -s /source/tls/server.key
+                mkdir -p /target/ovirt-backup
+                cp /source/tls/server.crt /target/ovirt-backup/server.crt
+                cp /source/tls/server.key /target/ovirt-backup/server.key
+                chown 1000:0 /target/ovirt-backup/server.crt /target/ovirt-backup/server.key
+                chmod 0444 /target/ovirt-backup/server.crt
+                chmod 0400 /target/ovirt-backup/server.key' ||
+            die "не удалось передать TLS-сертификат встроенному Keycloak"
+    fi
+
+    {
+        printf 'db=postgres\n'
+        printf 'db-url=jdbc:postgresql://postgres:5432/%s\n' "${KEYCLOAK_DB:-keycloak}"
+        printf 'db-username=%s\n' "$KEYCLOAK_DB_USER"
+        printf 'db-password=%s\n' "$KEYCLOAK_DB_PASSWORD"
+        printf 'hostname=%s\n' "$KEYCLOAK_URL"
+        printf 'hostname-strict=true\n'
+        printf 'http-enabled=true\nhttp-port=8080\n'
+        printf 'health-enabled=true\ncache=local\n'
+        if [ "$KEYCLOAK_DIRECT_TLS" -eq 1 ]; then
+            printf 'https-port=8443\n'
+            printf 'https-certificate-file=/opt/keycloak/data/ovirt-backup/server.crt\n'
+            printf 'https-certificate-key-file=/opt/keycloak/data/ovirt-backup/server.key\n'
+        else
+            case "$KEYCLOAK_URL" in https://*) printf 'proxy-headers=xforwarded\n' ;; esac
+        fi
+        if [ -n "$KEYCLOAK_ADMIN_PASSWORD" ]; then
+            printf 'bootstrap-admin-username=%s\n' "$KEYCLOAK_ADMIN_USER"
+            printf 'bootstrap-admin-password=%s\n' "$KEYCLOAK_ADMIN_PASSWORD"
+        fi
+    } | docker_volume_write "$PKR_VOL" ovirt-backup/keycloak.conf 1000:0 0400
+
+    docker run --rm --network none --user root -v "$PKR_VOL:/data" \
+        "$POSTGRES_HELPER_IMAGE" sh -c 'chown 1000:0 /data /data/ovirt-backup; chmod 0750 /data /data/ovirt-backup' ||
+        die "не удалось выставить владельца тома Keycloak"
+}
+
+clear_keycloak_bootstrap_secret() {
+    CKBS_VOL="$(keycloak_data_volume)"
+    volume_exists "$CKBS_VOL" || return 0
+    docker run --rm --network none --user root -v "$CKBS_VOL:/data" \
+        "$POSTGRES_HELPER_IMAGE" sh -c '
+            src=/data/ovirt-backup/keycloak.conf
+            test -f "$src" || exit 0
+            grep -v "^bootstrap-admin-password=" "$src" > "$src.tmp"
+            chown 1000:0 "$src.tmp"
+            chmod 0400 "$src.tmp"
+            mv "$src.tmp" "$src"' || die "не удалось удалить bootstrap-пароль Keycloak"
+}
+
+valid_pg_identifier() {
+    case "$1" in ""|*[!A-Za-z0-9_]*) return 1 ;; esac
+}
+
+ensure_docker_database_roles() {
+    EDDR_WORK="$1"; EDDR_RUN="$2"
+    EDDR_ADMIN="$(env_file_value "$EDDR_WORK/.env" POSTGRES_USER)"; [ -n "$EDDR_ADMIN" ] || EDDR_ADMIN=jhvirt
+    EDDR_DB="$(env_file_value "$EDDR_WORK/.env" POSTGRES_DB)"; [ -n "$EDDR_DB" ] || EDDR_DB=jhvirt
+    valid_pg_identifier "$EDDR_ADMIN" || die "небезопасное имя администратора PostgreSQL: $EDDR_ADMIN"
+    valid_pg_identifier "$EDDR_DB" || die "небезопасное имя базы PostgreSQL: $EDDR_DB"
+
+    # Старое приложение может держать соединения под административной ролью.
+    # Сначала останавливаем клиентов, затем меняем владельцев и пароли.
+    # shellcheck disable=SC2086
+    (cd "$EDDR_WORK" && $EDDR_RUN stop "$COMPOSE_SERVICE" keycloak) >/dev/null 2>&1 || true
+    # shellcheck disable=SC2086
+    (cd "$EDDR_WORK" && $EDDR_RUN up -d postgres) >/dev/null 2>&1 || die "не удалось запустить PostgreSQL"
+    docker_wait_postgres "$EDDR_WORK" "$EDDR_RUN" "$EDDR_ADMIN" || die "PostgreSQL не стала готова"
+
+    step "разделение ролей PostgreSQL"
+    # Пароли шестнадцатеричные и сгенерированы установщиком; имена проходят
+    # строгую проверку выше. SQL идёт по stdin и не виден в списке процессов.
+    # shellcheck disable=SC2086
+    (cd "$EDDR_WORK" && $EDDR_RUN exec -T postgres psql -U "$EDDR_ADMIN" -d postgres -v ON_ERROR_STOP=1) <<SQL
+SELECT 'CREATE ROLE "$APP_DB_USER" LOGIN' WHERE NOT EXISTS
+  (SELECT 1 FROM pg_roles WHERE rolname='$APP_DB_USER') \gexec
+ALTER ROLE "$APP_DB_USER" WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION PASSWORD '$APP_DB_PASSWORD';
+ALTER DATABASE "$EDDR_DB" OWNER TO "$APP_DB_USER";
+REVOKE CONNECT ON DATABASE "$EDDR_DB" FROM PUBLIC;
+GRANT CONNECT ON DATABASE "$EDDR_DB" TO "$APP_DB_USER", "$EDDR_ADMIN";
+SQL
+
+    # shellcheck disable=SC2086
+    (cd "$EDDR_WORK" && $EDDR_RUN exec -T postgres psql -U "$EDDR_ADMIN" -d "$EDDR_DB" -v ON_ERROR_STOP=1) <<SQL
+REASSIGN OWNED BY "$EDDR_ADMIN" TO "$APP_DB_USER";
+ALTER SCHEMA public OWNER TO "$APP_DB_USER";
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+GRANT USAGE, CREATE ON SCHEMA public TO "$APP_DB_USER";
+SQL
+
+    if [ "$OIDC_MODE" = keycloak ]; then
+        # shellcheck disable=SC2086
+        (cd "$EDDR_WORK" && $EDDR_RUN exec -T postgres psql -U "$EDDR_ADMIN" -d postgres -v ON_ERROR_STOP=1) <<SQL
+SELECT 'CREATE ROLE "$KEYCLOAK_DB_USER" LOGIN' WHERE NOT EXISTS
+  (SELECT 1 FROM pg_roles WHERE rolname='$KEYCLOAK_DB_USER') \gexec
+ALTER ROLE "$KEYCLOAK_DB_USER" WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION PASSWORD '$KEYCLOAK_DB_PASSWORD';
+SELECT 'CREATE DATABASE keycloak OWNER "$KEYCLOAK_DB_USER"' WHERE NOT EXISTS
+  (SELECT 1 FROM pg_database WHERE datname='keycloak') \gexec
+ALTER DATABASE keycloak OWNER TO "$KEYCLOAK_DB_USER";
+REVOKE CONNECT ON DATABASE keycloak FROM PUBLIC;
+GRANT CONNECT ON DATABASE keycloak TO "$KEYCLOAK_DB_USER", "$EDDR_ADMIN";
+SQL
+        # shellcheck disable=SC2086
+        (cd "$EDDR_WORK" && $EDDR_RUN exec -T postgres psql -U "$EDDR_ADMIN" -d keycloak -v ON_ERROR_STOP=1) <<SQL
+REASSIGN OWNED BY "$EDDR_ADMIN" TO "$KEYCLOAK_DB_USER";
+ALTER SCHEMA public OWNER TO "$KEYCLOAK_DB_USER";
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+GRANT USAGE, CREATE ON SCHEMA public TO "$KEYCLOAK_DB_USER";
+SQL
+    fi
+    say "    приложение и Keycloak используют разные непривилегированные роли"
 }
 
 install_containers() {
@@ -2801,46 +3098,21 @@ PostgreSQL хранит пароль внутри тома и новый не п
 	step "token-файл Prometheus"
 	ensure_docker_metrics_token
 	migration_restore_docker_data
+	prepare_docker_runtime_secrets "$WORK"
 	install_tls_docker "$WORK/.env"
+	prepare_keycloak_runtime
 	apply_data_dir_overrides "$WORK"
 	prepare_docker_data_paths "$WORK"
 	migration_restore_docker_database "$WORK" "$RUN"
+	ensure_docker_database_roles "$WORK" "$RUN"
 
     if [ "$START" -eq 0 ]; then
+        # shellcheck disable=SC2086
+        (cd "$WORK" && $RUN stop postgres) >/dev/null 2>&1 || true
         say ""
         say "Подготовлено. Запуск:"
         say "  cd $WORK && $RUN up -d --build"
-        if [ "$MIGRATION_ACTIVE" -eq 1 ] && [ "$MIGRATION_DATABASE_KIND" = embedded ]; then
-            # shellcheck disable=SC2086
-            (cd "$WORK" && $RUN stop postgres) >/dev/null 2>&1 || true
-        fi
         return
-    fi
-
-    if [ "$OIDC_MODE" = keycloak ]; then
-        step "база для Keycloak"
-        # Заводится до его старта: без своей базы Keycloak не поднимется, а
-        # docker-entrypoint-initdb.d отрабатывает только на пустом томе — том
-        # же здесь чаще всего уже есть с прошлой установки.
-        # shellcheck disable=SC2086
-        (cd "$WORK" && $RUN up -d postgres) >/dev/null 2>&1 ||
-            die "не удалось запустить PostgreSQL"
-        KC_DB_TRY=0
-        while [ "$KC_DB_TRY" -lt 40 ]; do
-            # shellcheck disable=SC2086
-            (cd "$WORK" && $RUN exec -T postgres pg_isready -U jhvirt -q) >/dev/null 2>&1 && break
-            KC_DB_TRY=$((KC_DB_TRY+1)); sleep 2
-        done
-        # shellcheck disable=SC2086
-        if (cd "$WORK" && $RUN exec -T postgres psql -U jhvirt -d postgres -tAc \
-                "SELECT 1 FROM pg_database WHERE datname='keycloak'") 2>/dev/null | grep -q 1; then
-            say "    база keycloak уже есть"
-        else
-            # shellcheck disable=SC2086
-            (cd "$WORK" && $RUN exec -T postgres createdb -U jhvirt keycloak) >/dev/null 2>&1 ||
-                die "не удалось создать базу keycloak"
-            say "    база keycloak создана"
-        fi
     fi
 
     step "сборка образа и запуск (в первый раз это несколько минут)"
@@ -2876,6 +3148,7 @@ PostgreSQL хранит пароль внутри тома и новый не п
         fi
         keycloak_bootstrap
         keycloak_realm_exists || die "Keycloak ответил, но realm $KEYCLOAK_REALM после настройки недоступен"
+        clear_keycloak_bootstrap_secret
         say "    realm $KEYCLOAK_REALM, клиент $OIDC_CLIENT_ID и группы созданы"
     fi
 
@@ -2894,17 +3167,12 @@ PostgreSQL хранит пароль внутри тома и новый не п
         say "    discovery доступен из контейнера приложения"
     fi
 
-    if [ "$OIDC_MODE" = keycloak ]; then
-        # Стираем только после сквозной проверки: при ошибке пароль нужен для
-        # безопасного повторного запуска bootstrap без удаления базы.
-        set_plain_env KEYCLOAK_ADMIN_PASSWORD "" "$WORK/.env"
-    fi
-
     # Пароль администратора: если .env создавали мы, он известен точно. Если
     # .env был раньше — учётная запись уже существует, и показывать нечего.
     if [ -n "${ADMPASS:-}" ]; then
-        # Стираем из файла: служба учётную запись создала, дальше он там лишний.
-        sed -i 's|^JHV_ADMIN_PASSWORD=.*|JHV_ADMIN_PASSWORD=|' "$WORK/.env" 2>/dev/null || true
+        # Одноразовый файл больше не нужен: учётная запись уже создана.
+        docker_volume_remove "$(docker_metrics_volume)" bootstrap-admin.password
+        set_plain_env JHV_ADMIN_PASSWORD_FILE "" "$WORK/.env"
     fi
 
     say ""

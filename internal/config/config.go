@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -67,8 +68,12 @@ type AuthConfig struct {
 	SessionTTL        time.Duration `mapstructure:"session_ttl"`
 	BootstrapUser     string        `mapstructure:"bootstrap_user"`
 	BootstrapPassword string        `mapstructure:"bootstrap_password"`
-	APITokens         []string      `mapstructure:"api_tokens"`
-	OIDC              OIDCConfig    `mapstructure:"oidc"`
+	// BootstrapPasswordFile keeps the one-time password out of the process
+	// environment. The installer removes the file after the first successful
+	// start.
+	BootstrapPasswordFile string     `mapstructure:"bootstrap_password_file"`
+	APITokens             []string   `mapstructure:"api_tokens"`
+	OIDC                  OIDCConfig `mapstructure:"oidc"`
 }
 
 // OIDCConfig describes the external identity provider.
@@ -85,9 +90,10 @@ type OIDCConfig struct {
 	// discovery, token, JWKS и userinfo. Публичные адреса и issuer токенов при
 	// этом не меняются. Это нужно, когда провайдер доступен браузеру по адресу
 	// хоста, а приложению в Compose — по имени соседнего сервиса.
-	BackchannelURL string `mapstructure:"backchannel_url"`
-	ClientID       string `mapstructure:"client_id"`
-	ClientSecret   string `mapstructure:"client_secret"`
+	BackchannelURL   string `mapstructure:"backchannel_url"`
+	ClientID         string `mapstructure:"client_id"`
+	ClientSecret     string `mapstructure:"client_secret"`
+	ClientSecretFile string `mapstructure:"client_secret_file"`
 	// RedirectURL должен совпадать с зарегистрированным у провайдера точно,
 	// вплоть до схемы и завершающего пути.
 	RedirectURL string   `mapstructure:"redirect_url"`
@@ -223,6 +229,9 @@ type DatabaseConfig struct {
 	//
 	// Пусто — берутся поля из блока postgres ниже.
 	URL string `mapstructure:"url"`
+	// URLFile is useful for an external PostgreSQL DSN containing credentials.
+	// It is resolved before validation and is never copied into the environment.
+	URLFile string `mapstructure:"url_file"`
 
 	RunMigrationsOnStartup bool           `mapstructure:"run_migrations_on_startup"`
 	Postgres               PostgresConfig `mapstructure:"postgres"`
@@ -431,13 +440,14 @@ type PostgresConfig struct {
 	// быть задана и напрямую. Если непуста, поля ниже не используются.
 	URL string `mapstructure:"url"`
 
-	Host     string `mapstructure:"host"`
-	Port     int    `mapstructure:"port"`
-	User     string `mapstructure:"user"`
-	Password string `mapstructure:"password"`
-	Database string `mapstructure:"database"`
-	SSLMode  string `mapstructure:"sslmode"`
-	MaxConns int32  `mapstructure:"max_conns"`
+	Host         string `mapstructure:"host"`
+	Port         int    `mapstructure:"port"`
+	User         string `mapstructure:"user"`
+	Password     string `mapstructure:"password"`
+	PasswordFile string `mapstructure:"password_file"`
+	Database     string `mapstructure:"database"`
+	SSLMode      string `mapstructure:"sslmode"`
+	MaxConns     int32  `mapstructure:"max_conns"`
 
 	// Пути к сертификатам для sslmode verify-ca и verify-full. Без них
 	// проверить подлинность сервера нечем, а значит и режимы эти задать
@@ -662,6 +672,9 @@ func Load(path string) (*Config, error) {
 	if err := v.Unmarshal(&cfg); err != nil {
 		return nil, fmt.Errorf("decode config: %w", err)
 	}
+	if err := cfg.resolveSecretFiles(); err != nil {
+		return nil, err
+	}
 	// До Validate: url задаёт driver, и проверять драйвер имеет смысл уже
 	// после того, как он окончательно определён.
 	if err := cfg.Database.applyURL(); err != nil {
@@ -671,6 +684,67 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+// resolveSecretFiles loads credentials from protected regular files. Direct
+// values and file values are mutually exclusive so an old environment
+// variable cannot silently override a rotated secret.
+func (c *Config) resolveSecretFiles() error {
+	type secretSetting struct {
+		name   string
+		path   string
+		direct *string
+	}
+	settings := []secretSetting{
+		{"database.url_file", c.Database.URLFile, &c.Database.URL},
+		{"database.postgres.password_file", c.Database.Postgres.PasswordFile, &c.Database.Postgres.Password},
+		{"auth.bootstrap_password_file", c.Auth.BootstrapPasswordFile, &c.Auth.BootstrapPassword},
+		{"auth.oidc.client_secret_file", c.Auth.OIDC.ClientSecretFile, &c.Auth.OIDC.ClientSecret},
+	}
+	for _, setting := range settings {
+		if strings.TrimSpace(setting.path) == "" {
+			continue
+		}
+		if strings.TrimSpace(*setting.direct) != "" {
+			return fmt.Errorf("%s нельзя задавать одновременно с прямым значением", setting.name)
+		}
+		value, err := readProtectedValue(setting.path, setting.name)
+		if err != nil {
+			return err
+		}
+		*setting.direct = value
+	}
+	return nil
+}
+
+func readProtectedValue(path, name string) (string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", fmt.Errorf("%s %q: %w", name, path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("%s %q должен быть обычным файлом", name, path)
+	}
+	// Windows does not expose Unix owner/group mode bits. Production targets
+	// are Linux; keeping the check there also lets the CLI be tested on Windows.
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
+		return "", fmt.Errorf("%s %q доступен группе или остальным; требуются права 0600", name, path)
+	}
+	if info.Size() > 64*1024 {
+		return "", fmt.Errorf("%s %q больше 64 КиБ", name, path)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("%s %q: %w", name, path, err)
+	}
+	value := strings.TrimRight(string(body), "\r\n")
+	if value == "" {
+		return "", fmt.Errorf("%s %q пуст", name, path)
+	}
+	if strings.ContainsAny(value, "\r\n") {
+		return "", fmt.Errorf("%s %q должен содержать ровно одну строку", name, path)
+	}
+	return value, nil
 }
 
 // Validate rejects combinations that would fail later in a confusing way.
@@ -878,12 +952,14 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("auth.session_ttl", "12h")
 	v.SetDefault("auth.bootstrap_user", "admin")
 	v.SetDefault("auth.bootstrap_password", "")
+	v.SetDefault("auth.bootstrap_password_file", "")
 	v.SetDefault("auth.api_tokens", []string{})
 	v.SetDefault("auth.oidc.enabled", false)
 	v.SetDefault("auth.oidc.issuer", "")
 	v.SetDefault("auth.oidc.backchannel_url", "")
 	v.SetDefault("auth.oidc.client_id", "")
 	v.SetDefault("auth.oidc.client_secret", "")
+	v.SetDefault("auth.oidc.client_secret_file", "")
 	v.SetDefault("auth.oidc.redirect_url", "")
 	v.SetDefault("auth.oidc.scopes", []string{"openid", "profile", "email", "groups"})
 	v.SetDefault("auth.oidc.button_label", "")
@@ -920,12 +996,14 @@ func setDefaults(v *viper.Viper) {
 	// переменных окружения идёт по списку известных ключей, и без этой строки
 	// JHV_DATABASE_URL просто не читался бы.
 	v.SetDefault("database.url", "")
+	v.SetDefault("database.url_file", "")
 	v.SetDefault("database.postgres.url", "")
 	v.SetDefault("database.run_migrations_on_startup", true)
 	v.SetDefault("database.postgres.host", "localhost")
 	v.SetDefault("database.postgres.port", 5432)
 	v.SetDefault("database.postgres.user", "jhvirt")
 	v.SetDefault("database.postgres.password", "")
+	v.SetDefault("database.postgres.password_file", "")
 	v.SetDefault("database.postgres.database", "jhvirt")
 	// prefer, а не disable: шифрование включается само везде, где сервер его
 	// умеет, и ничего не ломает там, где не умеет. disable как умолчание

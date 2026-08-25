@@ -4,7 +4,8 @@
 # где точки в пути ключа заменены на подчёркивания. Примеры:
 #   JHV_SERVER_PORT=9443
 #   JHV_DATABASE_URL=postgres://…
-#   JHV_DATABASE_POSTGRES_PASSWORD=secret
+#   JHV_DATABASE_URL_FILE=/run/secrets/database-url
+#   JHV_DATABASE_POSTGRES_PASSWORD_FILE=/run/secrets/database-password
 #   JHV_MONITOR_REMEDIATION_DRY_RUN=false
 
 server:
@@ -43,6 +44,9 @@ auth:
   # Если пароль не задан — будет сгенерирован и один раз выведен в лог.
   bootstrap_user: "admin"
   bootstrap_password: ""
+  # Безопасная альтернатива прямому значению. Файл должен быть обычным,
+  # непустым, однострочным и недоступным группе и остальным (0600).
+  bootstrap_password_file: ""
   # Устарело. Оставлено ради уже настроенных интеграций.
   #
   # Каждый токен из этого списка даёт права администратора, не имеет срока,
@@ -67,6 +71,7 @@ auth:
     backchannel_url: ""
     client_id: ""
     client_secret: ""
+    client_secret_file: ""
     # Должен совпадать с зарегистрированным у провайдера точно, вплоть до схемы:
     # https://virt.example.org/api/v1/auth/oidc/callback
     redirect_url: ""
@@ -180,6 +185,8 @@ database:
   # Вторая удобнее, когда в пароле есть / + @ или не-ASCII: в URL их пришлось
   # бы percent-кодировать. Задана — блок postgres ниже не используется.
   url: ""
+  # DSN из защищённого файла. Нельзя задавать одновременно с url.
+  url_file: ""
 
   run_migrations_on_startup: true
   # Раздельный способ, если url пуст.
@@ -188,6 +195,7 @@ database:
     port: 5432
     user: "jhvirt"
     password: ""
+    password_file: ""
     database: "jhvirt"
     # disable|prefer|require|verify-ca|verify-full
     #

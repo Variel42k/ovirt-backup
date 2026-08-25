@@ -32,6 +32,7 @@ services:
         VERSION: ${VERSION:-dev}
     image: ovirt-backup:${VERSION:-dev}
     restart: unless-stopped
+    init: true
     # Служба пишет журнал дважды: в файл (его ротацию настраивает оператор из
     # интерфейса) и в поток, который забирает docker. У драйвера json-file по
     # умолчанию предела нет вовсе, и вторая копия растёт на системном разделе
@@ -43,7 +44,7 @@ services:
         max-size: "20m"
         max-file: "5"
     ports:
-      - "${JHV_PORT:-8080}:8080"
+      - "${JHV_BIND_ADDRESS:-0.0.0.0}:${JHV_PORT:-8080}:8080"
     environment:
       JHV_SERVER_ADDR: "0.0.0.0"
       JHV_SERVER_PORT: "8080"
@@ -66,8 +67,8 @@ services:
       # Имя хоста postgres — это имя службы ниже.
       JHV_DATABASE_POSTGRES_HOST: "postgres"
       JHV_DATABASE_POSTGRES_PORT: "5432"
-      JHV_DATABASE_POSTGRES_USER: "${POSTGRES_USER:?задайте в deploy/.env}"
-      JHV_DATABASE_POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?задайте в deploy/.env, сгенерируйте openssl rand -base64 24}"
+      JHV_DATABASE_POSTGRES_USER: "${POSTGRES_APP_USER:-ovirt_backup_app}"
+      JHV_DATABASE_POSTGRES_PASSWORD_FILE: "/app/data/database.password"
       JHV_DATABASE_POSTGRES_DATABASE: "${POSTGRES_DB:?задайте в deploy/.env}"
       # База стоит рядом, в сети контейнеров: наружу этот трафик не выходит,
       # и своего TLS у образа postgres нет. prefer означает «зашифровать,
@@ -79,6 +80,7 @@ services:
       JHV_DATABASE_POSTGRES_SSLMODE: "${JHV_DATABASE_SSLMODE:-prefer}"
       # Внешняя база вместо поднятой рядом: если задан, перекрывает всё выше.
       JHV_DATABASE_URL: "${JHV_DATABASE_URL:-}"
+      JHV_DATABASE_URL_FILE: "${JHV_DATABASE_URL_FILE:-}"
       JHV_SECRETS_KEY_FILE: "/app/data/secret.key"
       # Временные файлы — рядом с восстановлением, а не в томе с данными.
       # Восстановление без указанного каталога назначения пишет образ именно
@@ -118,7 +120,7 @@ services:
       # Отключите dry_run, когда убедитесь по журналу, что решения верные.
       JHV_MONITOR_REMEDIATION_DRY_RUN: "${JHV_REMEDIATION_DRY_RUN:-true}"
       # Пароль первого администратора; пусто — будет сгенерирован и напечатан.
-      JHV_AUTH_BOOTSTRAP_PASSWORD: "${JHV_ADMIN_PASSWORD:-}"
+      JHV_AUTH_BOOTSTRAP_PASSWORD_FILE: "${JHV_ADMIN_PASSWORD_FILE:-}"
       # Вход через внешнего провайдера (Keycloak и совместимые).
       #
       # Соответствие групп ролям — auth.oidc.role_mapping — здесь задать
@@ -132,7 +134,7 @@ services:
       JHV_AUTH_OIDC_BACKCHANNEL_URL: "${JHV_OIDC_BACKCHANNEL_URL:-}"
       JHV_AUTH_OIDC_CLIENT_ID: "${JHV_OIDC_CLIENT_ID:-}"
       # Секрет — только через .env: файл настроек лежит в репозитории.
-      JHV_AUTH_OIDC_CLIENT_SECRET: "${JHV_OIDC_CLIENT_SECRET:-}"
+      JHV_AUTH_OIDC_CLIENT_SECRET_FILE: "${JHV_OIDC_CLIENT_SECRET_FILE:-}"
       # Задаётся целиком и обязателен при включённом внешнем входе: провайдер
       # сверяет его побуквенно. Собирать его здесь из внешнего адреса нельзя —
       # вложенная подстановка расходится между версиями Compose (см. выше про
@@ -181,6 +183,9 @@ services:
       nofile:
         soft: 65536
         hard: 65536
+    pids_limit: ${JHV_PIDS_LIMIT:-512}
+    mem_limit: ${JHV_MEMORY_LIMIT:-4g}
+    cpus: "${JHV_CPU_LIMIT:-4.0}"
 
     # Ограничения контейнера.
     #
@@ -207,6 +212,9 @@ services:
     # контейнера. Обычный первый шаг после захвата процесса.
     security_opt:
       - no-new-privileges:true
+    networks:
+      - frontend
+      - database
 
     healthcheck:
       test:
@@ -229,7 +237,7 @@ services:
         condition: service_healthy
 
   postgres:
-    image: docker.io/library/postgres:17-alpine
+    image: ${POSTGRES_IMAGE:-docker.io/library/postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73}
     restart: unless-stopped
     # См. выше: у json-file без опций предела нет, а база на каждой контрольной
     # точке пишет строку.
@@ -240,10 +248,12 @@ services:
         max-file: "5"
     environment:
       POSTGRES_USER: "${POSTGRES_USER:?задайте в deploy/.env}"
-      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?задайте в deploy/.env}"
+      POSTGRES_PASSWORD_FILE: "/run/secrets/admin-password"
       POSTGRES_DB: "${POSTGRES_DB:?задайте в deploy/.env}"
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
     volumes:
       - postgres-data:/var/lib/postgresql/data
+      - postgres-secrets:/run/secrets:ro
 
     # Здесь ограничение только одно, и это не забывчивость.
     #
@@ -259,9 +269,26 @@ services:
     # запрещает получить новые.
     security_opt:
       - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+    read_only: true
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+      - /var/run/postgresql:size=16m,uid=70,gid=70,mode=775
+    pids_limit: ${POSTGRES_PIDS_LIMIT:-256}
+    mem_limit: ${POSTGRES_MEMORY_LIMIT:-2g}
+    cpus: "${POSTGRES_CPU_LIMIT:-2.0}"
+    networks:
+      - database
 
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -283,38 +310,32 @@ services:
     # ровно в тот момент, когда кто-то просто пересоздал контейнеры.
     #
     # Поднимается версия отдельным решением, после проверки на стенде.
-    image: quay.io/keycloak/keycloak:${KEYCLOAK_VERSION:-26.7}
+    image: ${KEYCLOAK_IMAGE:-quay.io/keycloak/keycloak:26.7@sha256:831330513f55695572286e521f94fcd3c7e285250ed5b848090265a33192f669}
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
-    command: ["start", "--http-enabled=true", "--hostname-strict=false"]
+    command: ["--config-file=/opt/keycloak/data/ovirt-backup/keycloak.conf", "start"]
     logging:
       driver: json-file
       options:
         max-size: "20m"
         max-file: "5"
     environment:
-      # Адрес, по которому Keycloak виден браузеру. Он же попадает в issuer
-      # выданных токенов, поэтому браузер и служба обязаны звать его одинаково:
-      # разные адреса — разные issuer, и проверка токена не сойдётся.
-      KC_HOSTNAME: "${JHV_KEYCLOAK_URL:-}"
-      KC_PROXY_HEADERS: "xforwarded"
-      KC_HEALTH_ENABLED: "true"
-      # Своя база в том же кластере: заводит её установщик, потому что
-      # docker-entrypoint-initdb.d отрабатывает только на пустом томе, а том
-      # здесь чаще всего уже существует.
-      KC_DB: postgres
-      KC_DB_URL: "jdbc:postgresql://postgres:5432/${KEYCLOAK_DB:-keycloak}"
-      KC_DB_USERNAME: "${POSTGRES_USER:-}"
-      KC_DB_PASSWORD: "${POSTGRES_PASSWORD:-}"
-      # Учётная запись администратора Keycloak создаётся один раз, при первом
-      # запуске с пустой базой. Установщик печатает пароль и стирает его из
-      # .env — как и пароль администратора самой службы.
-      KC_BOOTSTRAP_ADMIN_USERNAME: "${KEYCLOAK_ADMIN_USER:-admin}"
-      KC_BOOTSTRAP_ADMIN_PASSWORD: "${KEYCLOAK_ADMIN_PASSWORD:-}"
       TZ: "${TZ:-UTC}"
+    volumes:
+      - keycloak-data:/opt/keycloak/data
     ports:
-      - "${KEYCLOAK_PORT:-8081}:8080"
+      - "${KEYCLOAK_BIND_ADDRESS:-127.0.0.1}:${KEYCLOAK_PORT:-8081}:${KEYCLOAK_CONTAINER_PORT:-8080}"
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    pids_limit: ${KEYCLOAK_PIDS_LIMIT:-512}
+    mem_limit: ${KEYCLOAK_MEMORY_LIMIT:-2g}
+    cpus: "${KEYCLOAK_CPU_LIMIT:-2.0}"
+    networks:
+      - frontend
+      - database
     depends_on:
       postgres:
         condition: service_healthy
@@ -322,3 +343,10 @@ services:
 volumes:
   jhvirt-data:
   postgres-data:
+  postgres-secrets:
+  keycloak-data:
+
+networks:
+  frontend:
+  database:
+    internal: true

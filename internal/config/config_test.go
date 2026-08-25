@@ -1,6 +1,9 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -65,6 +68,71 @@ func TestDatabaseURLAccepted(t *testing.T) {
 				t.Fatalf("DSN = %q, ожидалась исходная строка", got)
 			}
 		})
+	}
+}
+
+func TestProtectedFilesResolveSecrets(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, value string) string {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(value+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	t.Setenv("JHV_DATABASE_POSTGRES_HOST", "postgres")
+	t.Setenv("JHV_DATABASE_POSTGRES_USER", "ovirt_backup_app")
+	t.Setenv("JHV_DATABASE_POSTGRES_PASSWORD_FILE", write("database-password", "db-secret"))
+	t.Setenv("JHV_AUTH_BOOTSTRAP_PASSWORD_FILE", write("bootstrap-password", "admin-secret"))
+	t.Setenv("JHV_AUTH_OIDC_CLIENT_SECRET_FILE", write("oidc-secret", "oidc-value"))
+
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("загрузка: %v", err)
+	}
+	if cfg.Database.Postgres.Password != "db-secret" ||
+		cfg.Auth.BootstrapPassword != "admin-secret" || cfg.Auth.OIDC.ClientSecret != "oidc-value" {
+		t.Fatalf("секреты прочитаны неверно: db=%q admin=%q oidc=%q",
+			cfg.Database.Postgres.Password, cfg.Auth.BootstrapPassword, cfg.Auth.OIDC.ClientSecret)
+	}
+}
+
+func TestDatabaseURLFileAndDirectValueConflict(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "database-url")
+	if err := os.WriteFile(path, []byte("host=postgres user=u dbname=jhvirt\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Chmod(path, 0o600)
+	t.Setenv("JHV_DATABASE_URL", "postgres://u@postgres/jhvirt")
+	t.Setenv("JHV_DATABASE_URL_FILE", path)
+
+	_, err := Load("")
+	if err == nil || !strings.Contains(err.Error(), "одновременно") {
+		t.Fatalf("конфликт прямого значения и файла не обнаружен: %v", err)
+	}
+}
+
+func TestProtectedFileRejectsBroadPermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not expose Unix permission bits")
+	}
+	path := filepath.Join(t.TempDir(), "database-password")
+	if err := os.WriteFile(path, []byte("secret\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("JHV_DATABASE_POSTGRES_PASSWORD_FILE", path)
+
+	_, err := Load("")
+	if err == nil || !strings.Contains(err.Error(), "0600") {
+		t.Fatalf("слишком широкие права приняты: %v", err)
 	}
 }
 

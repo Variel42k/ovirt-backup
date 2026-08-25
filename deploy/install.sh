@@ -2129,12 +2129,20 @@ prepare_oidc() {
     if [ -t 0 ] && [ "$OIDC_MODE" != none ]; then
         say ""
         say "Группы допуска. Кто не попал ни в одну — в систему не допускается."
+        # if, а не «[ -n ... ] && VAR=...». Разница не косметическая: при
+        # пустом ответе такая строка возвращает 1, и если она стоит последней в
+        # функции, её статус становится статусом функции. Со `set -e` в начале
+        # скрипта это молчаливый выход посреди установки — ровно на самом
+        # частом ответе, когда все три умолчания принимают Enter'ом.
         printf 'Группа администраторов [%s]: ' "$GROUP_ADMIN"
-        read -r ANSWER || ANSWER=""; [ -n "$ANSWER" ] && GROUP_ADMIN="$ANSWER"
+        read -r ANSWER || ANSWER=""
+        if [ -n "$ANSWER" ]; then GROUP_ADMIN="$ANSWER"; fi
         printf 'Группа операторов [%s]: ' "$GROUP_OPERATOR"
-        read -r ANSWER || ANSWER=""; [ -n "$ANSWER" ] && GROUP_OPERATOR="$ANSWER"
+        read -r ANSWER || ANSWER=""
+        if [ -n "$ANSWER" ]; then GROUP_OPERATOR="$ANSWER"; fi
         printf 'Группа наблюдателей [%s]: ' "$GROUP_VIEWER"
-        read -r ANSWER || ANSWER=""; [ -n "$ANSWER" ] && GROUP_VIEWER="$ANSWER"
+        read -r ANSWER || ANSWER=""
+        if [ -n "$ANSWER" ]; then GROUP_VIEWER="$ANSWER"; fi
     fi
 }
 

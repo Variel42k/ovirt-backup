@@ -84,7 +84,7 @@ TLS_DAYS=825; TLS_MATERIAL_DIR=""; TLS_RESTART_REQUIRED=0; READY_SCHEME=http
 # Внешний вход: none — только пароль, keycloak — поднять рядом, external —
 # подключить существующего провайдера.
 OIDC_MODE=""; OIDC_ISSUER=""; OIDC_CLIENT_ID=""; OIDC_CLIENT_SECRET_FILE=""
-KEYCLOAK_PORT=8081; KEYCLOAK_REALM="jhvirt"; KEYCLOAK_URL=""
+KEYCLOAK_PORT=8081; KEYCLOAK_REALM="jhvirt"; KEYCLOAK_URL=""; KEYCLOAK_API_URL=""
 KEYCLOAK_ADMIN_USER="admin"; KEYCLOAK_ADMIN_PASSWORD=""; OIDC_CLIENT_SECRET=""
 # Имена групп допуска. Пользователь, не попавший ни в одну, в систему не
 # допускается: default_role остаётся пустым.
@@ -2102,6 +2102,8 @@ prepare_oidc() {
             fi
         fi
         [ -n "$OIDC_ISSUER" ] || die "--oidc external требует --oidc-issuer"
+        # Чужой провайдер стоит не здесь: петлевой адрес к нему не ведёт.
+        KEYCLOAK_API_URL="$KEYCLOAK_URL"
         [ -n "$OIDC_CLIENT_ID" ] || OIDC_CLIENT_ID="jhvirt"
         if [ -n "$OIDC_CLIENT_SECRET_FILE" ]; then
             [ -f "$OIDC_CLIENT_SECRET_FILE" ] || die "нет файла с секретом: $OIDC_CLIENT_SECRET_FILE"
@@ -2137,6 +2139,16 @@ prepare_oidc() {
             esac
         fi
         validate_port "$KEYCLOAK_PORT" || die "--keycloak-port: нужен номер от 1 до 65535"
+        # Сам установщик ходит к Keycloak на петлевой адрес, а не на внешний.
+        #
+        # Контейнер поднимается здесь же, и обращение с этой машины на её
+        # собственный внешний IP идёт через цепочку INPUT firewall. Порт службы
+        # обычно открыт, а порт Keycloak — нет, и настройка упиралась в
+        # «Keycloak не ответил за три минуты» при живом контейнере. Готовность
+        # самой службы проверяется по 127.0.0.1 ровно по этой причине.
+        #
+        # Внешний адрес остаётся тем, чем и был: issuer токенов и KC_HOSTNAME.
+        KEYCLOAK_API_URL="http://127.0.0.1:$KEYCLOAK_PORT"
         OIDC_ISSUER="$KEYCLOAK_URL/realms/$KEYCLOAK_REALM"
         OIDC_CLIENT_ID="jhvirt"
         OIDC_CLIENT_SECRET="$(gen_secret 24)"
@@ -2240,14 +2252,14 @@ keycloak_token() {
     curl -sS -k -m 20 --fail \
         -d "grant_type=password" -d "client_id=admin-cli" \
         -d "username=$KEYCLOAK_ADMIN_USER" --data-urlencode "password=$KEYCLOAK_ADMIN_PASSWORD" \
-        "$KEYCLOAK_URL/realms/master/protocol/openid-connect/token" 2>/dev/null |
+        "$KEYCLOAK_API_URL/realms/master/protocol/openid-connect/token" 2>/dev/null |
         sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p'
 }
 
 keycloak_post() {
     curl -sS -k -m 30 -o /dev/null -w '%{http_code}' \
         -H "Authorization: Bearer $KC_TOKEN" -H 'Content-Type: application/json' \
-        -X POST -d "$2" "$KEYCLOAK_URL/admin/realms$1" 2>/dev/null
+        -X POST -d "$2" "$KEYCLOAK_API_URL/admin/realms$1" 2>/dev/null
 }
 
 # Первый запуск Keycloak с пустой базой — это миграция схемы, и три минуты там
@@ -2257,7 +2269,7 @@ keycloak_wait() {
     while [ "$KC_TRY" -lt 90 ]; do
         # -k нужен, когда --keycloak-url указывает на прокси с
         # самоподписанным сертификатом: без него ожидание не кончится ничем.
-        if curl -sS -k -m 5 -o /dev/null "$KEYCLOAK_URL/realms/master" 2>/dev/null; then
+        if curl -sS -k -m 5 -o /dev/null "$KEYCLOAK_API_URL/realms/master" 2>/dev/null; then
             return 0
         fi
         KC_TRY=$((KC_TRY+1))
@@ -2271,7 +2283,7 @@ keycloak_wait() {
 # Не требует ни токена, ни прав: адрес /realms/<имя> отвечает 200 всякому, у
 # кого realm существует.
 keycloak_realm_exists() {
-    KC_REALM_URL="$KEYCLOAK_URL/realms/$KEYCLOAK_REALM"
+    KC_REALM_URL="$KEYCLOAK_API_URL/realms/$KEYCLOAK_REALM"
     KC_REALM_CODE="$(curl -sS -k -m 5 -o /dev/null -w '%{http_code}' "$KC_REALM_URL" 2>/dev/null)"
     [ "$KC_REALM_CODE" = 200 ]
 }
@@ -2781,9 +2793,18 @@ PostgreSQL хранит пароль внутри тома и новый не п
 
     if [ "$OIDC_MODE" = keycloak ]; then
         step "настройка Keycloak"
-        keycloak_wait ||
-            die "Keycloak не ответил за три минуты по адресу $KEYCLOAK_URL.
-Журнал: cd $WORK && $RUN logs keycloak"
+        if ! keycloak_wait; then
+            say ""
+            # shellcheck disable=SC2086
+            (cd "$WORK" && $RUN logs --tail 40 keycloak 2>/dev/null) || true
+            die "Keycloak не ответил за три минуты по адресу $KEYCLOAK_API_URL.
+Последние строки его журнала выше.
+
+Если журнал выглядит нормально, а контейнер работает (docker ps), проверьте
+проброс порта и firewall на этой машине:
+  curl -sS -o /dev/null -w '%{http_code}' $KEYCLOAK_API_URL/realms/master
+  ss -ltnp | grep $KEYCLOAK_PORT"
+        fi
         keycloak_bootstrap
         say "    realm $KEYCLOAK_REALM, клиент $OIDC_CLIENT_ID и группы созданы"
         # Пароль администратора Keycloak из файла стираем — как и пароль

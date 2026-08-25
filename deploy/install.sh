@@ -2113,9 +2113,28 @@ prepare_oidc() {
         # Keycloak. Именно он попадёт в issuer, поэтому браузер и служба будут
         # звать провайдера одинаково.
         if [ -z "$KEYCLOAK_URL" ]; then
-            KC_SCHEME="${URL%%://*}"
+            # Схема здесь всегда http, даже когда у самой службы включён свой
+            # TLS. Причина простая: контейнер Keycloak из docker-compose.yml
+            # поднимается командой `start --http-enabled=true`, сертификата ему
+            # никто не даёт — HTTPS он не слушает вовсе.
+            #
+            # Раньше схема наследовалась от внешнего адреса службы. С
+            # включённым TLS получался https://host:8081, curl упирался в
+            # TLS-рукопожатие с HTTP-сервером, и установка молча висела на
+            # «настройка Keycloak» все девяносто попыток. Хуже того, тот же
+            # адрес уходил в KC_HOSTNAME, то есть в issuer токенов, — вход не
+            # заработал бы и после успешной настройки.
             KC_HOSTPORT="${URL#*://}"; KC_HOSTPORT="${KC_HOSTPORT%%/*}"
-            KEYCLOAK_URL="$KC_SCHEME://${KC_HOSTPORT%%:*}:$KEYCLOAK_PORT"
+            KEYCLOAK_URL="http://${KC_HOSTPORT%%:*}:$KEYCLOAK_PORT"
+            case "$URL" in
+                https://*)
+                    say "    Keycloak поднимается по HTTP на порту $KEYCLOAK_PORT: своего"
+                    say "    сертификата у него здесь нет, пароли пользователей пойдут по"
+                    say "    сети открытым текстом. Для боя поставьте его за тот же"
+                    say "    reverse proxy, что и службу, и укажите адрес прокси:"
+                    say "      $SELF --keycloak-url https://keycloak.example.org"
+                    ;;
+            esac
         fi
         validate_port "$KEYCLOAK_PORT" || die "--keycloak-port: нужен номер от 1 до 65535"
         OIDC_ISSUER="$KEYCLOAK_URL/realms/$KEYCLOAK_REALM"
@@ -2181,6 +2200,19 @@ write_oidc_env() {
     OIDC_ENV_FILE="$1"
     [ "$OIDC_MODE" = none ] && return 0
 
+    # Уже выданные секреты переиспользуются, а не выпускаются заново.
+    #
+    # Keycloak заводит учётную запись администратора один раз — при первом
+    # старте с пустой базой, — и клиента с секретом тоже один раз. Свежий
+    # пароль в .env их не меняет: повторный запуск установщика упирался в
+    # «Keycloak не принял пароль администратора», а если бы прошёл, то развёл
+    # бы секрет клиента в .env и в самом Keycloak, и вход перестал бы работать
+    # молча.
+    OIDC_PREV="$(env_file_value "$OIDC_ENV_FILE" JHV_OIDC_CLIENT_SECRET)"
+    if [ -n "$OIDC_PREV" ]; then OIDC_CLIENT_SECRET="$OIDC_PREV"; fi
+    OIDC_PREV="$(env_file_value "$OIDC_ENV_FILE" KEYCLOAK_ADMIN_PASSWORD)"
+    if [ -n "$OIDC_PREV" ]; then KEYCLOAK_ADMIN_PASSWORD="$OIDC_PREV"; fi
+
     write_oidc_config "$WORK/$CONFIG_NAME"
 
     set_plain_env JHV_CONFIG_FILE "./$CONFIG_NAME" "$OIDC_ENV_FILE"
@@ -2205,7 +2237,7 @@ write_oidc_env() {
 # --- Keycloak ---------------------------------------------------------------
 
 keycloak_token() {
-    curl -sS -m 20 --fail \
+    curl -sS -k -m 20 --fail \
         -d "grant_type=password" -d "client_id=admin-cli" \
         -d "username=$KEYCLOAK_ADMIN_USER" --data-urlencode "password=$KEYCLOAK_ADMIN_PASSWORD" \
         "$KEYCLOAK_URL/realms/master/protocol/openid-connect/token" 2>/dev/null |
@@ -2213,7 +2245,7 @@ keycloak_token() {
 }
 
 keycloak_post() {
-    curl -sS -m 30 -o /dev/null -w '%{http_code}' \
+    curl -sS -k -m 30 -o /dev/null -w '%{http_code}' \
         -H "Authorization: Bearer $KC_TOKEN" -H 'Content-Type: application/json' \
         -X POST -d "$2" "$KEYCLOAK_URL/admin/realms$1" 2>/dev/null
 }
@@ -2223,7 +2255,9 @@ keycloak_post() {
 keycloak_wait() {
     KC_TRY=0
     while [ "$KC_TRY" -lt 90 ]; do
-        if curl -sS -m 5 -o /dev/null "$KEYCLOAK_URL/realms/master" 2>/dev/null; then
+        # -k нужен, когда --keycloak-url указывает на прокси с
+        # самоподписанным сертификатом: без него ожидание не кончится ничем.
+        if curl -sS -k -m 5 -o /dev/null "$KEYCLOAK_URL/realms/master" 2>/dev/null; then
             return 0
         fi
         KC_TRY=$((KC_TRY+1))
@@ -2232,11 +2266,40 @@ keycloak_wait() {
     return 1
 }
 
+# keycloak_realm_exists — публичная проверка, настроен ли realm.
+#
+# Не требует ни токена, ни прав: адрес /realms/<имя> отвечает 200 всякому, у
+# кого realm существует.
+keycloak_realm_exists() {
+    KC_REALM_URL="$KEYCLOAK_URL/realms/$KEYCLOAK_REALM"
+    KC_REALM_CODE="$(curl -sS -k -m 5 -o /dev/null -w '%{http_code}' "$KC_REALM_URL" 2>/dev/null)"
+    [ "$KC_REALM_CODE" = 200 ]
+}
+
 # Заводит realm, группы и клиента. Повторный запуск не ломается: уже
 # существующее Keycloak отвергает кодом 409, и это не ошибка установки.
 keycloak_bootstrap() {
+    # Пароль администратора стирается из .env сразу после успешной настройки:
+    # учётная запись заведена, дальше он там лишний. Поэтому повторный запуск
+    # установщика приходит сюда без пароля — и это не повод останавливать
+    # установку, если настраивать уже нечего.
+    if [ -z "$KEYCLOAK_ADMIN_PASSWORD" ] && keycloak_realm_exists; then
+        say "    realm $KEYCLOAK_REALM уже настроен, повторная настройка пропущена"
+        return 0
+    fi
+
     KC_TOKEN="$(keycloak_token)"
-    [ -n "$KC_TOKEN" ] || die "Keycloak не принял пароль администратора — проверьте $KEYCLOAK_URL"
+    [ -n "$KC_TOKEN" ] || die "Keycloak не принял пароль администратора.
+
+Так бывает, когда Keycloak уже поднимался раньше: учётную запись
+администратора он создаёт один раз, при первом старте с пустой базой, и
+новый пароль в .env её не меняет.
+
+Либо впишите прежний пароль в KEYCLOAK_ADMIN_PASSWORD в $WORK/.env,
+либо пересоздайте базу Keycloak:
+  cd $WORK && $RUN stop keycloak
+  $RUN exec -T postgres psql -U \"\$POSTGRES_USER\" -c 'DROP DATABASE keycloak'
+  $SELF"
 
     KC_CODE="$(keycloak_post "" "{\"realm\":\"$KEYCLOAK_REALM\",\"enabled\":true}")"
     case "$KC_CODE" in

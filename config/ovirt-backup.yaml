@@ -61,6 +61,10 @@ auth:
     # Адрес провайдера; остальные точки берутся из его discovery-документа
     # <issuer>/.well-known/openid-configuration.
     issuer: ""
+    # Необязательный внутренний origin для server-to-server запросов. Публичный
+    # issuer и адреса перенаправления не меняются. Для Keycloak в том же
+    # Docker Compose: http://keycloak:8080
+    backchannel_url: ""
     client_id: ""
     client_secret: ""
     # Должен совпадать с зарегистрированным у провайдера точно, вплоть до схемы:

@@ -63,7 +63,7 @@ async function submit() {
           <q-card-section>
             <div class="text-h6">ovirt-backup</div>
             <div class="text-caption text-grey-7">
-              Управление кластерами и одиночными серверами oVirt, РЕД Виртуализации и совместимых
+              Резервное копирование и восстановление виртуальных машин oVirt, РЕД Виртуализации и KVM
             </div>
           </q-card-section>
 

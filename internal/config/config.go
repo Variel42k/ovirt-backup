@@ -80,9 +80,14 @@ type AuthConfig struct {
 type OIDCConfig struct {
 	Enabled bool `mapstructure:"enabled"`
 	// Issuer — адрес провайдера; остальные точки берутся из его discovery.
-	Issuer       string `mapstructure:"issuer"`
-	ClientID     string `mapstructure:"client_id"`
-	ClientSecret string `mapstructure:"client_secret"`
+	Issuer string `mapstructure:"issuer"`
+	// BackchannelURL — необязательный внутренний origin для серверных запросов
+	// discovery, token, JWKS и userinfo. Публичные адреса и issuer токенов при
+	// этом не меняются. Это нужно, когда провайдер доступен браузеру по адресу
+	// хоста, а приложению в Compose — по имени соседнего сервиса.
+	BackchannelURL string `mapstructure:"backchannel_url"`
+	ClientID       string `mapstructure:"client_id"`
+	ClientSecret   string `mapstructure:"client_secret"`
 	// RedirectURL должен совпадать с зарегистрированным у провайдера точно,
 	// вплоть до схемы и завершающего пути.
 	RedirectURL string   `mapstructure:"redirect_url"`
@@ -739,6 +744,13 @@ func (c *Config) Validate() error {
 		if c.Auth.OIDC.DefaultRole != "" && !validRole(c.Auth.OIDC.DefaultRole) {
 			return fmt.Errorf("auth.oidc.default_role: неизвестная роль %q", c.Auth.OIDC.DefaultRole)
 		}
+		if raw := strings.TrimSpace(c.Auth.OIDC.BackchannelURL); raw != "" {
+			u, err := url.Parse(raw)
+			if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" ||
+				u.User != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+				return fmt.Errorf("auth.oidc.backchannel_url должен быть HTTP(S)-адресом без пути, параметров и учётных данных")
+			}
+		}
 	}
 	if c.Notifications.Enabled {
 		switch c.Notifications.MinSeverity {
@@ -869,6 +881,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("auth.api_tokens", []string{})
 	v.SetDefault("auth.oidc.enabled", false)
 	v.SetDefault("auth.oidc.issuer", "")
+	v.SetDefault("auth.oidc.backchannel_url", "")
 	v.SetDefault("auth.oidc.client_id", "")
 	v.SetDefault("auth.oidc.client_secret", "")
 	v.SetDefault("auth.oidc.redirect_url", "")

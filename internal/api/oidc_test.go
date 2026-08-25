@@ -33,8 +33,9 @@ import (
 // nonce с токеном, принимается ли подпись. Провайдер поэтому и поддельный, но
 // подпись настоящая — иначе проверка по JWKS ничего не значила бы.
 type fakeProvider struct {
-	server *httptest.Server
-	key    *rsa.PrivateKey
+	server       *httptest.Server
+	publicIssuer string
+	key          *rsa.PrivateKey
 
 	mu    sync.Mutex
 	codes map[string]fakeCode
@@ -58,12 +59,13 @@ func newFakeProvider(t *testing.T) *fakeProvider {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
+		issuer := provider.issuerURL()
 		writeJSON(w, http.StatusOK, map[string]any{
-			"issuer":                                provider.server.URL,
-			"authorization_endpoint":                provider.server.URL + "/authorize",
-			"token_endpoint":                        provider.server.URL + "/token",
-			"jwks_uri":                              provider.server.URL + "/keys",
-			"end_session_endpoint":                  provider.server.URL + "/logout",
+			"issuer":                                issuer,
+			"authorization_endpoint":                issuer + "/authorize",
+			"token_endpoint":                        issuer + "/token",
+			"jwks_uri":                              issuer + "/keys",
+			"end_session_endpoint":                  issuer + "/logout",
 			"id_token_signing_alg_values_supported": []string{"RS256"},
 		})
 	})
@@ -82,6 +84,13 @@ func newFakeProvider(t *testing.T) *fakeProvider {
 	provider.server = httptest.NewServer(mux)
 	t.Cleanup(provider.server.Close)
 	return provider
+}
+
+func (p *fakeProvider) issuerURL() string {
+	if p.publicIssuer != "" {
+		return p.publicIssuer
+	}
+	return p.server.URL
 }
 
 func (p *fakeProvider) handleToken(w http.ResponseWriter, r *http.Request) {
@@ -119,7 +128,7 @@ func (p *fakeProvider) issue(t *testing.T, challenge string, claims map[string]a
 	t.Helper()
 
 	full := map[string]any{
-		"iss": p.server.URL,
+		"iss": p.issuerURL(),
 		"aud": oidcTestClientID,
 		"exp": time.Now().Add(time.Hour).Unix(),
 		"iat": time.Now().Unix(),
@@ -329,6 +338,47 @@ func TestOIDCLoginIssuesSessionAndCreatesAccount(t *testing.T) {
 	defer replay.Body.Close()
 	if location := replay.Header.Get("Location"); !strings.HasPrefix(location, loginPagePath) {
 		t.Errorf("повтор возврата принят: перенаправление на %q", location)
+	}
+}
+
+// В Compose внешний адрес Keycloak нужен браузеру и остаётся issuer токена,
+// но из контейнера приложения он может быть недоступен через порт хоста.
+// Backchannel обязан провести discovery, обмен кода и чтение JWKS через имя
+// сервиса, не подменяя публичный issuer.
+func TestOIDCBackchannelKeepsPublicIssuer(t *testing.T) {
+	st := testStore(t)
+	provider := newFakeProvider(t)
+	provider.publicIssuer = "http://keycloak.public.invalid"
+
+	cfg := oidcTestServerConfig(provider.publicIssuer)
+	cfg.Auth.OIDC.BackchannelURL = provider.server.URL
+	app, client := oidcTestApp(t, st, cfg)
+
+	params := oidcBegin(t, app, client, "/")
+	code := provider.issue(t, params.Get("code_challenge"), map[string]any{
+		"sub":                "backchannel-user",
+		"nonce":              params.Get("nonce"),
+		"preferred_username": "backchannel",
+		"groups":             []string{"virt-admins"},
+	})
+	if location := oidcReturn(t, app, client, code, params.Get("state")); location != "/" {
+		t.Fatalf("после входа вернули на %q", location)
+	}
+	if me := oidcWhoAmI(t, app, client); me["username"] != "backchannel" {
+		t.Fatalf("вход через backchannel создал пользователя %q", me["username"])
+	}
+
+	logout, err := client.Post(app.URL+"/api/v1/auth/logout", "application/json", nil)
+	if err != nil {
+		t.Fatalf("выход: %v", err)
+	}
+	defer logout.Body.Close()
+	var body map[string]string
+	if err := json.NewDecoder(logout.Body).Decode(&body); err != nil {
+		t.Fatalf("ответ выхода: %v", err)
+	}
+	if !strings.HasPrefix(body["logout_url"], provider.publicIssuer+"/logout") {
+		t.Fatalf("браузер получил внутренний адрес вместо публичного: %q", body["logout_url"])
 	}
 }
 

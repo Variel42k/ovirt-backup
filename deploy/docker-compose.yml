@@ -127,6 +127,9 @@ services:
       # настроек (см. JHV_CONFIG_FILE ниже).
       JHV_AUTH_OIDC_ENABLED: "${JHV_OIDC_ENABLED:-false}"
       JHV_AUTH_OIDC_ISSUER: "${JHV_OIDC_ISSUER:-}"
+      # Внутренний origin нужен встроенному Keycloak: публичный issuer ведёт
+      # браузер на порт хоста, а приложение ходит к соседнему контейнеру.
+      JHV_AUTH_OIDC_BACKCHANNEL_URL: "${JHV_OIDC_BACKCHANNEL_URL:-}"
       JHV_AUTH_OIDC_CLIENT_ID: "${JHV_OIDC_CLIENT_ID:-}"
       # Секрет — только через .env: файл настроек лежит в репозитории.
       JHV_AUTH_OIDC_CLIENT_SECRET: "${JHV_OIDC_CLIENT_SECRET:-}"

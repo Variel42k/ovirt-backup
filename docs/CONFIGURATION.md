@@ -127,6 +127,8 @@ docker-compose.yml            описание контейнеров и при�
 | `JHV_RESTORE_DIR` | host-каталог, смонтированный как `/restores` |
 | `JHV_DATABASE_SSLMODE` | режим TLS до PostgreSQL; по умолчанию `prefer` |
 | `JHV_LOG_FILE` | файл журнала внутри контейнера; по умолчанию `/app/data/logs/jhvirt.log` |
+| `JHV_OIDC_ISSUER` | публичный issuer OIDC, доступный браузеру |
+| `JHV_OIDC_BACKCHANNEL_URL` | внутренний origin OIDC для server-to-server запросов |
 | `KEYCLOAK_VERSION` | версия образа Keycloak; по умолчанию закреплённая |
 | `TZ` | стартовая системная IANA-зона; web-override из PostgreSQL имеет приоритет |
 
@@ -597,6 +599,7 @@ auth:
   oidc:
     enabled: true
     issuer: "https://keycloak.example.org/realms/infra"
+    backchannel_url: "http://keycloak:8080"
     client_id: "jhvirt"
     client_secret: "..."
     redirect_url: "https://virt.example.org/api/v1/auth/oidc/callback"
@@ -616,6 +619,16 @@ auth:
 `redirect_url` должен совпадать с зарегистрированным у провайдера точно, вплоть
 до схемы и завершающего пути, и указывать на `/api/v1/auth/oidc/callback` того
 адреса, по которому до службы доходит браузер.
+
+`backchannel_url` нужен только при раздельной сетевой видимости провайдера.
+Это внутренний **origin без пути**, например `http://keycloak:8080`. Discovery,
+обмен кода, JWKS и userinfo идут через него, но их публичные URL, redirect и
+проверяемый `issuer` не переписываются. Для внешнего провайдера, который
+одинаково доступен браузеру и приложению, оставьте поле пустым.
+
+Не заменяйте `issuer` на `http://keycloak:8080/realms/...`: браузер не разрешит
+имя Compose-сервиса, а `iss` в токене не совпадёт с ожидаемым публичным
+адресом.
 
 ### Как назначается роль
 
@@ -729,6 +742,11 @@ Required Action «Configure OTP» (FreeOTP, Google Authenticator и совмес
 рядом»). Контейнер стартует командой `start --http-enabled=true`, сертификата
 ему не даётся, и **HTTPS он не слушает** — адрес получается
 `http://<хост>:8081`, и он же попадает в issuer выданных токенов.
+
+При этом приложение не выходит обратно на опубликованный порт хоста. Оно
+использует `JHV_OIDC_BACKCHANNEL_URL=http://keycloak:8080`, то есть DNS-имя
+сервиса во внутренней сети Compose. Это устраняет зависимость входа от
+hairpin NAT и правил firewall для порта `8081` на самом сервере.
 
 Это верно и тогда, когда у самой службы включён собственный TLS: схемы у них
 разные, и так и задумано. Раньше адрес Keycloak наследовал схему службы, и при

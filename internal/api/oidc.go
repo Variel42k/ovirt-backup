@@ -50,10 +50,11 @@ const (
 type oidcClient struct {
 	cfg config.OIDCConfig
 
-	mu       sync.Mutex
-	provider *oidc.Provider
-	oauth    *oauth2.Config
-	verifier *oidc.IDTokenVerifier
+	mu         sync.Mutex
+	provider   *oidc.Provider
+	oauth      *oauth2.Config
+	verifier   *oidc.IDTokenVerifier
+	httpClient *http.Client
 	// endSession — адрес выхода у провайдера. Библиотека его не разбирает,
 	// поэтому читаем из того же discovery-документа сами.
 	endSession string
@@ -61,6 +62,58 @@ type oidcClient struct {
 
 func newOIDCClient(cfg config.OIDCConfig) *oidcClient {
 	return &oidcClient{cfg: cfg}
+}
+
+// oidcBackchannelTransport отправляет серверные запросы по внутреннему origin,
+// оставляя URL из discovery публичными. Поэтому браузер видит внешний адрес,
+// а issuer в токене по-прежнему проверяется без послаблений.
+type oidcBackchannelTransport struct {
+	base        http.RoundTripper
+	issuer      *url.URL
+	backchannel *url.URL
+}
+
+func (t *oidcBackchannelTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.URL.Scheme != t.issuer.Scheme || !strings.EqualFold(req.URL.Host, t.issuer.Host) {
+		return t.base.RoundTrip(req)
+	}
+
+	clone := req.Clone(req.Context())
+	target := *req.URL
+	target.Scheme = t.backchannel.Scheme
+	target.Host = t.backchannel.Host
+	clone.URL = &target
+	clone.Host = ""
+	return t.base.RoundTrip(clone)
+}
+
+func oidcBackchannelClient(issuer, backchannel string) (*http.Client, error) {
+	issuerURL, err := url.Parse(issuer)
+	if err != nil || issuerURL.Scheme == "" || issuerURL.Host == "" {
+		return nil, fmt.Errorf("неверный issuer %q", issuer)
+	}
+	backchannelURL, err := url.Parse(backchannel)
+	if err != nil || backchannelURL.Scheme == "" || backchannelURL.Host == "" {
+		return nil, fmt.Errorf("неверный внутренний адрес провайдера %q", backchannel)
+	}
+	return &http.Client{
+		Transport: &oidcBackchannelTransport{
+			base:        http.DefaultTransport,
+			issuer:      issuerURL,
+			backchannel: backchannelURL,
+		},
+		Timeout: oidcExchangeTimeout,
+	}, nil
+}
+
+func (c *oidcClient) requestContext(ctx context.Context) context.Context {
+	c.mu.Lock()
+	client := c.httpClient
+	c.mu.Unlock()
+	if client == nil {
+		return ctx
+	}
+	return oidc.ClientContext(ctx, client)
 }
 
 // connect выполняет discovery один раз и запоминает результат.
@@ -76,6 +129,14 @@ func (c *oidcClient) connect(ctx context.Context) (*oauth2.Config, *oidc.IDToken
 	defer cancel()
 
 	issuer := strings.TrimSuffix(strings.TrimSpace(c.cfg.Issuer), "/")
+	if backchannel := strings.TrimRight(strings.TrimSpace(c.cfg.BackchannelURL), "/"); backchannel != "" {
+		client, err := oidcBackchannelClient(issuer, backchannel)
+		if err != nil {
+			return nil, nil, err
+		}
+		c.httpClient = client
+		discovery = oidc.ClientContext(discovery, client)
+	}
 	provider, err := oidc.NewProvider(discovery, issuer)
 	if err != nil {
 		return nil, nil, fmt.Errorf("настройки провайдера %s недоступны: %w", issuer, err)
@@ -292,6 +353,7 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), oidcExchangeTimeout)
 	defer cancel()
+	ctx = s.oidc.requestContext(ctx)
 
 	token, err := oauthCfg.Exchange(ctx, code, oauth2.VerifierOption(login.verifier))
 	if err != nil {

@@ -490,6 +490,63 @@ sudo sh /tmp/ovirt-backup-*.run --mode systemd \
 `external_url` задан как HTTP, вход будет работать, но cookie уйдёт без флага
 `Secure` и сможет передаваться по открытому каналу.
 
+### Keycloak: `провайдер недоступен`
+
+Сначала отделите внешний доступ, realm и связь внутри Compose:
+
+```bash
+# Из рабочего Compose-каталога.
+grep -E '^(COMPOSE_PROFILES|JHV_OIDC_ISSUER|JHV_OIDC_BACKCHANNEL_URL|JHV_KEYCLOAK_URL)=' .env
+docker compose ps
+
+# Keycloak доступен внутри сети Compose, а прикладной realm существует.
+docker compose exec -T ovirt-backup \
+  wget -S -O /dev/null \
+  http://keycloak:8080/realms/jhvirt/.well-known/openid-configuration
+
+# Браузерный адрес realm доступен снаружи.
+curl -i http://10.249.251.36:8081/realms/jhvirt/.well-known/openid-configuration
+
+# Приложение смогло выполнить discovery: Location должен быть абсолютным
+# адресом Keycloak, а не /login?oidc_error=...
+curl -k -sS -D - -o /dev/null \
+  https://127.0.0.1:8080/api/v1/auth/oidc/start | grep -i '^location:'
+```
+
+Для встроенного Keycloak значения должны иметь такой смысл:
+
+```dotenv
+JHV_OIDC_ISSUER=http://10.249.251.36:8081/realms/jhvirt
+JHV_OIDC_BACKCHANNEL_URL=http://keycloak:8080
+```
+
+`issuer` нельзя менять на имя `keycloak`: оно существует только внутри
+Compose, недоступно браузеру и не совпадёт с `iss` токена. Если
+`backchannel_url` пуст или равен адресу хоста, контейнер может упереться в
+hairpin NAT/firewall и через 15 секунд вернуть `провайдер недоступен`.
+Обновите проект и повторно запустите установщик: существующий режим OIDC и
+секрет клиента сохраняются, а внутренний адрес добавляется автоматически.
+
+Если discovery отвечает `404` и JSON `Realm does not exist`, контейнер
+Keycloak запущен, но realm `jhvirt` отсутствует. Если известен прежний пароль
+администратора Keycloak, временно укажите его в `KEYCLOAK_ADMIN_PASSWORD` в
+`.env` с правами `0600` и повторите установку. Если пароль потерян и в
+Keycloak ещё нет нужных пользователей, федераций и настроек, пересоздайте
+только его базу:
+
+```bash
+docker compose stop keycloak
+docker compose exec -T postgres psql -U jhvirt -d postgres \
+  -c 'DROP DATABASE IF EXISTS keycloak WITH (FORCE)'
+
+# Затем повторите запуск того же install.sh или .run с прежними --mode,
+# --url и --port. База, realm, клиент и группы будут созданы заново.
+```
+
+База приложения `jhvirt`, задания и копии этой командой не удаляются. База
+`keycloak` содержит пользователей, федерации и второй фактор, поэтому удалять
+её на настроенной production-системе без резервной копии нельзя.
+
 ### Вход работает через curl, но не через браузер
 
 Проверьте в DevTools браузера:

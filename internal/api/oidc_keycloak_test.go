@@ -42,6 +42,7 @@ import (
 // группа virt-admins и пользователь в ней.
 //
 //	JHV_TEST_OIDC_ISSUER=http://localhost:8081/realms/jhvirt-check
+//	JHV_TEST_OIDC_BACKCHANNEL_URL=http://keycloak:8080  # если тест идёт в Compose
 //	JHV_TEST_OIDC_CLIENT_SECRET=...
 //	JHV_TEST_OIDC_PASSWORD=...
 //	go test ./internal/api/ -run TestOIDCAgainstKeycloak -count=1
@@ -69,13 +70,14 @@ func TestOIDCAgainstKeycloak(t *testing.T) {
 	cfg.Auth.Enabled = true
 	cfg.Auth.SessionTTL = time.Hour
 	cfg.Auth.OIDC = config.OIDCConfig{
-		Enabled:      true,
-		Issuer:       issuer,
-		ClientID:     clientID,
-		ClientSecret: secret,
-		RedirectURL:  localAppURL() + "/api/v1/auth/oidc/callback",
-		Scopes:       []string{"openid", "profile", "email"},
-		GroupsClaim:  "groups",
+		Enabled:        true,
+		Issuer:         issuer,
+		BackchannelURL: os.Getenv("JHV_TEST_OIDC_BACKCHANNEL_URL"),
+		ClientID:       clientID,
+		ClientSecret:   secret,
+		RedirectURL:    localAppURL() + "/api/v1/auth/oidc/callback",
+		Scopes:         []string{"openid", "profile", "email"},
+		GroupsClaim:    "groups",
 		RoleMapping: map[string]string{
 			"virt-admins":    "admin",
 			"virt-operators": "operator",

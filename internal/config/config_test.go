@@ -176,6 +176,29 @@ func TestDefaultSSLModeIsPrefer(t *testing.T) {
 	}
 }
 
+func TestOIDCBackchannelURLMustBeAnOrigin(t *testing.T) {
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("загрузка конфигурации: %v", err)
+	}
+	cfg.Auth.OIDC = OIDCConfig{
+		Enabled:        true,
+		Issuer:         "https://keycloak.example.org/realms/infra",
+		BackchannelURL: "http://keycloak:8080/realms/infra",
+		ClientID:       "jhvirt",
+		RedirectURL:    "https://backup.example.org/api/v1/auth/oidc/callback",
+		RoleMapping:    map[string]string{"admins": "admin"},
+	}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "backchannel_url") {
+		t.Fatalf("внутренний адрес с путём принят: %v", err)
+	}
+
+	cfg.Auth.OIDC.BackchannelURL = "http://keycloak:8080"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("внутренний origin отклонён: %v", err)
+	}
+}
+
 // validateWithDatabase прогоняет проверку конфигурации с заданным подключением
 // и возвращает текст ошибки.
 //

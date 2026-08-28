@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -274,10 +275,10 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 
 // userPayload is the write shape of a local account.
 type userPayload struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
-	Role     string `json:"role"`
-	Disabled bool   `json:"disabled"`
+	Username *string `json:"username"`
+	Password string  `json:"password"`
+	Role     string  `json:"role"`
+	Disabled bool    `json:"disabled"`
 }
 
 func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
@@ -295,7 +296,7 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
-	if payload.Username == "" || payload.Password == "" {
+	if payload.Username == nil || strings.TrimSpace(*payload.Username) == "" || payload.Password == "" {
 		s.writeError(w, r, badRequest("нужны имя пользователя и пароль"))
 		return
 	}
@@ -317,7 +318,7 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user := &model.User{
-		Username: payload.Username, PasswordHash: string(hash),
+		Username: strings.TrimSpace(*payload.Username), PasswordHash: string(hash),
 		Role: role, Disabled: payload.Disabled,
 	}
 	if err := s.store.CreateUser(r.Context(), user); err != nil {
@@ -340,6 +341,19 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 	if err := decodeJSON(r, &payload); err != nil {
 		s.writeError(w, r, err)
 		return
+	}
+	if payload.Username != nil {
+		name := strings.TrimSpace(*payload.Username)
+		if name == "" {
+			s.writeError(w, r, badRequest("имя пользователя не может быть пустым"))
+			return
+		}
+		if user.IsExternal() && name != user.Username {
+			s.writeError(w, r, badRequest(
+				"имя внешней учётной записи %q задаётся провайдером", user.Username))
+			return
+		}
+		user.Username = name
 	}
 	if payload.Role != "" {
 		user.Role = model.Role(payload.Role)

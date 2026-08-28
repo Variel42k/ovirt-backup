@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/signal"
@@ -56,6 +57,10 @@ func run() error {
 	resetUser := flag.String("reset-password", "",
 		"задать новый пароль учётной записи (укажите имя пользователя) и выйти; "+
 			"новый пароль берётся из JHV_NEW_PASSWORD либо генерируется и печатается")
+	recoveryTokenFile := flag.String("recovery-token-file", "",
+		"защищённый recovery-токен для -reset-password; '-' читает токен из stdin")
+	revokeAllAccess := flag.Bool("revoke-all-access", false,
+		"при -reset-password закрыть все сессии и отозвать API-токены и делегирования из БД")
 	flag.Parse()
 
 	if *showVersion {
@@ -77,6 +82,29 @@ func run() error {
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		return err
+	}
+	if *resetUser == "" {
+		if *recoveryTokenFile != "" || *revokeAllAccess {
+			return fmt.Errorf("-recovery-token-file и -revoke-all-access допустимы только вместе с -reset-password")
+		}
+	} else {
+		if *recoveryTokenFile == "" {
+			return fmt.Errorf("-reset-password требует -recovery-token-file; запускайте восстановление с хоста")
+		}
+		if *revokeAllAccess && len(cfg.Auth.APITokens) > 0 {
+			return fmt.Errorf("auth.api_tokens содержит статические токены, которые нельзя отозвать в БД; " +
+				"удалите их из конфигурации и повторите восстановление")
+		}
+		reader, closeReader, err := openRecoveryToken(*recoveryTokenFile)
+		if err != nil {
+			return err
+		}
+		if closeReader != nil {
+			defer closeReader()
+		}
+		if err := api.VerifyRecoveryToken(cfg.Auth.RecoveryTokenHash, reader); err != nil {
+			return fmt.Errorf("проверка права на восстановление: %w", err)
+		}
 	}
 	if *checkConfig {
 		fmt.Println("конфигурация корректна")
@@ -129,6 +157,23 @@ func run() error {
 		return fmt.Errorf("ключ шифрования секретов: %w", err)
 	}
 	st := store.New(db, cipher)
+
+	// Recovery is deliberately completed before any scheduler, notification,
+	// DR or replication work starts. The one-off process has one job and exits.
+	if *resetUser != "" {
+		password, revoked, err := api.RecoverLocalAccess(ctx, st, *resetUser,
+			os.Getenv("JHV_NEW_PASSWORD"), *revokeAllAccess)
+		if err != nil {
+			return err
+		}
+		printCredentials(*resetUser, password, "ПАРОЛЬ ИЗМЕНЁН")
+		if *revokeAllAccess {
+			fmt.Fprintf(os.Stderr,
+				"Отозвано: сессий %d, API-токенов %d, делегирований %d.\n",
+				revoked.Sessions, revoked.APITokens, revoked.Delegations)
+		}
+		return nil
+	}
 
 	// Оповещения наружу. Подписка ставится до запуска монитора и планировщика:
 	// иначе первые же беды, найденные при старте, останутся без сообщения.
@@ -202,20 +247,12 @@ func run() error {
 		log.Warn().Msg("неполные настройки качества в базе проигнорированы; используются значения конфигурации")
 	}
 
-	// Password recovery runs before anything else starts. Without it an operator
-	// who lost the bootstrap password has no way back in except deleting the
-	// database, which would take every connection and backup record with it.
-	if *resetUser != "" {
-		password, err := api.ResetPassword(ctx, st, *resetUser, os.Getenv("JHV_NEW_PASSWORD"))
-		if err != nil {
-			return err
-		}
-		printCredentials(*resetUser, password, "ПАРОЛЬ ИЗМЕНЁН")
-		return nil
-	}
-
 	if cfg.Auth.Enabled {
-		generated, err := api.EnsureBootstrapUser(ctx, st, cfg.Auth.BootstrapUser, cfg.Auth.BootstrapPassword)
+		bootstrapPassword := cfg.Auth.BootstrapPassword
+		cfg.Auth.BootstrapPassword = ""
+		baseCfg.Auth.BootstrapPassword = ""
+		generated, err := api.EnsureBootstrapUser(ctx, st, cfg.Auth.BootstrapUser, bootstrapPassword)
+		bootstrapPassword = ""
 		if err != nil {
 			return fmt.Errorf("создание первой учётной записи: %w", err)
 		}
@@ -435,6 +472,17 @@ func run() error {
 	return nil
 }
 
+func openRecoveryToken(path string) (io.Reader, func() error, error) {
+	if path == "-" {
+		return os.Stdin, nil, nil
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("открытие recovery-токена %s: %w", path, err)
+	}
+	return file, file.Close, nil
+}
+
 // backgroundParts — то, что должно работать ровно в одном экземпляре.
 //
 // Планировщик запустил бы каждое задание дважды, а авто-восстановление
@@ -563,8 +611,8 @@ func printCredentials(username, password, title string) {
 	const rule = "════════════════════════════════════════════════════════════"
 	fmt.Fprintf(os.Stderr, "\n%s\n  %s\n\n  пользователь: %s\n  пароль:       %s\n\n"+
 		"  Запишите пароль: он больше не будет показан.\n"+
-		"  Забыли — задайте новый: ovirt-backup-server -reset-password %s\n%s\n\n",
-		rule, title, username, password, username, rule)
+		"  Забыли — используйте host-side ovirt-backup-recover-admin.\n%s\n\n",
+		rule, title, username, password, rule)
 }
 
 // warnLeftoverSQLite сообщает, что в каталоге данных остался файл базы от

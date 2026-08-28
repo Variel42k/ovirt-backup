@@ -105,6 +105,17 @@ func (s *Store) RevokeApprovalDelegation(ctx context.Context, id string, at time
 	return nil
 }
 
+// RevokeAllApprovalDelegations invalidates every active delegated credential.
+func (s *Store) RevokeAllApprovalDelegations(ctx context.Context, at time.Time) (int64, error) {
+	res, err := s.db.Exec(ctx,
+		`UPDATE approval_delegations SET revoked_at=? WHERE revoked_at IS NULL`, utc(at))
+	if err != nil {
+		return 0, fmt.Errorf("revoke all approval delegations: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 // TouchApprovalDelegation отмечает использование.
 //
 // Счётчик нужен владельцу: делегирование, которым воспользовались чаще

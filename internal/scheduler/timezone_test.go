@@ -92,8 +92,15 @@ func TestSetTimezoneRecalculatesNextRun(t *testing.T) {
 	if err != nil || yekaterinburgJob.NextRunAt == nil {
 		t.Fatalf("Yekaterinburg next run: job=%+v err=%v", yekaterinburgJob, err)
 	}
-	if delta := utcJob.NextRunAt.Sub(*yekaterinburgJob.NextRunAt); delta != 5*time.Hour {
-		t.Fatalf("next run shift = %s, want 5h; UTC=%s Yekaterinburg=%s",
+	// Both schedules are daily. Depending on the wall-clock time, one of the
+	// nearest occurrences can already be on the next day, so compare the shift
+	// modulo one day instead of assuming both dates are equal.
+	delta := utcJob.NextRunAt.Sub(*yekaterinburgJob.NextRunAt) % (24 * time.Hour)
+	if delta < 0 {
+		delta += 24 * time.Hour
+	}
+	if delta != 5*time.Hour {
+		t.Fatalf("next run shift modulo 24h = %s, want 5h; UTC=%s Yekaterinburg=%s",
 			delta, utcJob.NextRunAt, yekaterinburgJob.NextRunAt)
 	}
 	if got := s.Timezone(); got != "Asia/Yekaterinburg" {

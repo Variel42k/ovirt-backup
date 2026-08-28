@@ -102,7 +102,8 @@ HTTPS через nginx, который передаёт запросы на ло
 | `--url http[s]://host[:port]` | обязательный внешний URL в unattended-режиме |
 | `--port 8080` | опубликованный Docker-порт и `JHV_SERVER_PORT` для systemd |
 | `--database-url-file /root/jhvirt.dsn` | внешняя PostgreSQL только для systemd; файл `0600` |
-| `--no-start` | подготовить файлы/БД, но не запускать приложение |
+| `--dr-backup-dir /mnt/dr/ovirt-backup` | каталог ежедневных dump БД и копии `secret.key` |
+| `--no-start` | подготовить файлы/БД; первый запуск завершать повторным вызовом установщика без этого ключа, а не прямым `start` |
 | `--migration-export /root/jhvirt-migration.tar.gz` | остановить приложение и создать пакет переноса `0600` |
 | `--migrate-from /root/jhvirt-migration.tar.gz` | восстановить пакет на пустом новом сервере |
 | `--keep-source-running` | после репетиционного экспорта снова запустить исходное приложение |
@@ -124,6 +125,7 @@ HTTPS через nginx, который передаёт запросы на ло
 | `--oidc-backchannel-url http://idp:8080` | внутренний origin внешнего OIDC-провайдера, если публичный адрес недоступен из контейнера |
 | `--oidc-issuer`, `--oidc-client-id` | параметры существующего провайдера |
 | `--oidc-client-secret-file /root/kc.secret` | секрет клиента файлом, а не аргументом |
+| `--local-login enabled\|disabled` | локальная парольная форма рядом с OIDC; для новой OIDC-установки по умолчанию `disabled` |
 
 ### Внешний вход
 
@@ -134,13 +136,13 @@ HTTPS через nginx, который передаёт запросы на ло
 При `--oidc keycloak` установщик поднимает Keycloak тем же compose (профиль
 `keycloak`), заводит ему базу в том же кластере PostgreSQL, создаёт realm
 `jhvirt`, клиента с секретом, три группы допуска и mapper групп, а затем
-печатает пароль администратора Keycloak — один раз, как и пароль
-администратора службы.
+печатает пароль `kc-bootstrap-admin` — один раз. Это администратор master realm
+Keycloak, а не пользователь приложения.
 
 Публичный issuer и внутренний адрес различаются намеренно:
 
 ```dotenv
-JHV_OIDC_ISSUER=http://server.example.org:8081/realms/jhvirt
+JHV_OIDC_ISSUER=https://server.example.org:8081/realms/jhvirt
 JHV_OIDC_BACKCHANNEL_URL=http://keycloak:8080
 ```
 
@@ -155,9 +157,11 @@ Compose. Установщик не завершает работу, пока `/a
 и включается второй фактор (Required Actions → Configure OTP, FreeOTP и
 совместимые).
 
-Вход по паролю остаётся при любом выборе: он не проходит через провайдера, и
-второй фактор на него не распространяется, поэтому такие записи стоит держать
-аварийными.
+Локальная запись `local-admin` не является пользователем Keycloak. Её вход
+обходит политики и MFA провайдера, поэтому в новой OIDC-установке он выключен
+и пароль не показывается. Интерактивный установщик задаёт отдельный вопрос;
+для unattended-режима используйте `--local-login`. Прежняя установка без этой
+переменной сохраняет включённый вход при обновлении, чтобы не потерять доступ.
 
 Соответствие групп ролям установщик пишет в `ovirt-backup.yaml` рядом с
 compose-файлом: переменной окружения словарь не задаётся. Правится оно без
@@ -264,12 +268,24 @@ sudo sh /tmp/ovirt-backup-*.run --mode docker \
 
 1. проверяет, что выбранный host-порт свободен;
 2. создаёт `.env` с правами `0600`;
-3. генерирует пароли PostgreSQL и первого администратора;
-4. создаёт каталоги `backups` и `restores`;
-5. собирает образ и запускает приложение с PostgreSQL;
-6. ждёт `http://127.0.0.1:<порт>/readyz` до трёх минут;
-7. удаляет bootstrap-пароль администратора из `.env`;
-8. печатает адрес, логин `admin` и одноразово показанный пароль.
+3. создаёт отдельный host-only recovery token: для `.run` это
+   `/opt/jhvirt/config/recovery.token` с владельцем `root:root` и правами
+   `0600`, для checkout — `deploy/.recovery-token`; в контейнер передаётся
+   только SHA-256 токена;
+4. генерирует административный пароль PostgreSQL, отдельные пароли ролей
+   приложения и Keycloak и хранит их только файлами `0600` в volumes;
+5. создаёт каталоги `backups`, `restores` и аварийных dump;
+6. собирает закреплённые образы и запускает контейнеры с read-only root,
+   урезанными capabilities, лимитами ресурсов и внутренней сетью БД;
+7. ждёт `http://127.0.0.1:<порт>/readyz` до трёх минут;
+8. запускает проверенный `pg_dump` приложения и Keycloak и копирует
+   `secret.key` в каталог DR;
+9. удаляет bootstrap-секреты после успешной настройки, принудительно
+   пересоздаёт контейнер приложения и ещё раз ждёт `/readyz`, чтобы открытый
+   пароль исчез вместе с первым процессом;
+10. без OIDC печатает адрес, логин `local-admin` и одноразовый пароль; с OIDC
+   печатает данные администратора Keycloak, а локальный вход оставляет
+   выключенным, если не задано обратное.
 
 Запишите пароль сразу. При повторной установке существующий `.env`, пароль
 БД, тома, ключ и учётные записи сохраняются.
@@ -288,12 +304,31 @@ curl -fsS http://127.0.0.1:8080/readyz
 Для `.run` рабочий каталог по умолчанию — `/opt/jhvirt/compose`. Для установки
 из репозитория — каталог `deploy`.
 
-Ожидается: оба контейнера `healthy`, оба HTTP-запроса успешны.
+Ожидается: приложение и PostgreSQL работают, оба HTTP-запроса успешны;
+`dr-backup` остаётся запущенным и ждёт следующего интервала. С профилем
+Keycloak дополнительно работают `keycloak` и `keycloak-backup`.
+
+Для установки из `.run` проверьте, что recovery token остаётся только на
+хосте и не входит в mounts контейнера:
+
+```bash
+sudo stat -c '%U:%G %a %n' /opt/jhvirt/config/recovery.token
+cd /opt/jhvirt/compose
+docker inspect "$(docker compose ps -q ovirt-backup)" \
+  --format '{{range .Mounts}}{{println .Source "->" .Destination}}{{end}}'
+```
+
+Ожидается `root:root 600`; в списке mounts нет `recovery.token`. Для checkout
+токен находится в `deploy/.recovery-token`, также не монтируется, а его доступ
+ограничивается правами `0600`.
 
 ### Шаг 4. Проверьте вход
 
-Откройте ровно тот адрес, который передали через `--url`, и войдите как
-`admin`. Затем выполните независимую проверку сессии из раздела 7.
+Откройте ровно тот адрес, который передали через `--url`. Без OIDC войдите как
+`local-admin`. С OIDC сначала войдите в консоль Keycloak как
+`kc-bootstrap-admin`, создайте пользователя, включите его в `virt-admins`,
+затем используйте кнопку Keycloak в приложении. Выполните независимую проверку
+сессии из раздела 7.
 
 ## 5. Установка systemd с локальной PostgreSQL
 
@@ -328,8 +363,13 @@ sudo PREFIX=/srv/jhvirt sh /tmp/ovirt-backup-*.run \
 8. создаёт `/opt/jhvirt/config/jhvirt.env` с правами `0600`;
 9. формирует `/etc/systemd/system/jhvirt.service` с фактическими путями;
 10. выполняет `-check-config`, `daemon-reload` и `enable --now`;
-11. ждёт `/readyz` и печатает пароль администратора;
-12. после успешного старта удаляет bootstrap-пароль из env.
+11. ждёт `/readyz` и печатает пароль `local-admin`;
+12. создаёт host-only `/opt/jhvirt/config/recovery.token` (`root:root 0600`),
+    передавая службе только его SHA-256;
+13. после успешного старта удаляет файл bootstrap-пароля и перезапускает
+    службу, чтобы пароль исчез вместе с первым процессом;
+14. устанавливает `jhvirt-dr-backup.timer`, создаёт и проверяет первый dump
+    локальной PostgreSQL и копию `secret.key`.
 
 Локальное подключение к PostgreSQL использует Unix socket и peer-аутентификацию,
 поэтому пароль БД в env отсутствует.
@@ -345,6 +385,17 @@ sudo systemctl is-enabled jhvirt
 ```
 
 Ожидается: `active (running)`, `enabled`, оба HTTP-запроса успешны.
+
+Проверьте, что аварийный токен не читается сервисным пользователем:
+
+```bash
+sudo stat -c '%U:%G %a %n' /opt/jhvirt/config/recovery.token
+sudo -u jhvirt test ! -r /opt/jhvirt/config/recovery.token
+```
+
+Ожидается `root:root 600`. Для сброса доступа используется только host-side
+команда `sudo /opt/jhvirt/bin/ovirt-backup-recover-admin`; прямой
+`-reset-password` без токена отклоняется.
 
 ### Шаг 3. Проверьте сохранение после перезапуска
 
@@ -402,11 +453,11 @@ sudo journalctl -u jhvirt -n 100 --no-pager
 
 ```bash
 BASE=http://10.20.30.40:8080
-read -rsp 'Пароль admin: ' JHV_PASSWORD; echo
+read -rsp 'Пароль local-admin: ' JHV_PASSWORD; echo
 curl -sS -D /tmp/jhvirt-login.headers -c /tmp/jhvirt.cookies \
   -X POST "$BASE/api/v1/auth/login" \
   -H 'Content-Type: application/json' \
-  -d "{\"username\":\"admin\",\"password\":\"$JHV_PASSWORD\"}"
+  -d "{\"username\":\"local-admin\",\"password\":\"$JHV_PASSWORD\"}"
 unset JHV_PASSWORD
 curl -sS -b /tmp/jhvirt.cookies "$BASE/api/v1/auth/me"
 grep -i '^set-cookie:' /tmp/jhvirt-login.headers
@@ -544,8 +595,8 @@ server:
 6. Создайте первое задание с `verify_after: chain`.
 7. Оставьте авто-восстановление инфраструктуры в `dry_run: true` минимум на
    период наблюдения. Это не относится к восстановлению образов из копий.
-8. Создайте отдельных пользователей с ролями `operator` и `viewer`; не
-   используйте общий `admin` для повседневной работы.
+8. Создайте именные записи с ролями `operator` и `viewer`; не используйте одну
+   общую административную запись для повседневной работы.
 
 ## 10. Каталоги восстановления для systemd
 
@@ -882,13 +933,30 @@ sudo ./install.sh --uninstall=all --remove-config
 
 ## 14. Что резервировать в самом сервисе
 
+Штатная установка уже создаёт ежедневный аварийный комплект. Он не заменяет
+внешнюю политику резервирования: путь по умолчанию находится на том же сервере,
+поэтому переживёт удаление container volume, но не потерю диска или узла.
+Указывайте `--dr-backup-dir` на отдельный mount либо забирайте каталог с другого
+сервера по pull-схеме.
+
 ### Docker
 
-- том `jhvirt-data` с `secret.key` и `metrics.token`;
-- том `postgres-data` или логический `pg_dump`;
+- `<JHV_DR_BACKUP_DIR>/app/postgres/postgres-*.dump` — проверенный custom-format
+  dump БД приложения;
+- `<JHV_DR_BACKUP_DIR>/app/secret.key` — побайтовая копия ключа;
+- с Keycloak: `<JHV_DR_BACKUP_DIR>/keycloak/postgres/postgres-*.dump`;
 - рабочий `.env` с правами `0600`;
 - изменённый `config/ovirt-backup.yaml`;
 - внешние каталоги/NFS/S3 с копиями ВМ.
+
+Создание dump выполняют `dr-backup` и `keycloak-backup`: финальный файл
+появляется только после успешного `pg_dump` и `pg_restore --list`, имеет права
+`0600`, хранение по умолчанию семь дней. Проверьте:
+
+```bash
+docker compose logs --tail 50 dr-backup keycloak-backup
+find "$(sed -n 's/^JHV_DR_BACKUP_DIR=//p' .env)" -maxdepth 4 -type f -ls
+```
 
 Получить ключ из контейнера:
 
@@ -900,14 +968,25 @@ chmod 600 /root/jhvirt-secret.key.backup
 
 ### Systemd
 
-- `/opt/jhvirt/data/secret.key`;
+- `/var/backups/ovirt-backup/postgres/postgres-*.dump` и
+  `/var/backups/ovirt-backup/secret.key` либо путь из `--dr-backup-dir`;
 - `/opt/jhvirt/config/ovirt-backup.yaml`;
 - `/opt/jhvirt/config/jhvirt.env`;
 - `/opt/jhvirt/config/metrics.token`;
-- логический дамп PostgreSQL;
 - внешние хранилища копий.
 
-Храните ключ отдельно от базы и отдельно от копий ВМ.
+Проверка timer и последнего запуска:
+
+```bash
+sudo systemctl status jhvirt-dr-backup.timer --no-pager
+sudo journalctl -u jhvirt-dr-backup.service -n 50 --no-pager
+sudo -u jhvirt pg_restore --list \
+  "$(find /var/backups/ovirt-backup/postgres -type f -name 'postgres-*.dump' | sort | tail -1)" >/dev/null
+```
+
+Для внешней PostgreSQL timer не включается: используйте резервирование СУБД,
+PITR/WAL-архив и регулярную проверку восстановления. Храните dump и ключ
+отдельно от основной БД и отдельно от копий ВМ.
 
 ## 15. Prometheus после установки
 

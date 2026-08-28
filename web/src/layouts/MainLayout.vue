@@ -150,7 +150,7 @@ onBeforeUnmount(() => {
         <q-btn dense flat round icon="menu" aria-label="Меню" @click="drawer = !drawer" />
         <q-toolbar-title class="text-weight-medium">
           ovirt-backup
-          <span class="text-caption q-ml-sm opacity-70">управление oVirt и совместимыми</span>
+          <span class="text-caption q-ml-sm opacity-70">резервное копирование виртуальных машин</span>
         </q-toolbar-title>
 
         <q-btn

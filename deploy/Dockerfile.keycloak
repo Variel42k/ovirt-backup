@@ -1,0 +1,16 @@
+# Keycloak performs a Quarkus augmentation on the first ordinary `start` and
+# writes into /opt/keycloak/lib. Build it once here so the runtime container
+# can use an immutable root filesystem with `start --optimized`.
+ARG KEYCLOAK_BASE_IMAGE=quay.io/keycloak/keycloak:26.7.2@sha256:831330513f55695572286e521f94fcd3c7e285250ed5b848090265a33192f669
+FROM ${KEYCLOAK_BASE_IMAGE} AS builder
+
+ENV KC_DB=postgres \
+    KC_HEALTH_ENABLED=true
+RUN /opt/keycloak/bin/kc.sh build
+
+ARG KEYCLOAK_BASE_IMAGE
+FROM ${KEYCLOAK_BASE_IMAGE}
+COPY --from=builder /opt/keycloak/ /opt/keycloak/
+
+USER 1000
+ENTRYPOINT ["/opt/keycloak/bin/kc.sh"]

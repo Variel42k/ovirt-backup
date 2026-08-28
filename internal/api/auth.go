@@ -99,7 +99,7 @@ func EnsureBootstrapUser(ctx context.Context, st *store.Store, username, passwor
 		return "", nil
 	}
 	if username == "" {
-		username = "admin"
+		username = "local-admin"
 	}
 
 	generated := ""
@@ -135,41 +135,41 @@ const MinPasswordLength = 10
 // An empty password means "generate one", which keeps the operator from
 // choosing something weak under pressure and matches how bootstrap behaves.
 func ResetPassword(ctx context.Context, st *store.Store, username, password string) (string, error) {
+	password, _, err := resetPassword(ctx, st, username, password, false)
+	return password, err
+}
+
+func resetPassword(ctx context.Context, st *store.Store, username, password string,
+	revokeAll bool) (string, store.AccessRecoveryResult, error) {
 	user, err := st.GetUserByName(ctx, username)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return "", fmt.Errorf("учётная запись %q не найдена", username)
+			return "", store.AccessRecoveryResult{}, fmt.Errorf("учётная запись %q не найдена", username)
 		}
-		return "", err
+		return "", store.AccessRecoveryResult{}, err
+	}
+	if user.IsExternal() {
+		return "", store.AccessRecoveryResult{}, fmt.Errorf("учётная запись %q принадлежит внешнему провайдеру; сбрасывайте локальную запись", username)
 	}
 
 	if password == "" {
 		password, err = generatePassword()
 		if err != nil {
-			return "", err
+			return "", store.AccessRecoveryResult{}, err
 		}
 	} else if len(password) < MinPasswordLength {
-		return "", fmt.Errorf("пароль должен быть не короче %d символов", MinPasswordLength)
+		return "", store.AccessRecoveryResult{}, fmt.Errorf("пароль должен быть не короче %d символов", MinPasswordLength)
 	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
-		return "", err
+		return "", store.AccessRecoveryResult{}, err
 	}
-	user.PasswordHash = string(hash)
-	// A forgotten password on a disabled account usually means the account was
-	// disabled by mistake; leaving it disabled would make the reset useless.
-	user.Disabled = false
-	if err := st.UpdateUser(ctx, user); err != nil {
-		return "", err
+	revoked, err := st.RecoverUserAccess(ctx, user.ID, user.Username, string(hash), revokeAll, time.Now().UTC())
+	if err != nil {
+		return "", store.AccessRecoveryResult{}, err
 	}
-
-	// Existing sessions were issued against the old password; a reset is
-	// normally a response to losing control of it, so they must not survive.
-	if _, err := st.DeleteUserSessions(ctx, user.ID); err != nil {
-		return "", fmt.Errorf("закрытие действующих сессий: %w", err)
-	}
-	return password, nil
+	return password, revoked, nil
 }
 
 // generatePassword produces a printable random password.

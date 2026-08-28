@@ -28,6 +28,8 @@
 #   ./install.sh --backup-dir /srv/backups --restore-dir /srv/restores
 #                                      хранилище копий и каталог восстановления
 #                                      лежат по другим путям, чем на прежнем узле
+#   ./install.sh --dr-backup-dir /mnt/dr/ovirt-backup
+#                                      ежедневные dump БД и копия secret.key
 #   ./install.sh --tls self-signed      создать и подключить локальный сертификат
 #   ./install.sh --tls files --tls-cert-file /root/server.crt \
 #                --tls-key-file /root/server.key
@@ -42,6 +44,10 @@
 #                                      подключить существующий провайдер
 #   ./install.sh --oidc-backchannel-url http://keycloak:8080
 #                                      внутренний origin провайдера
+#   ./install.sh --local-login disabled локальный парольный вход при OIDC
+#                                      (enabled оставляет аварийный доступ)
+#   sudo /opt/jhvirt/bin/ovirt-backup-recover-admin
+#                                      сбросить local-admin с доверенного хоста
 #   ./install.sh --uninstall           выбрать, что удалить (с терминалом)
 #   ./install.sh --uninstall=systemd   снять только systemd-службу
 #   ./install.sh --uninstall=docker    снять только контейнеры
@@ -60,6 +66,8 @@ USER_NAME_EXPLICIT=0; [ "${USER_NAME+x}" = x ] && USER_NAME_EXPLICIT=1
 PREFIX="${PREFIX:-/opt/jhvirt}"
 USER_NAME="${USER_NAME:-jhvirt}"
 UNIT="/etc/systemd/system/jhvirt.service"
+DR_UNIT="/etc/systemd/system/jhvirt-dr-backup.service"
+DR_TIMER="/etc/systemd/system/jhvirt-dr-backup.timer"
 SERVER_BINARY="ovirt-backup-server"
 LEGACY_SERVER_BINARY="justhpc-virt-server"
 COMPOSE_SERVICE="ovirt-backup"
@@ -72,6 +80,7 @@ LEGACY_CONFIG_NAME="virt-manager.yaml"
 POSTGRES_HELPER_IMAGE="docker.io/library/postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73"
 APP_DB_USER="ovirt_backup_app"
 KEYCLOAK_DB_USER="keycloak_app"
+LOCAL_ADMIN_USER="local-admin"
 
 MODE=""; URL=""; DATABASE_URL_FILE=""; UNINSTALL_TARGET=""; START=1; PORT=8080
 URL_EXPLICIT=0; PORT_EXPLICIT=0
@@ -80,6 +89,7 @@ MIGRATION_ACTION=""; MIGRATION_EXPORT_FILE=""; MIGRATION_IMPORT_FILE=""
 # Пусто — брать пути из .env: при обычной установке они складываются рядом, при
 # переносе приезжают из пакета. Заданы — заменить, о чём установщик скажет вслух.
 BACKUP_DIR_OVERRIDE=""; RESTORE_DIR_OVERRIDE=""
+DR_BACKUP_DIR_OVERRIDE=""
 # Куда отправить пакет переноса: user@сервер:/каталог. Пусто — оставить рядом.
 MIGRATION_TO=""
 MIGRATION_TMP=""; MIGRATION_ACTIVE=0; MIGRATION_SOURCE_MODE=""
@@ -92,8 +102,9 @@ TLS_DAYS=825; TLS_MATERIAL_DIR=""; TLS_RESTART_REQUIRED=0; READY_SCHEME=http
 # Внешний вход: none — только пароль, keycloak — поднять рядом, external —
 # подключить существующего провайдера.
 OIDC_MODE=""; OIDC_EXISTING=0; OIDC_ISSUER=""; OIDC_BACKCHANNEL_URL=""; OIDC_CLIENT_ID=""; OIDC_CLIENT_SECRET_FILE=""
+OIDC_ALLOW_LOCAL_LOGIN=""
 KEYCLOAK_PORT=8081; KEYCLOAK_REALM="jhvirt"; KEYCLOAK_URL=""; KEYCLOAK_API_URL=""
-KEYCLOAK_ADMIN_USER="admin"; KEYCLOAK_ADMIN_PASSWORD=""; OIDC_CLIENT_SECRET=""
+KEYCLOAK_ADMIN_USER="kc-bootstrap-admin"; KEYCLOAK_ADMIN_PASSWORD=""; OIDC_CLIENT_SECRET=""
 KEYCLOAK_DIRECT_TLS=0; KEYCLOAK_BIND_ADDRESS=127.0.0.1; KEYCLOAK_CONTAINER_PORT=8080
 # Имена групп допуска. Пользователь, не попавший ни в одну, в систему не
 # допускается: default_role остаётся пустым.
@@ -133,6 +144,8 @@ while [ $# -gt 0 ]; do
         --backup-dir=*) BACKUP_DIR_OVERRIDE="${1#--backup-dir=}"; shift ;;
         --restore-dir) [ $# -ge 2 ] || die "--restore-dir требует путь"; RESTORE_DIR_OVERRIDE="$2"; shift 2 ;;
         --restore-dir=*) RESTORE_DIR_OVERRIDE="${1#--restore-dir=}"; shift ;;
+        --dr-backup-dir) [ $# -ge 2 ] || die "--dr-backup-dir требует путь"; DR_BACKUP_DIR_OVERRIDE="$2"; shift 2 ;;
+        --dr-backup-dir=*) DR_BACKUP_DIR_OVERRIDE="${1#--dr-backup-dir=}"; shift ;;
         --tls) [ $# -ge 2 ] || die "--tls требует none, self-signed или files"; TLS_MODE="$2"; shift 2 ;;
         --tls=*) TLS_MODE="${1#--tls=}"; shift ;;
         --self-signed) TLS_MODE=self-signed; shift ;;
@@ -154,6 +167,8 @@ while [ $# -gt 0 ]; do
         # ps любому пользователю машины и оседают в истории оболочки.
         --oidc-client-secret-file) [ $# -ge 2 ] || die "--oidc-client-secret-file требует путь"; OIDC_CLIENT_SECRET_FILE="$2"; shift 2 ;;
         --oidc-client-secret-file=*) OIDC_CLIENT_SECRET_FILE="${1#--oidc-client-secret-file=}"; shift ;;
+        --local-login) [ $# -ge 2 ] || die "--local-login требует enabled или disabled"; OIDC_ALLOW_LOCAL_LOGIN="$2"; shift 2 ;;
+        --local-login=*) OIDC_ALLOW_LOCAL_LOGIN="${1#--local-login=}"; shift ;;
         --keycloak-port) [ $# -ge 2 ] || die "--keycloak-port требует значение"; KEYCLOAK_PORT="$2"; shift 2 ;;
         --keycloak-port=*) KEYCLOAK_PORT="${1#--keycloak-port=}"; shift ;;
         --keycloak-url) [ $# -ge 2 ] || die "--keycloak-url требует значение"; KEYCLOAK_URL="$2"; shift 2 ;;
@@ -324,6 +339,47 @@ gen_secret() {
     fi
 }
 
+sha256_value() {
+    if have sha256sum; then
+        sha256sum | awk '{print $1}'
+    elif have shasum; then
+        shasum -a 256 | awk '{print $1}'
+    elif have openssl; then
+        openssl dgst -sha256 -r | awk '{print $1}'
+    else
+        die "для подготовки recovery-токена нужен sha256sum, shasum или openssl"
+    fi
+}
+
+# Сам токен остаётся на хосте и не монтируется в штатную службу. В её
+# конфигурацию попадает только verifier, поэтому shell внутри контейнера не
+# позволяет воспользоваться штатным CLI восстановления.
+ensure_recovery_token() {
+    ERT_FILE="$1"
+    mkdir -p "$(dirname "$ERT_FILE")"
+    if [ ! -s "$ERT_FILE" ]; then
+        ERT_TOKEN="$(gen_secret 32)"
+        [ -n "$ERT_TOKEN" ] || die "не удалось сгенерировать recovery-токен"
+        umask 077
+        printf '%s\n' "$ERT_TOKEN" > "$ERT_FILE"
+        umask 022
+        ERT_TOKEN=""
+    fi
+    ERT_VALUE="$(cat "$ERT_FILE")"
+    [ -n "$ERT_VALUE" ] || die "recovery-токен $ERT_FILE пуст"
+    case "$ERT_VALUE" in
+        *[!0-9a-fA-F]*) die "recovery-токен $ERT_FILE должен быть шестнадцатеричной строкой" ;;
+    esac
+	[ "${#ERT_VALUE}" -ge 64 ] || die "recovery-токен $ERT_FILE слишком короткий"
+    chmod 600 "$ERT_FILE"
+    if [ "$(id -u)" -eq 0 ]; then
+        chown root:root "$ERT_FILE"
+    fi
+    RECOVERY_TOKEN_HASH="$(printf '%s' "$ERT_VALUE" | sha256_value)"
+    ERT_VALUE=""
+    [ "${#RECOVERY_TOKEN_HASH}" -eq 64 ] || die "не удалось вычислить SHA-256 recovery-токена"
+}
+
 docker_metrics_volume() {
 	printf '%s_jhvirt-data' "$(project_name)"
 }
@@ -358,6 +414,7 @@ prepare_docker_runtime_secrets() {
     printf '%s\n' "$APP_DB_PASSWORD" | docker_volume_write "$PDRS_APP_VOL" database.password 10001:10001 0600
 
     PDRS_DATABASE_URL="$(env_file_value "$PDRS_WORK/.env" JHV_DATABASE_URL)"
+    [ -n "$PDRS_DATABASE_URL" ] || PDRS_DATABASE_URL="$(docker_volume_value "$PDRS_APP_VOL" database.url)"
     if [ -n "$DATABASE_URL_FILE" ]; then
         read_external_database_url
         PDRS_DATABASE_URL="$DATABASE_URL"
@@ -867,6 +924,9 @@ migration_export_docker() {
     volume_exists "$ME_DATA_VOLUME" || die "не найден том с ключом: $ME_DATA_VOLUME"
     migration_volume_file "$ME_DATA_VOLUME" secret.key "$ME_DIR/data/secret.key" 1
     migration_volume_file "$ME_DATA_VOLUME" metrics.token "$ME_DIR/data/metrics.token" 0
+    migration_volume_file "$ME_DATA_VOLUME" database.url "$ME_DIR/data/database.url" 0
+    migration_volume_file "$ME_DATA_VOLUME" oidc-client.secret "$ME_DIR/data/oidc-client.secret" 0
+    migration_volume_file "$ME_DATA_VOLUME" bootstrap-admin.password "$ME_DIR/data/bootstrap-admin.password" 0
     migration_volume_file "$ME_DATA_VOLUME" tls/server.crt "$ME_DIR/tls/server.crt" 0
     migration_volume_file "$ME_DATA_VOLUME" tls/server.key "$ME_DIR/tls/server.key" 0
     if [ "$(env_file_value "$ME_WORK/.env" JHV_TLS_ENABLED)" = true ]; then
@@ -875,6 +935,16 @@ migration_export_docker() {
     fi
 
     ME_DATABASE_URL="$(env_file_value "$ME_WORK/.env" JHV_DATABASE_URL)"
+    [ -n "$ME_DATABASE_URL" ] || ME_DATABASE_URL="$(sed -n '1p' "$ME_DIR/data/database.url" 2>/dev/null || true)"
+    if [ -n "$ME_DATABASE_URL" ]; then
+        printf '%s\n' "$ME_DATABASE_URL" > "$ME_DIR/data/database.url"
+        set_plain_env JHV_DATABASE_URL "" "$ME_DIR/environment/docker.env"
+        set_plain_env JHV_DATABASE_URL_FILE /app/data/database.url "$ME_DIR/environment/docker.env"
+    fi
+    if [ -s "$ME_DIR/data/oidc-client.secret" ]; then
+        set_plain_env JHV_OIDC_CLIENT_SECRET "" "$ME_DIR/environment/docker.env"
+        set_plain_env JHV_OIDC_CLIENT_SECRET_FILE /app/data/oidc-client.secret "$ME_DIR/environment/docker.env"
+    fi
     ME_KEYCLOAK=0
     case "$(env_file_value "$ME_WORK/.env" COMPOSE_PROFILES)" in
         *keycloak*) ME_KEYCLOAK=1 ;;
@@ -919,6 +989,23 @@ migration_export_systemd() {
     cp "$PREFIX/config/jhvirt.env" "$ME_DIR/environment/systemd.env"
     cp "$PREFIX/data/secret.key" "$ME_DIR/data/secret.key"
     [ ! -f "$PREFIX/config/metrics.token" ] || cp "$PREFIX/config/metrics.token" "$ME_DIR/data/metrics.token"
+    ME_DATABASE_URL_FILE="$(env_file_value "$PREFIX/config/jhvirt.env" JHV_DATABASE_URL_FILE)"
+    if [ -n "$ME_DATABASE_URL_FILE" ]; then
+        [ -s "$ME_DATABASE_URL_FILE" ] || die "не найден файл DSN внешней PostgreSQL: $ME_DATABASE_URL_FILE"
+        cp "$ME_DATABASE_URL_FILE" "$ME_DIR/data/database.url"
+        set_env JHV_DATABASE_URL "" "$ME_DIR/environment/systemd.env"
+        set_env JHV_DATABASE_URL_FILE "$PREFIX/config/database.url" "$ME_DIR/environment/systemd.env"
+    fi
+    ME_OIDC_SECRET_FILE="$(env_file_value "$PREFIX/config/jhvirt.env" JHV_AUTH_OIDC_CLIENT_SECRET_FILE)"
+    if [ -n "$ME_OIDC_SECRET_FILE" ]; then
+        [ -s "$ME_OIDC_SECRET_FILE" ] || die "не найден файл OIDC client secret: $ME_OIDC_SECRET_FILE"
+        cp "$ME_OIDC_SECRET_FILE" "$ME_DIR/data/oidc-client.secret"
+        set_env JHV_AUTH_OIDC_CLIENT_SECRET "" "$ME_DIR/environment/systemd.env"
+        set_env JHV_AUTH_OIDC_CLIENT_SECRET_FILE "$PREFIX/config/oidc-client.secret" "$ME_DIR/environment/systemd.env"
+    fi
+    ME_BOOTSTRAP_FILE="$(env_file_value "$PREFIX/config/jhvirt.env" JHV_AUTH_BOOTSTRAP_PASSWORD_FILE)"
+    [ -z "$ME_BOOTSTRAP_FILE" ] || [ ! -s "$ME_BOOTSTRAP_FILE" ] ||
+        cp "$ME_BOOTSTRAP_FILE" "$ME_DIR/data/bootstrap-admin.password"
 
     ME_TLS_ENABLED="$(env_file_value "$PREFIX/config/jhvirt.env" JHV_SERVER_TLS_ENABLED)"
     [ -n "$ME_TLS_ENABLED" ] || ME_TLS_ENABLED="$(yaml_server_tls_value "$PREFIX/config/$CONFIG_NAME" enabled)"
@@ -934,6 +1021,7 @@ migration_export_systemd() {
     fi
 
     ME_DATABASE_URL="$(env_file_value "$PREFIX/config/jhvirt.env" JHV_DATABASE_URL)"
+    [ -n "$ME_DATABASE_URL" ] || ME_DATABASE_URL="$(sed -n '1p' "$ME_DIR/data/database.url" 2>/dev/null || true)"
     case "$ME_DATABASE_URL" in
         *host=*|*://*)
             ME_DATABASE_KIND=external
@@ -1072,7 +1160,7 @@ migration_validate_archive() {
     while IFS= read -r MVA_ENTRY; do
         MVA_ENTRY="${MVA_ENTRY#./}"; MVA_ENTRY="${MVA_ENTRY%/}"
         case "$MVA_ENTRY" in
-            ""|manifest|checksums.sha256|systemd-write-paths|config|config/ovirt-backup.yaml|environment|environment/docker.env|environment/systemd.env|database|database/jhvirt.dump|database/keycloak.dump|data|data/secret.key|data/metrics.token|tls|tls/server.crt|tls/server.key) ;;
+            ""|manifest|checksums.sha256|systemd-write-paths|config|config/ovirt-backup.yaml|environment|environment/docker.env|environment/systemd.env|database|database/jhvirt.dump|database/keycloak.dump|data|data/secret.key|data/metrics.token|data/database.url|data/oidc-client.secret|data/bootstrap-admin.password|tls|tls/server.crt|tls/server.key) ;;
             *) die "в пакете миграции найден неожиданный путь: $MVA_ENTRY" ;;
         esac
     done < "$MIGRATION_TMP/archive.list"
@@ -1304,8 +1392,10 @@ uninstall_systemd() {
         step "остановка и удаление jhvirt.service"
         if have systemctl; then
             systemctl disable --now jhvirt >/dev/null 2>&1 || true
+            systemctl disable --now jhvirt-dr-backup.timer >/dev/null 2>&1 || true
+            systemctl stop jhvirt-dr-backup.service >/dev/null 2>&1 || true
         fi
-        rm -f "$UNIT"
+        rm -f "$UNIT" "$DR_UNIT" "$DR_TIMER"
         if have systemctl; then
             systemctl daemon-reload >/dev/null 2>&1 || true
             systemctl reset-failed jhvirt >/dev/null 2>&1 || true
@@ -1347,6 +1437,7 @@ remove_configuration_files() {
 					rm -f "$dir/.env"
                     say "    удалён $dir/.env"
                 fi
+				rm -f "$dir/.recovery-token"
             done
             ;;
     esac
@@ -1364,6 +1455,7 @@ remove_configuration_files() {
     esac
 
     if [ "$REMOVE_SHARED_CONFIG" -eq 1 ]; then
+		rm -f "$PREFIX/config/recovery.token"
         for name in "$CONFIG_NAME" "$CONFIG_NAME.new" \
             "$LEGACY_CONFIG_NAME" "$LEGACY_CONFIG_NAME.new"; do
             if [ -f "$PREFIX/config/$name" ]; then
@@ -1935,7 +2027,10 @@ prepare_tls() {
         case "$TLS_HOST" in *:*) TLS_SAN="IP:$TLS_HOST" ;; *[!0-9.]* ) TLS_SAN="DNS:$TLS_HOST" ;; *) TLS_SAN="IP:$TLS_HOST" ;; esac
         have openssl || die "для выпуска самоподписанного сертификата нужен openssl"
         step "самоподписанный TLS-сертификат для $TLS_HOST"
-        openssl req -x509 -newkey rsa:3072 -sha256 -nodes -days "$TLS_DAYS" \
+        # Git Bash на Windows иначе превращает /CN=... в C:/Program Files/Git/CN=...
+        # как будто это Unix-путь. Исключение касается только subject; пути к
+        # ключу и сертификату MSYS продолжает переводить для Windows openssl.
+        MSYS2_ARG_CONV_EXCL="/CN=" openssl req -x509 -newkey rsa:3072 -sha256 -nodes -days "$TLS_DAYS" \
             -subj "/CN=$TLS_HOST" \
             -addext "subjectAltName=$TLS_SAN" \
             -addext "basicConstraints=critical,CA:FALSE" \
@@ -2172,8 +2267,7 @@ choose_oidc() {
     say "     второй фактор (FreeOTP и совместимые)"
     say "  3) подключить существующий Keycloak или другой OIDC-провайдер"
     say ""
-    say "Вход по паролю остаётся в любом случае: это путь внутрь, когда"
-    say "провайдер недоступен, а недоступен он бывает как раз в аварии."
+    say "При OIDC локальный парольный вход настраивается отдельно."
     say ""
     while :; do
         printf 'Номер [1]: '
@@ -2202,12 +2296,18 @@ load_existing_oidc() {
     OIDC_CLIENT_ID="$(env_file_value "$WORK/.env" JHV_OIDC_CLIENT_ID)"
     OIDC_CLIENT_SECRET="$(env_file_value "$WORK/.env" JHV_OIDC_CLIENT_SECRET)"
     [ -n "$OIDC_CLIENT_SECRET" ] || OIDC_CLIENT_SECRET="$(docker_volume_value "$(docker_metrics_volume)" oidc-client.secret)"
+    if [ -z "$OIDC_ALLOW_LOCAL_LOGIN" ]; then
+        OIDC_ALLOW_LOCAL_LOGIN="$(env_file_value "$WORK/.env" JHV_OIDC_ALLOW_LOCAL_LOGIN)"
+        # До появления явного выбора установщик всегда оставлял локальный
+        # вход включённым. Обновление такой установки не должно запереть её.
+        [ -n "$OIDC_ALLOW_LOCAL_LOGIN" ] || OIDC_ALLOW_LOCAL_LOGIN=true
+    fi
     case "$(env_file_value "$WORK/.env" COMPOSE_PROFILES)" in
         *keycloak*)
             OIDC_MODE=keycloak
             KEYCLOAK_URL="$(env_file_value "$WORK/.env" JHV_KEYCLOAK_URL)"
             KEYCLOAK_ADMIN_USER="$(env_file_value "$WORK/.env" KEYCLOAK_ADMIN_USER)"
-            [ -n "$KEYCLOAK_ADMIN_USER" ] || KEYCLOAK_ADMIN_USER=admin
+            [ -n "$KEYCLOAK_ADMIN_USER" ] || KEYCLOAK_ADMIN_USER=kc-bootstrap-admin
             KEYCLOAK_PORT="$(env_file_value "$WORK/.env" KEYCLOAK_PORT)"
             [ -n "$KEYCLOAK_PORT" ] || KEYCLOAK_PORT=8081
             KEYCLOAK_DIRECT_TLS="$(env_file_value "$WORK/.env" KEYCLOAK_DIRECT_TLS)"
@@ -2238,7 +2338,15 @@ ask_nonempty() {
 # наполовину настроенным входом.
 prepare_oidc() {
     case "$OIDC_MODE" in
-        ""|none) OIDC_MODE=none; return 0 ;;
+        ""|none)
+            OIDC_MODE=none
+            case "$OIDC_ALLOW_LOCAL_LOGIN" in
+                ""|enabled|true) OIDC_ALLOW_LOCAL_LOGIN=true ;;
+                disabled|false) die "нельзя отключить единственный способ входа при --oidc none" ;;
+                *) die "--local-login принимает enabled или disabled" ;;
+            esac
+            return 0
+            ;;
         keycloak|external) ;;
         *) die "--oidc принимает none, keycloak или external" ;;
     esac
@@ -2369,7 +2477,26 @@ prepare_oidc() {
         printf 'Группа наблюдателей [%s]: ' "$GROUP_VIEWER"
         read -r ANSWER || ANSWER=""
         if [ -n "$ANSWER" ]; then GROUP_VIEWER="$ANSWER"; fi
+
+        if [ -z "$OIDC_ALLOW_LOCAL_LOGIN" ]; then
+            say ""
+            say "Локальный local-admin обходит Keycloak, включая его MFA и блокировки."
+            say "Оставлять его следует только как документированный аварийный доступ."
+            printf 'Разрешить локальный вход по паролю? [y/N]: '
+            read -r ANSWER || ANSWER=""
+            case "$ANSWER" in
+                y|Y|yes|YES|д|Д|да|ДА) OIDC_ALLOW_LOCAL_LOGIN=true ;;
+                *) OIDC_ALLOW_LOCAL_LOGIN=false ;;
+            esac
+        fi
     fi
+
+    [ -n "$OIDC_ALLOW_LOCAL_LOGIN" ] || OIDC_ALLOW_LOCAL_LOGIN=false
+    case "$OIDC_ALLOW_LOCAL_LOGIN" in
+        enabled|true) OIDC_ALLOW_LOCAL_LOGIN=true ;;
+        disabled|false) OIDC_ALLOW_LOCAL_LOGIN=false ;;
+        *) die "--local-login принимает enabled или disabled" ;;
+    esac
 }
 
 # Соответствие групп ролям — словарь, а viper словари из переменных окружения
@@ -2438,6 +2565,7 @@ write_oidc_env() {
     fi
     set_plain_env JHV_OIDC_REDIRECT_URL "$URL/api/v1/auth/oidc/callback" "$OIDC_ENV_FILE"
     set_plain_env JHV_OIDC_POST_LOGOUT_URL "$URL/login" "$OIDC_ENV_FILE"
+    set_plain_env JHV_OIDC_ALLOW_LOCAL_LOGIN "$OIDC_ALLOW_LOCAL_LOGIN" "$OIDC_ENV_FILE"
 
     if [ "$OIDC_MODE" = keycloak ]; then
         set_plain_env COMPOSE_PROFILES keycloak "$OIDC_ENV_FILE"
@@ -2509,7 +2637,30 @@ oidc_app_check() {
             exit
         }')"
     case "$OAC_LOCATION" in
-        http://*|https://*) return 0 ;;
+        http://*|https://*)
+            # Discovery alone is insufficient for the bundled Keycloak. An
+            # unknown scope is rejected by the authorization endpoint, so the
+            # first redirect looks healthy while the browser immediately
+            # returns to /login?oidc_error=... . External providers may expose
+            # their public issuer only to client DNS, therefore this extra
+            # host-side probe is intentionally limited to the bundled mode.
+            if [ "$OIDC_MODE" = keycloak ]; then
+                OAC_PROVIDER_HEADERS="$(curl -k -sS -m 35 -D - -o /dev/null "$OAC_LOCATION" 2>/dev/null)" || return 1
+                OAC_PROVIDER_LOCATION="$(printf '%s\n' "$OAC_PROVIDER_HEADERS" | tr -d '\r' | awk '
+                    tolower(substr($0, 1, 9)) == "location:" {
+                        sub(/^[^:]*:[[:space:]]*/, "")
+                        print
+                        exit
+                    }')"
+                case "$OAC_PROVIDER_LOCATION" in
+                    *error=*)
+                        say "    Keycloak отклонил OIDC-запрос: $OAC_PROVIDER_LOCATION"
+                        return 1
+                        ;;
+                esac
+            fi
+            return 0
+            ;;
     esac
     [ -z "$OAC_LOCATION" ] || say "    приложение вернуло: $OAC_LOCATION"
     return 1
@@ -2642,6 +2793,15 @@ migration_restore_docker_data() {
     docker_volume_put "$MRD_VOL" "$MIGRATION_TMP/data/secret.key" secret.key 600
     if [ -s "$MIGRATION_TMP/data/metrics.token" ]; then
         docker_volume_put "$MRD_VOL" "$MIGRATION_TMP/data/metrics.token" metrics.token 600
+    fi
+    if [ -s "$MIGRATION_TMP/data/database.url" ]; then
+        docker_volume_put "$MRD_VOL" "$MIGRATION_TMP/data/database.url" database.url 600
+    fi
+    if [ -s "$MIGRATION_TMP/data/oidc-client.secret" ]; then
+        docker_volume_put "$MRD_VOL" "$MIGRATION_TMP/data/oidc-client.secret" oidc-client.secret 600
+    fi
+    if [ -s "$MIGRATION_TMP/data/bootstrap-admin.password" ]; then
+        docker_volume_put "$MRD_VOL" "$MIGRATION_TMP/data/bootstrap-admin.password" bootstrap-admin.password 600
     fi
     say "    secret.key и служебные токены восстановлены с владельцем UID 10001"
 }
@@ -2790,6 +2950,31 @@ prepare_docker_data_paths() {
     done
 }
 
+prepare_docker_dr_backup() {
+    PDB_WORK="$1"
+    PDB_VALUE="$DR_BACKUP_DIR_OVERRIDE"
+    [ -n "$PDB_VALUE" ] || PDB_VALUE="$(env_file_value "$PDB_WORK/.env" JHV_DR_BACKUP_DIR)"
+    if [ -z "$PDB_VALUE" ]; then
+        if [ "$BUNDLE" -eq 1 ]; then PDB_VALUE="$PREFIX/dr-backups"; else PDB_VALUE="./dr-backups"; fi
+    fi
+    set_plain_env JHV_DR_BACKUP_DIR "$PDB_VALUE" "$PDB_WORK/.env"
+    set_plain_env JHV_DR_ENABLED true "$PDB_WORK/.env"
+    PDB_PATH="$(docker_host_path "$PDB_WORK" "$PDB_VALUE")"
+    mkdir -p "$PDB_PATH/app" "$PDB_PATH/keycloak" ||
+        die "не удалось создать каталог аварийных копий $PDB_PATH"
+
+    # Разные backup-контейнеры работают под UID приложения и Keycloak. Они
+    # получают только собственные подкаталоги и не могут менять копии соседа.
+    docker run --rm --network none --user root -v "$PDB_PATH:/dr" \
+        "$POSTGRES_HELPER_IMAGE" sh -c '
+            mkdir -p /dr/app/postgres /dr/keycloak/postgres
+            chown -R 10001:10001 /dr/app
+            chown -R 1000:0 /dr/keycloak
+            chmod 0700 /dr/app /dr/app/postgres /dr/keycloak /dr/keycloak/postgres' ||
+        die "не удалось подготовить права $PDB_PATH"
+    say "    аварийные копии: $PDB_PATH"
+}
+
 prepare_keycloak_runtime() {
     [ "$OIDC_MODE" = keycloak ] || return 0
     PKR_VOL="$(keycloak_data_volume)"
@@ -2927,6 +3112,8 @@ install_containers() {
     else
         WORK="$COMPOSE_DIR"
     fi
+	DOCKER_ENV_EXISTED=0
+	[ -f "$WORK/.env" ] && DOCKER_ENV_EXISTED=1
 
     if [ "$START" -eq 1 ] && ! have curl && ! have wget; then
         die "для проверки готовности нужен curl или wget"
@@ -2953,9 +3140,14 @@ install_containers() {
         cp -r "$HERE/bin" "$HERE/web" "$PREFIX/"
         cp "$HERE/Dockerfile" "$PREFIX/Dockerfile"
         install_bundle_config
-        cp "$HERE/compose/docker-compose.yml" "$HERE/compose/.env.example" "$PREFIX/compose/"
+        cp "$HERE/compose/docker-compose.yml" "$HERE/compose/.env.example" \
+            "$HERE/compose/Dockerfile.keycloak" "$HERE/compose/Dockerfile.postgres" \
+            "$HERE/compose/dr-backup.sh" "$PREFIX/compose/"
+		install -m 0755 "$HERE/recover-admin.sh" "$PREFIX/bin/ovirt-backup-recover-admin"
         chmod 644 "$PREFIX/Dockerfile" "$PREFIX/compose/docker-compose.yml" \
-            "$PREFIX/compose/.env.example"
+            "$PREFIX/compose/.env.example" "$PREFIX/compose/Dockerfile.keycloak" \
+			"$PREFIX/compose/Dockerfile.postgres" \
+            "$PREFIX/compose/dr-backup.sh"
         [ -d "$HERE/docs" ] && cp -r "$HERE/docs/." "$PREFIX/docs/"
         [ -f "$HERE/VERSION" ] && cp "$HERE/VERSION" "$PREFIX/"
         WORK="$PREFIX/compose"
@@ -2970,6 +3162,8 @@ install_containers() {
 
 	if [ -f "$WORK/.env" ]; then
         say "    $WORK/.env уже есть; пароль базы и пользовательские настройки сохранены"
+        LOCAL_ADMIN_USER="$(env_file_value "$WORK/.env" JHV_AUTH_BOOTSTRAP_USER)"
+        [ -n "$LOCAL_ADMIN_USER" ] || LOCAL_ADMIN_USER=admin
         set_plain_env JHV_EXTERNAL_URL "$URL" "$WORK/.env"
 		set_plain_env JHV_PORT "$PORT" "$WORK/.env"
 		set_plain_env JHV_METRICS_ENABLED true "$WORK/.env"
@@ -3071,6 +3265,7 @@ PostgreSQL хранит пароль внутри тома и новый не п
             printf 'POSTGRES_DB=jhvirt\n'
             printf 'JHV_EXTERNAL_URL=%s\n' "$URL"
             printf 'JHV_PORT=%s\n' "$PORT"
+            printf 'JHV_AUTH_BOOTSTRAP_USER=%s\n' "$LOCAL_ADMIN_USER"
             printf 'JHV_ADMIN_PASSWORD=%s\n' "$ADMPASS"
             printf 'JHV_BACKUP_DIR=%s\n' "$BACKUPS"
             printf 'JHV_RESTORE_DIR=%s\n' "$RESTORES"
@@ -3095,6 +3290,20 @@ PostgreSQL хранит пароль внутри тома и новый не п
 		chmod 644 "$PREFIX/config/$CONFIG_NAME"
 	fi
 
+	if [ "$BUNDLE" -eq 1 ]; then
+		RECOVERY_TOKEN_FILE="$PREFIX/config/recovery.token"
+	else
+		RECOVERY_TOKEN_FILE="$WORK/.recovery-token"
+	fi
+	step "host-only recovery-токен"
+	ensure_recovery_token "$RECOVERY_TOKEN_FILE"
+	set_plain_env JHV_RECOVERY_TOKEN_HASH "$RECOVERY_TOKEN_HASH" "$WORK/.env"
+	if [ "$BUNDLE" -eq 1 ]; then
+		RECOVERY_COMMAND="sudo $PREFIX/bin/ovirt-backup-recover-admin"
+	else
+		RECOVERY_COMMAND="sudo sh $HERE/recover-admin.sh --mode docker --compose-dir $WORK"
+	fi
+
 	step "token-файл Prometheus"
 	ensure_docker_metrics_token
 	migration_restore_docker_data
@@ -3103,6 +3312,7 @@ PostgreSQL хранит пароль внутри тома и новый не п
 	prepare_keycloak_runtime
 	apply_data_dir_overrides "$WORK"
 	prepare_docker_data_paths "$WORK"
+	prepare_docker_dr_backup "$WORK"
 	migration_restore_docker_database "$WORK" "$RUN"
 	ensure_docker_database_roles "$WORK" "$RUN"
 
@@ -3110,8 +3320,9 @@ PostgreSQL хранит пароль внутри тома и новый не п
         # shellcheck disable=SC2086
         (cd "$WORK" && $RUN stop postgres) >/dev/null 2>&1 || true
         say ""
-        say "Подготовлено. Запуск:"
-        say "  cd $WORK && $RUN up -d --build"
+        say "Подготовлено без запуска. Для безопасного первого старта повторите"
+        say "эту установку без --no-start: установщик удалит bootstrap-файл и"
+        say "пересоздаст первый контейнер. Не запускайте compose вручную до этого."
         return
     fi
 
@@ -3169,26 +3380,45 @@ PostgreSQL хранит пароль внутри тома и новый не п
 
     # Пароль администратора: если .env создавали мы, он известен точно. Если
     # .env был раньше — учётная запись уже существует, и показывать нечего.
-    if [ -n "${ADMPASS:-}" ]; then
-        # Одноразовый файл больше не нужен: учётная запись уже создана.
-        docker_volume_remove "$(docker_metrics_volume)" bootstrap-admin.password
-        set_plain_env JHV_ADMIN_PASSWORD_FILE "" "$WORK/.env"
-    fi
+    # После успешного старта bootstrap уже либо создал первую локальную
+    # учётную запись, либо увидел существующих пользователей. В обоих случаях
+    # одноразовый секрет больше не нужен, в том числе после миграции или
+    # продолжения прерванной установки.
+    BOOTSTRAP_RESTART_REQUIRED=0
+    [ "$DOCKER_ENV_EXISTED" -eq 0 ] && BOOTSTRAP_RESTART_REQUIRED=1
+    [ -n "$(env_file_value "$WORK/.env" JHV_ADMIN_PASSWORD_FILE)" ] && BOOTSTRAP_RESTART_REQUIRED=1
+    docker_volume_remove "$(docker_metrics_volume)" bootstrap-admin.password
+    set_plain_env JHV_ADMIN_PASSWORD_FILE "" "$WORK/.env"
+	if [ "$BOOTSTRAP_RESTART_REQUIRED" -eq 1 ]; then
+		step "удаление bootstrap-секрета из памяти"
+		# Перезапуск старого контейнера сохранил бы прежнее environment. Нужен
+		# именно новый контейнер, в котором пути к одноразовому файлу уже нет.
+		# shellcheck disable=SC2086
+		(cd "$WORK" && $RUN up -d --no-deps --force-recreate "$COMPOSE_SERVICE") ||
+			die "не удалось пересоздать приложение без bootstrap-секрета"
+		wait_ready "$READY_SCHEME://127.0.0.1:$PORT/readyz" ||
+			die "приложение не стало готово после удаления bootstrap-секрета"
+	fi
 
     say ""
     say "════════════════════════════════════════════════════════════"
     say "  ГОТОВО"
     say ""
     say "  интерфейс:     $URL"
-    if [ -n "${ADMPASS:-}" ]; then
-        say "  пользователь:  admin"
+    if [ "$OIDC_MODE" != none ] && [ "$OIDC_ALLOW_LOCAL_LOGIN" = false ]; then
+        say "  локальный вход: выключен"
+        say "  local-admin создан с неизвестным случайным паролем."
+        say "  Для аварийного доступа сначала включите --local-login enabled,"
+        say "  затем выполните с хоста: $RECOVERY_COMMAND"
+    elif [ -n "${ADMPASS:-}" ]; then
+        say "  пользователь:  $LOCAL_ADMIN_USER"
         say "  пароль:        $ADMPASS"
         say ""
         say "  Запишите пароль — больше он нигде не хранится."
     else
         say "  учётная запись уже была создана прежде; пароль не менялся."
         say "  Забыли — задайте новый:"
-        say "    cd $WORK && $RUN run --rm $COMPOSE_SERVICE -reset-password admin"
+        say "    $RECOVERY_COMMAND --user $LOCAL_ADMIN_USER"
     fi
     if [ "$OIDC_MODE" = keycloak ]; then
         say ""
@@ -3219,8 +3449,13 @@ PostgreSQL хранит пароль внутри тома и новый не п
         fi
         say "  • соответствие групп ролям правится в $WORK/$CONFIG_NAME без пересборки:"
         say "      cd $WORK && $RUN up -d"
-        say "  • вход по паролю остался: он не проходит через провайдера, и второй"
-        say "    фактор на него не распространяется — держите такие записи аварийными."
+        if [ "$OIDC_ALLOW_LOCAL_LOGIN" = true ]; then
+            say "  • локальный вход разрешён как аварийный: он обходит провайдера и MFA;"
+            say "    после проверки Keycloak выключите его повторной установкой с"
+            say "    --local-login disabled."
+        else
+            say "  • локальный вход выключен; это не влияет на CLI-сброс пароля из ОС."
+        fi
         say ""
     fi
     say "Дальше:"
@@ -3239,7 +3474,7 @@ PostgreSQL хранит пароль внутри тома и новый не п
     say "  • Скопируйте ключ шифрования отдельно от базы и не туда, где копии:"
     say "      cd $WORK && $RUN cp $COMPOSE_SERVICE:/app/data/secret.key ./secret.key.backup"
     say "  • Чек-лист перед боем: docs/DEPLOY.md"
-    say "  • Забыли пароль: cd $WORK && $RUN run --rm $COMPOSE_SERVICE -reset-password admin"
+    say "  • Забыли пароль: $RECOVERY_COMMAND --user $LOCAL_ADMIN_USER"
 }
 
 # --- Служба systemd ---------------------------------------------------------
@@ -3415,6 +3650,21 @@ migration_apply_systemd_files() {
     cp "$MIGRATION_TMP/data/secret.key" "$PREFIX/data/secret.key"
     [ ! -s "$MIGRATION_TMP/data/metrics.token" ] ||
         cp "$MIGRATION_TMP/data/metrics.token" "$PREFIX/config/metrics.token"
+    if [ -s "$MIGRATION_TMP/data/database.url" ]; then
+        cp "$MIGRATION_TMP/data/database.url" "$PREFIX/config/database.url"
+        set_env JHV_DATABASE_URL "" "$PREFIX/config/jhvirt.env"
+        set_env JHV_DATABASE_URL_FILE "$PREFIX/config/database.url" "$PREFIX/config/jhvirt.env"
+    fi
+    if [ -s "$MIGRATION_TMP/data/oidc-client.secret" ]; then
+        cp "$MIGRATION_TMP/data/oidc-client.secret" "$PREFIX/config/oidc-client.secret"
+        set_env JHV_AUTH_OIDC_CLIENT_SECRET "" "$PREFIX/config/jhvirt.env"
+        set_env JHV_AUTH_OIDC_CLIENT_SECRET_FILE "$PREFIX/config/oidc-client.secret" "$PREFIX/config/jhvirt.env"
+    fi
+    if [ -s "$MIGRATION_TMP/data/bootstrap-admin.password" ]; then
+        cp "$MIGRATION_TMP/data/bootstrap-admin.password" "$PREFIX/config/bootstrap-admin.password"
+        set_env JHV_AUTH_BOOTSTRAP_PASSWORD "" "$PREFIX/config/jhvirt.env"
+        set_env JHV_AUTH_BOOTSTRAP_PASSWORD_FILE "$PREFIX/config/bootstrap-admin.password" "$PREFIX/config/jhvirt.env"
+    fi
     rewrite_prefix_file "$PREFIX/config/$CONFIG_NAME" "$MIGRATION_SOURCE_PREFIX" "$PREFIX"
     rewrite_prefix_file "$PREFIX/config/jhvirt.env" "$MIGRATION_SOURCE_PREFIX" "$PREFIX"
     set_env JHV_SERVER_EXTERNAL_URL "$URL" "$PREFIX/config/jhvirt.env"
@@ -3490,6 +3740,10 @@ install_systemd() {
     [ -f "$HERE/web/dist/index.html" ] || die "в комплекте нет web/dist/index.html"
     [ -f "$HERE/config/$CONFIG_NAME" ] || die "в комплекте нет конфигурации"
     [ -f "$HERE/systemd/jhvirt.service" ] || die "в комплекте нет unit systemd"
+    [ -f "$HERE/systemd/jhvirt-dr-backup.service" ] || die "в комплекте нет unit резервирования"
+    [ -f "$HERE/systemd/jhvirt-dr-backup.timer" ] || die "в комплекте нет timer резервирования"
+    [ -f "$HERE/systemd/dr-backup.sh" ] || die "в комплекте нет скрипта резервирования"
+    [ -f "$HERE/recover-admin.sh" ] || die "в комплекте нет скрипта восстановления доступа"
     have systemd-run || die "не найдена команда systemd-run"
 
     detect_postgres_family
@@ -3527,6 +3781,8 @@ install_systemd() {
 
     install -m 0755 "$HERE/bin/$SERVER_BINARY" "$PREFIX/bin/"
     [ -f "$HERE/bin/jvbackup" ] && install -m 0755 "$HERE/bin/jvbackup" "$PREFIX/bin/"
+    install -m 0755 "$HERE/systemd/dr-backup.sh" "$PREFIX/bin/ovirt-backup-dr-backup"
+    install -m 0755 "$HERE/recover-admin.sh" "$PREFIX/bin/ovirt-backup-recover-admin"
     rm -rf "$PREFIX/web/dist"
     cp -r "$HERE/web/dist" "$PREFIX/web/dist"
     [ -d "$HERE/docs" ] && cp -r "$HERE/docs/." "$PREFIX/docs/"
@@ -3542,7 +3798,8 @@ install_systemd() {
 	chmod 750 "$PREFIX/config"
 	chmod 640 "$PREFIX/config/$CONFIG_NAME"
 	chmod 600 "$PREFIX/config/jhvirt.env" 2>/dev/null || true
-	chmod 600 "$PREFIX/data/secret.key" 2>/dev/null || true
+	chmod 600 "$PREFIX/data/secret.key" "$PREFIX/config/database.url" \
+        "$PREFIX/config/oidc-client.secret" "$PREFIX/config/bootstrap-admin.password" 2>/dev/null || true
 
     ENV_FILE="$PREFIX/config/jhvirt.env"
     ENV_EXISTED=0
@@ -3552,7 +3809,9 @@ install_systemd() {
     if [ -n "$DATABASE_URL_FILE" ]; then
         step "подключение внешней PostgreSQL"
         read_external_database_url
-        set_env JHV_DATABASE_URL "$DATABASE_URL" "$ENV_FILE"
+        install -o "$USER_NAME" -g "$USER_NAME" -m 0600 "$DATABASE_URL_FILE" "$PREFIX/config/database.url"
+        set_env JHV_DATABASE_URL "" "$ENV_FILE"
+        set_env JHV_DATABASE_URL_FILE "$PREFIX/config/database.url" "$ENV_FILE"
     elif [ "$MIGRATION_ACTIVE" -eq 1 ] && [ "$MIGRATION_DATABASE_KIND" = embedded ]; then
         if [ "$MIGRATION_RESUME" -eq 0 ] && have runuser && id postgres >/dev/null 2>&1 &&
                 runuser -u postgres -- psql -d jhvirt -Atc \
@@ -3561,15 +3820,41 @@ install_systemd() {
         fi
         prepare_local_postgres
         set_env JHV_DATABASE_URL "$DATABASE_URL" "$ENV_FILE"
+        set_env JHV_DATABASE_URL_FILE "" "$ENV_FILE"
     elif [ "$ENV_EXISTED" -eq 0 ]; then
         prepare_local_postgres
         set_env JHV_DATABASE_URL "$DATABASE_URL" "$ENV_FILE"
+        set_env JHV_DATABASE_URL_FILE "" "$ENV_FILE"
     else
-        say "    подключение к базе сохранено из $ENV_FILE"
+        EXISTING_DATABASE_URL_FILE="$(env_file_value "$ENV_FILE" JHV_DATABASE_URL_FILE)"
+        if [ -n "$EXISTING_DATABASE_URL_FILE" ]; then
+            [ -s "$EXISTING_DATABASE_URL_FILE" ] ||
+                die "не найден сохранённый файл DSN: $EXISTING_DATABASE_URL_FILE"
+            say "    подключение к базе сохранено в $EXISTING_DATABASE_URL_FILE"
+        else
+            EXISTING_DATABASE_URL="$(env_file_value "$ENV_FILE" JHV_DATABASE_URL)"
+            case "$EXISTING_DATABASE_URL" in
+                *host=*|*://*)
+                    umask 077
+                    printf '%s\n' "$EXISTING_DATABASE_URL" > "$PREFIX/config/database.url"
+                    umask 022
+                    chown "$USER_NAME:$USER_NAME" "$PREFIX/config/database.url"
+                    chmod 600 "$PREFIX/config/database.url"
+                    set_env JHV_DATABASE_URL "" "$ENV_FILE"
+                    set_env JHV_DATABASE_URL_FILE "$PREFIX/config/database.url" "$ENV_FILE"
+                    say "    DSN внешней базы перенесён из env в защищённый database.url"
+                    ;;
+                *) say "    локальное подключение к базе сохранено из $ENV_FILE" ;;
+            esac
+        fi
     fi
 
 	set_env JHV_SERVER_EXTERNAL_URL "$URL" "$ENV_FILE"
 	set_env JHV_SERVER_PORT "$PORT" "$ENV_FILE"
+	RECOVERY_TOKEN_FILE="$PREFIX/config/recovery.token"
+	step "host-only recovery-токен"
+	ensure_recovery_token "$RECOVERY_TOKEN_FILE"
+	set_env JHV_AUTH_RECOVERY_TOKEN_HASH "$RECOVERY_TOKEN_HASH" "$ENV_FILE"
 	METRICS_TOKEN_FILE="$PREFIX/config/metrics.token"
 	if [ ! -s "$METRICS_TOKEN_FILE" ]; then
 		METRICS_TOKEN="$(gen_secret 32)"
@@ -3582,17 +3867,65 @@ install_systemd() {
 	chmod 600 "$METRICS_TOKEN_FILE"
 	set_env JHV_METRICS_ENABLED true "$ENV_FILE"
 	set_env JHV_METRICS_TOKEN_FILE "$METRICS_TOKEN_FILE" "$ENV_FILE"
+	SYSTEMD_DR_LOCAL=1
+	case "$(env_file_value "$ENV_FILE" JHV_DATABASE_URL)" in *host=*|*://*) SYSTEMD_DR_LOCAL=0 ;; esac
+	[ -z "$(env_file_value "$ENV_FILE" JHV_DATABASE_URL_FILE)" ] || SYSTEMD_DR_LOCAL=0
+	if [ "$SYSTEMD_DR_LOCAL" -eq 1 ]; then
+		DR_BACKUP_DIR="$DR_BACKUP_DIR_OVERRIDE"
+		[ -n "$DR_BACKUP_DIR" ] || DR_BACKUP_DIR="$(env_file_value "$ENV_FILE" JHV_DR_BACKUP_DIR)"
+		[ -n "$DR_BACKUP_DIR" ] || DR_BACKUP_DIR="/var/backups/ovirt-backup"
+		case "$DR_BACKUP_DIR" in /*) ;; *) die "--dr-backup-dir для systemd должен быть абсолютным путём" ;; esac
+		mkdir -p "$DR_BACKUP_DIR/postgres"
+		chown -R "$USER_NAME:$USER_NAME" "$DR_BACKUP_DIR"
+		chmod 700 "$DR_BACKUP_DIR" "$DR_BACKUP_DIR/postgres"
+		set_env JHV_DR_BACKUP_DIR "$DR_BACKUP_DIR" "$ENV_FILE"
+		set_env JHV_DISASTER_RECOVERY_ENABLED true "$ENV_FILE"
+		set_env JHV_DISASTER_RECOVERY_POSTGRES_DUMP_PATH "$DR_BACKUP_DIR/postgres" "$ENV_FILE"
+		set_env JHV_DISASTER_RECOVERY_POSTGRES_DUMP_MAX_AGE 36h "$ENV_FILE"
+		set_env JHV_DISASTER_RECOVERY_SECRET_KEY_BACKUP_PATH "$DR_BACKUP_DIR/secret.key" "$ENV_FILE"
+	else
+		set_env JHV_DISASTER_RECOVERY_ENABLED false "$ENV_FILE"
+		say "    внешняя PostgreSQL: её резервирование остаётся на стороне СУБД"
+	fi
 	install_tls_systemd "$ENV_FILE"
 	migration_restore_systemd_database
+	if [ "$ENV_EXISTED" -eq 1 ]; then
+		LOCAL_ADMIN_USER="$(env_file_value "$ENV_FILE" JHV_AUTH_BOOTSTRAP_USER)"
+		[ -n "$LOCAL_ADMIN_USER" ] || LOCAL_ADMIN_USER=admin
+	else
+		set_env JHV_AUTH_BOOTSTRAP_USER "$LOCAL_ADMIN_USER" "$ENV_FILE"
+	fi
 
     ADMPASS=""
-    if [ "$START" -eq 1 ] && [ "$ENV_EXISTED" -eq 0 ] &&
-            [ -z "$DATABASE_URL_FILE" ] && local_database_needs_admin; then
+    BOOTSTRAP_PASSWORD_FILE="$PREFIX/config/bootstrap-admin.password"
+    if [ "$ENV_EXISTED" -eq 0 ] && [ -z "$DATABASE_URL_FILE" ] && local_database_needs_admin; then
         ADMPASS="$(gen_secret 18)"
         [ -n "$ADMPASS" ] || die "не удалось сгенерировать пароль администратора"
-        set_env JHV_AUTH_BOOTSTRAP_PASSWORD "$ADMPASS" "$ENV_FILE"
-    elif [ "$ENV_EXISTED" -eq 0 ]; then
+        umask 077
+        printf '%s\n' "$ADMPASS" > "$BOOTSTRAP_PASSWORD_FILE"
+        umask 022
+        chown "$USER_NAME:$USER_NAME" "$BOOTSTRAP_PASSWORD_FILE"
+        chmod 600 "$BOOTSTRAP_PASSWORD_FILE"
         set_env JHV_AUTH_BOOTSTRAP_PASSWORD "" "$ENV_FILE"
+        set_env JHV_AUTH_BOOTSTRAP_PASSWORD_FILE "$BOOTSTRAP_PASSWORD_FILE" "$ENV_FILE"
+    elif [ "$ENV_EXISTED" -eq 1 ]; then
+        LEGACY_BOOTSTRAP_PASSWORD="$(env_file_value "$ENV_FILE" JHV_AUTH_BOOTSTRAP_PASSWORD)"
+        if [ -n "$LEGACY_BOOTSTRAP_PASSWORD" ]; then
+            umask 077
+            printf '%s\n' "$LEGACY_BOOTSTRAP_PASSWORD" > "$BOOTSTRAP_PASSWORD_FILE"
+            umask 022
+            chown "$USER_NAME:$USER_NAME" "$BOOTSTRAP_PASSWORD_FILE"
+            chmod 600 "$BOOTSTRAP_PASSWORD_FILE"
+            set_env JHV_AUTH_BOOTSTRAP_PASSWORD "" "$ENV_FILE"
+            set_env JHV_AUTH_BOOTSTRAP_PASSWORD_FILE "$BOOTSTRAP_PASSWORD_FILE" "$ENV_FILE"
+        fi
+    else
+        # У внешней БД установщик не знает, пуста ли таблица users. Пароль
+        # генерирует и печатает сама служба только если действительно создаёт
+        # первую запись; показывать здесь пароль, который мог не примениться,
+        # опаснее, чем отправить оператора в journalctl.
+        set_env JHV_AUTH_BOOTSTRAP_PASSWORD "" "$ENV_FILE"
+        set_env JHV_AUTH_BOOTSTRAP_PASSWORD_FILE "" "$ENV_FILE"
     fi
 
     SYSTEMD_WRITE_PATHS="$(systemd_write_paths)"
@@ -3602,6 +3935,16 @@ install_systemd() {
         "$HERE/systemd/jhvirt.service" > "$UNIT.tmp"
     install -m 0644 "$UNIT.tmp" "$UNIT"
     rm -f "$UNIT.tmp"
+	if [ "$SYSTEMD_DR_LOCAL" -eq 1 ]; then
+		sed -e "s|@PREFIX@|$PREFIX|g" -e "s|@USER_NAME@|$USER_NAME|g" \
+			-e "s|@DR_DIR@|$DR_BACKUP_DIR|g" \
+			"$HERE/systemd/jhvirt-dr-backup.service" > "$DR_UNIT.tmp"
+		install -m 0644 "$DR_UNIT.tmp" "$DR_UNIT"
+		rm -f "$DR_UNIT.tmp"
+		install -m 0644 "$HERE/systemd/jhvirt-dr-backup.timer" "$DR_TIMER"
+	else
+		rm -f "$DR_UNIT" "$DR_TIMER"
+	fi
     systemctl daemon-reload
 
     step "проверка конфигурации"
@@ -3627,9 +3970,25 @@ install_systemd() {
             journalctl -u jhvirt -n 40 --no-pager || true
             die "за 3 минуты служба не стала готова — последние строки журнала выше"
         fi
-        if [ -n "$ADMPASS" ]; then
-            set_env JHV_AUTH_BOOTSTRAP_PASSWORD "" "$ENV_FILE"
+        if [ -s "$BOOTSTRAP_PASSWORD_FILE" ]; then
+			BOOTSTRAP_RESTART_REQUIRED=1
+            rm -f "$BOOTSTRAP_PASSWORD_FILE"
+            set_env JHV_AUTH_BOOTSTRAP_PASSWORD_FILE "" "$ENV_FILE"
+		else
+			BOOTSTRAP_RESTART_REQUIRED=0
+			[ "$ENV_EXISTED" -eq 0 ] && BOOTSTRAP_RESTART_REQUIRED=1
         fi
+		if [ "$BOOTSTRAP_RESTART_REQUIRED" -eq 1 ]; then
+			step "удаление bootstrap-секрета из памяти"
+			systemctl restart jhvirt
+			wait_ready "$READY_SCHEME://127.0.0.1:$PORT/readyz" ||
+				die "служба не стала готова после удаления bootstrap-секрета"
+		fi
+		if [ "$SYSTEMD_DR_LOCAL" -eq 1 ]; then
+			systemctl enable --now jhvirt-dr-backup.timer
+			systemctl start jhvirt-dr-backup.service ||
+				die "служба запущена, но первый dump PostgreSQL не создан"
+		fi
     fi
 
     say ""
@@ -3643,10 +4002,13 @@ install_systemd() {
     say "  каталог:        $PREFIX"
     say "  интерфейс:      $URL"
     if [ -n "$ADMPASS" ]; then
-        say "  пользователь:   admin"
+        say "  пользователь:   $LOCAL_ADMIN_USER"
         say "  пароль:         $ADMPASS"
         say ""
-        say "  Запишите пароль — после первого успешного старта он удаляется из env."
+        say "  Запишите пароль — после первого успешного старта его файл удаляется."
+    elif [ "$ENV_EXISTED" -eq 0 ] && [ -n "$DATABASE_URL_FILE" ]; then
+        say "  внешняя БД: если таблица users была пуста, пароль $LOCAL_ADMIN_USER"
+        say "  один раз напечатан службой; смотрите journalctl -u jhvirt."
     else
         say "  учётные записи сохранены; пароль администратора не менялся."
     fi
@@ -3656,10 +4018,13 @@ install_systemd() {
         if [ "$UPGRADE" -eq 1 ]; then
             say "Служба до обновления была остановлена и осталась остановленной."
         else
-            say "Запуск: systemctl enable --now jhvirt"
+            say "Для безопасного первого старта повторите установку без --no-start."
+            say "Не запускайте jhvirt.service вручную: установщик должен удалить"
+            say "bootstrap-файл и заменить первый процесс после создания учётной записи."
         fi
     fi
     say "Журнал: journalctl -u jhvirt -f"
+    say "Сброс доступа: sudo $PREFIX/bin/ovirt-backup-recover-admin --user $LOCAL_ADMIN_USER"
     say "Ключ шифрования: $PREFIX/data/secret.key — сохраните его отдельно от базы."
     if [ "$READY_SCHEME" = https ]; then
         say "TLS: $PREFIX/config/tls/server.crt — добавьте сертификат в доверенные на рабочих местах."

@@ -16,7 +16,7 @@ Cookie называется `jhvirt_session`, имеет `HttpOnly`, `SameSite=L
 ```bash
 curl -c cookies.txt -X POST http://localhost:8080/api/v1/auth/login \
   -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"…"}'
+  -d '{"username":"local-admin","password":"…"}'
 
 curl -b cookies.txt http://localhost:8080/api/v1/dashboard
 ```
@@ -1060,7 +1060,10 @@ source.addEventListener('alert', (e) => console.log(JSON.parse(e.data)))
 | `GET/POST` | `/users` | список, создать (admin) |
 | `PUT/DELETE` | `/users/{id}` | изменить, удалить (admin) |
 
-Пароль не короче 10 символов. Нельзя удалить себя и последнего администратора.
+`PUT` принимает `username`, `role`, `disabled` и необязательный `password`.
+Пустой `password` сохраняет текущий хеш; новый пароль должен быть не короче 10
+символов. Имя можно менять только у локальной записи; имя внешней записи
+синхронизирует OIDC-провайдер. Нельзя удалить себя и последнего администратора.
 
 ## Физические копии и репликация
 

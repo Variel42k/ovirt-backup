@@ -102,6 +102,17 @@ func (s *Store) DeleteAPIToken(ctx context.Context, id string) error {
 	return nil
 }
 
+// DisableAllAPITokens revokes every database-backed API token while keeping
+// its metadata for incident review.
+func (s *Store) DisableAllAPITokens(ctx context.Context) (int64, error) {
+	res, err := s.db.Exec(ctx, `UPDATE api_tokens SET disabled=? WHERE disabled=?`, true, false)
+	if err != nil {
+		return 0, fmt.Errorf("disable all api tokens: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 // TouchAPIToken records that the token has just been used.
 //
 // Нужно это затем, чтобы забытый токен можно было отличить от рабочего. Без

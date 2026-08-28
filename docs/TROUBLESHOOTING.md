@@ -86,11 +86,11 @@ sudo systemd-run --quiet --wait --pipe --collect \
 
 ```bash
 BASE=http://127.0.0.1:8080
-read -rsp 'Пароль admin: ' JHV_PASSWORD; echo
+read -rsp 'Пароль local-admin: ' JHV_PASSWORD; echo
 curl -sS -D /tmp/jhv.headers -c /tmp/jhv.cookies \
   -X POST "$BASE/api/v1/auth/login" \
   -H 'Content-Type: application/json' \
-  -d "{\"username\":\"admin\",\"password\":\"$JHV_PASSWORD\"}"
+  -d "{\"username\":\"local-admin\",\"password\":\"$JHV_PASSWORD\"}"
 unset JHV_PASSWORD
 curl -i -b /tmp/jhv.cookies "$BASE/api/v1/auth/me"
 grep -i '^set-cookie:' /tmp/jhv.headers
@@ -395,25 +395,48 @@ sudo systemctl enable --now jhvirt
 печатается отдельной строкой и после первого старта не хранится в открытом
 виде.
 
-Сброс для systemd:
+Штатный сброс из установки `.run` (режим определяется автоматически):
 
 ```bash
-sudo systemd-run --quiet --wait --pipe --collect \
-  --uid=jhvirt --gid=jhvirt --working-directory=/opt/jhvirt \
-  --property=EnvironmentFile=/opt/jhvirt/config/jhvirt.env \
-  /opt/jhvirt/bin/ovirt-backup-server -reset-password admin
+sudo /opt/jhvirt/bin/ovirt-backup-recover-admin --user local-admin
 ```
 
-Сброс для Docker из рабочего Compose-каталога:
+Для запуска Compose непосредственно из репозитория:
 
 ```bash
-docker compose run --rm ovirt-backup -reset-password admin
+sudo sh deploy/recover-admin.sh --mode docker --compose-dir deploy \
+  --user local-admin
 ```
 
-Команда генерирует новый пароль, включает отключённую учётную запись и удаляет
-все её действующие сессии. Свой пароль длиной не менее 10 символов можно задать
-одноразовой переменной `JHV_NEW_PASSWORD`; учитывайте риск попадания значения в
-историю оболочки и окружение процесса.
+Команда требует `/opt/jhvirt/config/recovery.token` (для репозитория —
+`deploy/.recovery-token`) с правами `0600`. Токен никогда не монтируется в
+рабочий контейнер. Скрипт генерирует новый пароль, включает отключённую локальную
+запись, отзывает все сессии, API-токены и делегирования и пересоздаёт приложение.
+Прямой запуск бинаря с одним `-reset-password` намеренно отклоняется.
+
+Если token-файл потерян, остановите приложение и повторно запустите проверенный
+установщик той же версии или новее: он создаст новый токен и заменит только его
+SHA-256 в env. Не переносите token-файл внутрь volume приложения.
+
+На установках, обновлённых со старой версии, имя может оставаться `admin`:
+проверьте `JHV_AUTH_BOOTSTRAP_USER` в `.env` или `jhvirt.env`. Установщик не
+переименовывает существующую запись и не меняет ей пароль. После входа
+её можно переименовать в **«Настройки → Пользователи»**: откройте
+`admin`, задайте `local-admin` и оставьте поле нового пароля пустым. Это
+меняет только логин; сессия продолжает работать. Внешние OIDC-записи
+так переименовать нельзя: их имя задаёт Keycloak.
+
+### `403 local_login_disabled` при правильном пароле
+
+Это ожидаемо при OIDC: локальная форма выключена целиком и `local-admin` не
+обходит Keycloak. `kc-bootstrap-admin` здесь тоже не подходит — он действует
+только в master realm Keycloak.
+
+Для документированного аварийного доступа сначала повторно запустите Docker-
+установщик с прежними `--url`/`--mode` и `--local-login enabled`, затем сбросьте
+пароль `local-admin` командой выше. После ремонта OIDC повторите установку с
+`--local-login disabled`. Не оставляйте этот вход включённым постоянно: на него
+не распространяются MFA и блокировки провайдера.
 
 ### Слишком много попыток (`429 too_many_attempts`)
 
@@ -446,11 +469,11 @@ docker compose restart ovirt-backup
 
 ```bash
 BASE=http://10.20.30.40:8080
-read -rsp 'Пароль admin: ' JHV_PASSWORD; echo
+read -rsp 'Пароль local-admin: ' JHV_PASSWORD; echo
 curl -i -c /tmp/jhv.cookies \
   -X POST "$BASE/api/v1/auth/login" \
   -H 'Content-Type: application/json' \
-  -d "{\"username\":\"admin\",\"password\":\"$JHV_PASSWORD\"}"
+  -d "{\"username\":\"local-admin\",\"password\":\"$JHV_PASSWORD\"}"
 unset JHV_PASSWORD
 curl -i -b /tmp/jhv.cookies "$BASE/api/v1/auth/me"
 rm -f /tmp/jhv.cookies
@@ -505,18 +528,20 @@ docker compose exec -T ovirt-backup \
   http://keycloak:8080/realms/jhvirt/.well-known/openid-configuration
 
 # Браузерный адрес realm доступен снаружи.
-curl -i http://10.249.251.36:8081/realms/jhvirt/.well-known/openid-configuration
+KEYCLOAK_URL="$(sed -n 's/^JHV_KEYCLOAK_URL=//p' .env)"
+curl -k -i "$KEYCLOAK_URL/realms/jhvirt/.well-known/openid-configuration"
 
 # Приложение смогло выполнить discovery: Location должен быть абсолютным
 # адресом Keycloak, а не /login?oidc_error=...
+APP_URL="$(sed -n 's/^JHV_EXTERNAL_URL=//p' .env)"
 curl -k -sS -D - -o /dev/null \
-  https://127.0.0.1:8080/api/v1/auth/oidc/start | grep -i '^location:'
+  "$APP_URL/api/v1/auth/oidc/start" | grep -i '^location:'
 ```
 
 Для встроенного Keycloak значения должны иметь такой смысл:
 
 ```dotenv
-JHV_OIDC_ISSUER=http://10.249.251.36:8081/realms/jhvirt
+JHV_OIDC_ISSUER=https://keycloak.example.org/realms/jhvirt
 JHV_OIDC_BACKCHANNEL_URL=http://keycloak:8080
 ```
 
@@ -528,24 +553,55 @@ hairpin NAT/firewall и через 15 секунд вернуть `провай�
 секрет клиента сохраняются, а внутренний адрес добавляется автоматически.
 
 Если discovery отвечает `404` и JSON `Realm does not exist`, контейнер
-Keycloak запущен, но realm `jhvirt` отсутствует. Если известен прежний пароль
-администратора Keycloak, временно укажите его в `KEYCLOAK_ADMIN_PASSWORD` в
-`.env` с правами `0600` и повторите установку. Если пароль потерян и в
-Keycloak ещё нет нужных пользователей, федераций и настроек, пересоздайте
-только его базу:
+Keycloak запущен, но realm `jhvirt` отсутствует. Не возвращайте пароль в
+`.env`: новые установки хранят секреты только файлами в volumes.
+
+Если потерян доступ администратора Keycloak, остановите все его узлы и
+создайте временную recovery-запись штатной командой Keycloak:
 
 ```bash
 docker compose stop keycloak
-docker compose exec -T postgres psql -U jhvirt -d postgres \
-  -c 'DROP DATABASE IF EXISTS keycloak WITH (FORCE)'
-
-# Затем повторите запуск того же install.sh или .run с прежними --mode,
-# --url и --port. База, realm, клиент и группы будут созданы заново.
+read -rsp 'Временный пароль Keycloak: ' KC_RECOVERY_PASSWORD; echo
+export KC_RECOVERY_PASSWORD
+docker compose run --rm --no-deps -e KC_RECOVERY_PASSWORD keycloak \
+  --config-file=/opt/keycloak/data/ovirt-backup/keycloak.conf \
+  bootstrap-admin user --optimized --username kc-recovery-admin \
+  --password:env KC_RECOVERY_PASSWORD
+unset KC_RECOVERY_PASSWORD
+docker compose up -d keycloak
 ```
 
-База приложения `jhvirt`, задания и копии этой командой не удаляются. База
-`keycloak` содержит пользователей, федерации и второй фактор, поэтому удалять
-её на настроенной production-системе без резервной копии нельзя.
+Войдите как `kc-recovery-admin`, исправьте постоянную административную запись и
+удалите временную. Все узлы должны быть остановлены на время команды; она
+использует тот же `keycloak.conf` и ту же БД, что штатный контейнер.
+
+Если realm действительно нужно пересоздать на пустом тестовом стенде, сначала
+проверьте последний файл в `<JHV_DR_BACKUP_DIR>/keycloak/postgres`, затем
+удалите только БД Keycloak и повторите установку. На production не удаляйте её:
+там находятся пользователи, federation-настройки и второй фактор.
+
+Локальный `local-admin` приложения не помогает войти в консоль Keycloak. И
+наоборот, `kc-bootstrap-admin` не принимается парольной формой ovirt-backup.
+
+### Keycloak возвращает `invalid_scope`
+
+Keycloak отклоняет запрос до показа формы входа, а приложение возвращает
+браузер на `/login?oidc_error=...invalid_scope`. Чаще всего в
+`auth.oidc.scopes` ошибочно добавлен `groups`: для встроенного Keycloak это
+утверждение токена, которое создаёт mapper клиента, а не стандартный scope.
+
+Оставьте стандартный набор и перезапустите приложение:
+
+```yaml
+auth:
+  oidc:
+    scopes: ["openid", "profile", "email"]
+```
+
+Отдельный scope групп добавляют только тогда, когда администратор провайдера
+явно создал его и назначил клиенту. Современный установщик проверяет ответ
+authorization endpoint встроенного Keycloak и завершает установку ошибкой,
+если тот сразу возвращает OIDC `error`.
 
 ### Вход работает через curl, но не через браузер
 

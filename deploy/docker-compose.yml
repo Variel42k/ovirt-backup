@@ -120,7 +120,11 @@ services:
       # Отключите dry_run, когда убедитесь по журналу, что решения верные.
       JHV_MONITOR_REMEDIATION_DRY_RUN: "${JHV_REMEDIATION_DRY_RUN:-true}"
       # Пароль первого администратора; пусто — будет сгенерирован и напечатан.
+      JHV_AUTH_BOOTSTRAP_USER: "${JHV_AUTH_BOOTSTRAP_USER:-local-admin}"
       JHV_AUTH_BOOTSTRAP_PASSWORD_FILE: "${JHV_ADMIN_PASSWORD_FILE:-}"
+      # В контейнер попадает только SHA-256. Сам recovery.token хранится на
+      # хосте и монтируется лишь в одноразовый контейнер восстановления.
+      JHV_AUTH_RECOVERY_TOKEN_HASH: "${JHV_RECOVERY_TOKEN_HASH:-}"
       # Вход через внешнего провайдера (Keycloak и совместимые).
       #
       # Соответствие групп ролям — auth.oidc.role_mapping — здесь задать
@@ -133,7 +137,8 @@ services:
       # браузер на порт хоста, а приложение ходит к соседнему контейнеру.
       JHV_AUTH_OIDC_BACKCHANNEL_URL: "${JHV_OIDC_BACKCHANNEL_URL:-}"
       JHV_AUTH_OIDC_CLIENT_ID: "${JHV_OIDC_CLIENT_ID:-}"
-      # Секрет — только через .env: файл настроек лежит в репозитории.
+      # Секрет хранится отдельным файлом 0600 в томе приложения: он не виден
+      # ни в YAML, ни в .env, ни в выводе docker inspect.
       JHV_AUTH_OIDC_CLIENT_SECRET_FILE: "${JHV_OIDC_CLIENT_SECRET_FILE:-}"
       # Задаётся целиком и обязателен при включённом внешнем входе: провайдер
       # сверяет его побуквенно. Собирать его здесь из внешнего адреса нельзя —
@@ -146,11 +151,17 @@ services:
       JHV_AUTH_OIDC_DEFAULT_ROLE: "${JHV_OIDC_DEFAULT_ROLE:-}"
       JHV_AUTH_OIDC_POST_LOGOUT_REDIRECT_URL: "${JHV_OIDC_POST_LOGOUT_URL:-}"
       JHV_AUTH_OIDC_SESSION_TTL: "${JHV_OIDC_SESSION_TTL:-1h}"
-      # Вход по паролю рядом с внешним. Выключать не рекомендуется: локальная
-      # запись администратора — путь внутрь, когда провайдер недоступен.
-      JHV_AUTH_OIDC_ALLOW_LOCAL_LOGIN: "${JHV_OIDC_ALLOW_LOCAL_LOGIN:-true}"
+      # Локальный вход при OIDC обходит политики провайдера и MFA. Установщик
+      # спрашивает о нём явно; при ручной настройке безопасное умолчание false.
+      # Без OIDC это значение не мешает обычному парольному входу.
+      JHV_AUTH_OIDC_ALLOW_LOCAL_LOGIN: "${JHV_OIDC_ALLOW_LOCAL_LOGIN:-false}"
       JHV_METRICS_ENABLED: "${JHV_METRICS_ENABLED:-false}"
       JHV_METRICS_TOKEN_FILE: "/app/data/metrics.token"
+      # Ежедневный dump и отдельную копию ключа создаёт dr-backup ниже.
+      JHV_DISASTER_RECOVERY_ENABLED: "${JHV_DR_ENABLED:-true}"
+      JHV_DISASTER_RECOVERY_POSTGRES_DUMP_PATH: "/app/dr/postgres"
+      JHV_DISASTER_RECOVERY_POSTGRES_DUMP_MAX_AGE: "${JHV_DR_DUMP_MAX_AGE:-36h}"
+      JHV_DISASTER_RECOVERY_SECRET_KEY_BACKUP_PATH: "/app/dr/secret.key"
       TZ: "${TZ:-UTC}"
     volumes:
       # Файл настроек. По умолчанию — тот же, что запечён в образ, поэтому
@@ -176,6 +187,9 @@ services:
       # Куда складываются восстановленные образы. Отдельно от хранилища копий
       # намеренно: восстановление не должно съедать место под сами копии.
       - ${JHV_RESTORE_DIR:-./restores}:/restores
+      # Локальный staging аварийного комплекта. В production этот путь должен
+      # быть отдельным mount или регулярно копироваться на другой узел.
+      - ${JHV_DR_BACKUP_DIR:-./dr-backups}/app:/app/dr:ro
     # Столько же, сколько в юните systemd: восстановление и проверка держат
     # много открытых объектов хранилища. На хостах, где предел по умолчанию
     # равен 1024, без этого проверка большой цепочки упирается в него.
@@ -237,8 +251,17 @@ services:
         condition: service_healthy
 
   postgres:
-    image: ${POSTGRES_IMAGE:-docker.io/library/postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73}
+    build:
+      context: .
+      dockerfile: Dockerfile.postgres
+      args:
+        POSTGRES_BASE_IMAGE: ${POSTGRES_IMAGE:-docker.io/library/postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73}
+    image: ovirt-backup-postgres:${POSTGRES_VERSION:-17-alpine-hardened}
     restart: unless-stopped
+    # The official entrypoint needs root only while it prepares a fresh volume;
+    # it then switches to UID 70. Capabilities below are the minimum verified
+    # on both an empty and an initialized volume.
+    user: "0:0"
     # См. выше: у json-file без опций предела нет, а база на каждой контрольной
     # точке пишет строку.
     logging:
@@ -255,18 +278,9 @@ services:
       - postgres-data:/var/lib/postgresql/data
       - postgres-secrets:/run/secrets:ro
 
-    # Здесь ограничение только одно, и это не забывчивость.
-    #
-    # Образ postgres стартует от root: он выставляет владельца каталогу данных
-    # и лишь потом переключается на своего пользователя. Снятие привилегий и
-    # read_only ломают именно этот шаг, и подбирать для него точный набор
-    # cap_add нужно с проверкой на стенде — на пустом томе и на уже
-    # существующем, потому что ведут они себя по-разному. Строка, добавленная
-    # без такой проверки, обнаружится в момент, когда база не поднимется, а
-    # это всегда самый неудобный момент.
-    #
-    # no-new-privileges безопасен при любом раскладе: он не отбирает прав, а
-    # запрещает получить новые.
+    # Entry point PostgreSQL сначала исправляет владельца тома от root, затем
+    # переключается на пользователя postgres. Набор ниже проверен и на пустом,
+    # и на уже инициализированном томе; остальные capabilities удалены.
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -293,6 +307,44 @@ services:
       timeout: 5s
       retries: 5
 
+  dr-backup:
+    image: ovirt-backup-postgres:${POSTGRES_VERSION:-17-alpine-hardened}
+    restart: unless-stopped
+    init: true
+    user: "10001:10001"
+    entrypoint: ["/bin/sh", "/usr/local/bin/ovirt-backup-dr-backup"]
+    command: ["--loop"]
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGUSER: "${POSTGRES_APP_USER:-ovirt_backup_app}"
+      PGDATABASE: "${POSTGRES_DB:?задайте в deploy/.env}"
+      PGPASSWORD_FILE: "/app/data/database.password"
+      JHV_DR_OUTPUT_DIR: "/dr/postgres"
+      JHV_DR_KEEP_DAYS: "${JHV_DR_KEEP_DAYS:-7}"
+      JHV_DR_INTERVAL_SECONDS: "${JHV_DR_INTERVAL_SECONDS:-86400}"
+      JHV_SECRET_KEY_SOURCE: "/app/data/secret.key"
+      JHV_SECRET_KEY_BACKUP: "/dr/secret.key"
+    volumes:
+      - jhvirt-data:/app/data:ro
+      - ./dr-backup.sh:/usr/local/bin/ovirt-backup-dr-backup:ro
+      - ${JHV_DR_BACKUP_DIR:-./dr-backups}/app:/dr
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,uid=10001,gid=10001,mode=700
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 256m
+    cpus: "0.5"
+    networks:
+      - database
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   # Keycloak — необязательная часть установки.
   #
   # Поднимается только при COMPOSE_PROFILES=keycloak; эту переменную ставит
@@ -310,11 +362,16 @@ services:
     # ровно в тот момент, когда кто-то просто пересоздал контейнеры.
     #
     # Поднимается версия отдельным решением, после проверки на стенде.
-    image: ${KEYCLOAK_IMAGE:-quay.io/keycloak/keycloak:26.7@sha256:831330513f55695572286e521f94fcd3c7e285250ed5b848090265a33192f669}
+    build:
+      context: .
+      dockerfile: Dockerfile.keycloak
+      args:
+        KEYCLOAK_BASE_IMAGE: ${KEYCLOAK_BASE_IMAGE:-quay.io/keycloak/keycloak:26.7.2@sha256:831330513f55695572286e521f94fcd3c7e285250ed5b848090265a33192f669}
+    image: ovirt-backup-keycloak:${KEYCLOAK_VERSION:-26.7.2}
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
-    command: ["--config-file=/opt/keycloak/data/ovirt-backup/keycloak.conf", "start"]
+    command: ["--config-file=/opt/keycloak/data/ovirt-backup/keycloak.conf", "start", "--optimized"]
     logging:
       driver: json-file
       options:
@@ -328,6 +385,7 @@ services:
       - "${KEYCLOAK_BIND_ADDRESS:-127.0.0.1}:${KEYCLOAK_PORT:-8081}:${KEYCLOAK_CONTAINER_PORT:-8080}"
     cap_drop:
       - ALL
+    read_only: true
     tmpfs:
       - /tmp:size=256m,mode=1777
     pids_limit: ${KEYCLOAK_PIDS_LIMIT:-512}
@@ -335,6 +393,43 @@ services:
     cpus: "${KEYCLOAK_CPU_LIMIT:-2.0}"
     networks:
       - frontend
+      - database
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  keycloak-backup:
+    profiles: ["keycloak"]
+    image: ovirt-backup-postgres:${POSTGRES_VERSION:-17-alpine-hardened}
+    restart: unless-stopped
+    init: true
+    user: "1000:0"
+    entrypoint: ["/bin/sh", "/usr/local/bin/ovirt-backup-dr-backup"]
+    command: ["--loop"]
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGUSER: "${KEYCLOAK_DB_USER:-keycloak_app}"
+      PGDATABASE: "${KEYCLOAK_DB:-keycloak}"
+      PGPASSWORD_FILE: "/keycloak-data/ovirt-backup/database.password"
+      JHV_DR_OUTPUT_DIR: "/dr/postgres"
+      JHV_DR_KEEP_DAYS: "${JHV_DR_KEEP_DAYS:-7}"
+      JHV_DR_INTERVAL_SECONDS: "${JHV_DR_INTERVAL_SECONDS:-86400}"
+    volumes:
+      - keycloak-data:/keycloak-data:ro
+      - ./dr-backup.sh:/usr/local/bin/ovirt-backup-dr-backup:ro
+      - ${JHV_DR_BACKUP_DIR:-./dr-backups}/keycloak:/dr
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,uid=1000,gid=0,mode=700
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 256m
+    cpus: "0.5"
+    networks:
       - database
     depends_on:
       postgres:

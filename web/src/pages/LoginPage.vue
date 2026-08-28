@@ -9,7 +9,7 @@ const auth = useAuthStore()
 const router = useRouter()
 const route = useRoute()
 
-const username = ref('admin')
+const username = ref('')
 const password = ref('')
 const busy = ref(false)
 const error = ref('')
@@ -121,7 +121,12 @@ async function submit() {
 
           <q-card-section class="text-caption text-grey-6">
             <template v-if="localLogin">
-              Пароль первого администратора выводится в журнал сервера при первом запуске.
+              <span v-if="oidc?.enabled">
+                Локальный вход не использует политики и второй фактор Keycloak.
+              </span>
+              <span v-else>
+                При новой установке одноразовый пароль local-admin показывает установщик.
+              </span>
             </template>
             <template v-else>
               Вход по паролю отключён администратором: учётные записи ведёт внешний провайдер.

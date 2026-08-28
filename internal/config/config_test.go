@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -23,6 +24,19 @@ func TestRestoreDirsFromEnv(t *testing.T) {
 	got := cfg.Backup.RestoreDirs
 	if len(got) != 2 || got[0] != "/mnt/restore" || got[1] != "/srv/restore" {
 		t.Fatalf("список каталогов разобран как %#v", got)
+	}
+}
+
+func TestSecureAuthenticationDefaults(t *testing.T) {
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("загрузка конфигурации: %v", err)
+	}
+	if cfg.Auth.BootstrapUser != "local-admin" {
+		t.Fatalf("bootstrap user = %q, ожидался local-admin", cfg.Auth.BootstrapUser)
+	}
+	if cfg.Auth.OIDC.AllowLocalLogin {
+		t.Fatal("локальный вход рядом с OIDC включён по умолчанию")
 	}
 }
 
@@ -99,6 +113,18 @@ func TestProtectedFilesResolveSecrets(t *testing.T) {
 		cfg.Auth.BootstrapPassword != "admin-secret" || cfg.Auth.OIDC.ClientSecret != "oidc-value" {
 		t.Fatalf("секреты прочитаны неверно: db=%q admin=%q oidc=%q",
 			cfg.Database.Postgres.Password, cfg.Auth.BootstrapPassword, cfg.Auth.OIDC.ClientSecret)
+	}
+}
+
+func TestRecoveryTokenHashValidation(t *testing.T) {
+	t.Setenv("JHV_AUTH_RECOVERY_TOKEN_HASH", strings.Repeat("a", 64))
+	if _, err := Load(""); err != nil {
+		t.Fatalf("корректный SHA-256 отклонён: %v", err)
+	}
+
+	t.Setenv("JHV_AUTH_RECOVERY_TOKEN_HASH", "not-a-sha256")
+	if _, err := Load(""); err == nil {
+		t.Fatal("повреждённый recovery_token_hash принят")
 	}
 }
 
@@ -241,6 +267,17 @@ func TestDefaultSSLModeIsPrefer(t *testing.T) {
 	}
 	if got := cfg.Database.Postgres.SSLMode; got != "prefer" {
 		t.Fatalf("умолчание sslmode: %q, ожидалось prefer", got)
+	}
+}
+
+func TestDefaultOIDCScopesAreProviderNeutral(t *testing.T) {
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("загрузка конфигурации: %v", err)
+	}
+	want := []string{"openid", "profile", "email"}
+	if !slices.Equal(cfg.Auth.OIDC.Scopes, want) {
+		t.Fatalf("OIDC scopes по умолчанию: %v, ожидались %v", cfg.Auth.OIDC.Scopes, want)
 	}
 }
 

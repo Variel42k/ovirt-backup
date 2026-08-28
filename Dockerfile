@@ -2,7 +2,7 @@
 # для локальной и серверной сборки Docker.
 
 # Сборка веб-интерфейса.
-FROM docker.io/library/node:24-alpine AS web
+FROM docker.io/library/node:24-alpine@sha256:d32cdf619f63fe0471182d08996dd516c6275bb5fd31ae06e55a570bd9e1ad43 AS web
 WORKDIR /build/web
 COPY web/package.json web/package-lock.json* ./
 RUN npm ci --no-audit --no-fund || npm install --no-audit --no-fund
@@ -11,7 +11,7 @@ RUN npm run build:fast
 
 # Сборка бинаря. CGO не нужен ни для чего, поэтому образ получается
 # статическим и не тянет за собой libc сборочного дистрибутива.
-FROM docker.io/library/golang:1.26-alpine AS build
+FROM docker.io/library/golang:1.26-alpine@sha256:28d89ee9cc0ff9fec75c82ca201e6bf7fdf9a679d4b7b24dfa04f2bb766bb468 AS build
 WORKDIR /build
 RUN apk add --no-cache git
 COPY go.mod go.sum ./
@@ -23,10 +23,11 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
         -ldflags "-s -w -X main.version=${VERSION}" \
         -o /out/ovirt-backup-server ./cmd/ovirt-backup-server
 
-FROM docker.io/library/alpine:3.24
+FROM docker.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 # qemu-img нужен только для экспорта восстановленных образов в qcow2 и для
 # режима проверки «qemu-img check»; всё остальное работает без него.
-RUN apk add --no-cache ca-certificates tzdata qemu-img && \
+RUN apk upgrade --no-cache && \
+    apk add --no-cache ca-certificates tzdata qemu-img && \
     addgroup -g 10001 jhvirt && \
     adduser -u 10001 -G jhvirt -h /app -D jhvirt
 

@@ -39,10 +39,11 @@ func (s *Store) CreateUser(ctx context.Context, u *model.User) error {
 	return nil
 }
 
-// UpdateUser changes role, disabled flag and — when non-empty — the password hash.
+// UpdateUser changes the account name, role, disabled flag and, when non-empty,
+// the password hash.
 func (s *Store) UpdateUser(ctx context.Context, u *model.User) error {
-	query := `UPDATE users SET role=?, disabled=?, updated_at=?`
-	args := []any{string(u.Role), u.Disabled, time.Now().UTC()}
+	query := `UPDATE users SET username=?, role=?, disabled=?, updated_at=?`
+	args := []any{u.Username, string(u.Role), u.Disabled, time.Now().UTC()}
 	if u.PasswordHash != "" {
 		query += `, password_hash=?`
 		args = append(args, u.PasswordHash)
@@ -52,6 +53,9 @@ func (s *Store) UpdateUser(ctx context.Context, u *model.User) error {
 
 	res, err := s.db.Exec(ctx, query, args...)
 	if err != nil {
+		if isUniqueViolation(err) {
+			return fmt.Errorf("%w: пользователь %q", ErrConflict, u.Username)
+		}
 		return fmt.Errorf("update user: %w", err)
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
@@ -243,6 +247,82 @@ func (s *Store) DeleteUserSessions(ctx context.Context, userID string) (int64, e
 	}
 	n, _ := res.RowsAffected()
 	return n, nil
+}
+
+// DeleteAllSessions closes local and OIDC sessions after host-side recovery.
+func (s *Store) DeleteAllSessions(ctx context.Context) (int64, error) {
+	res, err := s.db.Exec(ctx, `DELETE FROM sessions`)
+	if err != nil {
+		return 0, fmt.Errorf("delete all sessions: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
+// AccessRecoveryResult counts credentials revoked atomically with a password
+// reset. Keeping the operation in one transaction avoids printing a new
+// password after only part of an incident response was applied.
+type AccessRecoveryResult struct {
+	Sessions    int64
+	APITokens   int64
+	Delegations int64
+}
+
+// RecoverUserAccess updates a local password and invalidates credentials in a
+// single transaction. With revokeAll=false only sessions of that user close.
+func (s *Store) RecoverUserAccess(ctx context.Context, userID, username, passwordHash string,
+	revokeAll bool, at time.Time) (AccessRecoveryResult, error) {
+	var out AccessRecoveryResult
+	err := s.db.InTx(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx, s.db.Rebind(
+			`UPDATE users SET password_hash=?, disabled=?, updated_at=? WHERE id=?`),
+			passwordHash, false, utc(at), userID)
+		if err != nil {
+			return fmt.Errorf("update recovered user: %w", err)
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return ErrNotFound
+		}
+
+		sessionQuery := `DELETE FROM sessions WHERE user_id=?`
+		args := []any{userID}
+		if revokeAll {
+			sessionQuery, args = `DELETE FROM sessions`, nil
+		}
+		res, err = tx.ExecContext(ctx, s.db.Rebind(sessionQuery), args...)
+		if err != nil {
+			return fmt.Errorf("delete recovered sessions: %w", err)
+		}
+		out.Sessions, _ = res.RowsAffected()
+		if !revokeAll {
+			return nil
+		}
+
+		res, err = tx.ExecContext(ctx, s.db.Rebind(
+			`UPDATE api_tokens SET disabled=? WHERE disabled=?`), true, false)
+		if err != nil {
+			return fmt.Errorf("disable api tokens: %w", err)
+		}
+		out.APITokens, _ = res.RowsAffected()
+		res, err = tx.ExecContext(ctx, s.db.Rebind(
+			`UPDATE approval_delegations SET revoked_at=? WHERE revoked_at IS NULL`), utc(at))
+		if err != nil {
+			return fmt.Errorf("revoke approval delegations: %w", err)
+		}
+		out.Delegations, _ = res.RowsAffected()
+		detail := fmt.Sprintf("host recovery; sessions=%d api_tokens=%d delegations=%d",
+			out.Sessions, out.APITokens, out.Delegations)
+		_, err = tx.ExecContext(ctx, s.db.Rebind(
+			`INSERT INTO audit_log (id, actor, action, scope, object_id, detail,
+				success, remote_ip, at) VALUES (?,?,?,?,?,?,?,?,?)`),
+			at.UnixMicro(), "host-recovery", "auth.local_recovery", string(model.ScopeServer),
+			username, detail, true, "local-host", utc(at))
+		if err != nil {
+			return fmt.Errorf("audit access recovery: %w", err)
+		}
+		return nil
+	})
+	return out, err
 }
 
 // DeleteSession logs a session out.

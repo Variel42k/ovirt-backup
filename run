@@ -548,12 +548,18 @@ cmd_build() {
     cp -r web/dist "$OUT/web/dist"
     cp config/ovirt-backup.yaml "$OUT/config/"
     cp deploy/install.sh "$OUT/install.sh"
+	cp deploy/recover-admin.sh "$OUT/recover-admin.sh"
     cp deploy/systemd/jhvirt.service "$OUT/systemd/"
+    cp deploy/systemd/jhvirt-dr-backup.service deploy/systemd/jhvirt-dr-backup.timer "$OUT/systemd/"
+    cp deploy/dr-backup.sh "$OUT/systemd/"
 
     # Всё для установки в контейнерах. Dockerfile отдельный: он не собирает
     # проект, а берёт готовый бинарь и web/dist из этого же комплекта, поэтому
     # на сервере не нужны ни Go, ни Node, ни исходники.
     cp deploy/docker-compose.yml "$OUT/compose/"
+    cp deploy/Dockerfile.keycloak "$OUT/compose/"
+    cp deploy/Dockerfile.postgres "$OUT/compose/"
+    cp deploy/dr-backup.sh "$OUT/compose/"
     cp deploy/.env.example "$OUT/compose/"
     # Dockerfile кладётся в корень комплекта, а не в compose/, чтобы пути
     # сборки совпадали с репозиторием: из compose/ контекст «..» — это корень
@@ -561,9 +567,10 @@ cmd_build() {
     # compose-файл пришлось бы править при упаковке, а расходящиеся копии
     # одного файла рано или поздно разъезжаются.
     cp deploy/Dockerfile.bundle "$OUT/Dockerfile"
-    for doc in DEPLOY CONFIGURATION DNS OPERATIONS TROUBLESHOOTING BUILD API ARCHITECTURE BACKUP-FORMAT DISK-ARCHITECTURE; do
-        [ -f "docs/$doc.md" ] && cp "docs/$doc.md" "$OUT/docs/"
-    done
+    # Documentation evolves independently of the installer. A fixed allowlist
+    # previously omitted new operational and security guides from the .run
+    # bundle, leaving an installation with less documentation than the source.
+    cp docs/*.md "$OUT/docs/"
     # В репозитории README ссылается на docs/X.md. Внутри комплекта он сам уже
     # находится в docs/, поэтому префикс убирается, чтобы ссылки не вели в
     # несуществующий docs/docs/.

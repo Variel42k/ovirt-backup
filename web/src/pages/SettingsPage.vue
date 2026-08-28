@@ -421,7 +421,12 @@ function openEdit(user: User) {
 async function save() {
   try {
     if (editing.value) {
-      await api.updateUser(editing.value.id, { role: form.value.role, disabled: form.value.disabled, password: form.value.password })
+      await api.updateUser(editing.value.id, {
+        username: form.value.username,
+        role: form.value.role,
+        disabled: form.value.disabled,
+        password: form.value.password,
+      })
       notifyOk('Пользователь обновлён')
     } else {
       await api.createUser(form.value)
@@ -1885,7 +1890,13 @@ watch(() => route.query, applyDeepLink)
         </q-card-section>
         <q-separator />
         <q-card-section class="q-gutter-md">
-          <q-input v-model="form.username" label="Имя пользователя" outlined dense :disable="!!editing" />
+          <q-input
+            v-model="form.username"
+            label="Имя пользователя"
+            outlined
+            dense
+            :disable="editingExternal"
+          />
           <!-- У внешней записи пароля нет и быть не может: сервер такую правку
                отклоняет. Показывать поле значило бы предлагать действие, которое
                заведомо не сработает. -->

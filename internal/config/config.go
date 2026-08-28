@@ -4,6 +4,7 @@
 package config
 
 import (
+	"encoding/hex"
 	"fmt"
 	"net"
 	"net/url"
@@ -71,9 +72,12 @@ type AuthConfig struct {
 	// BootstrapPasswordFile keeps the one-time password out of the process
 	// environment. The installer removes the file after the first successful
 	// start.
-	BootstrapPasswordFile string     `mapstructure:"bootstrap_password_file"`
-	APITokens             []string   `mapstructure:"api_tokens"`
-	OIDC                  OIDCConfig `mapstructure:"oidc"`
+	BootstrapPasswordFile string `mapstructure:"bootstrap_password_file"`
+	// RecoveryTokenHash is a SHA-256 verifier for the host-only recovery token.
+	// The token itself must never be mounted into the normal service.
+	RecoveryTokenHash string     `mapstructure:"recovery_token_hash"`
+	APITokens         []string   `mapstructure:"api_tokens"`
+	OIDC              OIDCConfig `mapstructure:"oidc"`
 }
 
 // OIDCConfig describes the external identity provider.
@@ -126,9 +130,9 @@ type OIDCConfig struct {
 	SessionTTL time.Duration `mapstructure:"session_ttl"`
 	// AllowLocalLogin оставляет вход по паролю рядом с внешним.
 	//
-	// Выключать не рекомендуется: локальная запись администратора — это путь
-	// внутрь, когда провайдер недоступен, а недоступен он бывает ровно в той
-	// аварии, ради которой и разворачивают систему восстановления.
+	// Он обходит политики, блокировку и MFA внешнего провайдера, поэтому для
+	// новых OIDC-установок безопасное значение — false. Аварийный доступ
+	// включается явно и снова выключается после устранения сбоя провайдера.
 	AllowLocalLogin bool `mapstructure:"allow_local_login"`
 }
 
@@ -753,6 +757,12 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("не задано подключение к базе: укажите database.url " +
 			"(или JHV_DATABASE_URL) либо блок database.postgres")
 	}
+	if hash := strings.TrimSpace(c.Auth.RecoveryTokenHash); hash != "" {
+		decoded, err := hex.DecodeString(hash)
+		if err != nil || len(decoded) != 32 {
+			return fmt.Errorf("auth.recovery_token_hash должен быть SHA-256 в виде 64 шестнадцатеричных символов")
+		}
+	}
 	// Отказ от TLS до удалённой базы. В этой базе лежат пароли подключений к
 	// движкам и ключи хранилищ — зашифрованные, но расшифровать их может тот,
 	// кто прочитал трафик и добрался до secret.key. Плюс сам пароль базы,
@@ -950,9 +960,10 @@ func setDefaults(v *viper.Viper) {
 
 	v.SetDefault("auth.enabled", true)
 	v.SetDefault("auth.session_ttl", "12h")
-	v.SetDefault("auth.bootstrap_user", "admin")
+	v.SetDefault("auth.bootstrap_user", "local-admin")
 	v.SetDefault("auth.bootstrap_password", "")
 	v.SetDefault("auth.bootstrap_password_file", "")
+	v.SetDefault("auth.recovery_token_hash", "")
 	v.SetDefault("auth.api_tokens", []string{})
 	v.SetDefault("auth.oidc.enabled", false)
 	v.SetDefault("auth.oidc.issuer", "")
@@ -961,7 +972,11 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("auth.oidc.client_secret", "")
 	v.SetDefault("auth.oidc.client_secret_file", "")
 	v.SetDefault("auth.oidc.redirect_url", "")
-	v.SetDefault("auth.oidc.scopes", []string{"openid", "profile", "email", "groups"})
+	// groups is a claim, not a standard OIDC scope. Keycloak rejects an
+	// unregistered `scope=groups` with invalid_scope even when a group mapper
+	// is attached directly to the client. Providers that expose a dedicated
+	// groups scope can still add it explicitly in configuration.
+	v.SetDefault("auth.oidc.scopes", []string{"openid", "profile", "email"})
 	v.SetDefault("auth.oidc.button_label", "")
 	v.SetDefault("auth.oidc.groups_claim", "groups")
 	v.SetDefault("auth.oidc.role_mapping", map[string]string{})
@@ -970,7 +985,7 @@ func setDefaults(v *viper.Viper) {
 	// Час: отобранная у провайдера группа перестаёт действовать здесь не позже
 	// чем через час, а не через полсуток общего срока сессии.
 	v.SetDefault("auth.oidc.session_ttl", time.Hour)
-	v.SetDefault("auth.oidc.allow_local_login", true)
+	v.SetDefault("auth.oidc.allow_local_login", false)
 	v.SetDefault("metrics.enabled", false)
 	v.SetDefault("metrics.token_file", "")
 	// Пусто — журнал аудита пишется только в PostgreSQL. Включать вывод наружу

@@ -1,0 +1,28 @@
+[Unit]
+Description=ovirt-backup PostgreSQL and secret.key backup
+Documentation=file:@PREFIX@/docs/OPERATIONS.md
+After=postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=oneshot
+User=@USER_NAME@
+Group=@USER_NAME@
+Environment=PGDATABASE=jhvirt
+Environment=JHV_DR_OUTPUT_DIR=@DR_DIR@/postgres
+Environment=JHV_DR_KEEP_DAYS=7
+Environment=JHV_SECRET_KEY_SOURCE=@PREFIX@/data/secret.key
+Environment=JHV_SECRET_KEY_BACKUP=@DR_DIR@/secret.key
+ExecStart=@PREFIX@/bin/ovirt-backup-dr-backup --once
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=@PREFIX@/data/secret.key
+ReadWritePaths=@DR_DIR@
+CapabilityBoundingSet=
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX

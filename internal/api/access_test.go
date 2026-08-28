@@ -159,6 +159,70 @@ func TestRoleChangeTakesEffectImmediately(t *testing.T) {
 	}
 }
 
+func TestLocalUserCanBeRenamed(t *testing.T) {
+	srv, ts := newAccessServer(t)
+	admin := sessionFor(t, srv, model.RoleAdmin)
+	ctx := context.Background()
+
+	legacy := &model.User{
+		Username: "admin", Role: model.RoleAdmin, PasswordHash: "existing-hash",
+	}
+	if err := srv.store.CreateUser(ctx, legacy); err != nil {
+		t.Fatalf("создание legacy-пользователя: %v", err)
+	}
+
+	status, _ := postAs(t, ts, http.MethodPut, "/users/"+legacy.ID, admin,
+		`{"username":"local-admin","role":"admin","disabled":false}`)
+	if status != http.StatusOK {
+		t.Fatalf("переименование ответило %d", status)
+	}
+
+	renamed, err := srv.store.GetUser(ctx, legacy.ID)
+	if err != nil {
+		t.Fatalf("чтение пользователя: %v", err)
+	}
+	if renamed.Username != "local-admin" {
+		t.Fatalf("имя после правки = %q", renamed.Username)
+	}
+	if renamed.PasswordHash != "existing-hash" {
+		t.Fatal("переименование изменило пароль")
+	}
+	if _, err := srv.store.GetUserByName(ctx, "admin"); err == nil {
+		t.Fatal("старое имя всё ещё разрешается")
+	}
+
+	occupied := &model.User{
+		Username: "occupied", Role: model.RoleViewer, PasswordHash: "x",
+	}
+	if err := srv.store.CreateUser(ctx, occupied); err != nil {
+		t.Fatalf("создание второго пользователя: %v", err)
+	}
+	status, _ = postAs(t, ts, http.MethodPut, "/users/"+legacy.ID, admin,
+		`{"username":"occupied","role":"admin","disabled":false}`)
+	if status != http.StatusConflict {
+		t.Fatalf("занятое имя ответило %d, ожидалось 409", status)
+	}
+
+	external := &model.User{
+		Username: "keycloak-user", Role: model.RoleViewer,
+		Provider: "oidc", ExternalID: "subject-1",
+	}
+	if err := srv.store.CreateUser(ctx, external); err != nil {
+		t.Fatalf("создание OIDC-пользователя: %v", err)
+	}
+	status, _ = postAs(t, ts, http.MethodPut, "/users/"+external.ID, admin,
+		`{"username":"renamed-outside-keycloak","role":"viewer","disabled":false}`)
+	if status != http.StatusBadRequest {
+		t.Fatalf("переименование OIDC-записи ответило %d, ожидалось 400", status)
+	}
+
+	status, _ = postAs(t, ts, http.MethodPut, "/users/"+legacy.ID, admin,
+		`{"username":"  ","role":"admin","disabled":false}`)
+	if status != http.StatusBadRequest {
+		t.Fatalf("пустое имя ответило %d, ожидалось 400", status)
+	}
+}
+
 func newAccessServer(t *testing.T) (*Server, *httptest.Server) {
 	t.Helper()
 	cfg := config.Config{}

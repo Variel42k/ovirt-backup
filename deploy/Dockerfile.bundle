@@ -10,11 +10,11 @@
 
 FROM docker.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
-# qemu-img нужен только для экспорта восстановленных образов в qcow2 и режима
-# проверки «qemu-img check»; всё остальное работает без него.
-RUN apk upgrade --no-cache && \
-    apk add --no-cache ca-certificates tzdata qemu-img && \
-    addgroup -g 10001 jhvirt && \
+# Закреплённый Alpine уже содержит CA bundle и BusyBox wget. Установка из
+# фиксированного .run не должна обращаться к меняющемуся пакетному mirror:
+# qemu-img остаётся необязательным инструментом custom-образа, а база часовых
+# поясов встроена в Go-бинарь.
+RUN addgroup -g 10001 jhvirt && \
     adduser -u 10001 -G jhvirt -h /app -D jhvirt
 
 WORKDIR /app
@@ -28,6 +28,7 @@ COPY config/ovirt-backup.yaml /app/config/ovirt-backup.yaml
 # пересоздании, а при read_only был бы недоступен для записи. Журнал пишется
 # в /app/data/logs, внутри тома.
 RUN mkdir -p /app/data /backups /restores && \
+    chmod 0755 /app/ovirt-backup-server && \
     chown -R jhvirt:jhvirt /app /backups /restores
 VOLUME ["/app/data", "/backups"]
 

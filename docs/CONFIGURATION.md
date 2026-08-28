@@ -741,7 +741,7 @@ URIs*), а незарегистрированный превращает вых�
 | Учётная запись | Где хранится | Где действует |
 |---|---|---|
 | `local-admin` | таблица `users` приложения, пароль как bcrypt-хеш | только парольная форма ovirt-backup |
-| `kc-bootstrap-admin` | master realm Keycloak | консоль администрирования Keycloak |
+| `kc-bootstrap-admin` | master realm Keycloak, обычная постоянная запись | консоль администрирования Keycloak |
 | пользователь из `virt-admins` | Keycloak/LDAP/AD; в приложении хранится связь по `sub` | вход через OIDC, роль `admin` |
 
 `allow_local_login: false` — безопасное умолчание новых OIDC-установок.

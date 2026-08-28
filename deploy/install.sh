@@ -105,6 +105,7 @@ OIDC_MODE=""; OIDC_EXISTING=0; OIDC_ISSUER=""; OIDC_BACKCHANNEL_URL=""; OIDC_CLI
 OIDC_ALLOW_LOCAL_LOGIN=""
 KEYCLOAK_PORT=8081; KEYCLOAK_REALM="jhvirt"; KEYCLOAK_URL=""; KEYCLOAK_API_URL=""
 KEYCLOAK_ADMIN_USER="kc-bootstrap-admin"; KEYCLOAK_ADMIN_PASSWORD=""; OIDC_CLIENT_SECRET=""
+KEYCLOAK_BOOTSTRAP_USER=""; KEYCLOAK_ACTIVE_ADMIN_USER=""
 KEYCLOAK_DIRECT_TLS=0; KEYCLOAK_BIND_ADDRESS=127.0.0.1; KEYCLOAK_CONTAINER_PORT=8080
 # Имена групп допуска. Пользователь, не попавший ни в одну, в систему не
 # допускается: default_role остаётся пустым.
@@ -2456,8 +2457,17 @@ prepare_oidc() {
         OIDC_CLIENT_ID="jhvirt"
         OIDC_CLIENT_SECRET="$(gen_secret 24)"
         KEYCLOAK_ADMIN_PASSWORD="$(gen_secret 18)"
+        if [ "$OIDC_EXISTING" -eq 0 ]; then
+            KEYCLOAK_BOOTSTRAP_USER="kc-install-bootstrap-$(gen_secret 6)"
+            KEYCLOAK_ACTIVE_ADMIN_USER="$KEYCLOAK_BOOTSTRAP_USER"
+        else
+            KEYCLOAK_ACTIVE_ADMIN_USER="$KEYCLOAK_ADMIN_USER"
+        fi
         [ -n "$OIDC_CLIENT_SECRET" ] && [ -n "$KEYCLOAK_ADMIN_PASSWORD" ] ||
             die "не удалось сгенерировать секреты для Keycloak"
+        if [ "$OIDC_EXISTING" -eq 0 ] && [ -z "$KEYCLOAK_BOOTSTRAP_USER" ]; then
+            die "не удалось сгенерировать имя bootstrap-администратора Keycloak"
+        fi
     fi
 
     if [ -t 0 ] && [ "$OIDC_MODE" != none ]; then
@@ -2585,9 +2595,10 @@ write_oidc_env() {
 # --- Keycloak ---------------------------------------------------------------
 
 keycloak_token() {
+    KC_TOKEN_USER="${KEYCLOAK_ACTIVE_ADMIN_USER:-$KEYCLOAK_ADMIN_USER}"
     curl -sS -k -m 20 --fail \
         -d "grant_type=password" -d "client_id=admin-cli" \
-        -d "username=$KEYCLOAK_ADMIN_USER" --data-urlencode "password=$KEYCLOAK_ADMIN_PASSWORD" \
+        -d "username=$KC_TOKEN_USER" --data-urlencode "password=$KEYCLOAK_ADMIN_PASSWORD" \
         "$KEYCLOAK_API_URL/realms/master/protocol/openid-connect/token" 2>/dev/null |
         sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p'
 }
@@ -2605,7 +2616,7 @@ keycloak_wait() {
     while [ "$KC_TRY" -lt 90 ]; do
         # -k нужен, когда --keycloak-url указывает на прокси с
         # самоподписанным сертификатом: без него ожидание не кончится ничем.
-        if curl -sS -k -m 5 -o /dev/null "$KEYCLOAK_API_URL/realms/master" 2>/dev/null; then
+        if curl -sS -k --fail -m 5 -o /dev/null "$KEYCLOAK_API_URL/realms/master" 2>/dev/null; then
             return 0
         fi
         KC_TRY=$((KC_TRY+1))
@@ -2622,6 +2633,138 @@ keycloak_realm_exists() {
     KC_REALM_URL="$KEYCLOAK_API_URL/realms/$KEYCLOAK_REALM"
     KC_REALM_CODE="$(curl -sS -k -m 5 -o /dev/null -w '%{http_code}' "$KC_REALM_URL" 2>/dev/null)"
     [ "$KC_REALM_CODE" = 200 ]
+}
+
+# Обновление прежней установки не может полагаться на bootstrap-пароль:
+# Keycloak применяет его только к пустой БД. Если постоянный администратор уже
+# существует, создаём штатной offline-командой одноразового администратора,
+# используем его для настройки и обязательно удаляем через Admin API.
+keycloak_start_recovery_admin() {
+    KC_RECOVERY_ORIGINAL_USER="$KEYCLOAK_ACTIVE_ADMIN_USER"
+    KC_RECOVERY_ADMIN_USER="kc-install-recovery-$(gen_secret 6)"
+    [ -n "$KC_RECOVERY_ADMIN_USER" ] || return 1
+
+    say "    прежний bootstrap-пароль недоступен; создаётся временный администратор"
+    # shellcheck disable=SC2086
+    (cd "$WORK" && $RUN stop keycloak) >/dev/null 2>&1 || return 1
+    # Значение пароля передаётся через окружение процесса, а не аргументом:
+    # аргументы доступны другим пользователям хоста через список процессов.
+    # shellcheck disable=SC2086
+    if ! (cd "$WORK" && KC_RECOVERY_PASSWORD="$KEYCLOAK_ADMIN_PASSWORD" \
+            $RUN run --rm --no-deps -e KC_RECOVERY_PASSWORD keycloak \
+            --config-file=/opt/keycloak/data/ovirt-backup/keycloak.conf \
+            bootstrap-admin user --optimized --username "$KC_RECOVERY_ADMIN_USER" \
+            --password:env KC_RECOVERY_PASSWORD) >/dev/null; then
+        # shellcheck disable=SC2086
+        (cd "$WORK" && $RUN up -d keycloak) >/dev/null 2>&1 || true
+        return 1
+    fi
+    KC_RECOVERY_ACTIVE=1
+    KEYCLOAK_ACTIVE_ADMIN_USER="$KC_RECOVERY_ADMIN_USER"
+    # В существующей БД bootstrap-поле не используется штатным запуском. После
+    # offline-команды пароль больше не должен оставаться в volume.
+    clear_keycloak_bootstrap_secret
+
+    # shellcheck disable=SC2086
+    (cd "$WORK" && $RUN up -d keycloak) >/dev/null 2>&1 || return 1
+    keycloak_wait || return 1
+    KC_TOKEN="$(keycloak_token)"
+    [ -n "$KC_TOKEN" ]
+}
+
+keycloak_remove_recovery_admin() {
+    [ "${KC_RECOVERY_ACTIVE:-0}" -eq 1 ] || return 0
+    KC_RECOVERY_USERS="$(curl -sS -k -m 30 --fail \
+        -H "Authorization: Bearer $KC_TOKEN" \
+        --get --data-urlencode "username=$KC_RECOVERY_ADMIN_USER" \
+        --data-urlencode 'exact=true' \
+        "$KEYCLOAK_API_URL/admin/realms/master/users" 2>/dev/null)" || return 1
+    KC_RECOVERY_USER_ID="$(printf '%s' "$KC_RECOVERY_USERS" | sed -n \
+        's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+    [ -n "$KC_RECOVERY_USER_ID" ] || return 1
+    KC_RECOVERY_DELETE_CODE="$(curl -sS -k -m 30 -o /dev/null -w '%{http_code}' \
+        -H "Authorization: Bearer $KC_TOKEN" -X DELETE \
+        "$KEYCLOAK_API_URL/admin/realms/master/users/$KC_RECOVERY_USER_ID" 2>/dev/null)"
+    [ "$KC_RECOVERY_DELETE_CODE" = 204 ] || return 1
+
+    KC_RECOVERY_ACTIVE=0
+    KEYCLOAK_ACTIVE_ADMIN_USER="$KC_RECOVERY_ORIGINAL_USER"
+    KEYCLOAK_ADMIN_PASSWORD=""
+    say "    временный администратор Keycloak удалён"
+}
+
+# Keycloak bootstrap-admin is deliberately temporary. A fresh installation
+# replaces it with an ordinary master-realm administrator before the password
+# is removed from keycloak.conf.
+keycloak_create_permanent_admin() {
+    [ -n "$KEYCLOAK_BOOTSTRAP_USER" ] || return 0
+    [ "$KEYCLOAK_BOOTSTRAP_USER" != "$KEYCLOAK_ADMIN_USER" ] || return 0
+
+    KC_TOKEN="$(keycloak_token)"
+    [ -n "$KC_TOKEN" ] || return 1
+
+    KC_ADMIN_BODY="{\"username\":\"$KEYCLOAK_ADMIN_USER\",\"enabled\":true,\"email\":\"kc-admin@ovirt-backup.local\",\"emailVerified\":true,\"firstName\":\"Keycloak\",\"lastName\":\"Administrator\"}"
+    KC_CODE="$(keycloak_post "/master/users" "$KC_ADMIN_BODY")"
+    [ "$KC_CODE" = 201 ] || return 1
+
+    KC_ADMIN_USERS="$(curl -sS -k -m 30 --fail \
+        -H "Authorization: Bearer $KC_TOKEN" --get \
+        --data-urlencode "username=$KEYCLOAK_ADMIN_USER" --data-urlencode 'exact=true' \
+        "$KEYCLOAK_API_URL/admin/realms/master/users" 2>/dev/null)" || return 1
+    KC_PERMANENT_ADMIN_ID="$(printf '%s' "$KC_ADMIN_USERS" | sed -n \
+        's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+    [ -n "$KC_PERMANENT_ADMIN_ID" ] || return 1
+
+    KC_CODE="$(curl -sS -k -m 30 -o /dev/null -w '%{http_code}' \
+        -H "Authorization: Bearer $KC_TOKEN" -H 'Content-Type: application/json' \
+        -X PUT -d "{\"type\":\"password\",\"value\":\"$KEYCLOAK_ADMIN_PASSWORD\",\"temporary\":false}" \
+        "$KEYCLOAK_API_URL/admin/realms/master/users/$KC_PERMANENT_ADMIN_ID/reset-password" 2>/dev/null)"
+    [ "$KC_CODE" = 204 ] || return 1
+
+    KC_ADMIN_ROLE="$(curl -sS -k -m 30 --fail \
+        -H "Authorization: Bearer $KC_TOKEN" \
+        "$KEYCLOAK_API_URL/admin/realms/master/roles/admin" 2>/dev/null)" || return 1
+    [ -n "$KC_ADMIN_ROLE" ] || return 1
+    KC_CODE="$(curl -sS -k -m 30 -o /dev/null -w '%{http_code}' \
+        -H "Authorization: Bearer $KC_TOKEN" -H 'Content-Type: application/json' \
+        -X POST -d "[$KC_ADMIN_ROLE]" \
+        "$KEYCLOAK_API_URL/admin/realms/master/users/$KC_PERMANENT_ADMIN_ID/role-mappings/realm" 2>/dev/null)"
+    [ "$KC_CODE" = 204 ] || return 1
+
+    KEYCLOAK_ACTIVE_ADMIN_USER="$KEYCLOAK_ADMIN_USER"
+    KC_PERMANENT_TOKEN="$(keycloak_token)"
+    [ -n "$KC_PERMANENT_TOKEN" ] || return 1
+    KC_CODE="$(curl -sS -k -m 30 -o /dev/null -w '%{http_code}' \
+        -H "Authorization: Bearer $KC_PERMANENT_TOKEN" \
+        "$KEYCLOAK_API_URL/admin/realms/master/users" 2>/dev/null)"
+    [ "$KC_CODE" = 200 ] || return 1
+
+    KC_BOOTSTRAP_USERS="$(curl -sS -k -m 30 --fail \
+        -H "Authorization: Bearer $KC_PERMANENT_TOKEN" --get \
+        --data-urlencode "username=$KEYCLOAK_BOOTSTRAP_USER" --data-urlencode 'exact=true' \
+        "$KEYCLOAK_API_URL/admin/realms/master/users" 2>/dev/null)" || return 1
+    KC_BOOTSTRAP_ID="$(printf '%s' "$KC_BOOTSTRAP_USERS" | sed -n \
+        's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+    [ -n "$KC_BOOTSTRAP_ID" ] || return 1
+    KC_CODE="$(curl -sS -k -m 30 -o /dev/null -w '%{http_code}' \
+        -H "Authorization: Bearer $KC_PERMANENT_TOKEN" -X DELETE \
+        "$KEYCLOAK_API_URL/admin/realms/master/users/$KC_BOOTSTRAP_ID" 2>/dev/null)"
+    [ "$KC_CODE" = 204 ] || return 1
+
+    KC_TOKEN="$KC_PERMANENT_TOKEN"
+    KEYCLOAK_BOOTSTRAP_USER=""
+    say "    постоянный администратор Keycloak создан, bootstrap-запись удалена"
+}
+
+keycloak_bootstrap_die() {
+    KBD_MESSAGE="$1"
+    if [ "${KC_RECOVERY_ACTIVE:-0}" -eq 1 ] && ! keycloak_remove_recovery_admin; then
+        die "$KBD_MESSAGE
+
+Дополнительно не удалось удалить временного администратора
+$KC_RECOVERY_ADMIN_USER. Немедленно удалите его в master realm Keycloak."
+    fi
+    die "$KBD_MESSAGE"
 }
 
 # Проверяет OIDC тем же путём, которым пойдёт браузер. Успешный /start обязан
@@ -2645,7 +2788,15 @@ oidc_app_check() {
             # their public issuer only to client DNS, therefore this extra
             # host-side probe is intentionally limited to the bundled mode.
             if [ "$OIDC_MODE" = keycloak ]; then
-                OAC_PROVIDER_HEADERS="$(curl -k -sS -m 35 -D - -o /dev/null "$OAC_LOCATION" 2>/dev/null)" || return 1
+                # Публичный адрес обязан попасть в redirect браузеру, но сам
+                # сервер может не ходить на собственный внешний IP из-за
+                # hairpin NAT или firewall. Проверяем тот же путь и query через
+                # loopback API, которым установщик уже дождался Keycloak.
+                OAC_PROVIDER_AUTH_PATH="${OAC_LOCATION#*://}"
+                OAC_PROVIDER_PATH="/${OAC_PROVIDER_AUTH_PATH#*/}"
+                OAC_PROVIDER_CHECK_URL="${KEYCLOAK_API_URL%/}$OAC_PROVIDER_PATH"
+                OAC_PROVIDER_HEADERS="$(curl -k -sS -m 35 -D - -o /dev/null \
+                    "$OAC_PROVIDER_CHECK_URL" 2>/dev/null)" || return 1
                 OAC_PROVIDER_LOCATION="$(printf '%s\n' "$OAC_PROVIDER_HEADERS" | tr -d '\r' | awk '
                     tolower(substr($0, 1, 9)) == "location:" {
                         sub(/^[^:]*:[[:space:]]*/, "")
@@ -2669,6 +2820,7 @@ oidc_app_check() {
 # Заводит realm, группы и клиента. Повторный запуск не ломается: уже
 # существующее Keycloak отвергает кодом 409, и это не ошибка установки.
 keycloak_bootstrap() {
+    KC_RECOVERY_ACTIVE=0
     # Пароль администратора стирается из .env сразу после успешной настройки.
     # Существующий realm означает, что bootstrap уже проходил; повторно менять
     # группы и секрет клиента без сохранённого административного пароля нельзя.
@@ -2679,29 +2831,22 @@ keycloak_bootstrap() {
     fi
 
     KC_TOKEN="$(keycloak_token)"
-    [ -n "$KC_TOKEN" ] || die "Keycloak не принял пароль администратора.
+    if [ -z "$KC_TOKEN" ]; then
+        keycloak_start_recovery_admin || keycloak_bootstrap_die \
+            "не удалось создать временного администратора Keycloak"
+    fi
 
-Так бывает, когда Keycloak уже поднимался раньше: учётную запись
-администратора он создаёт один раз, при первом старте с пустой базой, и
-новый пароль в .env её не меняет.
-
-Либо впишите прежний пароль в KEYCLOAK_ADMIN_PASSWORD в $WORK/.env,
-либо пересоздайте базу Keycloak:
-  cd $WORK && $RUN stop keycloak
-  $RUN exec -T postgres psql -U \"\$POSTGRES_USER\" -c 'DROP DATABASE keycloak'
-  $SELF"
-
-    KC_CODE="$(keycloak_post "" "{\"realm\":\"$KEYCLOAK_REALM\",\"enabled\":true}")"
+    KC_CODE="$(keycloak_post "" "{\"realm\":\"$KEYCLOAK_REALM\",\"enabled\":true,\"displayName\":\"ovirt-backup\",\"displayNameHtml\":\"ovirt-backup\"}")"
     case "$KC_CODE" in
         201|409) ;;
-        *) die "не удалось создать realm $KEYCLOAK_REALM (код $KC_CODE)" ;;
+        *) keycloak_bootstrap_die "не удалось создать realm $KEYCLOAK_REALM (код $KC_CODE)" ;;
     esac
 
     for KC_GROUP in "$GROUP_ADMIN" "$GROUP_OPERATOR" "$GROUP_VIEWER"; do
         KC_CODE="$(keycloak_post "/$KEYCLOAK_REALM/groups" "{\"name\":\"$KC_GROUP\"}")"
         case "$KC_CODE" in
             201|409) ;;
-            *) die "не удалось создать группу $KC_GROUP (код $KC_CODE)" ;;
+            *) keycloak_bootstrap_die "не удалось создать группу $KC_GROUP (код $KC_CODE)" ;;
         esac
     done
 
@@ -2734,8 +2879,14 @@ keycloak_bootstrap() {
     case "$KC_CODE" in
         201) ;;
         409) say "    клиент $OIDC_CLIENT_ID уже был заведён; секрет из .env должен совпадать с его" ;;
-        *) die "не удалось создать клиента $OIDC_CLIENT_ID (код $KC_CODE)" ;;
+        *) keycloak_bootstrap_die "не удалось создать клиента $OIDC_CLIENT_ID (код $KC_CODE)" ;;
     esac
+
+    keycloak_create_permanent_admin || keycloak_bootstrap_die \
+        "не удалось заменить временного bootstrap-admin постоянным администратором Keycloak"
+
+    keycloak_remove_recovery_admin || die "не удалось удалить временного администратора
+$KC_RECOVERY_ADMIN_USER из master realm Keycloak"
 }
 
 # --- Контейнеры -------------------------------------------------------------
@@ -3018,7 +3169,7 @@ prepare_keycloak_runtime() {
             case "$KEYCLOAK_URL" in https://*) printf 'proxy-headers=xforwarded\n' ;; esac
         fi
         if [ -n "$KEYCLOAK_ADMIN_PASSWORD" ]; then
-            printf 'bootstrap-admin-username=%s\n' "$KEYCLOAK_ADMIN_USER"
+            printf 'bootstrap-admin-username=%s\n' "${KEYCLOAK_BOOTSTRAP_USER:-$KEYCLOAK_ADMIN_USER}"
             printf 'bootstrap-admin-password=%s\n' "$KEYCLOAK_ADMIN_PASSWORD"
         fi
     } | docker_volume_write "$PKR_VOL" ovirt-backup/keycloak.conf 1000:0 0400
@@ -3035,7 +3186,8 @@ clear_keycloak_bootstrap_secret() {
         "$POSTGRES_HELPER_IMAGE" sh -c '
             src=/data/ovirt-backup/keycloak.conf
             test -f "$src" || exit 0
-            grep -v "^bootstrap-admin-password=" "$src" > "$src.tmp"
+            sed "/^bootstrap-admin-password=/d; /^bootstrap-admin-username=/d" \
+                "$src" > "$src.tmp"
             chown 1000:0 "$src.tmp"
             chmod 0400 "$src.tmp"
             mv "$src.tmp" "$src"' || die "не удалось удалить bootstrap-пароль Keycloak"
@@ -3075,7 +3227,34 @@ SQL
 
     # shellcheck disable=SC2086
     (cd "$EDDR_WORK" && $EDDR_RUN exec -T postgres psql -U "$EDDR_ADMIN" -d "$EDDR_DB" -v ON_ERROR_STOP=1) <<SQL
-REASSIGN OWNED BY "$EDDR_ADMIN" TO "$APP_DB_USER";
+SELECT format(
+  'ALTER %s %I.%I OWNER TO %I',
+  CASE c.relkind
+    WHEN 'r' THEN 'TABLE'
+    WHEN 'p' THEN 'TABLE'
+    WHEN 'S' THEN 'SEQUENCE'
+    WHEN 'v' THEN 'VIEW'
+    WHEN 'm' THEN 'MATERIALIZED VIEW'
+    WHEN 'f' THEN 'FOREIGN TABLE'
+  END,
+  n.nspname,
+  c.relname,
+  '$APP_DB_USER'
+)
+FROM pg_class AS c
+JOIN pg_namespace AS n ON n.oid = c.relnamespace
+WHERE n.nspname = 'public'
+  AND c.relowner = (SELECT oid FROM pg_roles WHERE rolname = '$EDDR_ADMIN')
+  AND c.relkind IN ('r', 'p', 'S', 'v', 'm', 'f')
+  AND (c.relkind <> 'S' OR NOT EXISTS (
+    SELECT 1
+    FROM pg_depend AS d
+    WHERE d.classid = 'pg_class'::regclass
+      AND d.objid = c.oid
+      AND d.refclassid = 'pg_class'::regclass
+      AND d.deptype IN ('a', 'i')
+  ))
+\gexec
 ALTER SCHEMA public OWNER TO "$APP_DB_USER";
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 GRANT USAGE, CREATE ON SCHEMA public TO "$APP_DB_USER";
@@ -3095,7 +3274,34 @@ GRANT CONNECT ON DATABASE keycloak TO "$KEYCLOAK_DB_USER", "$EDDR_ADMIN";
 SQL
         # shellcheck disable=SC2086
         (cd "$EDDR_WORK" && $EDDR_RUN exec -T postgres psql -U "$EDDR_ADMIN" -d keycloak -v ON_ERROR_STOP=1) <<SQL
-REASSIGN OWNED BY "$EDDR_ADMIN" TO "$KEYCLOAK_DB_USER";
+SELECT format(
+  'ALTER %s %I.%I OWNER TO %I',
+  CASE c.relkind
+    WHEN 'r' THEN 'TABLE'
+    WHEN 'p' THEN 'TABLE'
+    WHEN 'S' THEN 'SEQUENCE'
+    WHEN 'v' THEN 'VIEW'
+    WHEN 'm' THEN 'MATERIALIZED VIEW'
+    WHEN 'f' THEN 'FOREIGN TABLE'
+  END,
+  n.nspname,
+  c.relname,
+  '$KEYCLOAK_DB_USER'
+)
+FROM pg_class AS c
+JOIN pg_namespace AS n ON n.oid = c.relnamespace
+WHERE n.nspname = 'public'
+  AND c.relowner = (SELECT oid FROM pg_roles WHERE rolname = '$EDDR_ADMIN')
+  AND c.relkind IN ('r', 'p', 'S', 'v', 'm', 'f')
+  AND (c.relkind <> 'S' OR NOT EXISTS (
+    SELECT 1
+    FROM pg_depend AS d
+    WHERE d.classid = 'pg_class'::regclass
+      AND d.objid = c.oid
+      AND d.refclassid = 'pg_class'::regclass
+      AND d.deptype IN ('a', 'i')
+  ))
+\gexec
 ALTER SCHEMA public OWNER TO "$KEYCLOAK_DB_USER";
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 GRANT USAGE, CREATE ON SCHEMA public TO "$KEYCLOAK_DB_USER";
@@ -3438,8 +3644,8 @@ PostgreSQL хранит пароль внутри тома и новый не п
     say "════════════════════════════════════════════════════════════"
     say ""
     if [ "$OIDC_MODE" != none ]; then
-        say "Внешний вход настроен, но пускать пока некого:"
-        say "  • заведите пользователей и включите их в группы допуска —"
+        say "Внешний вход настроен. Проверьте пользователей и группы допуска:"
+        say "  • пользователи должны входить в одну из групп —"
         say "    $GROUP_ADMIN, $GROUP_OPERATOR, $GROUP_VIEWER;"
         say "  • кто не попал ни в одну, в систему не допускается: так и задумано;"
         if [ "$OIDC_MODE" = keycloak ]; then

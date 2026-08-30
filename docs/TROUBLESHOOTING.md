@@ -519,7 +519,7 @@ sudo sh /tmp/ovirt-backup-*.run --mode systemd \
 
 ```bash
 # Из рабочего Compose-каталога.
-grep -E '^(COMPOSE_PROFILES|JHV_OIDC_ISSUER|JHV_OIDC_BACKCHANNEL_URL|JHV_KEYCLOAK_URL)=' .env
+grep -E '^(COMPOSE_PROFILES|JHV_OIDC_ISSUER|JHV_OIDC_BACKCHANNEL_URL|JHV_KEYCLOAK_URL|KEYCLOAK_(DIRECT_TLS|CONTAINER_PORT|BIND_ADDRESS))=' .env
 docker compose ps
 
 # Keycloak доступен внутри сети Compose, а прикладной realm существует.
@@ -544,6 +544,22 @@ curl -k -sS -D - -o /dev/null \
 JHV_OIDC_ISSUER=https://keycloak.example.org/realms/jhvirt
 JHV_OIDC_BACKCHANNEL_URL=http://keycloak:8080
 ```
+
+Если Keycloak получает сертификат напрямую от установщика, дополнительно
+ожидаются:
+
+```dotenv
+KEYCLOAK_DIRECT_TLS=1
+KEYCLOAK_CONTAINER_PORT=8443
+KEYCLOAK_BIND_ADDRESS=0.0.0.0
+```
+
+Для TLS на отдельном reverse proxy значения другие: `DIRECT_TLS=0`, внутренний
+порт `8080`, bind `127.0.0.1`. Комбинация публичного `https://...` и порта
+контейнера `8080` без реально настроенного reverse proxy приводит к ошибке TLS
+и сообщению `провайдер недоступен`. Повторите установку актуальным `.run` с
+теми же `--url`, `--tls` и `--keycloak-url`: режим исправится без пересоздания
+realm и без смены пользователей.
 
 `issuer` нельзя менять на имя `keycloak`: оно существует только внутри
 Compose, недоступно браузеру и не совпадёт с `iss` токена. Если

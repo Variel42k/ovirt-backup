@@ -103,7 +103,7 @@ TLS_DAYS=825; TLS_MATERIAL_DIR=""; TLS_RESTART_REQUIRED=0; READY_SCHEME=http
 # подключить существующего провайдера.
 OIDC_MODE=""; OIDC_EXISTING=0; OIDC_ISSUER=""; OIDC_BACKCHANNEL_URL=""; OIDC_CLIENT_ID=""; OIDC_CLIENT_SECRET_FILE=""
 OIDC_ALLOW_LOCAL_LOGIN=""
-KEYCLOAK_PORT=8081; KEYCLOAK_REALM="jhvirt"; KEYCLOAK_URL=""; KEYCLOAK_API_URL=""
+KEYCLOAK_PORT=8081; KEYCLOAK_PORT_EXPLICIT=0; KEYCLOAK_REALM="jhvirt"; KEYCLOAK_URL=""; KEYCLOAK_API_URL=""
 KEYCLOAK_ADMIN_USER="kc-bootstrap-admin"; KEYCLOAK_ADMIN_PASSWORD=""; OIDC_CLIENT_SECRET=""
 KEYCLOAK_BOOTSTRAP_USER=""; KEYCLOAK_ACTIVE_ADMIN_USER=""
 KEYCLOAK_DIRECT_TLS=0; KEYCLOAK_BIND_ADDRESS=127.0.0.1; KEYCLOAK_CONTAINER_PORT=8080
@@ -170,8 +170,8 @@ while [ $# -gt 0 ]; do
         --oidc-client-secret-file=*) OIDC_CLIENT_SECRET_FILE="${1#--oidc-client-secret-file=}"; shift ;;
         --local-login) [ $# -ge 2 ] || die "--local-login требует enabled или disabled"; OIDC_ALLOW_LOCAL_LOGIN="$2"; shift 2 ;;
         --local-login=*) OIDC_ALLOW_LOCAL_LOGIN="${1#--local-login=}"; shift ;;
-        --keycloak-port) [ $# -ge 2 ] || die "--keycloak-port требует значение"; KEYCLOAK_PORT="$2"; shift 2 ;;
-        --keycloak-port=*) KEYCLOAK_PORT="${1#--keycloak-port=}"; shift ;;
+        --keycloak-port) [ $# -ge 2 ] || die "--keycloak-port требует значение"; KEYCLOAK_PORT="$2"; KEYCLOAK_PORT_EXPLICIT=1; shift 2 ;;
+        --keycloak-port=*) KEYCLOAK_PORT="${1#--keycloak-port=}"; KEYCLOAK_PORT_EXPLICIT=1; shift ;;
         --keycloak-url) [ $# -ge 2 ] || die "--keycloak-url требует значение"; KEYCLOAK_URL="$2"; shift 2 ;;
         --keycloak-url=*) KEYCLOAK_URL="${1#--keycloak-url=}"; shift ;;
         --uninstall=*) MODE=uninstall; UNINSTALL_TARGET="${1#--uninstall=}"; shift ;;
@@ -1949,12 +1949,18 @@ choose_tls() {
     done
 }
 
-tls_host_from_url() {
-    TLS_AUTHORITY="${URL#*://}"
-    case "$TLS_AUTHORITY" in
-        \[*\]*) TLS_HOST="${TLS_AUTHORITY#\[}"; TLS_HOST="${TLS_HOST%%\]*}" ;;
-        *) TLS_HOST="${TLS_AUTHORITY%%:*}" ;;
+url_host() {
+    URL_HOST_AUTHORITY="${1#*://}"
+    URL_HOST_AUTHORITY="${URL_HOST_AUTHORITY%%/*}"
+    case "$URL_HOST_AUTHORITY" in
+        \[*\]*) URL_HOST_VALUE="${URL_HOST_AUTHORITY#\[}"; URL_HOST_VALUE="${URL_HOST_VALUE%%\]*}" ;;
+        *) URL_HOST_VALUE="${URL_HOST_AUTHORITY%%:*}" ;;
     esac
+    printf '%s' "$URL_HOST_VALUE"
+}
+
+tls_host_from_url() {
+    TLS_HOST="$(url_host "$URL")"
     case "$TLS_HOST" in
         ""|*[!A-Za-z0-9_.:-]*) die "не удалось получить безопасное имя сертификата из URL: $URL" ;;
     esac
@@ -1968,11 +1974,12 @@ tls_validate_pair() {
         die "сертификат не читается или уже истёк: $TV_CERT"
     openssl pkey -in "$TV_KEY" -passin pass: -noout >/dev/null 2>&1 ||
         die "закрытый ключ не читается или защищён паролем: $TV_KEY"
-    openssl x509 -in "$TV_CERT" -pubkey -noout > "$TLS_MATERIAL_DIR/cert.pub"
-    openssl pkey -in "$TV_KEY" -passin pass: -pubout > "$TLS_MATERIAL_DIR/key.pub"
-    cmp -s "$TLS_MATERIAL_DIR/cert.pub" "$TLS_MATERIAL_DIR/key.pub" ||
+    TV_CERT_PUBLIC="$(openssl x509 -in "$TV_CERT" -pubkey -noout)" ||
+        die "не удалось прочитать публичный ключ сертификата: $TV_CERT"
+    TV_KEY_PUBLIC="$(openssl pkey -in "$TV_KEY" -passin pass: -pubout)" ||
+        die "не удалось получить публичный ключ из закрытого ключа: $TV_KEY"
+    [ "$TV_CERT_PUBLIC" = "$TV_KEY_PUBLIC" ] ||
         die "сертификат и закрытый ключ не образуют пару"
-    rm -f "$TLS_MATERIAL_DIR/cert.pub" "$TLS_MATERIAL_DIR/key.pub"
 }
 
 prepare_tls() {
@@ -2287,14 +2294,27 @@ choose_oidc() {
 # считал OIDC выключенным и не добавлял новые обязательные параметры в старый
 # .env, хотя профиль Keycloak продолжал запускаться самим Compose.
 load_existing_oidc() {
-    [ -z "$OIDC_MODE" ] || return 0
     [ -f "$WORK/.env" ] || return 0
     [ "$(env_file_value "$WORK/.env" JHV_OIDC_ENABLED)" = true ] || return 0
-    OIDC_EXISTING=1
 
-    OIDC_ISSUER="$(env_file_value "$WORK/.env" JHV_OIDC_ISSUER)"
-    OIDC_BACKCHANNEL_URL="$(env_file_value "$WORK/.env" JHV_OIDC_BACKCHANNEL_URL)"
-    OIDC_CLIENT_ID="$(env_file_value "$WORK/.env" JHV_OIDC_CLIENT_ID)"
+    case "$(env_file_value "$WORK/.env" COMPOSE_PROFILES)" in
+        *keycloak*) EXISTING_OIDC_MODE=keycloak ;;
+        *) EXISTING_OIDC_MODE=external ;;
+    esac
+    # Явный повтор того же режима остаётся обновлением, а не новой настройкой.
+    # Переход на другой режим, напротив, должен пройти его обычную валидацию.
+    if [ -n "$OIDC_MODE" ] && [ "$OIDC_MODE" != "$EXISTING_OIDC_MODE" ]; then
+        return 0
+    fi
+    OIDC_EXISTING=1
+    [ -n "$OIDC_MODE" ] || OIDC_MODE="$EXISTING_OIDC_MODE"
+
+    OIDC_STORED="$(env_file_value "$WORK/.env" JHV_OIDC_ISSUER)"
+    [ -n "$OIDC_ISSUER" ] || OIDC_ISSUER="$OIDC_STORED"
+    OIDC_STORED="$(env_file_value "$WORK/.env" JHV_OIDC_BACKCHANNEL_URL)"
+    [ -n "$OIDC_BACKCHANNEL_URL" ] || OIDC_BACKCHANNEL_URL="$OIDC_STORED"
+    OIDC_STORED="$(env_file_value "$WORK/.env" JHV_OIDC_CLIENT_ID)"
+    [ -n "$OIDC_CLIENT_ID" ] || OIDC_CLIENT_ID="$OIDC_STORED"
     OIDC_CLIENT_SECRET="$(env_file_value "$WORK/.env" JHV_OIDC_CLIENT_SECRET)"
     [ -n "$OIDC_CLIENT_SECRET" ] || OIDC_CLIENT_SECRET="$(docker_volume_value "$(docker_metrics_volume)" oidc-client.secret)"
     if [ -z "$OIDC_ALLOW_LOCAL_LOGIN" ]; then
@@ -2303,13 +2323,16 @@ load_existing_oidc() {
         # вход включённым. Обновление такой установки не должно запереть её.
         [ -n "$OIDC_ALLOW_LOCAL_LOGIN" ] || OIDC_ALLOW_LOCAL_LOGIN=true
     fi
-    case "$(env_file_value "$WORK/.env" COMPOSE_PROFILES)" in
-        *keycloak*)
-            OIDC_MODE=keycloak
-            KEYCLOAK_URL="$(env_file_value "$WORK/.env" JHV_KEYCLOAK_URL)"
+    case "$EXISTING_OIDC_MODE" in
+        keycloak)
+            OIDC_STORED="$(env_file_value "$WORK/.env" JHV_KEYCLOAK_URL)"
+            [ -n "$KEYCLOAK_URL" ] || KEYCLOAK_URL="$OIDC_STORED"
             KEYCLOAK_ADMIN_USER="$(env_file_value "$WORK/.env" KEYCLOAK_ADMIN_USER)"
             [ -n "$KEYCLOAK_ADMIN_USER" ] || KEYCLOAK_ADMIN_USER=kc-bootstrap-admin
-            KEYCLOAK_PORT="$(env_file_value "$WORK/.env" KEYCLOAK_PORT)"
+            OIDC_STORED="$(env_file_value "$WORK/.env" KEYCLOAK_PORT)"
+            if [ "$KEYCLOAK_PORT_EXPLICIT" -eq 0 ] && [ -n "$OIDC_STORED" ]; then
+                KEYCLOAK_PORT="$OIDC_STORED"
+            fi
             [ -n "$KEYCLOAK_PORT" ] || KEYCLOAK_PORT=8081
             KEYCLOAK_DIRECT_TLS="$(env_file_value "$WORK/.env" KEYCLOAK_DIRECT_TLS)"
             [ "$KEYCLOAK_DIRECT_TLS" = 1 ] || KEYCLOAK_DIRECT_TLS=0
@@ -2319,8 +2342,7 @@ load_existing_oidc() {
             [ -n "$KEYCLOAK_CONTAINER_PORT" ] || KEYCLOAK_CONTAINER_PORT=8080
             say "    сохраняется вход через встроенный Keycloak"
             ;;
-        *)
-            OIDC_MODE=external
+        external)
             say "    сохраняется вход через внешний OIDC-провайдер"
             ;;
     esac
@@ -2332,6 +2354,13 @@ ask_nonempty() {
         printf '%s' "$1"
         read -r ANSWER || ANSWER=""
     done
+}
+
+keycloak_use_direct_tls() {
+    KEYCLOAK_DIRECT_TLS=1
+    KEYCLOAK_BIND_ADDRESS=0.0.0.0
+    KEYCLOAK_CONTAINER_PORT=8443
+    KEYCLOAK_API_URL="https://127.0.0.1:$KEYCLOAK_PORT"
 }
 
 # Проверяет, что для выбранного способа хватает данных, и добирает недостающее
@@ -2377,16 +2406,14 @@ prepare_oidc() {
         # Keycloak. Именно он попадёт в issuer, поэтому браузер и служба будут
         # звать провайдера одинаково.
         if [ -z "$KEYCLOAK_URL" ]; then
-            KC_HOSTPORT="${URL#*://}"; KC_HOSTPORT="${KC_HOSTPORT%%/*}"
+            KC_PUBLIC_HOST="$(url_host "$URL")"
+            case "$KC_PUBLIC_HOST" in *:*) KC_PUBLIC_AUTHORITY="[$KC_PUBLIC_HOST]" ;; *) KC_PUBLIC_AUTHORITY="$KC_PUBLIC_HOST" ;; esac
             case "$URL" in
                 https://*)
                     case "$TLS_MODE" in
                         self-signed|files|preserve)
-                            KEYCLOAK_DIRECT_TLS=1
-                            KEYCLOAK_BIND_ADDRESS=0.0.0.0
-                            KEYCLOAK_CONTAINER_PORT=8443
-                            KEYCLOAK_URL="https://${KC_HOSTPORT%%:*}:$KEYCLOAK_PORT"
-                            KEYCLOAK_API_URL="https://127.0.0.1:$KEYCLOAK_PORT"
+                            keycloak_use_direct_tls
+                            KEYCLOAK_URL="https://$KC_PUBLIC_AUTHORITY:$KEYCLOAK_PORT"
                             ;;
                         *)
                             die "для встроенного Keycloak за HTTPS reverse proxy укажите его публичный адрес:
@@ -2397,39 +2424,52 @@ prepare_oidc() {
                     esac
                     ;;
                 *)
-                    case "${KC_HOSTPORT%%:*}" in
-                        localhost|127.*|\[::1\]) ;;
+                    case "$KC_PUBLIC_HOST" in
+                        localhost|127.*|::1) ;;
                         *) die "встроенный Keycloak нельзя публиковать по HTTP: пароль входа пойдёт по сети открытым текстом.
 Используйте --tls self-signed, сертификат из файлов или HTTPS reverse proxy." ;;
                     esac
                     KEYCLOAK_BIND_ADDRESS=127.0.0.1
-                    KEYCLOAK_URL="http://${KC_HOSTPORT%%:*}:$KEYCLOAK_PORT"
+                    KEYCLOAK_URL="http://$KC_PUBLIC_AUTHORITY:$KEYCLOAK_PORT"
                     KEYCLOAK_API_URL="http://127.0.0.1:$KEYCLOAK_PORT"
                     ;;
             esac
         elif [ "$OIDC_EXISTING" -eq 1 ] && [ "$KEYCLOAK_DIRECT_TLS" -eq 0 ] &&
-                [ "$TLS_MODE" != none ]; then
+                [ "$TLS_MODE" != none ] &&
+                [ "${KEYCLOAK_URL#http://}" != "$KEYCLOAK_URL" ]; then
             # Безопасно обновляем прежнюю встроенную HTTP-установку: тот же
             # сертификат уже выбран для приложения и подходит тому же хосту.
-            KC_HOSTPORT="${URL#*://}"; KC_HOSTPORT="${KC_HOSTPORT%%/*}"
-            KEYCLOAK_DIRECT_TLS=1
-            KEYCLOAK_BIND_ADDRESS=0.0.0.0
-            KEYCLOAK_CONTAINER_PORT=8443
-            KEYCLOAK_URL="https://${KC_HOSTPORT%%:*}:$KEYCLOAK_PORT"
-            KEYCLOAK_API_URL="https://127.0.0.1:$KEYCLOAK_PORT"
+            KC_PUBLIC_HOST="$(url_host "$URL")"
+            case "$KC_PUBLIC_HOST" in *:*) KC_PUBLIC_AUTHORITY="[$KC_PUBLIC_HOST]" ;; *) KC_PUBLIC_AUTHORITY="$KC_PUBLIC_HOST" ;; esac
+            keycloak_use_direct_tls
+            KEYCLOAK_URL="https://$KC_PUBLIC_AUTHORITY:$KEYCLOAK_PORT"
             say "    встроенный Keycloak переводится с HTTP на HTTPS"
         elif [ "$OIDC_EXISTING" -eq 1 ] && [ "$KEYCLOAK_DIRECT_TLS" -eq 1 ]; then
-            KEYCLOAK_BIND_ADDRESS=0.0.0.0
-            KEYCLOAK_CONTAINER_PORT=8443
-            KEYCLOAK_API_URL="https://127.0.0.1:$KEYCLOAK_PORT"
+            keycloak_use_direct_tls
         else
             case "$KEYCLOAK_URL" in
                 https://*)
-                    # Явный адрес означает TLS-терминацию на reverse proxy.
-                    # Внутренний HTTP-порт доступен только через loopback.
-                    KEYCLOAK_BIND_ADDRESS=127.0.0.1
-                    KEYCLOAK_CONTAINER_PORT=8080
-                    KEYCLOAK_API_URL="http://127.0.0.1:$KEYCLOAK_PORT"
+                    # Тот же host и собственный сертификат означают прямой TLS
+                    # Keycloak. Другой host обслуживает внешний reverse proxy,
+                    # которому оставляем только loopback HTTP upstream.
+                    KC_PUBLIC_HOST="$(url_host "$URL")"
+                    KC_EXPLICIT_HOST="$(url_host "$KEYCLOAK_URL")"
+                    case "$TLS_MODE:$KC_PUBLIC_HOST:$KC_EXPLICIT_HOST" in
+                        self-signed:*:*|files:*:*|preserve:*:*)
+                            if [ "$KC_PUBLIC_HOST" = "$KC_EXPLICIT_HOST" ]; then
+                                keycloak_use_direct_tls
+                            else
+                                KEYCLOAK_BIND_ADDRESS=127.0.0.1
+                                KEYCLOAK_CONTAINER_PORT=8080
+                                KEYCLOAK_API_URL="http://127.0.0.1:$KEYCLOAK_PORT"
+                            fi
+                            ;;
+                        *)
+                            KEYCLOAK_BIND_ADDRESS=127.0.0.1
+                            KEYCLOAK_CONTAINER_PORT=8080
+                            KEYCLOAK_API_URL="http://127.0.0.1:$KEYCLOAK_PORT"
+                            ;;
+                    esac
                     ;;
                 http://localhost*|http://127.*|http://\[::1\]*)
                     KEYCLOAK_BIND_ADDRESS=127.0.0.1

@@ -193,7 +193,7 @@ RACE_BUILD_CACHE="jhvirt-gobuild"
 # Образ должен совпадать по версии Go с go.mod: детектор гонок собирает проект
 # заново, и расхождение версий проявилось бы как «локально проходит, а в
 # контейнере нет».
-RACE_IMAGE="docker.io/library/golang:1.26"
+RACE_IMAGE="docker.io/library/golang:1.27"
 
 # host_to_container переписывает адрес базы так, чтобы он был виден изнутри
 # контейнера: localhost там указывает на сам контейнер.
@@ -317,17 +317,26 @@ run_tool() {
     fi
 }
 
-# trivy собирается отдельно от прочих: с версии 0.7x он использует
-# encoding/json/v2, а тот в Go 1.26 ещё закрыт экспериментальным флагом. Без
-# GOEXPERIMENT сборка падает на «build constraints exclude all Go files» —
-# сообщение, по которому причина не угадывается вовсе.
+# trivy собирается отдельно от прочих, и не тем Go, что весь остальной проект.
+#
+# С версии 0.7x он использует encoding/json/v2. В Go 1.26 этот пакет был закрыт
+# экспериментальным флагом, в Go 1.27 он открылся — но уже без SkipFunc, на
+# который trivy опирается. Поэтому под 1.27 сборка падает на «undefined:
+# json.SkipFunc», и GOEXPERIMENT тут не спасает: флаг стал пустышкой.
+#
+# Отсюда закреплённый GOTOOLCHAIN: trivy — отдельный модуль, и собрать его
+# прежним Go можно, не трогая версию самого проекта. Нужный тулчейн Go скачает
+# сам. Снять это закрепление можно, когда выйдет trivy под открытый json/v2;
+# признак — сборка проходит без обеих переменных.
 #
 # На готовый бинарь из PATH это не влияет: он уже собран.
+TRIVY_TOOLCHAIN="go1.26.6"
 run_trivy() {
     if command -v trivy >/dev/null 2>&1; then
         trivy "$@"
     else
-        GOEXPERIMENT=jsonv2 go run "github.com/aquasecurity/trivy/cmd/trivy@$TRIVY_VERSION" "$@"
+        GOTOOLCHAIN="$TRIVY_TOOLCHAIN" GOEXPERIMENT=jsonv2 \
+            go run "github.com/aquasecurity/trivy/cmd/trivy@$TRIVY_VERSION" "$@"
     fi
 }
 

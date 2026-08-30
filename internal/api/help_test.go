@@ -116,6 +116,9 @@ func TestKeyTopicsArePresent(t *testing.T) {
 		"changed-blocks", "quiesce", "hot-backup", "retention", "verify", "chains",
 		"physical-copies", "storage-modes", "restore-new-vm", "file-backups", "managed-artifacts",
 		"outside-alerts", "server-migration", "system-time-and-theme",
+		// Статью про восстановление доступа читают до аварии: во время неё
+		// интерфейс уже недоступен. Пропасть она не должна.
+		"local-recovery",
 	} {
 		if !known[id] {
 			t.Errorf("в справке нет статьи %q", id)

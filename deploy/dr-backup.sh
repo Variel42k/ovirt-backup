@@ -66,10 +66,12 @@ backup_once() {
                 echo "не удалось создать копию secret.key" >&2
                 cleanup; trap - EXIT HUP INT TERM; return 1
             }
-        cmp -s "$JHV_SECRET_KEY_SOURCE" "$KEY_TMP" || {
+        KEY_SOURCE_SHA="$(sha256sum "$JHV_SECRET_KEY_SOURCE" | awk '{print $1}')"
+        KEY_BACKUP_SHA="$(sha256sum "$KEY_TMP" | awk '{print $1}')"
+        if [ -z "$KEY_SOURCE_SHA" ] || [ "$KEY_SOURCE_SHA" != "$KEY_BACKUP_SHA" ]; then
             echo "копия secret.key не совпала" >&2
             cleanup; trap - EXIT HUP INT TERM; return 1
-        }
+        fi
         mv "$KEY_TMP" "$JHV_SECRET_KEY_BACKUP" || {
             echo "не удалось опубликовать копию secret.key" >&2
             cleanup; trap - EXIT HUP INT TERM; return 1

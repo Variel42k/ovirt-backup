@@ -5,6 +5,7 @@ import { api, notify, notifyError, notifyOk } from '@/api/client'
 import { ago, bytes, dateTime, storageKindIcon } from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
+import DirectoryPicker from '@/components/DirectoryPicker.vue'
 import type { CatalogScanDetail, StorageKind, StorageTarget } from '@/api/types'
 
 const $q = useQuasar()
@@ -42,6 +43,7 @@ const emptyForm = () => ({
   password: '',
   private_key: '',
   host_key: '',
+  trust_any_host_key: false,
   share: '',
   domain: '',
   insecure_tls: false,
@@ -90,6 +92,46 @@ function openEdit(target: StorageTarget) {
   editing.value = target
   form.value = { ...emptyForm(), ...target, secret_key: '', password: '', private_key: '' }
   dialog.value = true
+}
+
+const pathPicker = ref(false)
+
+function usePickedPath(value: { rootId: string; path: string; absolute?: string }) {
+  // Для хранилища берётся полный путь: сам путь и есть настройка, и служба
+  // будет писать именно по нему.
+  if (value.absolute) form.value.base_path = value.absolute
+}
+
+const scanningKey = ref(false)
+
+/**
+ * Забирает ключ, который SFTP-сервер предъявляет прямо сейчас.
+ *
+ * Сам по себе он ничего не доказывает: тот, кто способен вклиниться в
+ * соединение, ответил бы и на этот запрос. Предупреждение показывается каждый
+ * раз — сверять отпечаток нужно со снятым на самом сервере.
+ */
+async function scanHostKey() {
+  if (!form.value.host) {
+    notifyError('Сначала укажите адрес сервера')
+    return
+  }
+  scanningKey.value = true
+  try {
+    const result = await api.scanStorageHostKey(form.value.host, form.value.port || 22)
+    form.value.host_key = result.line
+    form.value.trust_any_host_key = false
+    notify({
+      type: 'warning',
+      message: `Отпечаток ${result.fingerprint}. ${result.warning}`,
+      timeout: 20000,
+      multiLine: true,
+    })
+  } catch (err) {
+    notifyError(err, 'Не удалось получить ключ сервера')
+  } finally {
+    scanningKey.value = false
+  }
 }
 
 async function save() {
@@ -367,6 +409,32 @@ function location(target: StorageTarget): string {
         <q-td :props="props">
           {{ props.row.name }}
           <q-badge v-if="!props.row.enabled" color="grey-7" class="q-ml-sm">выключено</q-badge>
+          <q-badge
+            v-if="props.row.kind === 'sftp' && !props.row.private_key_stored"
+            color="warning"
+            text-color="dark"
+            class="q-ml-sm"
+          >
+            вход по паролю
+            <q-tooltip>
+              Пароль хранится расшифровываемым и предъявляется серверу при каждой записи копии.
+              Заведите ключ и очистите пароль.
+            </q-tooltip>
+          </q-badge>
+          <q-badge v-if="props.row.insecure_tls_since" color="negative" class="q-ml-sm">
+            без проверки сертификата, {{ ago(props.row.insecure_tls_since) }}
+            <q-tooltip>
+              Временный режим, а не настройка. Загрузите доверенный сертификат и снимите
+              отметку — служба напомнит об этом оповещением, когда срок выйдет.
+            </q-tooltip>
+          </q-badge>
+          <q-badge v-if="props.row.trust_any_host_key" color="negative" class="q-ml-sm">
+            без проверки хоста
+            <q-tooltip>
+              Подлинность сервера не проверяется: копии уйдут туда, куда их направит
+              вклинившийся в соединение. Задайте ключ хоста.
+            </q-tooltip>
+          </q-badge>
 			<q-badge v-if="props.row.object_lock_enabled" color="warning" class="q-ml-sm">Object Lock {{ props.row.object_lock_days }} дн.</q-badge>
           <!-- Итог проверки, а не настройка: Object Lock рядом говорит о
                намерении, этот бейдж — о том, что вышло на самом деле. -->
@@ -481,10 +549,21 @@ function location(target: StorageTarget): string {
             <q-input
               v-model="form.base_path"
               label="Путь"
-              hint="Путь внутри службы, а не на хосте: в установке из контейнера это /backups, а не путь из df. Каталог создаётся автоматически; сюда же монтируют NFS или CIFS."
+              hint="Выберите каталог: список показывает только то, куда служба действительно может писать. Путь задаётся внутри службы, а не на хосте."
               outlined
               dense
-            />
+            >
+              <template #append>
+                <q-btn
+                  flat
+                  dense
+                  no-caps
+                  icon="folder_open"
+                  label="Выбрать"
+                  @click="pathPicker = true"
+                />
+              </template>
+            </q-input>
           </div>
 
           <template v-if="form.kind === 's3'">
@@ -678,10 +757,34 @@ function location(target: StorageTarget): string {
               <q-input
                 v-model="form.host_key"
                 label="Ключ хоста (формат authorized_keys)"
-                hint="Пусто — ключ сервера не проверяется. Для боевой установки задайте."
+                hint="Без ключа подключения не будет. Получите отпечаток и сверьте его на самом сервере."
                 outlined
                 dense
+                :disable="form.trust_any_host_key"
+              >
+                <template #append>
+                  <q-btn
+                    flat
+                    dense
+                    no-caps
+                    icon="fingerprint"
+                    label="Получить"
+                    :loading="scanningKey"
+                    :disable="form.trust_any_host_key"
+                    @click="scanHostKey"
+                  />
+                </template>
+              </q-input>
+            </div>
+            <div class="col-12">
+              <q-checkbox
+                v-model="form.trust_any_host_key"
+                label="Подключаться без проверки подлинности сервера"
               />
+              <div class="text-caption text-negative q-ml-sm">
+                Годится для лаборатории. Копии уйдут туда, куда их направит вклинившийся в
+                соединение. Отказ записывается в журнал аудита.
+              </div>
             </div>
             <div class="col-12">
               <q-input v-model="form.base_path" label="Каталог на сервере" outlined dense />
@@ -743,5 +846,13 @@ function location(target: StorageTarget): string {
 			</q-card-actions>
 		</q-card>
 	</q-dialog>
+
+    <DirectoryPicker
+      v-model="pathPicker"
+      scope="storage"
+      title="Куда класть копии"
+      require-writable
+      @picked="usePickedPath"
+    />
   </q-page>
 </template>

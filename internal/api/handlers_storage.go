@@ -39,6 +39,9 @@ type storagePayload struct {
 	PrivateKey string `json:"private_key"`
 	HostKey    string `json:"host_key"`
 
+	// TrustAnyHostKey — явный отказ проверять подлинность SFTP-сервера.
+	TrustAnyHostKey bool `json:"trust_any_host_key"`
+
 	Share       string `json:"share"`
 	Domain      string `json:"domain"`
 	InsecureTLS bool   `json:"insecure_tls"`
@@ -66,6 +69,7 @@ func (p storagePayload) apply(dst *model.StorageTarget) {
 	dst.Password = p.Password
 	dst.PrivateKey = p.PrivateKey
 	dst.HostKey = p.HostKey
+	dst.TrustAnyHostKey = p.TrustAnyHostKey
 	dst.Share = p.Share
 	dst.Domain = p.Domain
 	dst.InsecureTLS = p.InsecureTLS
@@ -104,8 +108,20 @@ func (p storagePayload) validate(isNew bool) error {
 		if p.Host == "" || p.Username == "" {
 			return badRequest("для SFTP нужны хост и пользователь")
 		}
-		if isNew && p.Password == "" && p.PrivateKey == "" {
-			return badRequest("для SFTP нужен пароль или приватный ключ")
+		// Новое хранилище заводится только по ключу — по той же причине, что и
+		// подключение к гипервизору: пароль лежит расшифровываемым и уходит на
+		// сервер при каждой записи копии. Уже заведённые хранилища продолжают
+		// работать и помечены в списке.
+		if isNew && p.PrivateKey == "" {
+			return badRequest("для SFTP нужен приватный ключ: " +
+				"пароль в автоматических заданиях хранится расшифровываемым и " +
+				"предъявляется серверу при каждом подключении")
+		}
+		// Отказ здесь, а не при первой записи копии: запись случается ночью в
+		// фоновом задании, и ошибку там увидит не тот, кто заводил хранилище.
+		if strings.TrimSpace(p.HostKey) == "" && !p.TrustAnyHostKey {
+			return badRequest("не задан ключ хоста: получите отпечаток и сверьте его, " +
+				"либо явно разрешите подключение без проверки")
 		}
 	case model.StorageSMB:
 		if p.Host == "" {
@@ -184,6 +200,22 @@ func (s *Server) handleCreateStorage(w http.ResponseWriter, r *http.Request) {
 	target := &model.StorageTarget{Enabled: true, UseSSL: true}
 	payload.apply(target)
 
+	// Путь нового локального хранилища обязан лежать там, куда служба может
+	// писать, — в том же списке, который показывает выбиралка каталога.
+	//
+	// Только для новых: у заведённых раньше путь мог оказаться на корневой
+	// файловой системе контейнера, и отказ задним числом остановил бы копии.
+	// Такой путь виден в списке как «вне разрешённых каталогов».
+	if target.Kind == model.StorageLocal {
+		resolved, err := s.resolveBrowsable(r, scopeStorage, target.BasePath)
+		if err != nil {
+			s.audit(r, "storage.create", model.ScopeStorageTarget, target.Name, false, err.Error())
+			s.writeError(w, r, badRequest("каталог %s: %v. %s",
+				target.BasePath, err, storagePathHint()))
+			return
+		}
+		target.BasePath = resolved
+	}
 	if err := ensureLocalPathUsable(r.Context(), target); err != nil {
 		s.audit(r, "storage.create", model.ScopeStorageTarget, target.Name, false, err.Error())
 		s.writeError(w, r, err)
@@ -201,6 +233,8 @@ func (s *Server) handleCreateStorage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.audit(r, "storage.create", model.ScopeStorageTarget, target.ID, true, target.Name)
+	s.auditHostKeyTrust(r, model.ScopeStorageTarget, target.ID, target.Name,
+		target.TrustAnyHostKey, target.Kind == model.StorageSFTP)
 
 	// Check straight away: a repository that turns out to be unreachable is
 	// better discovered now than during the first nightly backup.
@@ -275,6 +309,8 @@ func (s *Server) handleUpdateStorage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.audit(r, "storage.update", model.ScopeStorageTarget, id, true, existing.Name)
+		s.auditHostKeyTrust(r, model.ScopeStorageTarget, id, existing.Name,
+			existing.TrustAnyHostKey, existing.Kind == model.StorageSFTP)
 
 		go s.checkStorage(context.WithoutCancel(r.Context()), id)
 		writeJSON(w, http.StatusOK, existing)
@@ -514,6 +550,8 @@ func (s *Server) checkStorage(ctx context.Context, id string) {
 	if err != nil {
 		return
 	}
+	s.checkStorageInsecureTLS(checkCtx, target)
+
 	backend, err := repo.Open(checkCtx, target)
 	if err != nil {
 		_ = s.store.UpdateStorageTargetHealth(checkCtx, id, false, err.Error(), 0, 0)
@@ -527,4 +565,43 @@ func (s *Server) checkStorage(ctx context.Context, id string) {
 	}
 	free, used, _ := backend.Usage(checkCtx)
 	_ = s.store.UpdateStorageTargetHealth(checkCtx, id, true, "", free, used)
+}
+
+// checkStorageInsecureTLS напоминает о временном режиме, ставшем постоянным.
+//
+// Проверка сертификата у WebDAV отключается, чтобы подключиться к NAS с
+// самоподписанным сертификатом «на сегодня». Дальше об этом забывают, и копии
+// годами уходят на сервер, подлинность которого никто не подтверждает.
+func (s *Server) checkStorageInsecureTLS(ctx context.Context, target *model.StorageTarget) {
+	grace := s.cfg.Monitor.InsecureTLSGrace
+	if !model.InsecureTLSOverdue(target.InsecureTLS, target.InsecureTLSSince, grace) {
+		if !target.InsecureTLS {
+			_ = s.store.ResolveAlert(ctx, "", model.ScopeStorageTarget, target.ID,
+				model.AlertInsecureTLSExpired)
+		}
+		return
+	}
+
+	days := int(time.Since(*target.InsecureTLSSince).Hours() / 24)
+	_ = s.store.RaiseAlert(ctx, &model.Alert{
+		Scope: model.ScopeStorageTarget, ObjectID: target.ID, ObjectName: target.Name,
+		Kind: model.AlertInsecureTLSExpired, Severity: model.SeverityWarning,
+		Message: fmt.Sprintf("проверка сертификата отключена %d-й день", days),
+		Details: "Подлинность хранилища не проверяется: копии уйдут туда, куда их направит " +
+			"вклинившийся в соединение. Загрузите доверенный сертификат и снимите отметку.",
+	})
+}
+
+// storagePathHint перечисляет каталоги, из которых можно выбирать.
+//
+// Отказ без списка бесполезен: путь внутри контейнера не совпадает с путём на
+// хосте, и оператор, глядя на «вне разрешённых каталогов», ищет ошибку там,
+// где её нет.
+func storagePathHint() string {
+	mounts := repo.WritableMounts()
+	if len(mounts) == 0 {
+		return "Служба не нашла ни одного каталога, доступного ей на запись: " +
+			"в установке из контейнера такой каталог подключается монтированием."
+	}
+	return "Доступны: " + strings.Join(mounts, ", ") + "."
 }

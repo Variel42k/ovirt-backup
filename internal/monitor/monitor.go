@@ -127,6 +127,8 @@ func (m *Monitor) release(serverID string) {
 
 // PollServer refreshes one engine's inventory and evaluates its state.
 func (m *Monitor) PollServer(ctx context.Context, srv *model.Server) error {
+	m.checkInsecureTLS(ctx, srv)
+
 	// A bare libvirt host has no engine REST API; everything downstream of the
 	// inventory is shared, so the split is confined to fetching it.
 	if srv.Kind.UsesLibvirt() {
@@ -493,4 +495,29 @@ func orDash(s string) string {
 		return "—"
 	}
 	return s
+}
+
+// checkInsecureTLS turns a permanent checkbox back into a temporary mode.
+//
+// Раньше «не проверять сертификат» ставили, чтобы подключиться сегодня, и не
+// снимали никогда: напомнить было некому. Опрос идёт каждые полминуты и знает,
+// когда галку поставили, — значит напомнить есть кому и есть чем.
+func (m *Monitor) checkInsecureTLS(ctx context.Context, srv *model.Server) {
+	if !model.InsecureTLSOverdue(srv.InsecureTLS, srv.InsecureTLSSince, m.cfg.InsecureTLSGrace) {
+		if !srv.InsecureTLS {
+			_ = m.store.ResolveAlert(ctx, srv.ID, model.ScopeServer, srv.ID,
+				model.AlertInsecureTLSExpired)
+		}
+		return
+	}
+
+	days := int(time.Since(*srv.InsecureTLSSince).Hours() / 24)
+	_ = m.store.RaiseAlert(ctx, &model.Alert{
+		ServerID: srv.ID, Scope: model.ScopeServer, ObjectID: srv.ID, ObjectName: srv.Name,
+		Kind: model.AlertInsecureTLSExpired, Severity: model.SeverityWarning,
+		Message: fmt.Sprintf("проверка сертификата отключена %d-й день", days),
+		Details: "Подлинность движка не проверяется: подключение можно перехватить, " +
+			"а вместе с ним — учётную запись, которой служба управляет виртуализацией. " +
+			"Загрузите сертификат удостоверяющего центра и снимите отметку.",
+	})
 }

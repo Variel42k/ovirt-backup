@@ -15,6 +15,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/Variel42k/ovirt-backup/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/sshtrust"
 )
 
 // sftpBackend stores backups on a remote host over SSH. It is the fallback for
@@ -43,6 +44,9 @@ func newSFTP(target *model.StorageTarget) (Backend, error) {
 		port = 22
 	}
 
+	// Ключ и пароль — альтернативы, а не набор. Предлагать оба значит отдать
+	// пароль серверу, которому достаточно отклонить publickey, чтобы его
+	// получить.
 	var auths []ssh.AuthMethod
 	if target.PrivateKey != "" {
 		signer, err := ssh.ParsePrivateKey([]byte(target.PrivateKey))
@@ -53,17 +57,16 @@ func newSFTP(target *model.StorageTarget) (Backend, error) {
 				"(ключ с парольной фразой не подходит для автоматических заданий)", err)
 		}
 		auths = append(auths, ssh.PublicKeys(signer))
-	}
-	if target.Password != "" {
+	} else if target.Password != "" {
 		auths = append(auths, ssh.Password(target.Password))
 	}
 	if len(auths) == 0 {
 		return nil, errors.New("для SFTP-хранилища не задан ни пароль, ни ключ")
 	}
 
-	hostKeyCallback, err := buildHostKeyCallback(target.HostKey)
+	hostKeyCallback, err := sshtrust.Callback(target.HostKey, target.TrustAnyHostKey)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("хранилище %q: %w", target.Name, err)
 	}
 
 	base := target.BasePath
@@ -82,20 +85,6 @@ func newSFTP(target *model.StorageTarget) (Backend, error) {
 			Timeout:         20 * time.Second,
 		},
 	}, nil
-}
-
-// buildHostKeyCallback pins the server key when one is configured. Without a
-// pin the connection still works but is vulnerable to interception; that is a
-// deliberate, documented trade-off for lab setups, not an oversight.
-func buildHostKeyCallback(hostKey string) (ssh.HostKeyCallback, error) {
-	if strings.TrimSpace(hostKey) == "" {
-		return ssh.InsecureIgnoreHostKey(), nil
-	}
-	parsed, _, _, _, err := ssh.ParseAuthorizedKey([]byte(hostKey))
-	if err != nil {
-		return nil, fmt.Errorf("разбор ключа хоста SFTP: %w (ожидается формат authorized_keys)", err)
-	}
-	return ssh.FixedHostKey(parsed), nil
 }
 
 func (s *sftpBackend) Kind() model.StorageKind { return model.StorageSFTP }

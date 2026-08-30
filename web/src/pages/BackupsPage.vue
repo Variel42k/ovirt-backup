@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useQuasar } from 'quasar'
 import { api, notify, notifyError, notifyOk } from '@/api/client'
+import DirectoryPicker from '@/components/DirectoryPicker.vue'
 import { bytes, dateTime, elapsed, runStatus, statusColor } from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
@@ -394,6 +395,14 @@ async function loadVMPlan() {
   } finally {
     vmPlanLoading.value = false
   }
+}
+
+const outputDirPicker = ref(false)
+
+function useOutputDir(value: { rootId: string; path: string; absolute?: string }) {
+  // Каталог восстановления — настоящий путь на диске службы, поэтому берётся
+  // полный: именно по нему потом искать восстановленный файл.
+  if (value.absolute) restoreForm.value.output_dir = value.absolute
 }
 
 async function submitRestoreVM() {
@@ -1488,7 +1497,11 @@ const replicationColumns = [
           </template>
 
           <template v-if="restoreForm.target === 'file'">
-            <q-input v-model="restoreForm.output_dir" label="Каталог" hint="Пусто — временный каталог сервиса" outlined dense />
+            <q-input v-model="restoreForm.output_dir" label="Каталог" hint="Пусто — временный каталог сервиса. Список показывает только разрешённые области восстановления." outlined dense>
+              <template #append>
+                <q-btn flat dense no-caps icon="folder_open" label="Выбрать" @click="outputDirPicker = true" />
+              </template>
+            </q-input>
             <q-select
               v-model="restoreForm.output_format"
               :options="[
@@ -1560,5 +1573,13 @@ const replicationColumns = [
         </q-card-actions>
       </q-card>
     </q-dialog>
+
+    <DirectoryPicker
+      v-model="outputDirPicker"
+      scope="restore"
+      title="Куда восстановить"
+      require-writable
+      @picked="useOutputDir"
+    />
   </q-page>
 </template>

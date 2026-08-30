@@ -192,6 +192,10 @@ func TestServerValidationByKind(t *testing.T) {
 		t.Error("подключение к libvirt без пароля и ключа должно отклоняться")
 	}
 	kvmSrv.SSHPrivateKey = "key"
+	if err := kvmSrv.Validate(); err == nil {
+		t.Error("подключение к libvirt без решения по ключу хоста должно отклоняться")
+	}
+	kvmSrv.SSHHostKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJ8xVQ0nMPUNbwvUuPy4LtRsJvVKLxkPHtoT1P9QzUmB"
 	if err := kvmSrv.Validate(); err != nil {
 		t.Errorf("корректное подключение к libvirt отклонено: %v", err)
 	}

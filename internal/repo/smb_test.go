@@ -260,7 +260,8 @@ func TestOpenSupportsEveryStorageKind(t *testing.T) {
 			Username: "svc", Password: "пароль"},
 		model.StorageWebDAV: {Endpoint: "https://nas.example.org/dav",
 			Username: "svc", Password: "пароль"},
-		model.StorageSFTP: {Host: "backup.example.org", Username: "svc", Password: "пароль"},
+		model.StorageSFTP: {Host: "backup.example.org", Username: "svc", Password: "пароль",
+			HostKey: testHostKey},
 	}
 
 	for _, kind := range model.AllStorageKinds() {

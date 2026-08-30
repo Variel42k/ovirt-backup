@@ -4,6 +4,7 @@ package model
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -67,9 +68,16 @@ type Server struct {
 	Password    string     `json:"-"`          // хранится зашифрованным, наружу не отдаётся
 	CACert      string     `json:"ca_cert,omitempty"`
 	InsecureTLS bool       `json:"insecure_tls"`
-	Enabled     bool       `json:"enabled"`
-	Tags        []string   `json:"tags"`
-	Notes       string     `json:"notes,omitempty"`
+	// InsecureTLSSince — когда проверку сертификата отключили.
+	//
+	// Галку ставят на полчаса, а снимают никогда: напоминать о ней некому.
+	// Отметка времени делает режим временным — интерфейс показывает его
+	// длительность, а служба поднимает оповещение, когда срок вышел.
+	// Заполняется хранилищем, снаружи не задаётся.
+	InsecureTLSSince *time.Time `json:"insecure_tls_since,omitempty"`
+	Enabled          bool       `json:"enabled"`
+	Tags             []string   `json:"tags"`
+	Notes            string     `json:"notes,omitempty"`
 
 	// Поля ниже используются только при Kind == KindKVM.
 	//
@@ -80,9 +88,22 @@ type Server struct {
 	SSHPort int    `json:"ssh_port,omitempty"`
 	// SSHPrivateKey хранится зашифрованным и наружу не отдаётся.
 	SSHPrivateKey string `json:"-"`
-	// SSHHostKey в формате authorized_keys. Пусто — подлинность гипервизора
-	// не проверяется.
+	// SSHKeyStored говорит интерфейсу, что ключ есть, не показывая самого
+	// ключа. Нужно, чтобы в списке было видно подключения, всё ещё входящие по
+	// паролю: их пароль лежит расшифровываемым и уходит на хост при каждом
+	// подключении. Заполняется чтением из базы, снаружи не задаётся.
+	SSHKeyStored bool `json:"ssh_key_stored"`
+	// SSHHostKey в формате authorized_keys. Пусто — ключ ещё не задан, и
+	// подключения не будет: см. SSHTrustAnyHostKey.
 	SSHHostKey string `json:"ssh_host_key,omitempty"`
+
+	// SSHTrustAnyHostKey — осознанный отказ проверять подлинность гипервизора.
+	//
+	// Годится для лаборатории и не годится для боевой установки: вставший
+	// посередине получает доступ к дискам всех виртуальных машин хоста. Признак
+	// отдельный, чтобы отказ был виден в интерфейсе и записан в журнал аудита, а
+	// не выводился из пустого поля.
+	SSHTrustAnyHostKey bool `json:"ssh_trust_any_host_key"`
 	// ScratchDir — каталог на гипервизоре под scratch-файлы бэкапа и сокет NBD.
 	ScratchDir string `json:"scratch_dir,omitempty"`
 
@@ -134,6 +155,13 @@ func (s *Server) Validate() error {
 		}
 		if s.Password == "" && s.SSHPrivateKey == "" {
 			return fmt.Errorf("для SSH нужен пароль или приватный ключ")
+		}
+		// Ключ хоста проверяется здесь, а не при подключении: подключение
+		// случается ночью в фоновом задании, и отказ там увидит не тот, кто
+		// заводил хост, и не тогда, когда может это исправить.
+		if strings.TrimSpace(s.SSHHostKey) == "" && !s.SSHTrustAnyHostKey {
+			return fmt.Errorf("не задан ключ хоста: получите отпечаток и сверьте его, " +
+				"либо явно разрешите подключение без проверки")
 		}
 		return nil
 	}
@@ -291,4 +319,18 @@ func (s *StorageDomain) FreeRatio() float64 {
 		return -1
 	}
 	return float64(s.AvailableSize) / float64(total)
+}
+
+// InsecureTLSOverdue reports whether verification has been off longer than the
+// grace period allows.
+//
+// A zero grace means "do not remind", which is the escape hatch for
+// installations that genuinely cannot fix their certificates and would
+// otherwise learn to ignore a permanently firing alert — the worst outcome,
+// because it teaches them to ignore the other ones too.
+func InsecureTLSOverdue(insecure bool, since *time.Time, grace time.Duration) bool {
+	if !insecure || grace <= 0 || since == nil {
+		return false
+	}
+	return time.Since(*since) > grace
 }

@@ -165,7 +165,19 @@ type StorageTarget struct {
 	Username   string `json:"username,omitempty"`
 	Password   string `json:"-"`
 	PrivateKey string `json:"-"`
-	HostKey    string `json:"host_key,omitempty"`
+	// PrivateKeyStored говорит интерфейсу, что ключ есть, не показывая ключа:
+	// так в списке видно хранилища, всё ещё входящие по паролю. Заполняется
+	// чтением из базы, снаружи не задаётся.
+	PrivateKeyStored bool   `json:"private_key_stored"`
+	HostKey          string `json:"host_key,omitempty"`
+
+	// TrustAnyHostKey — осознанный отказ проверять подлинность SFTP-сервера.
+	//
+	// Отдельный признак, а не пустой HostKey: пустое поле значит «ключ ещё не
+	// задан», и молча превращать это в «подключаться к кому угодно» — ровно тот
+	// отказ, которого никто не замечает, потому что перехваченное соединение
+	// выглядит как работающее.
+	TrustAnyHostKey bool `json:"trust_any_host_key"`
 
 	// SMB/CIFS. Share — имя сетевой папки без \\сервер\, Domain — домен
 	// Active Directory или рабочая группа; для локальной учётной записи NAS
@@ -178,6 +190,9 @@ type StorageTarget struct {
 	// InsecureTLS отключает проверку сертификата: NAS часто отдают
 	// самоподписанный, и без этого подключиться к нему нельзя вовсе.
 	InsecureTLS bool `json:"insecure_tls"`
+	// InsecureTLSSince — когда проверку сертификата отключили. Заполняется
+	// хранилищем, снаружи не задаётся; см. тот же признак у подключения.
+	InsecureTLSSince *time.Time `json:"insecure_tls_since,omitempty"`
 
 	// Ограничение полосы, байт/с. 0 — без ограничения.
 	RateLimit int64 `json:"rate_limit"` // bytes/second for aggregate streaming writes; 0 means unlimited

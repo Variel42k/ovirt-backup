@@ -51,6 +51,52 @@ export interface MeResponse {
   can_administer: boolean
 }
 
+/**
+ * Каталоги, доступные для выбора.
+ *
+ * Показывается не файловая система, а только корни, разрешённые для этого
+ * назначения: куда служба может писать копии, что ей разрешено бэкапить и куда
+ * восстанавливать. Выйти за них нельзя — ни вверх, ни по ссылке.
+ */
+export interface DirectoryEntry {
+  name: string
+  /** Путь внутри корня. Абсолютных путей наружу не отдаётся. */
+  path: string
+  writable: boolean
+  empty: boolean
+}
+
+export interface DirectoryRoot {
+  id: string
+  name: string
+  /** Расположение — только у корней, где сам путь и есть настройка. */
+  path?: string
+  writable: boolean
+}
+
+export interface DirectoryListing {
+  scope: string
+  roots: DirectoryRoot[]
+  root_id?: string
+  path: string
+  /** null — выше подниматься некуда; пустая строка — вверх до корня. */
+  parent: string | null
+  /** Полный путь, если корень его показывает. */
+  absolute?: string
+  writable: boolean
+  entries: DirectoryEntry[]
+  /** Объяснение пустого списка корней: сломалось или так задумано. */
+  hint?: string
+}
+
+/** Ключ, который хост предъявляет прямо сейчас, — чтобы оператору было что сверять. */
+export interface HostKeyScan {
+  line: string
+  type: string
+  fingerprint: string
+  warning: string
+}
+
 export interface Server {
   id: string
   name: string
@@ -59,10 +105,16 @@ export interface Server {
   username: string
   ca_cert?: string
   insecure_tls: boolean
+  /** Когда отключили проверку сертификата: режим временный, а не настройка. */
+  insecure_tls_since?: string
   /** Поля ниже заполняются только для kind === 'kvm'. */
   ssh_host?: string
   ssh_port?: number
   ssh_host_key?: string
+  /** Явный отказ проверять подлинность гипервизора — виден в списке значком. */
+  ssh_trust_any_host_key?: boolean
+  /** Есть ли сохранённый приватный ключ. Сам ключ наружу не отдаётся. */
+  ssh_key_stored?: boolean
   scratch_dir?: string
   enabled: boolean
   tags: string[]
@@ -186,9 +238,16 @@ export interface StorageTarget {
   host?: string
   port?: number
   username?: string
+  host_key?: string
+  /** Явный отказ проверять подлинность SFTP-сервера — виден в списке значком. */
+  trust_any_host_key?: boolean
+  /** Есть ли сохранённый приватный ключ. Сам ключ наружу не отдаётся. */
+  private_key_stored?: boolean
   share?: string
   domain?: string
   insecure_tls?: boolean
+  /** Когда отключили проверку сертификата: режим временный, а не настройка. */
+  insecure_tls_since?: string
   last_check_at?: string
   last_check_ok: boolean
   last_check_msg?: string

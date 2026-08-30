@@ -193,6 +193,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /servers/probe", s.perm(model.PermServersAdmin, s.handleProbeServer))
 	mux.HandleFunc("POST /servers/provision", s.perm(model.PermServersAdmin, s.handleProvisionServer))
 	mux.HandleFunc("POST /servers/ca-certificate", s.perm(model.PermServersAdmin, s.handleFetchCA))
+	mux.HandleFunc("POST /servers/host-key", s.perm(model.PermServersAdmin, s.handleScanHostKey))
 	mux.HandleFunc("POST /servers/{id}/refresh", s.perm(model.PermServersWrite, s.handleRefreshServer))
 	mux.HandleFunc("GET /servers/{id}/summary", s.perm(model.PermServersRead, s.handleServerSummary))
 
@@ -228,6 +229,11 @@ func (s *Server) routes(mux *http.ServeMux) {
 	// Хранилища бэкапов.
 	mux.HandleFunc("GET /storages", s.perm(model.PermStoragesRead, s.handleListStorages))
 	mux.HandleFunc("POST /storages", s.perm(model.PermStoragesAdmin, s.handleCreateStorage))
+	mux.HandleFunc("POST /storages/host-key", s.perm(model.PermStoragesAdmin, s.handleScanHostKey))
+	// Право проверяется внутри: у каждого назначения выбора каталога оно своё.
+	mux.HandleFunc("GET /fs/browse", s.handleBrowse)
+	mux.HandleFunc("GET /servers/{id}/browse",
+		s.perm(model.PermServersAdmin, s.handleBrowseHost))
 	mux.HandleFunc("GET /storages/{id}", s.perm(model.PermStoragesRead, s.handleGetStorage))
 	mux.HandleFunc("PUT /storages/{id}", s.perm(model.PermStoragesAdmin, s.handleUpdateStorage))
 	mux.HandleFunc("DELETE /storages/{id}", s.perm(model.PermStoragesAdmin,

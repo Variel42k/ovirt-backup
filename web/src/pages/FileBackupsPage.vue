@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useQuasar } from 'quasar'
 import { api, notifyError, notifyOk } from '@/api/client'
+import DirectoryPicker from '@/components/DirectoryPicker.vue'
 import { bytes, dateTime, runStatus, statusColor } from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
@@ -57,6 +58,27 @@ const pathOptions = computed(() => (manifest.value?.entries ?? []).map((entry) =
   label: `${entry.type === 'directory' ? '📁' : '📄'} ${entry.path || '/'}`,
   value: entry.path,
 })))
+const includePicker = ref(false)
+const destinationPicker = ref(false)
+
+/**
+ * Добавляет выбранную папку в список путей задания.
+ *
+ * Пути здесь относительные — от именованного корня, и другими они быть не
+ * могут: расположение корня служба наружу не отдаёт вовсе.
+ */
+function addIncludePath(value: { rootId: string; path: string }) {
+  const path = value.path || '.'
+  if (!form.value.include_paths.includes(path)) {
+    form.value.include_paths = [...form.value.include_paths, path]
+  }
+}
+
+function useRestoreDestination(value: { rootId: string; path: string }) {
+  restoreForm.value.restore_root_index = Number(value.rootId)
+  restoreForm.value.destination = value.path
+}
+
 const restoreRootOptions = computed(() => {
   const root = roots.value.find((item) => item.id === selectedRun.value?.root_id)
   return Array.from({ length: root?.restore_root_count ?? 0 }, (_, index) => ({
@@ -332,7 +354,13 @@ onBeforeUnmount(() => {
             <div class="col-12 col-md-4"><q-toggle v-model="form.enabled" label="Включено" /></div>
             <div class="col-12 col-md-6"><q-select v-model="form.root_id" :options="rootOptions" emit-value map-options outlined dense label="Разрешённый корень" /></div>
             <div class="col-12 col-md-6"><q-input v-model="form.schedule" outlined dense label="Cron-расписание" hint="Пусто — только ручной запуск" /></div>
-            <div class="col-12"><q-select v-model="form.include_paths" multiple use-input use-chips new-value-mode="add-unique" hide-dropdown-icon outlined dense label="Относительные пути" hint="Пустой список означает весь корень" /></div>
+            <div class="col-12">
+              <q-select v-model="form.include_paths" multiple use-input use-chips new-value-mode="add-unique" hide-dropdown-icon outlined dense label="Относительные пути" hint="Пустой список означает весь корень. Папку можно выбрать, а не набирать по памяти.">
+                <template #append>
+                  <q-btn flat dense no-caps icon="folder_open" label="Выбрать папку" :disable="!form.root_id" @click="includePicker = true" />
+                </template>
+              </q-select>
+            </div>
             <div class="col-12"><q-select v-model="form.exclude_globs" multiple use-input use-chips new-value-mode="add-unique" hide-dropdown-icon outlined dense label="Исключающие glob-шаблоны" hint="Например: **/*.tmp или cache/**" /></div>
             <div class="col-12 col-md-8"><q-select v-model="form.storage_target_ids" :options="storageOptions" multiple emit-value map-options use-chips outlined dense label="Хранилища" /></div>
             <div class="col-12 col-md-4"><q-select v-model="form.storage_mode" :options="[{label:'Копирование',value:'copy'},{label:'Параллельно',value:'parallel'},{label:'Раздельно',value:'separate'}]" emit-value map-options outlined dense label="Режим доставки" /></div>
@@ -367,7 +395,11 @@ onBeforeUnmount(() => {
         <q-card-section class="text-h6">Восстановление файлов</q-card-section>
         <q-card-section class="q-pt-none">
           <q-select v-model="restoreForm.restore_root_index" :options="restoreRootOptions" emit-value map-options outlined dense label="Разрешённая область назначения" />
-          <q-input v-model="restoreForm.destination" outlined dense class="q-mt-md" label="Относительный каталог назначения" hint="Абсолютные пути и выход через .. запрещены" />
+          <q-input v-model="restoreForm.destination" outlined dense class="q-mt-md" label="Относительный каталог назначения" hint="Абсолютные пути и выход через .. запрещены">
+            <template #append>
+              <q-btn flat dense no-caps icon="folder_open" label="Выбрать" @click="destinationPicker = true" />
+            </template>
+          </q-input>
           <q-checkbox v-model="restoreForm.overwrite" label="Разрешить перезапись существующих файлов" color="negative" />
           <q-checkbox v-if="restoreForm.overwrite" v-model="restoreForm.confirmOverwrite" label="Я подтверждаю перезапись" color="negative" />
           <q-banner rounded class="bg-info text-white q-mt-md">Символические ссылки сохраняются как ссылки и никогда не обходятся при сканировании.</q-banner>
@@ -375,5 +407,22 @@ onBeforeUnmount(() => {
         <q-card-actions align="right"><q-btn flat label="Отмена" v-close-popup /><q-btn color="primary" label="Восстановить" :loading="busy" :disable="restoreForm.overwrite && !restoreForm.confirmOverwrite" @click="restoreFiles" /></q-card-actions>
       </q-card>
     </q-dialog>
+
+    <DirectoryPicker
+      v-model="includePicker"
+      scope="file-backup"
+      title="Что бэкапить"
+      :initial-root="form.root_id"
+      @picked="addIncludePath"
+    />
+
+    <DirectoryPicker
+      v-model="destinationPicker"
+      scope="file-restore"
+      title="Куда восстановить"
+      :owner="selectedRun?.root_id"
+      require-writable
+      @picked="useRestoreDestination"
+    />
   </q-page>
 </template>

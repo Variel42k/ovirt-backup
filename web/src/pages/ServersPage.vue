@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useQuasar } from 'quasar'
 import { api, notify, notifyError, notifyOk } from '@/api/client'
+import DirectoryPicker from '@/components/DirectoryPicker.vue'
 import { ago, connState } from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
@@ -42,6 +43,7 @@ const emptyForm = () => ({
   ssh_port: 22,
   ssh_private_key: '',
   ssh_host_key: '',
+  ssh_trust_any_host_key: false,
   scratch_dir: '/var/lib/libvirt/qemu',
 })
 
@@ -154,6 +156,7 @@ function openEdit(server: Server) {
     ssh_host: server.ssh_host ?? '',
     ssh_port: server.ssh_port || 22,
     ssh_host_key: server.ssh_host_key ?? '',
+    ssh_trust_any_host_key: server.ssh_trust_any_host_key ?? false,
     scratch_dir: server.scratch_dir ?? '/var/lib/libvirt/qemu',
   }
   dialog.value = true
@@ -185,6 +188,45 @@ async function fetchCA() {
     notify({ type: 'warning', message: result.warning, timeout: 12000, multiLine: true })
   } catch (err) {
     notifyError(err, 'Не удалось получить сертификат')
+  }
+}
+
+const scratchPicker = ref(false)
+
+function useScratchDir(value: { rootId: string; path: string; absolute?: string }) {
+  if (value.absolute) form.value.scratch_dir = value.absolute
+}
+
+const scanningKey = ref(false)
+
+/**
+ * Забирает ключ, который хост предъявляет прямо сейчас.
+ *
+ * Сам по себе он ничего не доказывает — тот, кто способен вклиниться в
+ * соединение, ответил бы и на этот запрос. Поэтому предупреждение показывается
+ * всегда, а не только при первом разе: оператор обязан сверить отпечаток с
+ * снятым на самом хосте.
+ */
+async function scanHostKey() {
+  if (!form.value.ssh_host) {
+    notifyError('Сначала укажите адрес хоста')
+    return
+  }
+  scanningKey.value = true
+  try {
+    const result = await api.scanServerHostKey(form.value.ssh_host, form.value.ssh_port || 22)
+    form.value.ssh_host_key = result.line
+    form.value.ssh_trust_any_host_key = false
+    notify({
+      type: 'warning',
+      message: `Отпечаток ${result.fingerprint}. ${result.warning}`,
+      timeout: 20000,
+      multiLine: true,
+    })
+  } catch (err) {
+    notifyError(err, 'Не удалось получить ключ хоста')
+  } finally {
+    scanningKey.value = false
   }
 }
 
@@ -292,6 +334,32 @@ onMounted(load)
             {{ props.row.name }}
           </router-link>
           <q-badge v-if="!props.row.enabled" color="grey-7" class="q-ml-sm">отключён</q-badge>
+          <q-badge
+            v-if="props.row.kind === 'kvm' && !props.row.ssh_key_stored"
+            color="warning"
+            text-color="dark"
+            class="q-ml-sm"
+          >
+            вход по паролю
+            <q-tooltip>
+              Пароль хранится расшифровываемым и предъявляется хосту при каждом подключении.
+              Заведите ключ и очистите пароль.
+            </q-tooltip>
+          </q-badge>
+          <q-badge v-if="props.row.insecure_tls_since" color="negative" class="q-ml-sm">
+            без проверки сертификата, {{ ago(props.row.insecure_tls_since) }}
+            <q-tooltip>
+              Временный режим, а не настройка. Загрузите доверенный сертификат и снимите
+              отметку — служба напомнит об этом оповещением, когда срок выйдет.
+            </q-tooltip>
+          </q-badge>
+          <q-badge v-if="props.row.ssh_trust_any_host_key" color="negative" class="q-ml-sm">
+            без проверки хоста
+            <q-tooltip>
+              Подлинность гипервизора не проверяется: вклинившийся в это подключение получает
+              доступ к дискам всех его виртуальных машин. Задайте ключ хоста.
+            </q-tooltip>
+          </q-badge>
         </q-td>
       </template>
 
@@ -447,19 +515,60 @@ onMounted(load)
               <q-input
                 v-model="form.ssh_host_key"
                 label="Ключ хоста (authorized_keys)"
-                hint="Пусто — подлинность гипервизора не проверяется. Для боевой установки задайте."
+                hint="Без ключа подключения не будет. Получите отпечаток и сверьте его на самом хосте."
                 outlined
                 dense
+                :disable="form.ssh_trust_any_host_key"
+              >
+                <template #append>
+                  <q-btn
+                    flat
+                    dense
+                    no-caps
+                    icon="fingerprint"
+                    label="Получить"
+                    :loading="scanningKey"
+                    :disable="form.ssh_trust_any_host_key"
+                    @click="scanHostKey"
+                  />
+                </template>
+              </q-input>
+            </div>
+            <div class="col-12">
+              <q-checkbox
+                v-model="form.ssh_trust_any_host_key"
+                label="Подключаться без проверки подлинности хоста"
               />
+              <div class="text-caption text-negative q-ml-sm">
+                Годится для лаборатории. Тот, кто вклинится в такое подключение, получает доступ
+                к дискам всех виртуальных машин этого хоста. Отказ записывается в журнал аудита.
+              </div>
             </div>
             <div class="col-12">
               <q-input
                 v-model="form.scratch_dir"
                 label="Каталог для scratch-файлов на гипервизоре"
-                hint="Сюда QEMU складывает вытесняемые блоки, пока идёт чтение бэкапа. Нужен запас места и доступ на запись для qemu."
+                hint="Сюда QEMU складывает вытесняемые блоки, пока идёт чтение бэкапа. Нужен запас места и доступ на запись для qemu. Выбор доступен для уже сохранённого подключения."
                 outlined
                 dense
-              />
+              >
+                <template #append>
+                  <q-btn
+                    flat
+                    dense
+                    no-caps
+                    icon="folder_open"
+                    label="Выбрать"
+                    :disable="!editing"
+                    @click="scratchPicker = true"
+                  >
+                    <q-tooltip v-if="!editing">
+                      Каталоги читаются на самом гипервизоре по SSH, поэтому подключение
+                      нужно сначала сохранить.
+                    </q-tooltip>
+                  </q-btn>
+                </template>
+              </q-input>
             </div>
           </template>
 
@@ -656,5 +765,15 @@ onMounted(load)
         </q-card-actions>
       </q-card>
     </q-dialog>
+
+    <DirectoryPicker
+      v-if="editing"
+      v-model="scratchPicker"
+      scope="host"
+      title="Каталог на гипервизоре"
+      :server-id="editing.id"
+      require-writable
+      @picked="useScratchDir"
+    />
   </q-page>
 </template>

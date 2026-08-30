@@ -37,7 +37,9 @@ type serverPayload struct {
 	SSHPort       int    `json:"ssh_port"`
 	SSHPrivateKey string `json:"ssh_private_key"`
 	SSHHostKey    string `json:"ssh_host_key"`
-	ScratchDir    string `json:"scratch_dir"`
+	// SSHTrustAnyHostKey — явный отказ проверять подлинность гипервизора.
+	SSHTrustAnyHostKey bool   `json:"ssh_trust_any_host_key"`
+	ScratchDir         string `json:"scratch_dir"`
 }
 
 func (p serverPayload) apply(dst *model.Server) {
@@ -52,6 +54,7 @@ func (p serverPayload) apply(dst *model.Server) {
 	dst.SSHHost = p.SSHHost
 	dst.SSHPrivateKey = p.SSHPrivateKey
 	dst.SSHHostKey = p.SSHHostKey
+	dst.SSHTrustAnyHostKey = p.SSHTrustAnyHostKey
 	dst.ScratchDir = p.ScratchDir
 	if p.SSHPort > 0 {
 		dst.SSHPort = p.SSHPort
@@ -73,6 +76,21 @@ func validateServer(srv *model.Server, isNew bool) error {
 	}
 	if isNew && srv.Password == "" && srv.SSHPrivateKey == "" {
 		return badRequest("не указан пароль")
+	}
+	// Новое подключение к гипервизору заводится только по ключу.
+	//
+	// Пароль для автоматических заданий означает, что он лежит в базе в
+	// расшифровываемом виде и предъявляется каждому хосту при каждом
+	// подключении. Ключ этим свойством не обладает: хост видит подпись, а не
+	// секрет.
+	//
+	// Требование только к новым: уже заведённые подключения продолжают
+	// работать, иначе обновление службы остановило бы ночное копирование. Они
+	// помечены в списке, и переводить их на ключи нужно, но не в три часа ночи.
+	if isNew && srv.Kind.UsesLibvirt() && srv.SSHPrivateKey == "" {
+		return badRequest("для подключения к гипервизору нужен приватный ключ: " +
+			"пароль в автоматических заданиях хранится расшифровываемым и " +
+			"предъявляется хосту при каждом подключении")
 	}
 	return nil
 }
@@ -115,6 +133,8 @@ func (s *Server) handleCreateServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.audit(r, "server.create", model.ScopeServer, srv.ID, true, srv.Name)
+	s.auditHostKeyTrust(r, model.ScopeServer, srv.ID, srv.Name, srv.SSHTrustAnyHostKey,
+		srv.Kind.UsesLibvirt())
 
 	// Probe immediately so the operator sees whether the connection works
 	// instead of waiting for the next poll.
@@ -166,6 +186,8 @@ func (s *Server) handleUpdateServer(w http.ResponseWriter, r *http.Request) {
 	// The cached client holds the old credentials and TLS settings.
 	s.pool.Invalidate(id)
 	s.audit(r, "server.update", model.ScopeServer, id, true, existing.Name)
+	s.auditHostKeyTrust(r, model.ScopeServer, id, existing.Name, existing.SSHTrustAnyHostKey,
+		existing.Kind.UsesLibvirt())
 
 	go s.refreshServer(context.WithoutCancel(r.Context()), id)
 	writeJSON(w, http.StatusOK, existing)
@@ -298,13 +320,14 @@ func (s *Server) probeLibvirt(ctx context.Context, payload serverPayload) probeR
 
 	started := time.Now()
 	conn, err := libvirtx.Connect(ctx, libvirtx.Config{
-		Host:           payload.SSHHost,
-		Port:           payload.SSHPort,
-		User:           payload.Username,
-		Password:       payload.Password,
-		PrivateKey:     payload.SSHPrivateKey,
-		HostKey:        payload.SSHHostKey,
-		ConnectTimeout: 20 * time.Second,
+		Host:            payload.SSHHost,
+		Port:            payload.SSHPort,
+		User:            payload.Username,
+		Password:        payload.Password,
+		PrivateKey:      payload.SSHPrivateKey,
+		HostKey:         payload.SSHHostKey,
+		TrustAnyHostKey: payload.SSHTrustAnyHostKey,
+		ConnectTimeout:  20 * time.Second,
 	})
 	if err != nil {
 		return probeResult{OK: false, Error: err.Error(), Hint: libvirtHint(err)}

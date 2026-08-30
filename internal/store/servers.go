@@ -16,7 +16,8 @@ import (
 const serverColumns = `id, name, kind, engine_url, username, password_enc, ca_cert, insecure_tls,
 	enabled, tags, notes, state, state_message, engine_version, product_name, api_version,
 	supports_cbt, failure_count, last_seen_at, last_checked_at, created_at, updated_at,
-	ssh_host, ssh_port, ssh_private_key_enc, ssh_host_key, scratch_dir`
+	ssh_host, ssh_port, ssh_private_key_enc, ssh_host_key, ssh_trust_any_host_key, scratch_dir,
+	insecure_tls_since`
 
 // CreateServer stores a new engine connection, encrypting the password.
 func (s *Store) CreateServer(ctx context.Context, srv *model.Server) error {
@@ -43,15 +44,19 @@ func (s *Store) CreateServer(ctx context.Context, srv *model.Server) error {
 	if srv.SSHPort == 0 {
 		srv.SSHPort = 22
 	}
+	if srv.InsecureTLS && srv.InsecureTLSSince == nil {
+		srv.InsecureTLSSince = &now
+	}
 
 	_, err = s.db.Exec(ctx, `INSERT INTO servers (`+serverColumns+`)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		srv.ID, srv.Name, string(srv.Kind), srv.EngineURL, srv.Username, enc, srv.CACert,
 		srv.InsecureTLS, srv.Enabled, encodeJSON(srv.Tags), srv.Notes, string(srv.State),
 		srv.StateMessage, srv.EngineVersion, srv.ProductName, srv.APIVersion, srv.SupportsCBT,
 		srv.FailureCount, srv.LastSeenAt, srv.LastCheckedAt,
 		srv.CreatedAt, srv.UpdatedAt,
-		srv.SSHHost, srv.SSHPort, sshKey, srv.SSHHostKey, srv.ScratchDir)
+		srv.SSHHost, srv.SSHPort, sshKey, srv.SSHHostKey, srv.SSHTrustAnyHostKey, srv.ScratchDir,
+		srv.InsecureTLSSince)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return fmt.Errorf("%w: сервер %q", ErrConflict, srv.Name)
@@ -90,15 +95,28 @@ func (s *Store) UpdateServer(ctx context.Context, srv *model.Server) error {
 	}
 	srv.UpdatedAt = time.Now().UTC()
 	srv.CreatedAt = existing.CreatedAt
+	// Отсчёт временного режима ведётся здесь: только тут видно, чем он был
+	// раньше. Повторное сохранение формы с уже стоящей галкой не должно
+	// сбрасывать срок на ноль — иначе напоминание не наступит никогда.
+	switch {
+	case !srv.InsecureTLS:
+		srv.InsecureTLSSince = nil
+	case existing.InsecureTLSSince != nil:
+		srv.InsecureTLSSince = existing.InsecureTLSSince
+	default:
+		srv.InsecureTLSSince = &srv.UpdatedAt
+	}
 
 	_, err = s.db.Exec(ctx, `UPDATE servers SET
 		name=?, kind=?, engine_url=?, username=?, password_enc=?, ca_cert=?, insecure_tls=?,
 		enabled=?, tags=?, notes=?, updated_at=?,
-		ssh_host=?, ssh_port=?, ssh_private_key_enc=?, ssh_host_key=?, scratch_dir=?
+		ssh_host=?, ssh_port=?, ssh_private_key_enc=?, ssh_host_key=?, ssh_trust_any_host_key=?,
+		scratch_dir=?, insecure_tls_since=?
 		WHERE id=?`,
 		srv.Name, string(srv.Kind), srv.EngineURL, srv.Username, enc, srv.CACert, srv.InsecureTLS,
 		srv.Enabled, encodeJSON(srv.Tags), srv.Notes, srv.UpdatedAt,
-		srv.SSHHost, srv.SSHPort, sshKey, srv.SSHHostKey, srv.ScratchDir, srv.ID)
+		srv.SSHHost, srv.SSHPort, sshKey, srv.SSHHostKey, srv.SSHTrustAnyHostKey, srv.ScratchDir,
+		srv.InsecureTLSSince, srv.ID)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return fmt.Errorf("%w: сервер %q", ErrConflict, srv.Name)
@@ -195,13 +213,15 @@ func (s *Store) scanServer(row rowScanner) (*model.Server, error) {
 		tags                  string
 		enc, sshKeyEnc        string
 		lastSeen, lastChecked sql.NullTime
+		insecureSince         sql.NullTime
 		createdAt, updatedAt  time.Time
 	)
 	err := row.Scan(&srv.ID, &srv.Name, &kind, &srv.EngineURL, &srv.Username, &enc, &srv.CACert,
 		&srv.InsecureTLS, &srv.Enabled, &tags, &srv.Notes, &state, &srv.StateMessage,
 		&srv.EngineVersion, &srv.ProductName, &srv.APIVersion, &srv.SupportsCBT, &srv.FailureCount,
 		&lastSeen, &lastChecked, &createdAt, &updatedAt,
-		&srv.SSHHost, &srv.SSHPort, &sshKeyEnc, &srv.SSHHostKey, &srv.ScratchDir)
+		&srv.SSHHost, &srv.SSHPort, &sshKeyEnc, &srv.SSHHostKey, &srv.SSHTrustAnyHostKey,
+		&srv.ScratchDir, &insecureSince)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -221,6 +241,8 @@ func (s *Store) scanServer(row rowScanner) (*model.Server, error) {
 		srv.StateMessage = "не удалось расшифровать приватный ключ SSH: " + err.Error()
 	}
 
+	srv.SSHKeyStored = srv.SSHPrivateKey != ""
+	srv.InsecureTLSSince = nullTime(insecureSince)
 	srv.Kind = model.ServerKind(kind)
 	srv.State = model.ConnState(state)
 	srv.Password = password

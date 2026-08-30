@@ -23,6 +23,8 @@ import (
 
 	"github.com/digitalocean/go-libvirt"
 	"golang.org/x/crypto/ssh"
+
+	"github.com/Variel42k/ovirt-backup/internal/sshtrust"
 )
 
 // DefaultSocket is where libvirtd listens on a stock installation.
@@ -39,9 +41,19 @@ type Config struct {
 	Password   string
 	PrivateKey string
 
-	// HostKey в формате authorized_keys. Пусто — ключ хоста не проверяется;
-	// это осознанный компромисс для лабораторий, но не для боевой установки.
+	// HostKey в формате authorized_keys.
+	//
+	// Пусто — подключения не будет: пустой ключ означает «ключ ещё не задан», а
+	// не «проверять не надо». Отказаться от проверки можно только явно, через
+	// TrustAnyHostKey.
 	HostKey string
+
+	// TrustAnyHostKey — осознанный отказ от проверки подлинности гипервизора.
+	//
+	// Годится для лаборатории и не годится для боевой установки: тот, кто
+	// встанет посередине такого подключения, получает доступ к дискам всех
+	// виртуальных машин этого хоста.
+	TrustAnyHostKey bool
 
 	// Socket — путь к сокету libvirtd на удалённом хосте.
 	Socket string
@@ -137,6 +149,10 @@ func Connect(ctx context.Context, cfg Config) (*Conn, error) {
 func sshConfig(cfg Config) (*ssh.ClientConfig, error) {
 	var auths []ssh.AuthMethod
 
+	// Ключ и пароль — альтернативы, а не набор способов. Раньше серверу
+	// предлагались оба, и это отдавало пароль тому, кто им не должен владеть:
+	// достаточно отклонить publickey, и клиент сам предъявит пароль. Хосту,
+	// притворившемуся гипервизором, ничего другого и не нужно.
 	if cfg.PrivateKey != "" {
 		signer, err := ssh.ParsePrivateKey([]byte(cfg.PrivateKey))
 		if err != nil {
@@ -144,17 +160,16 @@ func sshConfig(cfg Config) (*ssh.ClientConfig, error) {
 				"(ключ с парольной фразой не подходит для автоматических заданий)", err)
 		}
 		auths = append(auths, ssh.PublicKeys(signer))
-	}
-	if cfg.Password != "" {
+	} else if cfg.Password != "" {
 		auths = append(auths, ssh.Password(cfg.Password))
 	}
 	if len(auths) == 0 {
 		return nil, errors.New("не задан ни пароль, ни приватный ключ для SSH")
 	}
 
-	hostKeyCallback, err := hostKeyCallback(cfg.HostKey)
+	hostKeyCallback, err := sshtrust.Callback(cfg.HostKey, cfg.TrustAnyHostKey)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("гипервизор %s: %w", cfg.Host, err)
 	}
 
 	timeout := cfg.ConnectTimeout
@@ -167,17 +182,6 @@ func sshConfig(cfg Config) (*ssh.ClientConfig, error) {
 		HostKeyCallback: hostKeyCallback,
 		Timeout:         timeout,
 	}, nil
-}
-
-func hostKeyCallback(hostKey string) (ssh.HostKeyCallback, error) {
-	if strings.TrimSpace(hostKey) == "" {
-		return ssh.InsecureIgnoreHostKey(), nil
-	}
-	parsed, _, _, _, err := ssh.ParseAuthorizedKey([]byte(hostKey))
-	if err != nil {
-		return nil, fmt.Errorf("разбор ключа хоста: %w (ожидается формат authorized_keys)", err)
-	}
-	return ssh.FixedHostKey(parsed), nil
 }
 
 // Libvirt exposes the RPC client for calls this package does not wrap.

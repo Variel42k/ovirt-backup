@@ -531,9 +531,12 @@ type MonitorConfig struct {
 	CollectIOStats bool `mapstructure:"collect_io_stats"`
 	// IORetention — сколько хранить эти метрики. Они мельче проб состояния и
 	// копятся быстрее, поэтому срок отдельный.
-	IORetention   time.Duration               `mapstructure:"io_retention"`
-	BackupQuality model.BackupQualitySettings `mapstructure:"backup_quality"`
-	Remediation   RemediationConfig           `mapstructure:"remediation"`
+	IORetention time.Duration `mapstructure:"io_retention"`
+	// InsecureTLSGrace — сколько разрешено работать с отключённой проверкой
+	// сертификата, прежде чем служба поднимет оповещение. 0 — не напоминать.
+	InsecureTLSGrace time.Duration               `mapstructure:"insecure_tls_grace"`
+	BackupQuality    model.BackupQualitySettings `mapstructure:"backup_quality"`
+	Remediation      RemediationConfig           `mapstructure:"remediation"`
 }
 
 // RemediationConfig gates the automatic "revive" actions. Everything that can
@@ -565,6 +568,15 @@ type BackupConfig struct {
 	HeavyWorkers int    `mapstructure:"heavy_workers"`
 	TempDir      string `mapstructure:"temp_dir"`
 	QemuImgPath  string `mapstructure:"qemu_img_path"`
+	// ScratchRoots — где на гипервизоре разрешено выбирать каталог для
+	// scratch-файлов.
+	//
+	// Ограничение нужно затем, что выбор каталога по SSH превращает службу в
+	// способ читать чужую файловую систему: право servers:admin позволяет
+	// менять учётные данные подключения, но не читать файлы хоста, и обзор без
+	// границ эту разницу стирает. Пустой список запрещает обзор вовсе — путь
+	// тогда вводится вручную, как раньше.
+	ScratchRoots []string `mapstructure:"scratch_roots"`
 	// PurgeDelay — сколько удалённая копия лежит в карантине, прежде чем её
 	// данные сотрут физически.
 	//
@@ -1048,6 +1060,9 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("monitor.remediation.enabled", true)
 	v.SetDefault("monitor.collect_io_stats", true)
 	v.SetDefault("monitor.io_retention", "168h")
+	// Две недели: достаточно, чтобы завести правильный сертификат без
+	// спешки, и мало, чтобы «на полчаса» не превратилось в год.
+	v.SetDefault("monitor.insecure_tls_grace", "336h")
 	v.SetDefault("monitor.backup_quality.stale_intervals", 2)
 	v.SetDefault("monitor.backup_quality.verify_max_age_days", 7)
 	v.SetDefault("monitor.backup_quality.performance_window_runs", 10)
@@ -1075,6 +1090,9 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("backup.compression_level", 3)
 	v.SetDefault("backup.heavy_workers", 2)
 	v.SetDefault("backup.temp_dir", "./data/tmp")
+	// Там, где scratch-файлам и место: рядом с образами libvirt и в
+	// общем каталоге для крупных временных файлов.
+	v.SetDefault("backup.scratch_roots", []string{"/var/lib/libvirt", "/var/tmp"})
 	// Трое суток: за меньший срок ошибочное удаление можно не заметить, за
 	// больший карантин начинает заметно держать место.
 	v.SetDefault("backup.purge_delay", "72h")

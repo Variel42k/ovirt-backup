@@ -16,7 +16,8 @@ const storageColumns = `id, name, kind, enabled, base_path, endpoint, region, bu
 	access_key, secret_key_enc, use_ssl, path_style, storage_class, host, port, username,
 	password_enc, private_key_enc, host_key, rate_limit, last_check_at, last_check_ok,
 	last_check_msg, free_bytes, used_bytes, created_at, updated_at,
-	object_lock_enabled, object_lock_days, share, domain, insecure_tls`
+	object_lock_enabled, object_lock_days, share, domain, insecure_tls, trust_any_host_key,
+	insecure_tls_since`
 
 // storageSelectColumns — то же плюс итог проверки неизменяемости.
 //
@@ -35,6 +36,9 @@ func (s *Store) CreateStorageTarget(ctx context.Context, t *model.StorageTarget)
 	}
 	now := time.Now().UTC()
 	t.CreatedAt, t.UpdatedAt = now, now
+	if t.InsecureTLS && t.InsecureTLSSince == nil {
+		t.InsecureTLSSince = &now
+	}
 
 	secretKey, err := s.cipher.Encrypt(t.SecretKey)
 	if err != nil {
@@ -50,12 +54,13 @@ func (s *Store) CreateStorageTarget(ctx context.Context, t *model.StorageTarget)
 	}
 
 	_, err = s.db.Exec(ctx, `INSERT INTO storage_targets (`+storageColumns+`)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		t.ID, t.Name, string(t.Kind), t.Enabled, t.BasePath, t.Endpoint, t.Region, t.Bucket,
 		t.Prefix, t.AccessKey, secretKey, t.UseSSL, t.PathStyle, t.StorageClass, t.Host, t.Port,
 		t.Username, password, privateKey, t.HostKey, t.RateLimit, t.LastCheckAt,
 		t.LastCheckOK, t.LastCheckMsg, t.FreeBytes, t.UsedBytes, t.CreatedAt,
-		t.UpdatedAt, t.ObjectLockEnabled, t.ObjectLockDays, t.Share, t.Domain, t.InsecureTLS)
+		t.UpdatedAt, t.ObjectLockEnabled, t.ObjectLockDays, t.Share, t.Domain, t.InsecureTLS,
+		t.TrustAnyHostKey, t.InsecureTLSSince)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return fmt.Errorf("%w: хранилище %q", ErrConflict, t.Name)
@@ -95,17 +100,29 @@ func (s *Store) UpdateStorageTarget(ctx context.Context, t *model.StorageTarget)
 	}
 	t.UpdatedAt = time.Now().UTC()
 	t.CreatedAt = existing.CreatedAt
+	// Повторное сохранение формы не сбрасывает отсчёт: иначе срок временного
+	// режима не истечёт никогда. См. тот же разбор у подключений.
+	switch {
+	case !t.InsecureTLS:
+		t.InsecureTLSSince = nil
+	case existing.InsecureTLSSince != nil:
+		t.InsecureTLSSince = existing.InsecureTLSSince
+	default:
+		t.InsecureTLSSince = &t.UpdatedAt
+	}
 
 	_, err = s.db.Exec(ctx, `UPDATE storage_targets SET
 		name=?, kind=?, enabled=?, base_path=?, endpoint=?, region=?, bucket=?, prefix=?,
 		access_key=?, secret_key_enc=?, use_ssl=?, path_style=?, storage_class=?, host=?, port=?,
 		username=?, password_enc=?, private_key_enc=?, host_key=?, rate_limit=?, updated_at=?,
-		object_lock_enabled=?, object_lock_days=?, share=?, domain=?, insecure_tls=?
+		object_lock_enabled=?, object_lock_days=?, share=?, domain=?, insecure_tls=?,
+		trust_any_host_key=?, insecure_tls_since=?
 		WHERE id=?`,
 		t.Name, string(t.Kind), t.Enabled, t.BasePath, t.Endpoint, t.Region, t.Bucket, t.Prefix,
 		t.AccessKey, secretKey, t.UseSSL, t.PathStyle, t.StorageClass, t.Host, t.Port, t.Username,
 		password, privateKey, t.HostKey, t.RateLimit, t.UpdatedAt,
-		t.ObjectLockEnabled, t.ObjectLockDays, t.Share, t.Domain, t.InsecureTLS, t.ID)
+		t.ObjectLockEnabled, t.ObjectLockDays, t.Share, t.Domain, t.InsecureTLS,
+		t.TrustAnyHostKey, t.InsecureTLSSince, t.ID)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return fmt.Errorf("%w: хранилище %q", ErrConflict, t.Name)
@@ -220,6 +237,7 @@ func (s *Store) scanStorageTarget(row rowScanner) (*model.StorageTarget, error) 
 		kind                            string
 		secretKey, password, privateKey string
 		lastCheck, immutabilityChecked  sql.NullTime
+		insecureSince                   sql.NullTime
 		createdAt, updatedAt            time.Time
 	)
 	err := row.Scan(&t.ID, &t.Name, &kind, &t.Enabled, &t.BasePath, &t.Endpoint, &t.Region,
@@ -227,6 +245,7 @@ func (s *Store) scanStorageTarget(row rowScanner) (*model.StorageTarget, error) 
 		&t.Host, &t.Port, &t.Username, &password, &privateKey, &t.HostKey, &t.RateLimit,
 		&lastCheck, &t.LastCheckOK, &t.LastCheckMsg, &t.FreeBytes, &t.UsedBytes, &createdAt, &updatedAt,
 		&t.ObjectLockEnabled, &t.ObjectLockDays, &t.Share, &t.Domain, &t.InsecureTLS,
+		&t.TrustAnyHostKey, &insecureSince,
 		&t.ImmutabilityState, &t.ImmutabilityDetail, &immutabilityChecked)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -245,6 +264,8 @@ func (s *Store) scanStorageTarget(row rowScanner) (*model.StorageTarget, error) 
 		return nil, fmt.Errorf("хранилище %q: %w", t.Name, err)
 	}
 
+	t.PrivateKeyStored = t.PrivateKey != ""
+	t.InsecureTLSSince = nullTime(insecureSince)
 	t.Kind = model.StorageKind(kind)
 	t.LastCheckAt = nullTime(lastCheck)
 	t.ImmutabilityCheckedAt = nullTime(immutabilityChecked)

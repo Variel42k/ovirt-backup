@@ -3,6 +3,8 @@ import { Notify } from 'quasar'
 import type { QNotifyCreateOptions } from 'quasar'
 import { ref } from 'vue'
 import type {
+  DirectoryListing,
+  HostKeyScan,
   Alert,
   BackupCopy,
   BackupJob,
@@ -279,6 +281,32 @@ export const api = {
   fetchCA: (engineUrl: string) =>
     http.post<{ ca_cert: string; warning: string }>('/servers/ca-certificate', { engine_url: engineUrl }).then((r) => r.data),
   refreshServer: (id: string) => http.post<Server>(`/servers/${id}/refresh`).then((r) => r.data),
+  browseDirectories: (params: { scope: string; root?: string; path?: string; owner?: string }) =>
+    http
+      .get<DirectoryListing>('/fs/browse', {
+        params: {
+          scope: params.scope,
+          root: params.root || undefined,
+          path: params.path || undefined,
+          owner: params.owner || undefined,
+        },
+      })
+      .then((r) => r.data),
+  browseHostDirectories: (serverId: string, root?: string, path?: string) =>
+    http
+      .get<DirectoryListing>(`/servers/${serverId}/browse`, {
+        params: { root: root || undefined, path: path || undefined },
+        timeout: 30_000,
+      })
+      .then((r) => r.data),
+  scanServerHostKey: (host: string, port: number) =>
+    http
+      .post<HostKeyScan>('/servers/host-key', { host, port }, { timeout: 30_000 })
+      .then((r) => r.data),
+  scanStorageHostKey: (host: string, port: number) =>
+    http
+      .post<HostKeyScan>('/storages/host-key', { host, port }, { timeout: 30_000 })
+      .then((r) => r.data),
 
   // Инвентарь
   listHosts: (serverId: string) => http.get<ListResponse<Host>>(`/servers/${serverId}/hosts`).then((r) => unwrap(r.data)),

@@ -46,7 +46,13 @@ func TestStorageValidationCoversEveryKind(t *testing.T) {
 			Username: "svc", Password: "пароль"},
 		model.StorageWebDAV: {Endpoint: "https://nas.example.org/dav",
 			Username: "svc", Password: "пароль"},
-		model.StorageSFTP: {Host: "backup.example.org", Username: "svc", Password: "пароль"},
+		// У SFTP два обязательных условия сверх прочих: ключ хоста — иначе
+		// сервер не проверяется, и свой приватный ключ — вместо пароля,
+		// который лежал бы расшифровываемым и уходил на сервер при каждой
+		// записи копии.
+		model.StorageSFTP: {Host: "backup.example.org", Username: "svc",
+			PrivateKey: "-----BEGIN OPENSSH PRIVATE KEY-----",
+			HostKey:    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJ8xVQ0nMPUNbwvUuPy4LtRsJvVKLxkPHtoT1P9QzUmB"},
 	}
 
 	for _, kind := range model.AllStorageKinds() {

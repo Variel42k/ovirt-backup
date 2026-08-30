@@ -54,6 +54,12 @@ func pathHint(root string) string {
 		"Служба может писать в: %s", root, strings.Join(writable, ", "))
 }
 
+// WritableMounts is writableMounts for callers outside the package: the
+// directory picker offers exactly these as roots for local storage, so that
+// what the operator can choose and what the service can write to are the same
+// list, derived the same way.
+func WritableMounts() []string { return writableMounts() }
+
 // writableMounts lists mounted directories the service can actually write to.
 //
 // Смотрим именно точки монтирования, а не каталоги вообще: том с копиями и

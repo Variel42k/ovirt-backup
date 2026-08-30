@@ -118,12 +118,13 @@ func (p *Pool) ForServer(ctx context.Context, srv *model.Server) (*Conn, error) 
 // ConfigFromServer maps a stored connection onto the transport config.
 func ConfigFromServer(srv *model.Server) Config {
 	return Config{
-		Host:       srv.SSHHost,
-		Port:       srv.SSHPort,
-		User:       srv.Username,
-		Password:   srv.Password,
-		PrivateKey: srv.SSHPrivateKey,
-		HostKey:    srv.SSHHostKey,
+		Host:            srv.SSHHost,
+		Port:            srv.SSHPort,
+		User:            srv.Username,
+		Password:        srv.Password,
+		PrivateKey:      srv.SSHPrivateKey,
+		HostKey:         srv.SSHHostKey,
+		TrustAnyHostKey: srv.SSHTrustAnyHostKey,
 	}
 }
 

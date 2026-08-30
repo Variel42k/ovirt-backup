@@ -58,6 +58,13 @@ const (
 	AlertStorageTargetDown    = "storage_target_unreachable"
 	AlertCBTUnavailable       = "cbt_unavailable"
 	AlertDRNotReady           = "disaster_recovery_not_ready"
+	// AlertInsecureTLSExpired — проверка сертификата отключена дольше
+	// разрешённого.
+	//
+	// Галку «не проверять сертификат» ставят на полчаса, чтобы подключиться
+	// сегодня, и не снимают никогда: напоминать о ней некому, а в интерфейсе
+	// она выглядит как обычная настройка. Оповещение и есть напоминание.
+	AlertInsecureTLSExpired = "insecure_tls_expired"
 	// AlertStoragePathDegraded — путь до СХД теряет трафик: повторы RPC,
 	// таймауты NFS или разорванная сессия iSCSI. Диск при этом «исправен»:
 	// проблема сетевая, и по дисковым ошибкам её не увидеть.

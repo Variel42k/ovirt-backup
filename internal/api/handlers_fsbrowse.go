@@ -7,7 +7,6 @@ import (
 
 	"github.com/Variel42k/ovirt-backup/internal/fsbrowse"
 	"github.com/Variel42k/ovirt-backup/internal/model"
-	"github.com/Variel42k/ovirt-backup/internal/repo"
 )
 
 // Выбор каталога мышью вместо пути, набранного по памяти.
@@ -47,9 +46,9 @@ func browseScopes() map[string]scopeRule {
 	return map[string]scopeRule{
 		scopeStorage: {
 			permission: model.PermStoragesAdmin,
-			roots: func(*Server, *http.Request) []fsbrowse.Root {
+			roots: func(s *Server, _ *http.Request) []fsbrowse.Root {
 				var out []fsbrowse.Root
-				for _, mount := range repo.WritableMounts() {
+				for _, mount := range s.storageMounts() {
 					out = append(out, fsbrowse.NewRoot(mount, mount, mount))
 				}
 				return out

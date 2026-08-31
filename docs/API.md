@@ -447,6 +447,8 @@ curl -b cookies.txt -X PUT http://localhost:8080/api/v1/api-tokens/<id> \
 | Код | HTTP | Смысл |
 |---|---|---|
 | `unauthorized` | 401 | нет сессии или она истекла |
+| `csrf_origin_required` | 403 | браузерный запрос с cookie не передал Origin |
+| `csrf_origin_denied` | 403 | Origin не совпадает с `external_url` и CORS allowlist |
 | `too_many_attempts` | 429 | слишком много неудачных входов подряд |
 | `forbidden` | 403 | роли недостаточно |
 | `local_login_disabled` | 403 | вход по паролю выключен, остаётся внешний провайдер |

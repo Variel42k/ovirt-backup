@@ -67,6 +67,7 @@ ovirt-backup — команды разработки и сборки
   --skip-web            только бинари; web/dist должен быть собран заранее
   --tar                 оставить рядом и обычный tar.gz
   --no-archive          разложить в dist/, не паковать
+  --sign-key ID         подписать .run указанным GPG-ключом, создать .asc
 
 Примеры:
   ./run build --target linux/amd64
@@ -267,7 +268,7 @@ cmd_dev() {
 
 cmd_web() {
     need npm "нужен Node 20+"
-    [ -d web/node_modules ] || (cd web && npm install --no-audit --no-fund)
+    [ -d web/node_modules ] || (cd web && npm ci --no-audit --no-fund)
     step "интерфейс на :9000, /api проксируется на :8080"
     (cd web && npm run dev)
 }
@@ -405,12 +406,11 @@ cmd_vuln() {
     go run "golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION" ./... ||
         failed="$failed govulncheck"
 
-    # Состав снимается заново, если его нет или если появился образ, которого
-    # не было в прошлый раз.
-    if [ ! -f "$SBOM_DIR/source.cdx.json" ] ||
-        { [ -n "$(built_image)" ] && [ ! -f "$SBOM_DIR/image.cdx.json" ]; }; then
-        cmd_sbom
-    fi
+    # Security results must describe this working tree and the current image.
+    # Reusing an existing SBOM can hide a newly introduced dependency or report
+    # an already upgraded one, so every vulnerability scan starts from a fresh
+    # inventory.
+    cmd_sbom
 
     # Порог high и только исправимое. Без этого список растёт за счёт того,
     # чего починить нельзя, к длинному списку привыкают и перестают читать — а
@@ -492,7 +492,7 @@ cmd_clean_all() {
 }
 
 cmd_build() {
-    TARGET=""; VERSION=""; SKIP_WEB=0; NO_ARCHIVE=0; KEEP_TAR=0
+    TARGET=""; VERSION=""; SKIP_WEB=0; NO_ARCHIVE=0; KEEP_TAR=0; SIGN_KEY=""
 
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -501,6 +501,7 @@ cmd_build() {
             --skip-web)   SKIP_WEB=1; shift ;;
             --no-archive) NO_ARCHIVE=1; shift ;;
             --tar)        KEEP_TAR=1; shift ;;
+            --sign-key)   SIGN_KEY="${2:-}"; [ -n "$SIGN_KEY" ] || die "--sign-key требует ID ключа"; shift 2 ;;
             *)            die "неизвестный ключ build: $1 (см. ./run help)" ;;
         esac
     done
@@ -510,6 +511,10 @@ cmd_build() {
     need go "нужен Go 1.26+ (https://go.dev/dl/)"
     [ "$SKIP_WEB" -eq 1 ] || need npm \
         "нужен Node 20+, либо соберите с --skip-web, если web/dist уже готов"
+    if [ -n "$SIGN_KEY" ]; then
+        [ "$NO_ARCHIVE" -eq 0 ] || die "--sign-key нельзя использовать вместе с --no-archive"
+        need gpg "для --sign-key нужен GnuPG"
+    fi
 
     [ -n "$VERSION" ] || VERSION="$(version)"
 
@@ -535,8 +540,7 @@ cmd_build() {
         step "веб-интерфейс"
         if [ ! -d web/node_modules ]; then
             say "    зависимости не установлены, ставим"
-            (cd web && npm ci --no-audit --no-fund) || \
-                (cd web && npm install --no-audit --no-fund)
+            (cd web && npm ci --no-audit --no-fund)
         fi
         (cd web && npm run build)
     else
@@ -608,6 +612,22 @@ cmd_build() {
     )
 
     make_installer "$NAME" "$VERSION" "$GOOS/$GOARCH"
+
+    if command -v sha256sum >/dev/null 2>&1; then
+        (cd dist && sha256sum "$NAME.run" > "$NAME.run.sha256")
+    elif command -v shasum >/dev/null 2>&1; then
+        (cd dist && shasum -a 256 "$NAME.run" > "$NAME.run.sha256")
+    else
+        die "для внешней контрольной суммы нужен sha256sum или shasum"
+    fi
+    say "    dist/$NAME.run.sha256"
+
+    rm -f "dist/$NAME.run.asc"
+    if [ -n "$SIGN_KEY" ]; then
+        gpg --batch --yes --local-user "$SIGN_KEY" --armor --detach-sign \
+            --output "dist/$NAME.run.asc" "dist/$NAME.run"
+        say "    dist/$NAME.run.asc"
+    fi
 
     if [ "$KEEP_TAR" -eq 1 ]; then
         say "    dist/$NAME.tar.gz (--tar)"

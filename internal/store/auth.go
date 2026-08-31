@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -51,17 +52,25 @@ func (s *Store) UpdateUser(ctx context.Context, u *model.User) error {
 	query += ` WHERE id=?`
 	args = append(args, u.ID)
 
-	res, err := s.db.Exec(ctx, query, args...)
-	if err != nil {
-		if isUniqueViolation(err) {
-			return fmt.Errorf("%w: пользователь %q", ErrConflict, u.Username)
+	return s.db.InTx(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx, s.db.Rebind(query), args...)
+		if err != nil {
+			if isUniqueViolation(err) {
+				return fmt.Errorf("%w: пользователь %q", ErrConflict, u.Username)
+			}
+			return fmt.Errorf("update user: %w", err)
 		}
-		return fmt.Errorf("update user: %w", err)
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return ErrNotFound
-	}
-	return nil
+		if n, _ := res.RowsAffected(); n == 0 {
+			return ErrNotFound
+		}
+		if u.PasswordHash != "" {
+			if _, err := tx.ExecContext(ctx, s.db.Rebind(
+				`DELETE FROM sessions WHERE user_id=?`), u.ID); err != nil {
+				return fmt.Errorf("revoke sessions after password change: %w", err)
+			}
+		}
+		return nil
+	})
 }
 
 // DeleteUser removes an account and, by cascade, its sessions.
@@ -188,10 +197,14 @@ func (s *Store) CreateSession(ctx context.Context, sess *model.Session) error {
 	if sess.CreatedAt.IsZero() {
 		sess.CreatedAt = time.Now().UTC()
 	}
-	_, err := s.db.Exec(ctx, `INSERT INTO sessions (token, user_id, user_agent, remote_ip,
+	idToken, err := s.cipher.Encrypt(sess.OIDCIDToken)
+	if err != nil {
+		return fmt.Errorf("encrypt session id token: %w", err)
+	}
+	_, err = s.db.Exec(ctx, `INSERT INTO sessions (token_hash, user_id, user_agent, remote_ip,
 		expires_at, created_at, oidc_id_token) VALUES (?,?,?,?,?,?,?)`,
-		sess.Token, sess.UserID, sess.UserAgent, sess.RemoteIP, sess.ExpiresAt,
-		sess.CreatedAt, nullString(sess.OIDCIDToken))
+		sessionTokenHash(sess.Token), sess.UserID, sess.UserAgent, sess.RemoteIP, sess.ExpiresAt,
+		sess.CreatedAt, nullString(idToken))
 	if err != nil {
 		return fmt.Errorf("insert session: %w", err)
 	}
@@ -201,9 +214,9 @@ func (s *Store) CreateSession(ctx context.Context, sess *model.Session) error {
 // GetSession resolves a session token to the session and its owner, rejecting
 // expired sessions and disabled accounts.
 func (s *Store) GetSession(ctx context.Context, token string) (*model.Session, error) {
-	row := s.db.QueryRow(ctx, `SELECT s.token, s.user_id, s.user_agent, s.remote_ip, s.expires_at,
+	row := s.db.QueryRow(ctx, `SELECT s.user_id, s.user_agent, s.remote_ip, s.expires_at,
 		s.created_at, s.oidc_id_token, u.username, u.role, u.disabled
-		FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token=?`, token)
+		FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash=?`, sessionTokenHash(token))
 
 	var (
 		sess                 model.Session
@@ -212,7 +225,7 @@ func (s *Store) GetSession(ctx context.Context, token string) (*model.Session, e
 		disabled             bool
 		expiresAt, createdAt time.Time
 	)
-	err := row.Scan(&sess.Token, &sess.UserID, &sess.UserAgent, &sess.RemoteIP, &expiresAt,
+	err := row.Scan(&sess.UserID, &sess.UserAgent, &sess.RemoteIP, &expiresAt,
 		&createdAt, &idToken, &sess.Username, &role, &disabled)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -221,8 +234,11 @@ func (s *Store) GetSession(ctx context.Context, token string) (*model.Session, e
 		return nil, fmt.Errorf("scan session: %w", err)
 	}
 
+	sess.Token = token
 	sess.Role = model.Role(role)
-	sess.OIDCIDToken = idToken.String
+	if sess.OIDCIDToken, err = s.cipher.Decrypt(idToken.String); err != nil {
+		return nil, fmt.Errorf("decrypt session id token: %w", err)
+	}
 	sess.ExpiresAt = utc(expiresAt)
 	sess.CreatedAt = utc(createdAt)
 
@@ -327,8 +343,13 @@ func (s *Store) RecoverUserAccess(ctx context.Context, userID, username, passwor
 
 // DeleteSession logs a session out.
 func (s *Store) DeleteSession(ctx context.Context, token string) error {
-	_, err := s.db.Exec(ctx, `DELETE FROM sessions WHERE token=?`, token)
+	_, err := s.db.Exec(ctx, `DELETE FROM sessions WHERE token_hash=?`, sessionTokenHash(token))
 	return err
+}
+
+func sessionTokenHash(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return fmt.Sprintf("%x", sum[:])
 }
 
 // PurgeExpiredSessions drops sessions past their expiry.

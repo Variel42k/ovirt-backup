@@ -132,6 +132,15 @@ func TestAbsolutePathInsideRootIsAccepted(t *testing.T) {
 	}
 }
 
+func TestFilesystemRootIsNotAnAliasForAllowedRoot(t *testing.T) {
+	roots, base := testRoots(t)
+	filesystemRoot := filepath.VolumeName(base) + string(filepath.Separator)
+
+	if _, err := List(roots, "backups", filesystemRoot); !errors.Is(err, ErrOutsideRoots) {
+		t.Fatalf("filesystem root was rewritten to the allowed root: %v", err)
+	}
+}
+
 // Ссылка внутри корня, ведущая наружу, не должна ни открываться, ни
 // показываться в списке: иначе выбор каталога становится способом обойти сами
 // корни.

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -86,6 +88,28 @@ func TestRetargetingStorageOpensRequest(t *testing.T) {
 	}
 	if changed.BasePath != newPath {
 		t.Errorf("путь не изменился после согласования: %q", changed.BasePath)
+	}
+}
+
+func TestRetargetingStorageRejectsPathOutsideWritableRoots(t *testing.T) {
+	srv, ts, cookies := approvalFixture(t)
+	target := storageFor(t, srv, "выход за корень")
+	outside := string(filepath.Separator)
+	if volume := filepath.VolumeName(os.TempDir()); volume != "" {
+		outside = volume + string(filepath.Separator)
+	}
+
+	code, body := do(t, ts, "PUT", "/storages/"+target.ID+"?reason=проверка+пути", cookies["инициатор"],
+		`{"name":"выход за корень","kind":"local","base_path":`+quoted(outside)+`}`)
+	if code != http.StatusBadRequest {
+		t.Fatalf("путь вне разрешённых корней принят: %d %s", code, body)
+	}
+	unchanged, err := srv.store.GetStorageTarget(context.Background(), target.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unchanged.BasePath != target.BasePath {
+		t.Fatalf("отклонённый путь сохранён: %q", unchanged.BasePath)
 	}
 }
 

@@ -270,6 +270,7 @@ func callAs(t *testing.T, ts *httptest.Server, method, path, cookie string) int 
 		t.Fatalf("запрос: %v", err)
 	}
 	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: cookie})
+	req.Header.Set("Origin", ts.URL)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := ts.Client().Do(req)
@@ -303,6 +304,7 @@ func postAs(t *testing.T, ts *httptest.Server, method, path, cookie, body string
 		t.Fatalf("запрос: %v", err)
 	}
 	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: cookie})
+	req.Header.Set("Origin", ts.URL)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := ts.Client().Do(req)

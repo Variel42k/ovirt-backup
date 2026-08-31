@@ -369,13 +369,9 @@ func (d DatabaseConfig) tlsSettings() (mode, host string) {
 // localDatabaseHost сообщает, остаётся ли соединение с базой внутри машины или
 // внутри сети контейнеров.
 //
-// Имя без точки — это служба compose или запись в /etc/hosts: снаружи такое имя
-// не разрешается, и трафик до него не покидает хост. Имя с точкой или адрес —
-// уже сеть, и пароль в ней открытым текстом ходить не должен.
-//
-// Провести границу точно нельзя: база на соседней машине в защищённом сегменте
-// и база через полстраны выглядят одинаково. Поэтому вывод здесь мягкий —
-// он запрещает не подключение, а молчаливый отказ от TLS.
+// Однокомпонентное имя само по себе не означает локальность: его может выдать
+// корпоративный DNS search path. Контейнерный PostgreSQL разрешается отдельно
+// через trusted_plaintext_host и точное совпадение имени.
 func localDatabaseHost(host string) bool {
 	host = strings.ToLower(strings.TrimSpace(host))
 	// Пусто — подключение через unix-сокет по умолчанию; путь — он же, но
@@ -389,7 +385,15 @@ func localDatabaseHost(host string) bool {
 	if host == "localhost" {
 		return true
 	}
-	return !strings.Contains(host, ".")
+	return false
+}
+
+func (d DatabaseConfig) permitsPlaintext(host string) bool {
+	if localDatabaseHost(host) {
+		return true
+	}
+	trusted := strings.TrimSpace(d.Postgres.TrustedPlaintextHost)
+	return trusted != "" && strings.EqualFold(strings.TrimSpace(host), trusted)
 }
 
 // redactDSN прячет пароль в строке подключения любой из принимаемых форм.
@@ -451,7 +455,10 @@ type PostgresConfig struct {
 	PasswordFile string `mapstructure:"password_file"`
 	Database     string `mapstructure:"database"`
 	SSLMode      string `mapstructure:"sslmode"`
-	MaxConns     int32  `mapstructure:"max_conns"`
+	// TrustedPlaintextHost is the exact service name of a PostgreSQL container
+	// on the private Compose network. It must not be used for an external DB.
+	TrustedPlaintextHost string `mapstructure:"trusted_plaintext_host"`
+	MaxConns             int32  `mapstructure:"max_conns"`
 
 	// Пути к сертификатам для sslmode verify-ca и verify-full. Без них
 	// проверить подлинность сервера нечем, а значит и режимы эти задать
@@ -780,18 +787,22 @@ func (c *Config) Validate() error {
 	// кто прочитал трафик и добрался до secret.key. Плюс сам пароль базы,
 	// который при sslmode=disable уходит по сети как есть.
 	//
-	// Запрещается именно disable, а не отсутствие шифрования: prefer тоже
-	// может остаться открытым, если сервер не умеет TLS. Разница в том, что
-	// disable — это решение не пробовать вовсе, и принимается оно обычно не
-	// глядя, потому что стояло в примере.
-	if mode, host := c.Database.tlsSettings(); mode == "disable" && !localDatabaseHost(host) {
-		return fmt.Errorf("база %q подключена с sslmode=disable: пароль и данные "+
+	// disable, allow, prefer и неуказанный режим допускают незашифрованное
+	// соединение. Для внешней базы это downgrade, а не безопасное умолчание.
+	mode, host := c.Database.tlsSettings()
+	weakTLS := mode == "" || mode == "disable" || mode == "allow" || mode == "prefer"
+	if weakTLS && !c.Database.permitsPlaintext(host) {
+		shownMode := mode
+		if shownMode == "" {
+			shownMode = "не указан"
+		}
+		return fmt.Errorf("база %q подключена с sslmode=%s: пароль и данные "+
 			"пойдут по сети открытым текстом.\n"+
-			"  sslmode=prefer      — TLS, если сервер его умеет (безопасное умолчание)\n"+
 			"  sslmode=require     — только TLS, без проверки подлинности сервера\n"+
 			"  sslmode=verify-full — с проверкой; задайте database.postgres.sslrootcert\n"+
-			"disable допустим только для localhost и для базы в сети контейнеров",
-			host)
+			"открытый режим допустим только для localhost/Unix socket или точного "+
+			"database.postgres.trusted_plaintext_host внутренней Compose-сети",
+			host, shownMode)
 	}
 	// Список повторён здесь строкой, а не взят из internal/backup: движок
 	// бэкапа настраивается этой структурой, и импорт в обратную сторону замкнул
@@ -1032,11 +1043,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("database.postgres.password", "")
 	v.SetDefault("database.postgres.password_file", "")
 	v.SetDefault("database.postgres.database", "jhvirt")
-	// prefer, а не disable: шифрование включается само везде, где сервер его
-	// умеет, и ничего не ломает там, где не умеет. disable как умолчание
-	// доживал до боя чаще, чем заменялся, — его никто не менял просто потому,
-	// что установка и так работала.
-	v.SetDefault("database.postgres.sslmode", "prefer")
+	v.SetDefault("database.postgres.sslmode", "require")
+	v.SetDefault("database.postgres.trusted_plaintext_host", "")
 	v.SetDefault("database.postgres.sslrootcert", "")
 	v.SetDefault("database.postgres.sslcert", "")
 	v.SetDefault("database.postgres.sslkey", "")

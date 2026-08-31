@@ -154,7 +154,9 @@ func Resolve(roots []Root, rootID, path string) (Root, string, error) {
 
 	clean := filepath.Clean(filepath.FromSlash(strings.TrimSpace(path)))
 	switch {
-	case clean == "." || clean == string(filepath.Separator):
+	case clean == ".":
+		clean = ""
+	case clean == string(filepath.Separator) && filepath.Clean(root.dir) == string(filepath.Separator):
 		clean = ""
 	case filepath.IsAbs(clean):
 		// Абсолютный путь здесь не отвергается сразу: форма редактирования уже

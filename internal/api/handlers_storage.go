@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -274,6 +275,17 @@ func (s *Server) handleUpdateStorage(w http.ResponseWriter, r *http.Request) {
 	}
 	if payload.PrivateKey == "" {
 		existing.PrivateKey = privateKey
+	}
+	if existing.Kind == model.StorageLocal &&
+		(before.Kind != model.StorageLocal || filepath.Clean(before.BasePath) != filepath.Clean(existing.BasePath)) {
+		resolved, err := s.resolveBrowsable(r, scopeStorage, existing.BasePath)
+		if err != nil {
+			s.audit(r, "storage.update", model.ScopeStorageTarget, id, false, err.Error())
+			s.writeError(w, r, badRequest("каталог %s: %v. %s",
+				existing.BasePath, err, storagePathHint()))
+			return
+		}
+		existing.BasePath = resolved
 	}
 	if objectLockWasEnabled && !existing.ObjectLockEnabled {
 		count, countErr := s.store.CountRunsOnTarget(r.Context(), id)

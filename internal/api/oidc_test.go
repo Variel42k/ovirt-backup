@@ -299,10 +299,7 @@ func TestOIDCLoginIssuesSessionAndCreatesAccount(t *testing.T) {
 	// Выход обязан закрывать и сессию провайдера. Иначе «Выйти» защищает лишь
 	// на вид: следующее нажатие кнопки входа пустит обратно, ничего не
 	// спросив, — на общем компьютере это и есть вся разница.
-	logout, err := client.Post(app.URL+"/api/v1/auth/logout", "application/json", nil)
-	if err != nil {
-		t.Fatalf("выход: %v", err)
-	}
+	logout := postOIDCLogout(t, app, client)
 	var logoutBody map[string]string
 	if err := json.NewDecoder(logout.Body).Decode(&logoutBody); err != nil {
 		t.Fatalf("разбор ответа выхода: %v", err)
@@ -368,10 +365,7 @@ func TestOIDCBackchannelKeepsPublicIssuer(t *testing.T) {
 		t.Fatalf("вход через backchannel создал пользователя %q", me["username"])
 	}
 
-	logout, err := client.Post(app.URL+"/api/v1/auth/logout", "application/json", nil)
-	if err != nil {
-		t.Fatalf("выход: %v", err)
-	}
+	logout := postOIDCLogout(t, app, client)
 	defer logout.Body.Close()
 	var body map[string]string
 	if err := json.NewDecoder(logout.Body).Decode(&body); err != nil {
@@ -380,6 +374,21 @@ func TestOIDCBackchannelKeepsPublicIssuer(t *testing.T) {
 	if !strings.HasPrefix(body["logout_url"], provider.publicIssuer+"/logout") {
 		t.Fatalf("браузер получил внутренний адрес вместо публичного: %q", body["logout_url"])
 	}
+}
+
+func postOIDCLogout(t *testing.T, app *httptest.Server, client *http.Client) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, app.URL+"/api/v1/auth/logout", http.NoBody)
+	if err != nil {
+		t.Fatalf("запрос выхода: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", app.URL)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("выход: %v", err)
+	}
+	return resp
 }
 
 // Токен, выданный для другого входа, принимать нельзя: иначе украденный у

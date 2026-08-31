@@ -77,7 +77,10 @@ services:
       #
       # Меняйте вместе с JHV_DATABASE_URL, когда база вынесена наружу: со
       # значением disable служба туда просто не подключится и скажет почему.
-      JHV_DATABASE_POSTGRES_SSLMODE: "${JHV_DATABASE_SSLMODE:-prefer}"
+      # The bundled DB is reachable only on the private backend network and
+      # does not expose a TCP port. External databases must use TLS instead.
+      JHV_DATABASE_POSTGRES_SSLMODE: "${JHV_DATABASE_SSLMODE:-disable}"
+      JHV_DATABASE_POSTGRES_TRUSTED_PLAINTEXT_HOST: "postgres"
       # Внешняя база вместо поднятой рядом: если задан, перекрывает всё выше.
       JHV_DATABASE_URL: "${JHV_DATABASE_URL:-}"
       JHV_DATABASE_URL_FILE: "${JHV_DATABASE_URL_FILE:-}"
@@ -366,7 +369,7 @@ services:
       context: .
       dockerfile: Dockerfile.keycloak
       args:
-        KEYCLOAK_BASE_IMAGE: ${KEYCLOAK_BASE_IMAGE:-quay.io/keycloak/keycloak:26.7.2@sha256:831330513f55695572286e521f94fcd3c7e285250ed5b848090265a33192f669}
+        KEYCLOAK_BASE_IMAGE: ${KEYCLOAK_BASE_IMAGE:-quay.io/keycloak/keycloak:26.7.2@sha256:9d1f1b2b7261ff53c66cb1092dfcdc34a5fb77e81f9e6a6e75b8b6a795de8067}
     image: ovirt-backup-keycloak:${KEYCLOAK_VERSION:-26.7.2}
     restart: unless-stopped
     security_opt:

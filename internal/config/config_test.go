@@ -63,11 +63,11 @@ func TestDatabaseURLAccepted(t *testing.T) {
 		dsn  string
 	}{
 		{"URL", "postgres://u:p@db:5432/jhvirt?sslmode=require"},
-		{"URL postgresql://", "postgresql://u:p@db:5432/jhvirt"},
-		{"форма ключ=значение", "host=db port=5432 user=u password=p dbname=jhvirt sslmode=disable"},
+		{"URL postgresql://", "postgresql://u:p@db:5432/jhvirt?sslmode=require"},
+		{"форма ключ=значение", "host=db port=5432 user=u password=p dbname=jhvirt sslmode=require"},
 		// Ради этого случая форма key=value и принимается: openssl rand -base64
 		// выдаёт / и +, а в URL их пришлось бы percent-кодировать.
-		{"пароль со слешем", "host=db user=u password=aB/c+d= dbname=jhvirt"},
+		{"пароль со слешем", "host=db user=u password=aB/c+d= dbname=jhvirt sslmode=require"},
 	}
 
 	for _, tt := range tests {
@@ -257,16 +257,14 @@ func TestEnvOverridesFile(t *testing.T) {
 	}
 }
 
-// Умолчание должно шифровать там, где сервер это умеет. Значение проверяется
-// именно здесь, а не читается из документации: disable как умолчание дожил бы
-// до боя незамеченным — установка с ним работает и выглядит исправной.
-func TestDefaultSSLModeIsPrefer(t *testing.T) {
+// Умолчание не должно допускать downgrade до открытого соединения.
+func TestDefaultSSLModeRequiresTLS(t *testing.T) {
 	cfg, err := Load("")
 	if err != nil {
 		t.Fatalf("загрузка конфигурации: %v", err)
 	}
-	if got := cfg.Database.Postgres.SSLMode; got != "prefer" {
-		t.Fatalf("умолчание sslmode: %q, ожидалось prefer", got)
+	if got := cfg.Database.Postgres.SSLMode; got != "require" {
+		t.Fatalf("умолчание sslmode: %q, ожидалось require", got)
 	}
 }
 
@@ -326,8 +324,8 @@ func validateWithDatabase(t *testing.T, db DatabaseConfig) string {
 }
 
 // Отказ от TLS до удалённой базы — это пароль и данные по сети открытым
-// текстом. Внутри машины и в сети контейнеров это допустимо, снаружи нет.
-func TestSSLModeDisableAllowedOnlyLocally(t *testing.T) {
+// текстом. Контейнерное имя должно быть разрешено явно и точно.
+func TestWeakSSLModeAllowedOnlyForTrustedTransport(t *testing.T) {
 	tests := []struct {
 		name     string
 		db       DatabaseConfig
@@ -337,8 +335,12 @@ func TestSSLModeDisableAllowedOnlyLocally(t *testing.T) {
 			Host: "localhost", SSLMode: "disable"}}, false},
 		{"поля, петля по адресу", DatabaseConfig{Postgres: PostgresConfig{
 			Host: "127.0.0.1", SSLMode: "disable"}}, false},
-		{"поля, служба compose", DatabaseConfig{Postgres: PostgresConfig{
-			Host: "postgres", SSLMode: "disable"}}, false},
+		{"поля, служба compose без разрешения", DatabaseConfig{Postgres: PostgresConfig{
+			Host: "postgres", SSLMode: "disable"}}, true},
+		{"поля, доверенная служба compose", DatabaseConfig{Postgres: PostgresConfig{
+			Host: "postgres", SSLMode: "disable", TrustedPlaintextHost: "postgres"}}, false},
+		{"поля, разрешение другого имени", DatabaseConfig{Postgres: PostgresConfig{
+			Host: "database", SSLMode: "disable", TrustedPlaintextHost: "postgres"}}, true},
 		{"поля, чужой хост", DatabaseConfig{Postgres: PostgresConfig{
 			Host: "db.example.org", SSLMode: "disable"}}, true},
 		// Адрес из диапазона, отведённого стандартом под документацию
@@ -347,14 +349,18 @@ func TestSSLModeDisableAllowedOnlyLocally(t *testing.T) {
 		{"поля, чужой адрес", DatabaseConfig{Postgres: PostgresConfig{
 			Host: "203.0.113.10", SSLMode: "disable"}}, true},
 		{"поля, чужой хост с prefer", DatabaseConfig{Postgres: PostgresConfig{
-			Host: "db.example.org", SSLMode: "prefer"}}, false},
+			Host: "db.example.org", SSLMode: "prefer"}}, true},
+		{"поля, одночастное имя без TLS", DatabaseConfig{Postgres: PostgresConfig{
+			Host: "production-db", SSLMode: "disable"}}, true},
 
 		{"URL, чужой хост", DatabaseConfig{Postgres: PostgresConfig{
 			URL: "postgres://u:p@db.example.org:5432/jhvirt?sslmode=disable"}}, true},
 		{"URL, чужой хост с require", DatabaseConfig{Postgres: PostgresConfig{
 			URL: "postgres://u:p@db.example.org:5432/jhvirt?sslmode=require"}}, false},
-		{"URL, служба compose", DatabaseConfig{Postgres: PostgresConfig{
-			URL: "postgres://u:p@postgres:5432/jhvirt?sslmode=disable"}}, false},
+		{"URL без sslmode", DatabaseConfig{Postgres: PostgresConfig{
+			URL: "postgres://u:p@db.example.org:5432/jhvirt"}}, true},
+		{"URL, доверенная служба compose", DatabaseConfig{Postgres: PostgresConfig{
+			URL: "postgres://u:p@postgres:5432/jhvirt?sslmode=disable", TrustedPlaintextHost: "postgres"}}, false},
 
 		{"ключ=значение, чужой хост", DatabaseConfig{Postgres: PostgresConfig{
 			URL: "host=db.example.org port=5432 user=u password=p dbname=jhvirt sslmode=disable"}}, true},
@@ -365,7 +371,7 @@ func TestSSLModeDisableAllowedOnlyLocally(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := validateWithDatabase(t, tt.db)
-			complained := strings.Contains(got, "sslmode=disable")
+			complained := strings.Contains(got, "пойдут по сети открытым текстом")
 
 			if tt.rejected && !complained {
 				t.Fatalf("открытое подключение к удалённой базе принято, ошибка: %q", got)

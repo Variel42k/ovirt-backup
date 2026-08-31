@@ -28,6 +28,7 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/ovirt"
 	"github.com/Variel42k/ovirt-backup/internal/quality"
 	"github.com/Variel42k/ovirt-backup/internal/replication"
+	"github.com/Variel42k/ovirt-backup/internal/repo"
 	"github.com/Variel42k/ovirt-backup/internal/scheduler"
 	"github.com/Variel42k/ovirt-backup/internal/store"
 )
@@ -53,6 +54,7 @@ type Server struct {
 	dr            *drcheck.Checker
 	fileBackup    *filebackup.Engine
 	metricsToken  []byte
+	storageMounts func() []string
 	// logins притормаживает подбор пароля. В памяти, а не в базе: ограничение
 	// действует на процесс, переживать перезапуск ему не нужно, а запись в
 	// базу на каждую неудачную попытку сама стала бы точкой приложения силы.
@@ -92,6 +94,9 @@ type Deps struct {
 	Notifications *notify.Manager
 	DR            *drcheck.Checker
 	FileBackup    *filebackup.Engine
+	// StorageMounts supplies writable roots for local repositories. Production
+	// uses repo.WritableMounts; tests may provide isolated temporary roots.
+	StorageMounts func() []string
 	// AuditFile — журнал аудита для внешнего сборщика. Может быть nil.
 	AuditFile *auditlog.Writer
 }
@@ -105,6 +110,9 @@ func New(d Deps) *Server {
 	if d.Quality == nil {
 		d.Quality = quality.New(d.Store, d.Config.Monitor.BackupQuality, d.Config.Location())
 	}
+	if d.StorageMounts == nil {
+		d.StorageMounts = repo.WritableMounts
+	}
 	var metricsToken []byte
 	if d.Config.Metrics.Enabled {
 		body, _ := os.ReadFile(d.Config.Metrics.TokenFile)
@@ -116,11 +124,12 @@ func New(d Deps) *Server {
 		bus: d.Bus, log: d.Logger, logs: d.Logs, quality: d.Quality, replicator: d.Replicator, notifier: d.Notifier,
 		notifications: d.Notifications,
 		dr:            d.DR, metricsToken: metricsToken,
-		fileBackup: d.FileBackup,
-		logins:     newLoginLimiter(),
-		oidcLogins: newOIDCPending(),
-		roles:      newRoleCache(),
-		auditFile:  d.AuditFile,
+		fileBackup:    d.FileBackup,
+		storageMounts: d.StorageMounts,
+		logins:        newLoginLimiter(),
+		oidcLogins:    newOIDCPending(),
+		roles:         newRoleCache(),
+		auditFile:     d.AuditFile,
 	}
 	// Про токены из файла настроек служба говорит при каждом старте, а не
 	// один раз в документации. Забывают именно их: работают они бессрочно и с
@@ -167,7 +176,7 @@ func (s *Server) Handler() http.Handler {
 		mux.Handle("/", s.spaHandler())
 	}
 
-	return s.recoverer(s.requestLogger(s.cors(s.authenticate(mux))))
+	return s.recoverer(s.securityHeaders(s.requestLogger(s.cors(s.csrf(s.authenticate(mux))))))
 }
 
 // routes registers the API surface. Paths here are relative to /api/v1.

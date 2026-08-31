@@ -176,10 +176,7 @@ func TestOIDCAgainstKeycloak(t *testing.T) {
 	// 6. Выход должен закрыть сессию и у провайдера. Проверяется это не тем,
 	// что мы построили адрес, а тем, что провайдер после перехода по нему
 	// снова спрашивает пароль: иначе «Выйти» защищает только на вид.
-	logout, err := client.Post(app.URL+"/api/v1/auth/logout", "application/json", nil)
-	if err != nil {
-		t.Fatalf("выход: %v", err)
-	}
+	logout := postOIDCLogout(t, app, client)
 	var logoutBody map[string]string
 	if err := json.NewDecoder(logout.Body).Decode(&logoutBody); err != nil {
 		t.Fatalf("разбор ответа выхода: %v", err)

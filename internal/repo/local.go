@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/google/uuid"
+
 	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
@@ -20,6 +22,7 @@ import (
 type local struct {
 	name string
 	root string
+	dir  *os.Root
 }
 
 func newLocal(target *model.StorageTarget) (Backend, error) {
@@ -33,7 +36,15 @@ func newLocal(target *model.StorageTarget) (Backend, error) {
 	if err := os.MkdirAll(root, 0o750); err != nil {
 		return nil, fmt.Errorf("создание каталога хранилища %s: %w%s", root, err, pathHint(root))
 	}
-	return &local{name: target.Name, root: root}, nil
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		return nil, fmt.Errorf("разрешение пути хранилища %s: %w", root, err)
+	}
+	dir, err := os.OpenRoot(root)
+	if err != nil {
+		return nil, fmt.Errorf("открытие каталога хранилища %s: %w", root, err)
+	}
+	return &local{name: target.Name, root: root, dir: dir}, nil
 }
 
 // pathHint explains the most common mistake in a local storage path.
@@ -117,41 +128,67 @@ func isSystemPath(point string) bool {
 
 func (l *local) Kind() model.StorageKind { return model.StorageLocal }
 func (l *local) Name() string            { return l.name }
-func (l *local) Close() error            { return nil }
+func (l *local) Close() error            { return l.dir.Close() }
 
-// path maps an object key to a filesystem path, refusing anything that would
-// escape the configured root.
-func (l *local) path(key string) (string, error) {
-	clean := filepath.Clean(filepath.FromSlash("/" + key))
-	full := filepath.Join(l.root, clean)
-	rel, err := filepath.Rel(l.root, full)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+// key maps an object key to a relative OS path. os.Root performs the actual
+// traversal and keeps every operation beneath the opened repository root.
+func (l *local) key(key string) (string, error) {
+	raw := filepath.FromSlash(key)
+	if filepath.IsAbs(raw) || filepath.VolumeName(raw) != "" {
 		return "", fmt.Errorf("недопустимый ключ объекта: %q", key)
 	}
-	return full, nil
+	clean := filepath.Clean(raw)
+	if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("недопустимый ключ объекта: %q", key)
+	}
+	return clean, nil
+}
+
+func (l *local) objectKey(key string) (string, error) {
+	clean, err := l.key(key)
+	if err != nil {
+		return "", err
+	}
+	if clean == "." {
+		return "", fmt.Errorf("пустой ключ объекта недопустим")
+	}
+	return clean, nil
+}
+
+func (l *local) rejectSymlink(key string) error {
+	info, err := l.dir.Lstat(key)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("символическая ссылка в хранилище запрещена: %s", filepath.ToSlash(key))
+	}
+	return nil
 }
 
 func (l *local) Put(ctx context.Context, key string, r io.Reader, size int64) (int64, error) {
-	full, err := l.path(key)
+	clean, err := l.objectKey(key)
 	if err != nil {
 		return 0, err
 	}
-	if err := os.MkdirAll(filepath.Dir(full), 0o750); err != nil {
+	dir := filepath.Dir(clean)
+	if err := l.dir.MkdirAll(dir, 0o750); err != nil {
 		return 0, fmt.Errorf("создание каталога для %s: %w", key, err)
 	}
 
 	// Write to a temporary file and rename: a crash mid-write then leaves no
 	// object at all rather than a truncated one that verification would have
 	// to discover later.
-	tmp, err := os.CreateTemp(filepath.Dir(full), ".jhv-*.tmp")
+	tmpKey := filepath.Join(dir, ".jhv-"+uuid.NewString()+".tmp")
+	tmp, err := l.dir.OpenFile(tmpKey, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return 0, fmt.Errorf("создание временного файла: %w", err)
 	}
-	tmpName := tmp.Name()
+	removeTemp := true
 	defer func() {
-		if tmpName != "" {
+		if removeTemp {
 			_ = tmp.Close()
-			_ = os.Remove(tmpName)
+			_ = l.dir.Remove(tmpKey)
 		}
 	}()
 
@@ -165,19 +202,25 @@ func (l *local) Put(ctx context.Context, key string, r io.Reader, size int64) (i
 	if err := tmp.Close(); err != nil {
 		return written, err
 	}
-	if err := os.Rename(tmpName, full); err != nil {
+	if err := l.dir.Rename(tmpKey, clean); err != nil {
 		return written, fmt.Errorf("публикация %s: %w", key, err)
 	}
-	tmpName = ""
+	removeTemp = false
 	return written, nil
 }
 
 func (l *local) Get(ctx context.Context, key string) (io.ReadCloser, error) {
-	full, err := l.path(key)
+	clean, err := l.objectKey(key)
 	if err != nil {
 		return nil, err
 	}
-	f, err := os.Open(full)
+	if err := l.rejectSymlink(clean); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("%w: %s", ErrNotExist, key)
+		}
+		return nil, err
+	}
+	f, err := l.dir.Open(clean)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, fmt.Errorf("%w: %s", ErrNotExist, key)
 	}
@@ -188,11 +231,17 @@ func (l *local) Get(ctx context.Context, key string) (io.ReadCloser, error) {
 }
 
 func (l *local) GetRange(ctx context.Context, key string, offset, length int64) (io.ReadCloser, error) {
-	full, err := l.path(key)
+	clean, err := l.objectKey(key)
 	if err != nil {
 		return nil, err
 	}
-	f, err := os.Open(full)
+	if err := l.rejectSymlink(clean); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("%w: %s", ErrNotExist, key)
+		}
+		return nil, err
+	}
+	f, err := l.dir.Open(clean)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, fmt.Errorf("%w: %s", ErrNotExist, key)
 	}
@@ -212,11 +261,17 @@ func (l *local) GetRange(ctx context.Context, key string, offset, length int64) 
 }
 
 func (l *local) Stat(ctx context.Context, key string) (ObjectInfo, error) {
-	full, err := l.path(key)
+	clean, err := l.objectKey(key)
 	if err != nil {
 		return ObjectInfo{}, err
 	}
-	fi, err := os.Stat(full)
+	if err := l.rejectSymlink(clean); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return ObjectInfo{}, fmt.Errorf("%w: %s", ErrNotExist, key)
+		}
+		return ObjectInfo{}, err
+	}
+	fi, err := l.dir.Stat(clean)
 	if errors.Is(err, fs.ErrNotExist) {
 		return ObjectInfo{}, fmt.Errorf("%w: %s", ErrNotExist, key)
 	}
@@ -227,23 +282,23 @@ func (l *local) Stat(ctx context.Context, key string) (ObjectInfo, error) {
 }
 
 func (l *local) Delete(ctx context.Context, key string) error {
-	full, err := l.path(key)
+	clean, err := l.objectKey(key)
 	if err != nil {
 		return err
 	}
-	if err := os.Remove(full); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err := l.dir.Remove(clean); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
-	l.pruneEmptyDirs(filepath.Dir(full))
+	l.pruneEmptyDirs(filepath.Dir(clean))
 	return nil
 }
 
 func (l *local) DeletePrefix(ctx context.Context, prefix string) (int, error) {
-	full, err := l.path(prefix)
+	clean, err := l.objectKey(prefix)
 	if err != nil {
 		return 0, err
 	}
-	fi, err := os.Stat(full)
+	fi, err := l.dir.Lstat(clean)
 	if errors.Is(err, fs.ErrNotExist) {
 		return 0, nil
 	}
@@ -252,10 +307,13 @@ func (l *local) DeletePrefix(ctx context.Context, prefix string) (int, error) {
 	}
 
 	count := 0
-	if fi.IsDir() {
-		err = filepath.WalkDir(full, func(_ string, d fs.DirEntry, err error) error {
+	if fi.IsDir() && fi.Mode()&os.ModeSymlink == 0 {
+		err = fs.WalkDir(l.dir.FS(), filepath.ToSlash(clean), func(_ string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err
+			}
+			if d.Type()&fs.ModeSymlink != 0 {
+				return fmt.Errorf("символическая ссылка в хранилище запрещена: %s", d.Name())
 			}
 			if !d.IsDir() {
 				count++
@@ -265,37 +323,41 @@ func (l *local) DeletePrefix(ctx context.Context, prefix string) (int, error) {
 		if err != nil {
 			return 0, err
 		}
-		if err := os.RemoveAll(full); err != nil {
+		if err := l.dir.RemoveAll(clean); err != nil {
 			return count, err
 		}
 	} else {
-		if err := os.Remove(full); err != nil {
+		if err := l.dir.Remove(clean); err != nil {
 			return 0, err
 		}
 		count = 1
 	}
-	l.pruneEmptyDirs(filepath.Dir(full))
+	l.pruneEmptyDirs(filepath.Dir(clean))
 	return count, nil
 }
 
 func (l *local) List(ctx context.Context, prefix string) ([]ObjectInfo, error) {
-	full, err := l.path(prefix)
+	clean, err := l.key(prefix)
 	if err != nil {
 		return nil, err
 	}
-	base := full
-	if fi, err := os.Stat(full); err != nil || !fi.IsDir() {
+	base := clean
+	if fi, err := l.dir.Stat(clean); err != nil || !fi.IsDir() {
 		// The prefix may be a partial name rather than a directory.
-		base = filepath.Dir(full)
+		base = filepath.Dir(clean)
 	}
-	if _, err := os.Stat(base); errors.Is(err, fs.ErrNotExist) {
+	if _, err := l.dir.Stat(base); errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}
 
+	wanted := filepath.ToSlash(prefix)
 	var out []ObjectInfo
-	err = filepath.WalkDir(base, func(path string, d fs.DirEntry, err error) error {
+	err = fs.WalkDir(l.dir.FS(), filepath.ToSlash(base), func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
+		}
+		if d.Type()&fs.ModeSymlink != 0 {
+			return fmt.Errorf("символическая ссылка в хранилище запрещена: %s", path)
 		}
 		if d.IsDir() {
 			return nil
@@ -303,12 +365,8 @@ func (l *local) List(ctx context.Context, prefix string) ([]ObjectInfo, error) {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		rel, err := filepath.Rel(l.root, path)
-		if err != nil {
-			return err
-		}
-		key := filepath.ToSlash(rel)
-		if !strings.HasPrefix(key, strings.TrimPrefix(prefix, "/")) {
+		key := filepath.ToSlash(path)
+		if !strings.HasPrefix(key, wanted) {
 			return nil
 		}
 		info, err := d.Info()
@@ -338,14 +396,14 @@ func (l *local) Check(ctx context.Context) error { return runCheck(ctx, l) }
 // does not accumulate an empty date tree after retention runs.
 func (l *local) pruneEmptyDirs(dir string) {
 	for {
-		if dir == l.root || !strings.HasPrefix(dir, l.root) {
+		if dir == "." || dir == "" {
 			return
 		}
-		entries, err := os.ReadDir(dir)
+		entries, err := fs.ReadDir(l.dir.FS(), filepath.ToSlash(dir))
 		if err != nil || len(entries) > 0 {
 			return
 		}
-		if err := os.Remove(dir); err != nil {
+		if err := l.dir.Remove(dir); err != nil {
 			return
 		}
 		dir = filepath.Dir(dir)

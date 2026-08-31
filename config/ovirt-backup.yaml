@@ -203,16 +203,18 @@ database:
     password: ""
     password_file: ""
     database: "jhvirt"
-    # disable|prefer|require|verify-ca|verify-full
+    # disable|allow|prefer|require|verify-ca|verify-full
     #
-    # prefer — шифрование, если сервер его умеет; иначе открыто. Служба
-    # откажется стартовать с disable, когда база не на этой машине и не в сети
-    # контейнеров: пароль и данные пошли бы по сети открытым текстом.
+    # Для внешней базы минимум require: prefer, allow, disable и пустое значение
+    # допускают downgrade до открытого соединения и будут отклонены.
     #
     # verify-full — единственный режим, проверяющий, что на том конце
     # действительно ваш сервер, а не чужой с валидным сертификатом. Требует
     # sslrootcert.
-    sslmode: "prefer"
+    sslmode: "require"
+    # Только для точного имени PostgreSQL в изолированной Compose-сети.
+    # Для внешней БД оставьте пустым.
+    trusted_plaintext_host: ""
     # Нужны для verify-ca и verify-full; пустые не подставляются вовсе.
     # sslcert и sslkey — только если сервер требует клиентский сертификат.
     sslrootcert: ""

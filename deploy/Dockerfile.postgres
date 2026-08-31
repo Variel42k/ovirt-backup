@@ -1,9 +1,17 @@
 ARG POSTGRES_BASE_IMAGE=docker.io/library/postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
 FROM ${POSTGRES_BASE_IMAGE}
 
-# Keep the resulting image reproducible and buildable in an isolated network.
-# Security updates are applied by reviewing and changing POSTGRES_BASE_IMAGE to
-# a new pinned digest, not by downloading a moving Alpine package set here.
+# The pinned upstream image currently contains OpenSSL 3.5.7-r0 and a gosu
+# binary built with an obsolete Go runtime. Upgrade the affected libraries and
+# replace gosu with Alpine's interface-compatible, C-based privilege dropper.
+# Keeping the versions explicit avoids silently changing the database image.
+USER root
+RUN apk add --no-cache --upgrade \
+        libcrypto3=3.5.8-r0 \
+        libssl3=3.5.8-r0 \
+        su-exec=0.3-r0 \
+    && cp /sbin/su-exec /usr/local/bin/gosu \
+    && gosu nobody true
 
 # Compose overrides this to root only for the main database service because
 # the official entrypoint must initialize/chown a fresh volume before dropping

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -22,7 +23,10 @@ func approvalFixture(t *testing.T) (*Server, *httptest.Server, map[string]string
 	cfg.Auth.Enabled = true
 	cfg.Server.ServeSPA = false
 
-	srv := New(Deps{Config: cfg, Store: testStore(t), Logger: zerolog.Nop()})
+	srv := New(Deps{
+		Config: cfg, Store: testStore(t), Logger: zerolog.Nop(),
+		StorageMounts: func() []string { return []string{os.TempDir()} },
+	})
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 
@@ -70,6 +74,7 @@ func do(t *testing.T, ts *httptest.Server, method, path, cookie, body string) (i
 		t.Fatalf("запрос: %v", err)
 	}
 	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: cookie})
+	req.Header.Set("Origin", ts.URL)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := ts.Client().Do(req)

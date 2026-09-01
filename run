@@ -74,8 +74,9 @@ ovirt-backup — команды разработки и сборки
   ./run check
   ./run test -race
 
-build даёт один файл dist/ovirt-backup-<версия>-<ос>-<арх>.run: скрипт с архивом
-внутри. Копируется на сервер и запускается — распаковка и установка внутри.
+build даёт установщик dist/ovirt-backup-<версия>-<ос>-<арх>.run и checksum
+рядом. Временный распакованный комплект удаляется; каталог остаётся только с
+--no-archive. На сервер копируется .run и запускается без ручной распаковки.
 
   scp dist/ovirt-backup-*.run server:/tmp/ && ssh server 'sudo sh /tmp/ovirt-backup-*.run'
 EOF
@@ -517,10 +518,19 @@ cmd_build() {
     fi
 
     [ -n "$VERSION" ] || VERSION="$(version)"
+    case "$VERSION" in
+        ""|.*|*[!A-Za-z0-9._+-]*)
+            die "версия содержит недопустимые символы: $VERSION" ;;
+    esac
 
     if [ -n "$TARGET" ]; then
+        case "$TARGET" in
+            */*/*|/*|*/|*[!a-z0-9_/]*)
+                die "цель задаётся как ос/арх, например linux/amd64" ;;
+        esac
         GOOS="${TARGET%/*}"; GOARCH="${TARGET#*/}"
-        [ "$GOOS" != "$TARGET" ] || die "цель задаётся как ос/арх, например linux/amd64"
+        [ "$GOOS" != "$TARGET" ] && [ -n "$GOOS" ] && [ -n "$GOARCH" ] ||
+            die "цель задаётся как ос/арх, например linux/amd64"
     else
         GOOS="$(go env GOOS)"; GOARCH="$(go env GOARCH)"
     fi
@@ -532,8 +542,15 @@ cmd_build() {
 
     SUFFIX=""; [ "$GOOS" = "windows" ] && SUFFIX=".exe"
     NAME="ovirt-backup-$VERSION-$GOOS-$GOARCH"
-    OUT="$ROOT/dist/$NAME"
-    rm -rf "$OUT"
+    mkdir -p "$ROOT/dist"
+    BUILD_TMP="$(mktemp -d "$ROOT/dist/.build-$NAME.XXXXXX")" ||
+        die "не удалось создать временный каталог сборки"
+    OUT="$BUILD_TMP/$NAME"
+    # Обычная сборка не должна оставлять распакованный комплект или обрывки
+    # архива. При любой ошибке и при прерывании удаляется весь staging-каталог;
+    # готовые артефакты публикуются в dist только в самом конце.
+    trap 'rm -rf "$BUILD_TMP"' 0
+    trap 'exit 1' HUP INT TERM
     mkdir -p "$OUT/bin" "$OUT/config" "$OUT/web" "$OUT/systemd" "$OUT/compose" "$OUT/docs"
 
     if [ "$SKIP_WEB" -eq 0 ]; then
@@ -562,6 +579,7 @@ cmd_build() {
     cp config/ovirt-backup.yaml "$OUT/config/"
     cp deploy/install.sh "$OUT/install.sh"
 	cp deploy/recover-admin.sh "$OUT/recover-admin.sh"
+	cp deploy/recover-keycloak.sh "$OUT/recover-keycloak.sh"
     cp deploy/systemd/jhvirt.service "$OUT/systemd/"
     cp deploy/systemd/jhvirt-dr-backup.service deploy/systemd/jhvirt-dr-backup.timer "$OUT/systemd/"
     cp deploy/dr-backup.sh "$OUT/systemd/"
@@ -592,6 +610,12 @@ cmd_build() {
 
     say ""
     if [ "$NO_ARCHIVE" -eq 1 ]; then
+        FINAL_OUT="$ROOT/dist/$NAME"
+        rm -rf "$FINAL_OUT"
+        mv "$OUT" "$FINAL_OUT"
+        rm -rf "$BUILD_TMP"
+        BUILD_TMP=""
+        trap - 0 HUP INT TERM
         say "готово: dist/$NAME/"
         return
     fi
@@ -601,39 +625,55 @@ cmd_build() {
     # сервере файл разворачивается неисполняемым. Права в комплекте не должны
     # зависеть от того, где его собирали.
     step "упаковка"
+    ARCHIVE="$BUILD_TMP/$NAME.tar"
     (
-        cd dist
+        cd "$BUILD_TMP"
         # Одной строкой намеренно: перенос строки здесь уже дважды не переживал
         # правку файла и превращался в аргумент tar с именем «n».
-        tar cf "$NAME.tar" --exclude="$NAME/bin" --exclude="$NAME/install.sh" "$NAME"
-        tar rf "$NAME.tar" --mode=0755 "$NAME/bin" "$NAME/install.sh"
-        rm -f "$NAME.tar.gz"
-        gzip -9 "$NAME.tar"
+        tar cf "$ARCHIVE" --exclude="$NAME/bin" --exclude="$NAME/install.sh" "$NAME"
+        tar rf "$ARCHIVE" --mode=0755 "$NAME/bin" "$NAME/install.sh"
+        gzip -9 "$ARCHIVE"
     )
+    ARCHIVE="$ARCHIVE.gz"
 
-    make_installer "$NAME" "$VERSION" "$GOOS/$GOARCH"
+    make_installer "$NAME" "$VERSION" "$GOOS/$GOARCH" "$ARCHIVE" "$BUILD_TMP"
 
     if command -v sha256sum >/dev/null 2>&1; then
-        (cd dist && sha256sum "$NAME.run" > "$NAME.run.sha256")
+        (cd "$BUILD_TMP" && sha256sum "$NAME.run" > "$NAME.run.sha256")
     elif command -v shasum >/dev/null 2>&1; then
-        (cd dist && shasum -a 256 "$NAME.run" > "$NAME.run.sha256")
+        (cd "$BUILD_TMP" && shasum -a 256 "$NAME.run" > "$NAME.run.sha256")
     else
         die "для внешней контрольной суммы нужен sha256sum или shasum"
     fi
-    say "    dist/$NAME.run.sha256"
 
-    rm -f "dist/$NAME.run.asc"
     if [ -n "$SIGN_KEY" ]; then
         gpg --batch --yes --local-user "$SIGN_KEY" --armor --detach-sign \
-            --output "dist/$NAME.run.asc" "dist/$NAME.run"
-        say "    dist/$NAME.run.asc"
+            --output "$BUILD_TMP/$NAME.run.asc" "$BUILD_TMP/$NAME.run"
     fi
 
-    if [ "$KEEP_TAR" -eq 1 ]; then
-        say "    dist/$NAME.tar.gz (--tar)"
-    else
-        rm -f "dist/$NAME.tar.gz"
+    # Публикуем только полностью сформированный набор. Каталог с тем же именем
+    # мог остаться от старой реализации build; для архивного режима он больше
+    # не является результатом и безопасно удаляется.
+    rm -rf "$ROOT/dist/$NAME"
+    mv "$BUILD_TMP/$NAME.run" "$ROOT/dist/$NAME.run"
+    mv "$BUILD_TMP/$NAME.run.sha256" "$ROOT/dist/$NAME.run.sha256"
+    rm -f "$ROOT/dist/$NAME.run.asc"
+    if [ -n "$SIGN_KEY" ]; then
+        mv "$BUILD_TMP/$NAME.run.asc" "$ROOT/dist/$NAME.run.asc"
     fi
+    if [ "$KEEP_TAR" -eq 1 ]; then
+        mv "$ARCHIVE" "$ROOT/dist/$NAME.tar.gz"
+    else
+        rm -f "$ROOT/dist/$NAME.tar.gz"
+    fi
+    rm -rf "$BUILD_TMP"
+    BUILD_TMP=""
+    trap - 0 HUP INT TERM
+
+    say "    dist/$NAME.run"
+    say "    dist/$NAME.run.sha256"
+    [ -z "$SIGN_KEY" ] || say "    dist/$NAME.run.asc"
+    [ "$KEEP_TAR" -eq 0 ] || say "    dist/$NAME.tar.gz (--tar)"
 
     say ""
     say "готово: dist/$NAME.run ($(du -h "dist/$NAME.run" 2>/dev/null | cut -f1 || echo '?'))"
@@ -649,18 +689,18 @@ cmd_build() {
 # каждый $0, $@ и подстановку команды, а это ровно тот код, который потом
 # ломается незаметно.
 make_installer() {
-    N="$1"; V="$2"; P="$3"
+    N="$1"; V="$2"; P="$3"; A="$4"; DEST="$5"
 
     SUM=""
     if command -v sha256sum >/dev/null 2>&1; then
-        SUM="$(sha256sum "dist/$N.tar.gz" | cut -d' ' -f1)"
+        SUM="$(sha256sum "$A" | cut -d' ' -f1)"
     elif command -v shasum >/dev/null 2>&1; then
-        SUM="$(shasum -a 256 "dist/$N.tar.gz" | cut -d' ' -f1)"
+        SUM="$(shasum -a 256 "$A" | cut -d' ' -f1)"
     else
         say "    предупреждение: нет sha256sum, установщик не сможет проверить целостность"
     fi
 
-    HDR="dist/.header.$$"
+    HDR="$DEST/.header.$$"
     cat > "$HDR" <<'HEADER_EOF'
 #!/bin/sh
 # ovirt-backup @VERSION@ (@PLATFORM@) — установщик в одном файле.
@@ -821,12 +861,11 @@ HEADER_EOF
     sed -e "s|@VERSION@|$V|g" \
         -e "s|@PLATFORM@|$P|g" \
         -e "s|@SHA256@|$SUM|g" \
-        -e "s|@NAME@|$N|g" "$HDR" > "dist/$N.run"
+        -e "s|@NAME@|$N|g" "$HDR" > "$DEST/$N.run"
     rm -f "$HDR"
 
-    cat "dist/$N.tar.gz" >> "dist/$N.run"
-    chmod 0755 "dist/$N.run"
-    say "    dist/$N.run"
+    cat "$A" >> "$DEST/$N.run"
+    chmod 0755 "$DEST/$N.run"
 }
 
 # --- Диспетчер --------------------------------------------------------------

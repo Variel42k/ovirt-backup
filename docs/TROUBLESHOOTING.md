@@ -578,25 +578,21 @@ Keycloak запущен, но realm `jhvirt` отсутствует. Не воз
 создаст случайного временного администратора, настроит realm и удалит эту
 учётную запись. Постоянный пароль администратора при этом не меняется.
 
-Ручная процедура ниже нужна, только если сам установщик завершился ошибкой или
-потерян доступ администратора Keycloak. Остановите все его узлы и создайте
-временную recovery-запись штатной командой Keycloak:
+Если потерян доступ администратора Keycloak, не возвращайте bootstrap-пароль в
+конфигурацию и не удаляйте БД. Для установки из `.run` выполните:
 
 ```bash
-docker compose stop keycloak
-read -rsp 'Временный пароль Keycloak: ' KC_RECOVERY_PASSWORD; echo
-export KC_RECOVERY_PASSWORD
-docker compose run --rm --no-deps -e KC_RECOVERY_PASSWORD keycloak \
-  --config-file=/opt/keycloak/data/ovirt-backup/keycloak.conf \
-  bootstrap-admin user --optimized --username kc-recovery-admin \
-  --password:env KC_RECOVERY_PASSWORD
-unset KC_RECOVERY_PASSWORD
-docker compose up -d keycloak
+sudo /opt/jhvirt/bin/ovirt-backup-recover-keycloak \
+  --user kc-bootstrap-admin
 ```
 
-Войдите как `kc-recovery-admin`, исправьте постоянную административную запись и
-удалите временную. Все узлы должны быть остановлены на время команды; она
-использует тот же `keycloak.conf` и ту же БД, что штатный контейнер.
+Для запуска из checkout: `sudo sh deploy/recover-keycloak.sh --compose-dir
+deploy --user kc-bootstrap-admin`. Команда сама останавливает все контейнеры
+сервиса Keycloak, создаёт временный admin service account штатной offline-
+командой, меняет пароль постоянного администратора, проверяет его права,
+отзывает старые сессии и удаляет временный client. Если аварийная очистка не
+смогла удалить его, скрипт печатает точный client ID: после возврата доступа
+удалите его из **master realm → Clients**.
 
 Если realm действительно нужно пересоздать на пустом тестовом стенде, сначала
 проверьте последний файл в `<JHV_DR_BACKUP_DIR>/keycloak/postgres`, затем

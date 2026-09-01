@@ -904,6 +904,22 @@ realm и не пытается создать его заново. Это отн
 unattended-команды с явным `--oidc keycloak`: режим и секреты загружаются из
 существующей установки до применения переданных параметров.
 
+Потерянный пароль не является причиной удалять БД или возвращать bootstrap-
+секрет в `.env`/`keycloak.conf`. Установка из `.run` содержит root-команду:
+
+```bash
+sudo /opt/jhvirt/bin/ovirt-backup-recover-keycloak \
+  --user kc-bootstrap-admin
+```
+
+Она сохраняет всю конфигурацию realm, создаёт отдельный временный admin service
+account штатной offline-командой Keycloak, проверяет новый постоянный пароль и
+его административные права, отзывает старые сессии и удаляет временный client.
+Для Compose из checkout используйте
+`sudo sh deploy/recover-keycloak.sh --compose-dir deploy`. Ни постоянный, ни
+временный пароль не записывается в `.env` или volume; новый постоянный пароль
+выводится только в терминал.
+
 Удаление базы Keycloak уничтожает пользователей, federation-настройки, MFA и
 realm. Делайте это только для чистого тестового развёртывания после проверки
 dump из `<JHV_DR_BACKUP_DIR>/keycloak/postgres`; в production восстанавливайте

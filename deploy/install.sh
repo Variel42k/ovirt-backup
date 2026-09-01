@@ -3390,6 +3390,7 @@ install_containers() {
             "$HERE/compose/Dockerfile.keycloak" "$HERE/compose/Dockerfile.postgres" \
             "$HERE/compose/dr-backup.sh" "$PREFIX/compose/"
 		install -m 0755 "$HERE/recover-admin.sh" "$PREFIX/bin/ovirt-backup-recover-admin"
+		install -m 0755 "$HERE/recover-keycloak.sh" "$PREFIX/bin/ovirt-backup-recover-keycloak"
         chmod 644 "$PREFIX/Dockerfile" "$PREFIX/compose/docker-compose.yml" \
             "$PREFIX/compose/.env.example" "$PREFIX/compose/Dockerfile.keycloak" \
 			"$PREFIX/compose/Dockerfile.postgres" \
@@ -3546,8 +3547,10 @@ PostgreSQL хранит пароль внутри тома и новый не п
 	set_plain_env JHV_RECOVERY_TOKEN_HASH "$RECOVERY_TOKEN_HASH" "$WORK/.env"
 	if [ "$BUNDLE" -eq 1 ]; then
 		RECOVERY_COMMAND="sudo $PREFIX/bin/ovirt-backup-recover-admin"
+		KEYCLOAK_RECOVERY_COMMAND="sudo $PREFIX/bin/ovirt-backup-recover-keycloak"
 	else
 		RECOVERY_COMMAND="sudo sh $HERE/recover-admin.sh --mode docker --compose-dir $WORK"
+		KEYCLOAK_RECOVERY_COMMAND="sudo sh $HERE/recover-keycloak.sh --compose-dir $WORK"
 	fi
 
 	step "token-файл Prometheus"
@@ -3676,6 +3679,8 @@ PostgreSQL хранит пароль внутри тома и новый не п
             say "  Запишите и его — из файла он тоже стёрт."
         else
             say "  пароль не менялся и повторно не выводится."
+            say "  Забыли — безопасно задайте новый с хоста:"
+            say "    $KEYCLOAK_RECOVERY_COMMAND --user $KEYCLOAK_ADMIN_USER"
         fi
     elif [ "$OIDC_MODE" = external ]; then
         say ""

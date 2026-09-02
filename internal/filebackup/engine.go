@@ -77,9 +77,6 @@ func New(st *store.Store, cfg config.Config, cipher *secret.Cipher, log zerolog.
 }
 
 func (e *Engine) Start(ctx context.Context, jobID string) (*model.FileBackupRun, error) {
-	if !e.cfg.FileBackup.Enabled {
-		return nil, fmt.Errorf("file backup is disabled by file_backup.enabled")
-	}
 	job, err := e.store.GetFileBackupJob(ctx, jobID)
 	if err != nil {
 		return nil, err
@@ -567,9 +564,6 @@ func (e *Engine) Manifest(ctx context.Context, runID string) (*Manifest, error) 
 // referenced by an incremental manifest are retained by the shared chain-safe
 // retention algorithm.
 func (e *Engine) ApplyRetention(ctx context.Context) error {
-	if !e.cfg.FileBackup.Enabled {
-		return nil
-	}
 	jobs, err := e.store.ListFileBackupJobs(ctx)
 	if err != nil {
 		return err
@@ -644,9 +638,6 @@ func (e *Engine) DeleteRun(ctx context.Context, runID string) error {
 }
 
 func (e *Engine) Restore(ctx context.Context, req RestoreRequest) (*RestoreResult, error) {
-	if !e.cfg.FileBackup.Enabled {
-		return nil, fmt.Errorf("file backup is disabled by file_backup.enabled")
-	}
 	run, err := e.store.GetFileBackupRun(ctx, req.RunID)
 	if err != nil {
 		return nil, err

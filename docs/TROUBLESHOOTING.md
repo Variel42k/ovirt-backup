@@ -434,6 +434,18 @@ SHA-256 в env. Не переносите token-файл внутрь volume п�
 обходит Keycloak. `kc-bootstrap-admin` здесь тоже не подходит — он действует
 только в master realm Keycloak.
 
+Если после чистой установки в Keycloak существует только
+`kc-bootstrap-admin`, использована версия установщика, которая ещё не создавала
+первого пользователя realm `jhvirt`. Повторно запустите актуальный `.run` с
+теми же параметрами. Он создаст `backup-admin`, включит его в `virt-admins` и
+один раз выведет отдельный пароль, не сбрасывая master-admin, realm или клиент.
+
+Если `backup-admin` уже есть, повторная установка намеренно не меняет его
+пароль. Сбросьте пароль в Admin Console:
+**realm jhvirt → Users → backup-admin → Credentials → Reset password**.
+При утраченном пароле самой консоли сначала выполните
+`sudo /opt/jhvirt/bin/ovirt-backup-recover-keycloak --user kc-bootstrap-admin`.
+
 Для документированного аварийного доступа сначала повторно запустите Docker-
 установщик с прежними `--url`/`--mode` и `--local-login enabled`, затем сбросьте
 пароль `local-admin` командой выше. После ремонта OIDC повторите установку с
@@ -993,10 +1005,22 @@ volumes/disks и другие ресурсы, которые rollback не см�
 
 ### Файловый бэкап не видит root или восстановление отвергает путь
 
-Функция должна быть включена `file_backup.enabled`, а root — объявлен в YAML.
-API принимает ID и относительный путь, не абсолютный путь клиента. Для Docker
-тот же абсолютный путь должен быть bind-mounted в контейнер; для systemd
-restore root должен входить в `ReadWritePaths`.
+Функция включена всегда. Без дополнительной настройки используйте root
+`default`: в Docker его host-пути заданы `JHV_FILE_BACKUP_DIR` и
+`JHV_FILE_RESTORE_DIR`, в systemd это `<PREFIX>/file-sources` и
+`<PREFIX>/file-restores`. API принимает ID и относительный путь, не
+абсолютный путь клиента. Для дополнительного Docker-root тот же абсолютный путь
+должен быть bind-mounted в контейнер; для дополнительного systemd restore root
+должен входить в `ReadWritePaths`.
+
+Проверка Docker:
+
+```bash
+cd /opt/jhvirt/compose
+grep -E '^JHV_FILE_(BACKUP|RESTORE)_DIR=' .env
+docker compose exec ovirt-backup sh -c \
+  'test -r /app/file-sources && test -w /app/file-restores'
+```
 
 Сервис отвергает `..`, выход canonical path из allowlist и переход через
 symlink-родителя. Это защита, а не ошибка сопоставления. Symlink внутри набора

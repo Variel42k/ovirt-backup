@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"slices"
 	"strings"
@@ -61,8 +62,8 @@ func trimNonEmpty(values []string) []string {
 }
 
 func (s *Server) requireFileBackup() error {
-	if !s.cfg.FileBackup.Enabled || s.fileBackup == nil {
-		return badRequest("native file backup is disabled by file_backup.enabled")
+	if s.fileBackup == nil {
+		return fmt.Errorf("native file backup engine is unavailable")
 	}
 	return nil
 }
@@ -100,12 +101,10 @@ func (s *Server) validateFileBackupJob(ctx context.Context, job *model.FileBacku
 
 func (s *Server) handleListFileBackupRoots(w http.ResponseWriter, r *http.Request) {
 	items := make([]fileBackupRootResponse, 0, len(s.cfg.FileBackup.Roots))
-	if s.cfg.FileBackup.Enabled {
-		for _, root := range s.cfg.FileBackup.Roots {
-			items = append(items, fileBackupRootResponse{ID: root.ID, Name: root.Name, RestoreRootCount: len(root.RestoreRoots)})
-		}
+	for _, root := range s.cfg.FileBackup.Roots {
+		items = append(items, fileBackupRootResponse{ID: root.ID, Name: root.Name, RestoreRootCount: len(root.RestoreRoots)})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"enabled": s.cfg.FileBackup.Enabled, "items": items, "total": len(items)})
+	writeJSON(w, http.StatusOK, map[string]any{"enabled": true, "items": items, "total": len(items)})
 }
 
 func (s *Server) handleListFileBackupJobs(w http.ResponseWriter, r *http.Request) {

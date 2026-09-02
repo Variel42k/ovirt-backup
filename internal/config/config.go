@@ -613,6 +613,9 @@ type FileBackupRoot struct {
 }
 
 type FileBackupConfig struct {
+	// Enabled сохранён только для совместимости со старыми YAML. Нативный
+	// файловый бэкап больше не является feature gate и после загрузки всегда
+	// включён; отключать нужно конкретные задания.
 	Enabled bool             `mapstructure:"enabled"`
 	Roots   []FileBackupRoot `mapstructure:"roots"`
 }
@@ -624,6 +627,40 @@ func (f FileBackupConfig) Root(id string) (FileBackupRoot, bool) {
 		}
 	}
 	return FileBackupRoot{}, false
+}
+
+// prepareFileBackup делает функцию пригодной к работе сразу после установки.
+// Рабочий каталог выбран базой намеренно: в systemd это PREFIX, в контейнере
+// /app. Установщики создают и изолированно монтируют эти каталоги.
+func (c *Config) prepareFileBackup() error {
+	base, err := filepath.Abs(".")
+	if err != nil {
+		return fmt.Errorf("resolve file backup working directory: %w", err)
+	}
+	c.FileBackup.Enabled = true
+	if len(c.FileBackup.Roots) == 0 {
+		c.FileBackup.Roots = []FileBackupRoot{{
+			ID:   "default",
+			Name: "Файлы для резервного копирования",
+			Path: filepath.Join(base, "file-sources"),
+			RestoreRoots: []string{
+				filepath.Join(base, "file-restores"),
+			},
+		}}
+		return nil
+	}
+	for i := range c.FileBackup.Roots {
+		root := &c.FileBackup.Roots[i]
+		if !filepath.IsAbs(root.Path) {
+			root.Path = filepath.Join(base, root.Path)
+		}
+		for j := range root.RestoreRoots {
+			if !filepath.IsAbs(root.RestoreRoots[j]) {
+				root.RestoreRoots[j] = filepath.Join(base, root.RestoreRoots[j])
+			}
+		}
+	}
+	return nil
 }
 
 // RestoreRoots возвращает каталоги, внутри которых разрешено создавать файлы
@@ -694,6 +731,9 @@ func Load(path string) (*Config, error) {
 	var cfg Config
 	if err := v.Unmarshal(&cfg); err != nil {
 		return nil, fmt.Errorf("decode config: %w", err)
+	}
+	if err := cfg.prepareFileBackup(); err != nil {
+		return nil, err
 	}
 	if err := cfg.resolveSecretFiles(); err != nil {
 		return nil, err
@@ -1120,7 +1160,7 @@ func setDefaults(v *viper.Viper) {
 
 	v.SetDefault("scheduler.enabled", true)
 	v.SetDefault("scheduler.timezone", "UTC")
-	v.SetDefault("file_backup.enabled", false)
+	v.SetDefault("file_backup.enabled", true)
 	v.SetDefault("file_backup.roots", []map[string]any{})
 	v.SetDefault("scheduler.catch_up_missed", true)
 }

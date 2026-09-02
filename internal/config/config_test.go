@@ -40,6 +40,42 @@ func TestSecureAuthenticationDefaults(t *testing.T) {
 	}
 }
 
+func TestFileBackupIsAlwaysAvailableWithDefaultRoot(t *testing.T) {
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("загрузка конфигурации: %v", err)
+	}
+	if !cfg.FileBackup.Enabled {
+		t.Fatal("файловый бэкап должен быть доступен без feature gate")
+	}
+	root, ok := cfg.FileBackup.Root("default")
+	if !ok {
+		t.Fatalf("не создан корень по умолчанию: %#v", cfg.FileBackup.Roots)
+	}
+	workingDir, err := filepath.Abs(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if root.Path != filepath.Join(workingDir, "file-sources") {
+		t.Fatalf("source root = %q", root.Path)
+	}
+	if len(root.RestoreRoots) != 1 ||
+		root.RestoreRoots[0] != filepath.Join(workingDir, "file-restores") {
+		t.Fatalf("restore roots = %#v", root.RestoreRoots)
+	}
+}
+
+func TestLegacyFileBackupSwitchCannotDisableFeature(t *testing.T) {
+	t.Setenv("JHV_FILE_BACKUP_ENABLED", "false")
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("загрузка конфигурации: %v", err)
+	}
+	if !cfg.FileBackup.Enabled {
+		t.Fatal("устаревший feature gate отключил файловые бэкапы")
+	}
+}
+
 // temp_dir входит в разрешённые корни всегда: иначе восстановление в файл не
 // работало бы из коробки.
 func TestRestoreRootsAlwaysIncludeTempDir(t *testing.T) {

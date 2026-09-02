@@ -80,7 +80,8 @@ test('engine and native file backup pages are discoverable', async ({ page }) =>
 
   await page.goto('/file-backups')
   await expect(page.getByRole('main').getByText('Файловые бекапы', { exact: true })).toBeVisible()
-  await expect(page.getByRole('alert')).toContainText('file_backup.enabled')
+  await expect(page.getByRole('button', { name: 'Новое задание' })).toBeVisible()
+  await expect(page.getByText('Функция выключена', { exact: false })).toHaveCount(0)
 })
 
 test('timezone change is pushed to another open web session', async ({ page, context }, testInfo) => {

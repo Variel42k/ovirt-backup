@@ -11,7 +11,6 @@ import type { FileBackupJob, FileBackupManifest, FileBackupRoot, FileBackupRun }
 const $q = useQuasar()
 const app = useAppStore()
 const auth = useAuthStore()
-const enabled = ref(false)
 const loading = ref(false)
 const busy = ref(false)
 const roots = ref<FileBackupRoot[]>([])
@@ -123,13 +122,7 @@ async function load(silent = false) {
   if (!silent) loading.value = true
   try {
     const rootResponse = await api.listFileBackupRoots()
-    enabled.value = rootResponse.enabled
     roots.value = rootResponse.items
-    if (!enabled.value) {
-      jobs.value = []
-      runs.value = []
-      return
-    }
     ;[jobs.value, runs.value] = await Promise.all([
       api.listFileBackupJobs(),
       api.listFileBackupRuns(),
@@ -288,18 +281,14 @@ onBeforeUnmount(() => {
       </div>
       <q-space />
       <q-btn flat round dense icon="refresh" :loading="loading" @click="load()" />
-      <q-btn v-if="enabled && auth.canAdmin()" color="primary" icon="add" label="Новое задание" class="q-ml-sm" @click="createJob" />
+      <q-btn v-if="auth.canAdmin()" color="primary" icon="add" label="Новое задание" class="q-ml-sm" @click="createJob" />
     </div>
 
-    <q-banner v-if="!enabled" rounded class="bg-warning text-dark q-mb-md">
-      Функция выключена. Добавьте именованные корни и включите <code>file_backup.enabled</code> в конфигурации сервера.
-    </q-banner>
-    <q-banner v-else-if="roots.length === 0" rounded class="bg-warning text-dark q-mb-md">
+    <q-banner v-if="roots.length === 0" rounded class="bg-warning text-dark q-mb-md">
       Нет разрешённых корней. Web-интерфейс намеренно не принимает произвольные абсолютные пути.
     </q-banner>
 
-    <template v-if="enabled">
-      <div class="text-subtitle1 q-mb-sm">Задания</div>
+    <div class="text-subtitle1 q-mb-sm">Задания</div>
       <q-table :rows="jobs" :columns="jobColumns" row-key="id" flat bordered :loading="loading" class="jhv-table q-mb-lg">
         <template #body-cell-name="props">
           <q-td :props="props">
@@ -339,11 +328,10 @@ onBeforeUnmount(() => {
             <q-btn flat round dense icon="account_tree" :loading="busy && selectedRun?.id === props.row.id" :disable="!['succeeded', 'partial'].includes(props.row.status)" @click="openTree(props.row)">
               <q-tooltip>Просмотреть и восстановить</q-tooltip>
             </q-btn>
-						<q-btn v-if="auth.canAdmin()" flat round dense icon="delete" color="negative" :disable="['pending', 'running', 'waiting_copies'].includes(props.row.status)" @click="deleteRun(props.row)" />
+            <q-btn v-if="auth.canAdmin()" flat round dense icon="delete" color="negative" :disable="['pending', 'running', 'waiting_copies'].includes(props.row.status)" @click="deleteRun(props.row)" />
           </q-td>
         </template>
       </q-table>
-    </template>
 
     <q-dialog v-model="jobDialog" persistent>
       <q-card style="width: 760px; max-width: 96vw">

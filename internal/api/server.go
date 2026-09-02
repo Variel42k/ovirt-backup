@@ -366,7 +366,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /engine-config/compare", s.perm(model.PermEngineConfigRead, s.handleCompareEngineConfig))
 
 	// Native file backups are isolated from VM jobs and guarded by the
-	// file_backup.enabled feature gate.
+	// Файловые бэкапы доступны всегда; корни ограничивают видимую файловую систему.
 	mux.HandleFunc("GET /file-backup/roots", s.perm(model.PermFileBackupsRead, s.handleListFileBackupRoots))
 	mux.HandleFunc("GET /file-backup/jobs", s.perm(model.PermFileBackupsRead, s.handleListFileBackupJobs))
 	mux.HandleFunc("POST /file-backup/jobs", s.perm(model.PermFileBackupsAdmin, s.handleCreateFileBackupJob))

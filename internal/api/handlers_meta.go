@@ -151,7 +151,7 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 	// интерфейс должен показывать то, что действует сейчас.
 	resp.Capabilities.RemediationDryRun = s.remediator.DryRun()
 	resp.Capabilities.AuthEnabled = s.cfg.Auth.Enabled
-	resp.Capabilities.FileBackup = s.cfg.FileBackup.Enabled
+	resp.Capabilities.FileBackup = s.fileBackup != nil
 	resp.Capabilities.OIDCEnabled = s.oidc != nil
 	resp.Capabilities.LocalLogin = s.localLoginAllowed()
 

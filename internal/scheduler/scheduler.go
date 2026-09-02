@@ -331,12 +331,9 @@ func (s *Scheduler) reload(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("загрузка заданий: %w", err)
 	}
-	var fileJobs []*model.FileBackupJob
-	if s.cfg.FileBackup.Enabled {
-		fileJobs, err = s.store.ListFileBackupJobs(ctx)
-		if err != nil {
-			return fmt.Errorf("загрузка заданий файлового бекапа: %w", err)
-		}
+	fileJobs, err := s.store.ListFileBackupJobs(ctx)
+	if err != nil {
+		return fmt.Errorf("загрузка заданий файлового бекапа: %w", err)
 	}
 	engineJobs, err := s.store.ListEngineConfigJobs(ctx)
 	if err != nil {

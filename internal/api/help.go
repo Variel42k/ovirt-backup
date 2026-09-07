@@ -906,6 +906,87 @@ func helpArticles() []helpArticle {
 			},
 		},
 		{
+			ID:       "keycloak-active-directory",
+			Title:    "Active Directory через Keycloak",
+			Summary:  "Доменный пароль проверяет AD, а роль приложения определяется группой, которую Keycloak помещает в OIDC-токен.",
+			Category: "Доступ",
+			Blocks: []helpBlock{
+				{
+					Kind: "flow",
+					Steps: []helpStep{
+						{Title: "Доменный пользователь", Detail: "Вводит пароль только на странице Keycloak", Icon: "person"},
+						{Title: "LDAP federation", Detail: "Keycloak проверяет пароль в AD по LDAPS", Icon: "account_tree"},
+						{Title: "Группа доступа", Detail: "Локальное членство Keycloak или синхронизация группы AD", Icon: "groups"},
+						{Title: "OIDC groups", Detail: "virt-admins, virt-operators или virt-readers попадает в токен", Icon: "verified_user"},
+						{Title: "Роль приложения", Detail: "admin, operator или viewer пересчитывается при новом входе", Icon: "badge"},
+					},
+				},
+				{
+					Kind:    "list",
+					Heading: "Подключение каталога",
+					Items: []string{
+						"В простом интерактивном режиме достаточно DNS-домена, контроллера, bind-пользователя и CA: Base DN вычисляется автоматически, пароль вводится скрыто сразу в file vault",
+						"В unattended-режиме используйте --keycloak-ad-domain, --keycloak-ad-controller, --keycloak-ad-bind-user, password-файл 0600 и PEM CA",
+						"Расширенный режим позволяет отдельно задать LDAPS URL, Users DN и Groups DN; он нужен, когда поиск требуется ограничить конкретными OU",
+						"Если LDAP provider уже существует, укажите установщику его точное имя; второй provider поверх существующей federation автоматически не создаётся",
+						"Группы realm и группы AD — разные объекты: virt-admins, virt-operators и virt-readers сначала создаёт AD-администратор, mapper связывает их по имени",
+						"В Admin Console выберите realm jhvirt, затем User federation → Add new provider → LDAP",
+						"Vendor: Active Directory; Connection URL: ldaps://полное-имя-dc:636; bind выполняет отдельная read-only service account",
+						"Users DN ограничивает область поиска; username = sAMAccountName, UUID = objectGUID, search scope = Subtree",
+						"Edit mode = READ_ONLY, Import users = On, Sync registrations = Off; сначала Test connection и Test authentication",
+						"Проверьте mappers givenName → firstName, sn → lastName, mail → email и оставьте MSAD User Account Mapper",
+						"Выполните Synchronize all users, затем включите периодическую синхронизацию изменённых пользователей",
+					},
+				},
+				{
+					Kind:    "table",
+					Heading: "Как выдать доступ",
+					Columns: []string{"Режим", "Действие"},
+					Rows: [][]string{
+						{"Вручную в Keycloak", "Users → пользователь → Groups → Join Group; выберите virt-admins, virt-operators или virt-readers"},
+						{"Автоматически из AD", "Group LDAP Mapper в режиме READ_ONLY читает cn группы, member/memberOf и переносит членство; состав меняется только в AD"},
+						{"Смена роли", "Удалите прежнее членство, назначьте новое, завершите сессии пользователя и выполните новый вход"},
+						{"Несколько групп", "Побеждает старшая роль: администратор, затем оператор, затем наблюдатель"},
+					},
+				},
+				{
+					Kind:    "table",
+					Heading: "Group LDAP Mapper для плоских групп AD",
+					Columns: []string{"Поле", "Значение"},
+					Rows: [][]string{
+						{"LDAP Groups DN", "OU, где лежат группы доступа"},
+						{"Group Name LDAP Attribute", "cn"},
+						{"Group Object Classes", "group"},
+						{"Membership LDAP Attribute / type", "member / DN"},
+						{"Retrieve Strategy / Member-Of", "GET_GROUPS_FROM_USER_MEMBEROF_ATTRIBUTE / memberOf"},
+						{"Mode", "READ_ONLY — Keycloak не записывает членство обратно в AD"},
+						{"Groups LDAP Filter", "(|(cn=virt-admins)(cn=virt-operators)(cn=virt-readers))"},
+					},
+				},
+				{
+					Kind:    "warning",
+					Heading: "Не смешивайте источники членства",
+					Text: "Если LDAP mapper управляет группой, ручное добавление пользователя в ту же группу может исчезнуть после sync. " +
+						"Для малой команды используйте локальные группы Keycloak без Group LDAP Mapper. Для production обычно надёжнее " +
+						"управлять тремя группами в AD и считать каталог единственным источником истины.",
+				},
+				{
+					Kind:    "note",
+					Heading: "Где находится bind-пароль",
+					Text: "В базе Keycloak хранится только ссылка ${vault.ad-bind}. Сам пароль лежит в отдельном file vault на Docker-host, " +
+						"который смонтирован только в Keycloak и только для чтения. Компрометация контейнера Keycloak всё равно даёт доступ к этому " +
+						"секрету, поэтому service account должна иметь только право чтения каталога, без интерактивного входа и административных групп.",
+				},
+				{
+					Kind:    "note",
+					Heading: "DNS и сертификат LDAPS",
+					Text: "DNS-имя контроллера должно разрешаться внутри контейнера. Адрес 127.0.0.11 — нормальный DNS-прокси Docker; " +
+						"исправляется резолвер host. Корневой и промежуточный CA положите в сохраняемый keycloak-truststores и перезапустите " +
+						"только Keycloak. Каталог смонтирован read-only, закрытый ключ туда помещать нельзя.",
+				},
+			},
+		},
+		{
 			ID:      "local-recovery",
 			Title:   "Восстановление доступа, когда войти нельзя",
 			Summary: "Сброс пароля выполняется с хоста по отдельному токену и отзывает все действующие доступы.",

@@ -123,6 +123,7 @@ Cookie сессии имеет `HttpOnly`, `SameSite=Lax` и `Secure` при HTT
 | metrics token | `jhvirt-data:/app/data/metrics.token` | `<PREFIX>/config/metrics.token` |
 | админ-пароль PostgreSQL | `postgres-secrets:/run/secrets/admin-password` | не нужен при peer |
 | конфигурация Keycloak | `keycloak-data:/opt/keycloak/data/ovirt-backup/keycloak.conf` | не применяется |
+| LDAP bind credential | `<PREFIX>/keycloak-vault/jhvirt_ad-bind`, bind mount только в Keycloak, `root:root 0440` | не применяется |
 | recovery token | `<PREFIX>/config/recovery.token` на хосте, не смонтирован | `<PREFIX>/config/recovery.token`, `root:root 0600` |
 
 Bootstrap-пароли удаляются из файлов после успешного старта/настройки. Затем
@@ -137,6 +138,24 @@ Bootstrap-пароли удаляются из файлов после успе�
 
 Не прикладывайте `.env`,
 `jhvirt.env`, `keycloak.conf`, migration archive или вывод с токенами к issue.
+
+### Active Directory
+
+В компоненте LDAP хранится ссылка `${vault.ad-bind}`, а не пароль. File vault
+смонтирован только в контейнер Keycloak; приложение и PostgreSQL не имеют к
+нему пути. Это ограничивает последствия компрометации соседнего контейнера,
+но не самого Keycloak: процесс, который выполняет LDAP bind, принципиально
+должен читать credential. Поэтому AD service account должна быть отдельной,
+read-only, без интерактивного входа, административных групп и прав изменения
+каталога. Её пароль должен быть уникальным и быстро отзываемым.
+
+Установщик разрешает только LDAPS и проверяет наличие корпоративного CA. Group
+LDAP Mapper по умолчанию `READ_ONLY`, поэтому действие администратора Keycloak
+не меняет состав групп в AD. В интерактивном режиме пароль читается с
+отключённым echo и сразу записывается в vault; временный password-файл не
+создаётся. Файл bind-пароля, переданный unattended-установщику, после успешной
+настройки удалите; рабочий vault-файл и truststore входят в защищённый пакет
+миграции вместе с dump Keycloak.
 
 ## Подключение к хостам и хранилищам
 

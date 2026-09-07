@@ -614,6 +614,65 @@ deploy --user kc-bootstrap-admin`. Команда сама останавлив�
 Локальный `local-admin` приложения не помогает войти в консоль Keycloak. И
 наоборот, `kc-bootstrap-admin` не принимается парольной формой ovirt-backup.
 
+### Keycloak не видит пользователей или группы Active Directory
+
+Проверьте по порядку:
+
+1. DNS-имена всех DC разрешаются внутри контейнера Keycloak;
+2. `Connection URL` использует `ldaps://...:636`, а корпоративный CA находится
+   в `/opt/jhvirt/keycloak-truststores`;
+3. `Users DN` содержит нужные OU, а `Search scope` равен `Subtree`;
+4. username mapper читает `sAMAccountName`, не `cn`;
+5. `LDAP Groups DN` указывает на OU с `virt-admins`, `virt-operators` и
+   `virt-readers`;
+6. пользователь является непосредственным членом одной из этих групп.
+
+Простой мастер строит Base DN из DNS-домена и ищет DC по записи
+`_ldap._tcp.dc._msdcs.<домен>`. Сообщение `контроллер домена не найден через
+DNS SRV` не запрещает интеграцию: проверьте AD DNS и повторите установку с
+`--keycloak-ad-controller dc01.example.org`. Указывайте FQDN из SAN
+сертификата, а не случайный IP.
+
+`Synchronize all users: 0 imported users` без ошибки обычно означает слишком
+узкий `Users DN`, `One Level` или LDAP filter. Успешный импорт пользователей не
+доказывает, что импортированы группы: Group LDAP Mapper синхронизируется
+отдельно.
+
+Проверьте vault без печати секрета:
+
+```bash
+cd /opt/jhvirt/compose
+sudo stat -c '%U:%G %a %n' \
+  /opt/jhvirt/keycloak-vault/jhvirt_ad-bind
+sudo docker compose exec -T --user 1000:0 keycloak \
+  sh -c 'test -s /opt/keycloak/conf/vault/jhvirt_ad-bind'
+sudo docker compose logs --since=15m keycloak |
+  grep -Ei 'ldap|vault|pkix|certificate|sync'
+```
+
+Ожидаемые права host-файла: `root:root 440`. Ошибка `Vault key 'ad-bind' not
+found` означает, что файл отсутствует, пуст или недоступен UID 1000:GID 0.
+Повторите интерактивную установку и скрыто введите новый пароль; при одном
+provider он будет выбран автоматически. Для unattended-запуска используйте то
+же `--keycloak-ad-provider` и новый `--keycloak-ad-bind-password-file`; пароль
+в базу или `.env` не записывайте.
+
+Если пользователь виден в **Users**, но ovirt-backup отклоняет вход, откройте
+его вкладку **Groups**. Нужна хотя бы одна из трёх групп без префикса пути.
+После изменения членства выполните sync mapper, завершите Keycloak-сессии
+пользователя и начните новый вход: существующая cookie приложения не меняет
+роль сама. Полная команда установки и модель ролей приведены в
+[KEYCLOAK-AD.md](KEYCLOAK-AD.md).
+
+Если установщик сообщает о нескольких LDAP-компонентах с одним именем, не
+удаляйте случайный. В **User federation** временно отключите старый provider,
+сравнив `Users DN`, username attribute и число привязанных пользователей.
+Проверьте вход учётной записью из нового provider и только затем удаляйте
+старый. Пользователи, импортированные через разные provider под разными
+username (`cn` и `sAMAccountName`), могут представлять одних и тех же людей;
+перед удалением выгрузите список и проверьте активные записи. Установщик
+намеренно не выбирает первый дубликат и не удаляет пользователей автоматически.
+
 ### После пароля Keycloak открывает `Update Account Information`
 
 Провайдер принял пароль, но считает профиль пользователя неполным. Заполните
@@ -621,6 +680,12 @@ email, имя и фамилию в этой форме либо заранее �
 консоли Keycloak: **Users → пользователь → Details**. После сохранения Keycloak
 продолжит тот же OIDC-вход. Для допуска в ovirt-backup пользователь также должен
 состоять в `virt-admins`, `virt-operators` или `virt-readers`.
+
+Для доменного пользователя проверьте, кем управляется членство. Если выбран
+ручной режим: **realm jhvirt → Users → пользователь → Groups → Join Group**.
+Если используется LDAP Group Mapper, меняйте членство в Active Directory и
+запускайте sync, а не добавляйте пользователя локально. Полный порядок и
+разбор LDAPS/DNS: [KEYCLOAK-AD.md](KEYCLOAK-AD.md).
 
 ### Keycloak возвращает `invalid_scope`
 

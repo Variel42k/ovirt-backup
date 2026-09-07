@@ -281,7 +281,19 @@ digest. После bootstrap приложение пересоздаётся б�
 пароля. При чистой установке отдельный `backup-admin` создаётся в realm
 `jhvirt`, включается в `virt-admins` и получает свой одноразово показанный
 пароль для входа в приложение. `kc-bootstrap-admin` действует только в Admin
-Console master realm. `install.sh` также создаёт ежедневные проверенные dump БД приложения и
+Console master realm.
+
+Active Directory можно подключить тем же `.run` через `--keycloak-ad`:
+установщик принимает только LDAPS, ставит корпоративный CA, создаёт provider и
+Group LDAP Mapper, синхронизирует `virt-admins`, `virt-operators` и
+`virt-readers`. В интерактивной установке достаточно выбрать простой режим,
+ввести DNS-домен, контроллер и bind-пользователя; Base DN вычисляется
+автоматически, а пароль вводится скрыто сразу в read-only Keycloak file vault.
+Для unattended-запуска пароль принимается из файла `0600`. В `.env` и
+PostgreSQL остаётся только ссылка на секрет. Полная команда и подготовка групп приведены в
+[`docs/KEYCLOAK-AD.md`](docs/KEYCLOAK-AD.md).
+
+`install.sh` также создаёт ежедневные проверенные dump БД приложения и
 Keycloak и отдельную копию `secret.key`; каталог задаётся
 `--dr-backup-dir` и в production должен находиться вне системного диска.
 
@@ -299,7 +311,9 @@ sudo sh ./ovirt-backup-*.run \
   --migrate-from /root/jhvirt-migration.tar.gz
 ```
 
-Пакет содержит dump PostgreSQL, YAML/env, `secret.key`, токены и TLS-пару.
+Пакет содержит dump PostgreSQL, YAML/env, `secret.key`, токены и TLS-пару. Для
+встроенного Keycloak также переносятся его dump, LDAPS truststore и AD bind
+credential из file vault.
 Исходные путь установки и системный пользователь сохраняются, если на новом
 узле не задать другие `PREFIX`/`USER_NAME`. Каталоги самих бекапов в архив не
 входят: их mount points нужно подключить отдельно. Оба действия доступны и в
@@ -520,6 +534,8 @@ jvbackup list -repo 'webdavs://backup:pass@cloud.example.org/remote.php/dav/file
   резервирование самого сервиса и восстановление.
 - [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) — где находятся YAML, env,
   unit, ключ и данные для Docker и systemd.
+- [`docs/KEYCLOAK-AD.md`](docs/KEYCLOAK-AD.md) — пошаговое подключение Active
+  Directory к встроенному Keycloak и назначение ролей через группы.
 - [`docs/DNS.md`](docs/DNS.md) — DNS движков и гипервизоров, корпоративный
   `.local`, постоянная настройка Netplan/NetworkManager и Docker override.
 - [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) — ошибки установки и

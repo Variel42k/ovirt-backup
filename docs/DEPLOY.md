@@ -124,6 +124,18 @@ HTTPS через nginx, который передаёт запросы на ло
 | `--keycloak-port 8081` | порт Keycloak наружу |
 | `--keycloak-url https://host:8081` | адрес Keycloak, если он виден не по адресу службы |
 | `--keycloak-app-admin-user backup-admin` | имя первого администратора приложения в realm `jhvirt`; `none` — не создавать |
+| `--keycloak-ad` | идемпотентно подключить Active Directory к встроенному Keycloak |
+| `--keycloak-ad-provider corp-ad` | стабильное имя LDAP provider; повторный запуск обновляет provider с этим именем |
+| `--keycloak-ad-domain example.org` | простой режим: вычислить `DC=example,DC=org` для поиска пользователей и групп |
+| `--keycloak-ad-controller dc01.example.org` | DNS-имя DC; без параметра установщик пробует DNS SRV и спрашивает подтверждение |
+| `--keycloak-ad-bind-user svc-keycloak@example.org` | UPN либо полный DN read-only service account; короткое имя дополняется доменом |
+| `--keycloak-ad-url 'ldaps://dc01:636 ldaps://dc02:636'` | один или несколько LDAPS URL через пробел; незашифрованный LDAP установщик отклоняет |
+| `--keycloak-ad-users-dn DN` | корень поиска доменных пользователей с областью `Subtree` |
+| `--keycloak-ad-groups-dn DN` | OU, содержащий три группы доступа |
+| `--keycloak-ad-bind-dn DN` | DN отдельной read-only service account |
+| `--keycloak-ad-bind-password-file /root/ad-bind.password` | однострочный файл `0600`; пароль переносится в Keycloak file vault, не в `.env`/БД |
+| `--keycloak-ad-ca-file /root/ad-ca-chain.pem` | PEM bundle корневого и промежуточных CA для LDAPS, без закрытых ключей |
+| `--keycloak-ad-group-mode read-only` | запрет записи членства из Keycloak в AD; безопасное умолчание |
 | `--oidc-backchannel-url http://idp:8080` | внутренний origin внешнего OIDC-провайдера, если публичный адрес недоступен из контейнера |
 | `--oidc-issuer`, `--oidc-client-id` | параметры существующего провайдера |
 | `--oidc-client-secret-file /root/kc.secret` | секрет клиента файлом, а не аргументом |
@@ -164,6 +176,30 @@ Compose. Установщик не завершает работу, пока `/a
 умолчание `default_role`. Там же, а не в службе, подключаются домены (User
 Federation) и включается второй фактор (Required Actions → Configure OTP,
 FreeOTP и совместимые).
+
+При выборе встроенного Keycloak интерактивный установщик отдельно предлагает
+подключить Active Directory. Режим `1 — по DNS-домену` вычисляет Base DN,
+пытается найти DC через `_ldap._tcp.dc._msdcs.<домен>`, предлагает найденное
+имя для подтверждения и принимает bind-пароль без отображения. Режим `2`
+оставляет отдельный ввод URL, Users DN и Groups DN.
+
+В unattended-режиме для простой настройки передайте `--keycloak-ad-domain`,
+`--keycloak-ad-controller`, `--keycloak-ad-bind-user`, файл пароля и CA.
+Отдельные Users/Groups DN необязательны. Установщик проверяет права файла секрета,
+PEM CA, LDAPS URL, создаёт provider и Group LDAP Mapper, выполняет полный sync
+и требует найти `virt-admins`, `virt-operators`, `virt-readers`. Повторный
+запуск с тем же `--keycloak-ad-provider` обновляет конфигурацию и подходит для
+смены bind-пароля. Если в realm уже есть LDAP provider с другим именем,
+установщик не создаёт второй: укажите точное существующее имя. Дубликаты нужно
+сначала разобрать по [KEYCLOAK-AD.md](KEYCLOAK-AD.md).
+
+Bind-пароль хранится в `/opt/jhvirt/keycloak-vault/jhvirt_ad-bind`, а CA в
+`/opt/jhvirt/keycloak-truststores`; оба каталога монтируются только в Keycloak
+и только для чтения. Пакет миграции включает их вместе с dump Keycloak.
+
+Пошаговая подготовка групп AD, запуск установщика, проверка LDAPS,
+синхронизация, отзыв доступа и смена bind-пароля:
+[KEYCLOAK-AD.md](KEYCLOAK-AD.md).
 
 Повторная установка сохраняет БД Keycloak и не меняет прежний пароль
 `kc-bootstrap-admin`, поэтому он повторно не печатается. Если пароль утрачен,

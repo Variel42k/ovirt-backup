@@ -131,6 +131,10 @@ postgres-secrets volume       административный пароль Post
 | `JHV_RESTORE_DIR` | host-каталог, смонтированный как `/restores` |
 | `JHV_FILE_BACKUP_DIR` | исходный каталог корня `default`, смонтированный read-only как `/app/file-sources` |
 | `JHV_FILE_RESTORE_DIR` | каталог восстановления корня `default`, смонтированный как `/app/file-restores` |
+| `JHV_KEYCLOAK_TRUSTSTORE_DIR` | host-каталог корпоративных CA, смонтированный read-only в truststore Keycloak |
+| `JHV_KEYCLOAK_VAULT_DIR` | host-каталог file vault Keycloak; LDAP bind secret хранится как `<realm>_ad-bind` и монтируется read-only |
+| `JHV_KEYCLOAK_AD_DOMAIN`, `JHV_KEYCLOAK_AD_CONTROLLER` | сохранённые несекретные значения простого AD-мастера |
+| `JHV_KEYCLOAK_AD_PROVIDER`, `JHV_KEYCLOAK_AD_URL`, `JHV_KEYCLOAK_AD_*_DN` | состояние federation для повторного обновления; bind-пароля среди этих полей нет |
 | `JHV_DR_BACKUP_DIR` | dump БД приложения/Keycloak и отдельная копия `secret.key` |
 | `JHV_DATABASE_SSLMODE` | режим TLS до PostgreSQL; для внутренней Compose-сети по умолчанию `disable`, разрешённый только для точного хоста `postgres` |
 | `JHV_LOG_FILE` | файл журнала внутри контейнера; по умолчанию `/app/data/logs/jhvirt.log` |
@@ -311,6 +315,8 @@ curl -fsS http://127.0.0.1:8080/readyz
 | Файловые source/restore roots | `JHV_FILE_BACKUP_DIR` и `JHV_FILE_RESTORE_DIR`; дополнительные bind mounts + allowlist YAML | `<PREFIX>/file-sources` и `<PREFIX>/file-restores`; дополнительные allowlist-пути + `ReadWritePaths` |
 | Восстановленные образы | host-путь из `JHV_RESTORE_DIR` | разрешённые каталоги из YAML и unit |
 | TLS приложения | каталог `tls/` в `jhvirt-data` | `<PREFIX>/config/tls` |
+| CA для LDAPS Keycloak | `<PREFIX>/keycloak-truststores` либо `JHV_KEYCLOAK_TRUSTSTORE_DIR` | не применяется |
+| Bind-пароль AD | `<PREFIX>/keycloak-vault/jhvirt_ad-bind`, `root:root 0440` | не применяется; systemd использует только внешний OIDC |
 
 Надёжно получить Docker-ключ, не завися от внутреннего пути Docker volume:
 
@@ -848,6 +854,23 @@ User Federation на каждый домен (LDAP или Active Directory), а 
 Второй провайдер в конфигурации службы понадобился бы только при двух
 независимых точках входа — например, при переезде с одного Keycloak на другой,
 когда какое-то время должны работать оба.
+
+Полная настройка Active Directory, LDAPS truststore, подготовка групп и
+автоматический Group LDAP Mapper описаны в [KEYCLOAK-AD.md](KEYCLOAK-AD.md).
+Интерактивный мастер умеет вычислить Base DN по DNS-домену, найти DC через SRV
+и скрыто принять bind-пароль. Установщик также принимает AD-параметры через
+`--keycloak-ad-*`, применяет их идемпотентно и по умолчанию использует режим
+`READ_ONLY`. Для одной группы не
+смешивайте локальное членство и LDAP-синхронизацию: следующий sync изменит
+эффективный набор групп.
+
+LDAP bind credential не записывается в `.env`, YAML и компонентную таблицу
+Keycloak. Provider хранит `${vault.ad-bind}`, а default file-vault resolver
+читает файл `<realm>_ad-bind` из `JHV_KEYCLOAK_VAULT_DIR`. Для стандартного
+realm это `/opt/jhvirt/keycloak-vault/jhvirt_ad-bind`, `root:root 0440`.
+Каталог монтируется только в Keycloak и только для чтения. При смене пароля
+service account повторите `.run` с тем же именем provider и новым входным
+файлом `0600`.
 
 ### Двухфакторная проверка
 

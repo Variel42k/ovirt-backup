@@ -6,7 +6,9 @@ FROM ${KEYCLOAK_BASE_IMAGE} AS builder
 
 ENV KC_DB=postgres \
     KC_HEALTH_ENABLED=true
-RUN /opt/keycloak/bin/kc.sh build
+# LDAP bind credentials are referenced as ${vault.<key>} and read from a
+# dedicated read-only mount instead of being stored in component JSON/DB.
+RUN /opt/keycloak/bin/kc.sh build --vault=file
 
 ARG KEYCLOAK_BASE_IMAGE
 FROM ${KEYCLOAK_BASE_IMAGE}

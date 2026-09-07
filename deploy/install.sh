@@ -41,6 +41,23 @@
 #   ./install.sh --keycloak-port 8081  порт Keycloak наружу
 #   ./install.sh --keycloak-app-admin-user backup-admin
 #                                      первый администратор приложения в realm jhvirt
+#   ./install.sh --keycloak-ad --keycloak-ad-domain example.org \
+#                --keycloak-ad-controller dc01.example.org \
+#                --keycloak-ad-bind-user svc-keycloak@example.org \
+#                --keycloak-ad-bind-password-file /root/ad-bind.password \
+#                --keycloak-ad-ca-file /root/ad-ca-chain.pem
+#                                      простое подключение AD по DNS-домену
+#   ./install.sh --keycloak-ad --keycloak-ad-url ldaps://dc.example.org:636 \
+#                --keycloak-ad-users-dn 'OU=Users,DC=example,DC=org' \
+#                --keycloak-ad-groups-dn 'OU=Groups,DC=example,DC=org' \
+#                --keycloak-ad-bind-dn 'CN=svc-keycloak,OU=Service Accounts,DC=example,DC=org' \
+#                --keycloak-ad-bind-password-file /root/ad-bind.password \
+#                --keycloak-ad-ca-file /root/ad-ca-chain.pem
+#                                      расширенное подключение с отдельными DN
+#   ./install.sh --keycloak-ad-provider corp-ad
+#                                      имя provider; нужно то же имя при обновлении
+#   ./install.sh --keycloak-ad-group-mode read-only
+#                                      AD управляет членством без записи из Keycloak
 #   ./install.sh --oidc external --oidc-issuer https://kc/realms/infra \
 #                --oidc-client-id jhvirt --oidc-client-secret-file /root/kc.secret
 #                                      подключить существующий провайдер
@@ -112,6 +129,15 @@ KEYCLOAK_RECOVERY_PASSWORD=""
 KEYCLOAK_APP_ADMIN_USER="backup-admin"; KEYCLOAK_APP_ADMIN_USER_EXPLICIT=0
 KEYCLOAK_APP_ADMIN_PASSWORD=""; KEYCLOAK_APP_ADMIN_CREATED=0
 KEYCLOAK_DIRECT_TLS=0; KEYCLOAK_BIND_ADDRESS=127.0.0.1; KEYCLOAK_CONTAINER_PORT=8080
+# Параметры AD применяются только при явном --keycloak-ad либо в ответ на
+# интерактивный вопрос. Bind-пароль копируется в file vault Keycloak и никогда
+# не попадает в .env, аргументы процессов или БД Keycloak.
+KEYCLOAK_AD_REQUESTED=0; KEYCLOAK_AD_PROVIDER="active-directory"; KEYCLOAK_AD_PROVIDER_EXPLICIT=0
+KEYCLOAK_AD_DOMAIN=""; KEYCLOAK_AD_CONTROLLER=""; KEYCLOAK_AD_URL=""
+KEYCLOAK_AD_USERS_DN=""; KEYCLOAK_AD_GROUPS_DN=""; KEYCLOAK_AD_BIND_DN=""
+KEYCLOAK_AD_BIND_PASSWORD_FILE=""; KEYCLOAK_AD_BIND_PASSWORD=""; KEYCLOAK_AD_PASSWORD_WAS_INTERACTIVE=0
+KEYCLOAK_AD_CA_FILE=""; KEYCLOAK_AD_SIMPLE=0
+KEYCLOAK_AD_GROUP_MODE="read-only"; KEYCLOAK_AD_CA_TARGET=""; KEYCLOAK_AD_VAULT_TARGET=""
 # Имена групп допуска. Пользователь, не попавший ни в одну, в систему не
 # допускается: default_role остаётся пустым.
 GROUP_ADMIN="virt-admins"; GROUP_OPERATOR="virt-operators"; GROUP_VIEWER="virt-readers"
@@ -181,6 +207,29 @@ while [ $# -gt 0 ]; do
         --keycloak-url=*) KEYCLOAK_URL="${1#--keycloak-url=}"; shift ;;
         --keycloak-app-admin-user) [ $# -ge 2 ] || die "--keycloak-app-admin-user требует имя или none"; KEYCLOAK_APP_ADMIN_USER="$2"; KEYCLOAK_APP_ADMIN_USER_EXPLICIT=1; shift 2 ;;
         --keycloak-app-admin-user=*) KEYCLOAK_APP_ADMIN_USER="${1#--keycloak-app-admin-user=}"; KEYCLOAK_APP_ADMIN_USER_EXPLICIT=1; shift ;;
+        --keycloak-ad) KEYCLOAK_AD_REQUESTED=1; shift ;;
+        --keycloak-ad-provider) [ $# -ge 2 ] || die "--keycloak-ad-provider требует имя"; KEYCLOAK_AD_PROVIDER="$2"; KEYCLOAK_AD_PROVIDER_EXPLICIT=1; KEYCLOAK_AD_REQUESTED=1; shift 2 ;;
+        --keycloak-ad-provider=*) KEYCLOAK_AD_PROVIDER="${1#--keycloak-ad-provider=}"; KEYCLOAK_AD_PROVIDER_EXPLICIT=1; KEYCLOAK_AD_REQUESTED=1; shift ;;
+        --keycloak-ad-domain) [ $# -ge 2 ] || die "--keycloak-ad-domain требует DNS-домен"; KEYCLOAK_AD_DOMAIN="$2"; KEYCLOAK_AD_REQUESTED=1; shift 2 ;;
+        --keycloak-ad-domain=*) KEYCLOAK_AD_DOMAIN="${1#--keycloak-ad-domain=}"; KEYCLOAK_AD_REQUESTED=1; shift ;;
+        --keycloak-ad-controller) [ $# -ge 2 ] || die "--keycloak-ad-controller требует DNS-имя DC"; KEYCLOAK_AD_CONTROLLER="$2"; KEYCLOAK_AD_REQUESTED=1; shift 2 ;;
+        --keycloak-ad-controller=*) KEYCLOAK_AD_CONTROLLER="${1#--keycloak-ad-controller=}"; KEYCLOAK_AD_REQUESTED=1; shift ;;
+        --keycloak-ad-url) [ $# -ge 2 ] || die "--keycloak-ad-url требует ldaps:// URL"; KEYCLOAK_AD_URL="$2"; KEYCLOAK_AD_REQUESTED=1; shift 2 ;;
+        --keycloak-ad-url=*) KEYCLOAK_AD_URL="${1#--keycloak-ad-url=}"; KEYCLOAK_AD_REQUESTED=1; shift ;;
+        --keycloak-ad-users-dn) [ $# -ge 2 ] || die "--keycloak-ad-users-dn требует DN"; KEYCLOAK_AD_USERS_DN="$2"; KEYCLOAK_AD_REQUESTED=1; shift 2 ;;
+        --keycloak-ad-users-dn=*) KEYCLOAK_AD_USERS_DN="${1#--keycloak-ad-users-dn=}"; KEYCLOAK_AD_REQUESTED=1; shift ;;
+        --keycloak-ad-groups-dn) [ $# -ge 2 ] || die "--keycloak-ad-groups-dn требует DN"; KEYCLOAK_AD_GROUPS_DN="$2"; KEYCLOAK_AD_REQUESTED=1; shift 2 ;;
+        --keycloak-ad-groups-dn=*) KEYCLOAK_AD_GROUPS_DN="${1#--keycloak-ad-groups-dn=}"; KEYCLOAK_AD_REQUESTED=1; shift ;;
+        --keycloak-ad-bind-dn) [ $# -ge 2 ] || die "--keycloak-ad-bind-dn требует DN"; KEYCLOAK_AD_BIND_DN="$2"; KEYCLOAK_AD_REQUESTED=1; shift 2 ;;
+        --keycloak-ad-bind-dn=*) KEYCLOAK_AD_BIND_DN="${1#--keycloak-ad-bind-dn=}"; KEYCLOAK_AD_REQUESTED=1; shift ;;
+        --keycloak-ad-bind-user) [ $# -ge 2 ] || die "--keycloak-ad-bind-user требует UPN или DN"; KEYCLOAK_AD_BIND_DN="$2"; KEYCLOAK_AD_REQUESTED=1; shift 2 ;;
+        --keycloak-ad-bind-user=*) KEYCLOAK_AD_BIND_DN="${1#--keycloak-ad-bind-user=}"; KEYCLOAK_AD_REQUESTED=1; shift ;;
+        --keycloak-ad-bind-password-file) [ $# -ge 2 ] || die "--keycloak-ad-bind-password-file требует путь"; KEYCLOAK_AD_BIND_PASSWORD_FILE="$2"; KEYCLOAK_AD_REQUESTED=1; shift 2 ;;
+        --keycloak-ad-bind-password-file=*) KEYCLOAK_AD_BIND_PASSWORD_FILE="${1#--keycloak-ad-bind-password-file=}"; KEYCLOAK_AD_REQUESTED=1; shift ;;
+        --keycloak-ad-ca-file) [ $# -ge 2 ] || die "--keycloak-ad-ca-file требует путь к PEM bundle"; KEYCLOAK_AD_CA_FILE="$2"; KEYCLOAK_AD_REQUESTED=1; shift 2 ;;
+        --keycloak-ad-ca-file=*) KEYCLOAK_AD_CA_FILE="${1#--keycloak-ad-ca-file=}"; KEYCLOAK_AD_REQUESTED=1; shift ;;
+        --keycloak-ad-group-mode) [ $# -ge 2 ] || die "--keycloak-ad-group-mode требует ldap-only или read-only"; KEYCLOAK_AD_GROUP_MODE="$2"; KEYCLOAK_AD_REQUESTED=1; shift 2 ;;
+        --keycloak-ad-group-mode=*) KEYCLOAK_AD_GROUP_MODE="${1#--keycloak-ad-group-mode=}"; KEYCLOAK_AD_REQUESTED=1; shift ;;
         --uninstall=*) MODE=uninstall; UNINSTALL_TARGET="${1#--uninstall=}"; shift ;;
         --uninstall) MODE=uninstall; shift ;;
         --remove-config) UNINSTALL_REMOVE_CONFIG=1; shift ;;
@@ -556,13 +605,30 @@ reset_db_password() {
 }
 
 set_plain_env() {
-    KEY="$1"; VALUE="$2"; FILE="$3"; JHV_ENV_TMP="${TMPDIR:-/tmp}/jhvirt-env.$$"
-	grep -v "^${KEY}=" "$FILE" > "$JHV_ENV_TMP" || true
-	printf '%s=%s\n' "$KEY" "$VALUE" >> "$JHV_ENV_TMP"
-	chmod 600 "$JHV_ENV_TMP"
-	cat "$JHV_ENV_TMP" > "$FILE"
-	chmod 600 "$FILE"
-	rm -f "$JHV_ENV_TMP"
+    KEY="$1"; VALUE="$2"; FILE="$3"
+    JHV_ENV_DIR="${FILE%/*}"
+    [ "$JHV_ENV_DIR" != "$FILE" ] || JHV_ENV_DIR=.
+    JHV_ENV_BASE="${FILE##*/}"
+    JHV_ENV_TMP="$(mktemp "$JHV_ENV_DIR/.${JHV_ENV_BASE}.XXXXXX")" ||
+        die "не удалось создать временный env рядом с $FILE"
+    chmod 600 "$JHV_ENV_TMP"
+    if [ -f "$FILE" ]; then
+        JHV_ENV_GREP_STATUS=0
+        grep -v "^${KEY}=" "$FILE" > "$JHV_ENV_TMP" || JHV_ENV_GREP_STATUS=$?
+        [ "$JHV_ENV_GREP_STATUS" -le 1 ] || {
+            rm -f "$JHV_ENV_TMP"
+            die "не удалось прочитать $FILE"
+        }
+    fi
+    printf '%s=%s\n' "$KEY" "$VALUE" >> "$JHV_ENV_TMP" || {
+        rm -f "$JHV_ENV_TMP"
+        die "не удалось обновить $FILE"
+    }
+    chmod 600 "$JHV_ENV_TMP"
+    mv -f "$JHV_ENV_TMP" "$FILE" || {
+        rm -f "$JHV_ENV_TMP"
+        die "не удалось опубликовать $FILE"
+    }
 }
 
 install_bundle_config() {
@@ -937,6 +1003,25 @@ migration_export_docker() {
     migration_volume_file "$ME_DATA_VOLUME" bootstrap-admin.password "$ME_DIR/data/bootstrap-admin.password" 0
     migration_volume_file "$ME_DATA_VOLUME" tls/server.crt "$ME_DIR/tls/server.crt" 0
     migration_volume_file "$ME_DATA_VOLUME" tls/server.key "$ME_DIR/tls/server.key" 0
+
+    # Федерация AD хранит bind-пароль вне БД Keycloak. Без vault-файла и CA
+    # восстановленная база выглядит исправной, но доменный вход не работает.
+    ME_KC_VAULT_VALUE="$(env_file_value "$ME_WORK/.env" JHV_KEYCLOAK_VAULT_DIR)"
+    if [ -n "$ME_KC_VAULT_VALUE" ]; then
+        ME_KC_VAULT_PATH="$(docker_host_path "$ME_WORK" "$ME_KC_VAULT_VALUE")"
+        if [ -s "$ME_KC_VAULT_PATH/${KEYCLOAK_REALM}_ad-bind" ]; then
+            cp "$ME_KC_VAULT_PATH/${KEYCLOAK_REALM}_ad-bind" "$ME_DIR/data/keycloak-ad-bind"
+        fi
+    fi
+    ME_KC_TRUST_VALUE="$(env_file_value "$ME_WORK/.env" JHV_KEYCLOAK_TRUSTSTORE_DIR)"
+    if [ -n "$ME_KC_TRUST_VALUE" ]; then
+        ME_KC_TRUST_PATH="$(docker_host_path "$ME_WORK" "$ME_KC_TRUST_VALUE")"
+        mkdir -p "$ME_DIR/truststores"
+        for ME_KC_CA in "$ME_KC_TRUST_PATH"/*; do
+            [ -f "$ME_KC_CA" ] && [ ! -L "$ME_KC_CA" ] || continue
+            cp "$ME_KC_CA" "$ME_DIR/truststores/$(basename "$ME_KC_CA")"
+        done
+    fi
     if [ "$(env_file_value "$ME_WORK/.env" JHV_TLS_ENABLED)" = true ]; then
         [ -s "$ME_DIR/tls/server.crt" ] && [ -s "$ME_DIR/tls/server.key" ] ||
             die "TLS включён, но в томе $ME_DATA_VOLUME нет сертификата или ключа"
@@ -1072,7 +1157,8 @@ migration_export() {
         die "не удалось создать временный каталог"
     trap migration_cleanup EXIT INT TERM HUP
     mkdir -p "$MIGRATION_TMP/config" "$MIGRATION_TMP/environment" \
-        "$MIGRATION_TMP/database" "$MIGRATION_TMP/data" "$MIGRATION_TMP/tls"
+        "$MIGRATION_TMP/database" "$MIGRATION_TMP/data" "$MIGRATION_TMP/tls" \
+        "$MIGRATION_TMP/truststores"
     chmod 700 "$MIGRATION_TMP"
 
     step "подготовка пакета миграции ($MODE)"
@@ -1082,6 +1168,7 @@ migration_export() {
         systemd) migration_export_systemd "$MIGRATION_TMP" ;;
     esac
     chmod 600 "$MIGRATION_TMP/data/"* "$MIGRATION_TMP/tls/"* \
+        "$MIGRATION_TMP/truststores/"* \
         "$MIGRATION_TMP/environment/"* "$MIGRATION_TMP/database/"* 2>/dev/null || true
     have sha256sum || die "для контроля целостности пакета нужен sha256sum"
     (cd "$MIGRATION_TMP" && find . -type f ! -name checksums.sha256 -print | LC_ALL=C sort |
@@ -1168,7 +1255,11 @@ migration_validate_archive() {
     while IFS= read -r MVA_ENTRY; do
         MVA_ENTRY="${MVA_ENTRY#./}"; MVA_ENTRY="${MVA_ENTRY%/}"
         case "$MVA_ENTRY" in
-            ""|manifest|checksums.sha256|systemd-write-paths|config|config/ovirt-backup.yaml|environment|environment/docker.env|environment/systemd.env|database|database/jhvirt.dump|database/keycloak.dump|data|data/secret.key|data/metrics.token|data/database.url|data/oidc-client.secret|data/bootstrap-admin.password|tls|tls/server.crt|tls/server.key) ;;
+            ""|manifest|checksums.sha256|systemd-write-paths|config|config/ovirt-backup.yaml|environment|environment/docker.env|environment/systemd.env|database|database/jhvirt.dump|database/keycloak.dump|data|data/secret.key|data/metrics.token|data/database.url|data/oidc-client.secret|data/bootstrap-admin.password|data/keycloak-ad-bind|tls|tls/server.crt|tls/server.key|truststores) ;;
+            truststores/*)
+                MVA_TRUST_NAME="${MVA_ENTRY#truststores/}"
+                case "$MVA_TRUST_NAME" in ""|*/*|.|..) die "недопустимое имя truststore в пакете: $MVA_ENTRY" ;; esac
+                ;;
             *) die "в пакете миграции найден неожиданный путь: $MVA_ENTRY" ;;
         esac
     done < "$MIGRATION_TMP/archive.list"
@@ -2351,6 +2442,22 @@ load_existing_oidc() {
             [ -n "$KEYCLOAK_BIND_ADDRESS" ] || KEYCLOAK_BIND_ADDRESS=127.0.0.1
             KEYCLOAK_CONTAINER_PORT="$(env_file_value "$WORK/.env" KEYCLOAK_CONTAINER_PORT)"
             [ -n "$KEYCLOAK_CONTAINER_PORT" ] || KEYCLOAK_CONTAINER_PORT=8080
+            if [ "$KEYCLOAK_AD_PROVIDER_EXPLICIT" -eq 0 ]; then
+                OIDC_STORED="$(env_file_value "$WORK/.env" JHV_KEYCLOAK_AD_PROVIDER)"
+                [ -z "$OIDC_STORED" ] || KEYCLOAK_AD_PROVIDER="$OIDC_STORED"
+            fi
+            OIDC_STORED="$(env_file_value "$WORK/.env" JHV_KEYCLOAK_AD_DOMAIN)"
+            [ -n "$KEYCLOAK_AD_DOMAIN" ] || KEYCLOAK_AD_DOMAIN="$OIDC_STORED"
+            OIDC_STORED="$(env_file_value "$WORK/.env" JHV_KEYCLOAK_AD_CONTROLLER)"
+            [ -n "$KEYCLOAK_AD_CONTROLLER" ] || KEYCLOAK_AD_CONTROLLER="$OIDC_STORED"
+            OIDC_STORED="$(env_file_value "$WORK/.env" JHV_KEYCLOAK_AD_URL)"
+            [ -n "$KEYCLOAK_AD_URL" ] || KEYCLOAK_AD_URL="$OIDC_STORED"
+            OIDC_STORED="$(env_file_value "$WORK/.env" JHV_KEYCLOAK_AD_USERS_DN)"
+            [ -n "$KEYCLOAK_AD_USERS_DN" ] || KEYCLOAK_AD_USERS_DN="$OIDC_STORED"
+            OIDC_STORED="$(env_file_value "$WORK/.env" JHV_KEYCLOAK_AD_GROUPS_DN)"
+            [ -n "$KEYCLOAK_AD_GROUPS_DN" ] || KEYCLOAK_AD_GROUPS_DN="$OIDC_STORED"
+            OIDC_STORED="$(env_file_value "$WORK/.env" JHV_KEYCLOAK_AD_BIND_DN)"
+            [ -n "$KEYCLOAK_AD_BIND_DN" ] || KEYCLOAK_AD_BIND_DN="$OIDC_STORED"
             say "    сохраняется вход через встроенный Keycloak"
             ;;
         external)
@@ -2367,11 +2474,245 @@ ask_nonempty() {
     done
 }
 
+validate_ad_domain() {
+    printf '%s\n' "$1" | awk -F. '
+        NF < 2 { exit 1 }
+        {
+            for (i = 1; i <= NF; i++) {
+                if (length($i) < 1 || length($i) > 63 ||
+                        $i !~ /^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$/) exit 1
+            }
+        }
+    '
+}
+
+ad_domain_to_base_dn() {
+    printf '%s\n' "$1" | awk -F. '{
+        for (i = 1; i <= NF; i++) {
+            if (i > 1) printf ","
+            printf "DC=%s", $i
+        }
+    }'
+}
+
+discover_ad_controller() {
+    DAC_QUERY="_ldap._tcp.dc._msdcs.$1"
+    DAC_RESULT=""
+    if have dig; then
+        DAC_RESULT="$(dig +short SRV "$DAC_QUERY" 2>/dev/null |
+            awk 'NF >= 4 { print $4; exit }')"
+    elif have host; then
+        DAC_RESULT="$(host -t SRV "$DAC_QUERY" 2>/dev/null |
+            awk '/SRV record/ { print $NF; exit }')"
+    elif have nslookup; then
+        DAC_RESULT="$(nslookup -type=SRV "$DAC_QUERY" 2>/dev/null |
+            awk '/service =|svr hostname =/ { print $NF; exit }')"
+    fi
+    printf '%s' "${DAC_RESULT%.}"
+}
+
+read_hidden_value() (
+    printf '%s' "$1" >&2
+    trap 'stty echo 2>/dev/null || true; printf "\n" >&2; exit 130' HUP INT TERM
+    stty -echo || exit 1
+    IFS= read -r RHV_VALUE
+    RHV_STATUS=$?
+    stty echo || true
+    printf '\n' >&2
+    [ "$RHV_STATUS" -eq 0 ] || exit "$RHV_STATUS"
+    printf '%s' "$RHV_VALUE"
+)
+
+prepare_keycloak_ad_simple() {
+    KEYCLOAK_AD_SIMPLE=1
+    if [ -z "$KEYCLOAK_AD_DOMAIN" ] && [ -t 0 ]; then
+        ask_nonempty "DNS-домен Active Directory, например example.org: "
+        KEYCLOAK_AD_DOMAIN="$ANSWER"
+    fi
+    KEYCLOAK_AD_DOMAIN="$(printf '%s' "${KEYCLOAK_AD_DOMAIN%.}" | tr '[:upper:]' '[:lower:]')"
+    [ -n "$KEYCLOAK_AD_DOMAIN" ] ||
+        die "для простой настройки укажите --keycloak-ad-domain"
+    validate_ad_domain "$KEYCLOAK_AD_DOMAIN" ||
+        die "некорректный DNS-домен Active Directory: $KEYCLOAK_AD_DOMAIN"
+
+    KC_AD_BASE_DN="$(ad_domain_to_base_dn "$KEYCLOAK_AD_DOMAIN")"
+    [ -n "$KEYCLOAK_AD_USERS_DN" ] || KEYCLOAK_AD_USERS_DN="$KC_AD_BASE_DN"
+    [ -n "$KEYCLOAK_AD_GROUPS_DN" ] || KEYCLOAK_AD_GROUPS_DN="$KC_AD_BASE_DN"
+
+    if [ -z "$KEYCLOAK_AD_URL" ]; then
+        if [ -z "$KEYCLOAK_AD_CONTROLLER" ]; then
+            KEYCLOAK_AD_CONTROLLER="$(discover_ad_controller "$KEYCLOAK_AD_DOMAIN")"
+            if [ -t 0 ]; then
+                if [ -n "$KEYCLOAK_AD_CONTROLLER" ]; then
+                    printf 'Контроллер домена [%s]: ' "$KEYCLOAK_AD_CONTROLLER"
+                    read -r ANSWER || ANSWER=""
+                    [ -z "$ANSWER" ] || KEYCLOAK_AD_CONTROLLER="$ANSWER"
+                else
+                    ask_nonempty "DNS-имя контроллера домена: "
+                    KEYCLOAK_AD_CONTROLLER="$ANSWER"
+                fi
+            fi
+        fi
+        [ -n "$KEYCLOAK_AD_CONTROLLER" ] || die "контроллер домена не найден через DNS SRV
+Укажите --keycloak-ad-controller с полным DNS-именем DC."
+        KEYCLOAK_AD_CONTROLLER="${KEYCLOAK_AD_CONTROLLER%.}"
+        case "$KEYCLOAK_AD_CONTROLLER" in
+            *://*|*/*|*[!A-Za-z0-9._-]*) die "некорректное DNS-имя контроллера: $KEYCLOAK_AD_CONTROLLER" ;;
+        esac
+        case "$KEYCLOAK_AD_CONTROLLER" in
+            *.*) ;;
+            *) KEYCLOAK_AD_CONTROLLER="$KEYCLOAK_AD_CONTROLLER.$KEYCLOAK_AD_DOMAIN" ;;
+        esac
+        KEYCLOAK_AD_URL="ldaps://$KEYCLOAK_AD_CONTROLLER:636"
+    fi
+
+    if [ -z "$KEYCLOAK_AD_BIND_DN" ] && [ -t 0 ]; then
+        ask_nonempty "Bind-пользователь только для чтения (UPN или DN): "
+        KEYCLOAK_AD_BIND_DN="$ANSWER"
+    fi
+    case "$KEYCLOAK_AD_BIND_DN" in
+        ""|*@*|*=*) ;;
+        *) KEYCLOAK_AD_BIND_DN="$KEYCLOAK_AD_BIND_DN@$KEYCLOAK_AD_DOMAIN" ;;
+    esac
+
+    if [ -z "$KEYCLOAK_AD_BIND_PASSWORD_FILE" ] &&
+            [ -z "$KEYCLOAK_AD_BIND_PASSWORD" ] && [ -t 0 ]; then
+        KEYCLOAK_AD_BIND_PASSWORD="$(read_hidden_value 'Пароль bind-пользователя: ')" ||
+            die "не удалось безопасно прочитать bind-пароль"
+        KC_AD_PASSWORD_CONFIRM="$(read_hidden_value 'Повторите пароль: ')" ||
+            die "не удалось безопасно прочитать подтверждение bind-пароля"
+        [ -n "$KEYCLOAK_AD_BIND_PASSWORD" ] || die "bind-пароль не может быть пустым"
+        [ "$KEYCLOAK_AD_BIND_PASSWORD" = "$KC_AD_PASSWORD_CONFIRM" ] ||
+            die "введённые bind-пароли не совпадают"
+        KC_AD_PASSWORD_CONFIRM=""
+        KEYCLOAK_AD_PASSWORD_WAS_INTERACTIVE=1
+    fi
+
+    if [ -z "$KEYCLOAK_AD_CA_FILE" ] && [ -t 0 ]; then
+        if [ "$OIDC_EXISTING" -eq 1 ]; then
+            printf 'PEM-файл корпоративного CA [использовать уже установленный]: '
+            read -r KEYCLOAK_AD_CA_FILE || KEYCLOAK_AD_CA_FILE=""
+        else
+            ask_nonempty "PEM-файл корневого/промежуточного CA: "
+            KEYCLOAK_AD_CA_FILE="$ANSWER"
+        fi
+    fi
+
+    say "    домен AD: $KEYCLOAK_AD_DOMAIN"
+    say "    контроллер: $KEYCLOAK_AD_URL"
+    say "    поиск пользователей и групп: $KC_AD_BASE_DN (Subtree)"
+}
+
 keycloak_use_direct_tls() {
     KEYCLOAK_DIRECT_TLS=1
     KEYCLOAK_BIND_ADDRESS=0.0.0.0
     KEYCLOAK_CONTAINER_PORT=8443
     KEYCLOAK_API_URL="https://127.0.0.1:$KEYCLOAK_PORT"
+}
+
+prepare_keycloak_ad() {
+    [ "$OIDC_MODE" = keycloak ] || {
+        [ "$KEYCLOAK_AD_REQUESTED" -eq 0 ] || die "--keycloak-ad работает только вместе с --oidc keycloak"
+        return 0
+    }
+
+    if [ -t 0 ] && [ "$KEYCLOAK_AD_REQUESTED" -eq 0 ]; then
+        say ""
+        say "Active Directory можно подключить сейчас или позднее повторным запуском .run."
+        say "Достаточно DNS-домена, контроллера, bind-пользователя и корпоративного CA."
+        say "Пароль вводится скрыто; разрешён только LDAPS."
+        printf 'Настроить Active Directory сейчас? [y/N]: '
+        read -r ANSWER || ANSWER=""
+        case "$ANSWER" in
+            y|Y|yes|YES|д|Д|да|ДА) KEYCLOAK_AD_REQUESTED=1 ;;
+        esac
+    fi
+    [ "$KEYCLOAK_AD_REQUESTED" -eq 1 ] || return 0
+
+    if [ -n "$KEYCLOAK_AD_DOMAIN" ] || [ -n "$KEYCLOAK_AD_CONTROLLER" ]; then
+        KEYCLOAK_AD_SIMPLE=1
+    elif [ -t 0 ] && [ -z "$KEYCLOAK_AD_URL" ] &&
+            [ -z "$KEYCLOAK_AD_USERS_DN" ] && [ -z "$KEYCLOAK_AD_GROUPS_DN" ]; then
+        say ""
+        printf 'Настройка AD: 1 — по DNS-домену, 2 — расширенная [1]: '
+        read -r ANSWER || ANSWER=""
+        case "$ANSWER" in
+            2) KEYCLOAK_AD_SIMPLE=0 ;;
+            *) KEYCLOAK_AD_SIMPLE=1 ;;
+        esac
+    fi
+
+    if [ "$KEYCLOAK_AD_SIMPLE" -eq 1 ]; then
+        prepare_keycloak_ad_simple
+    elif [ -t 0 ]; then
+        [ -n "$KEYCLOAK_AD_URL" ] || {
+            ask_nonempty "LDAPS URL контроллера, например ldaps://dc01.example.org:636: "
+            KEYCLOAK_AD_URL="$ANSWER"
+        }
+        [ -n "$KEYCLOAK_AD_USERS_DN" ] || {
+            ask_nonempty "Users DN, например OU=Users,DC=example,DC=org: "
+            KEYCLOAK_AD_USERS_DN="$ANSWER"
+        }
+        [ -n "$KEYCLOAK_AD_GROUPS_DN" ] || {
+            ask_nonempty "Groups DN с группами допуска: "
+            KEYCLOAK_AD_GROUPS_DN="$ANSWER"
+        }
+        [ -n "$KEYCLOAK_AD_BIND_DN" ] || {
+            ask_nonempty "Bind DN read-only service account: "
+            KEYCLOAK_AD_BIND_DN="$ANSWER"
+        }
+        [ -n "$KEYCLOAK_AD_BIND_PASSWORD_FILE" ] || {
+            ask_nonempty "Файл 0600 с bind-паролем: "
+            KEYCLOAK_AD_BIND_PASSWORD_FILE="$ANSWER"
+        }
+        if [ -z "$KEYCLOAK_AD_CA_FILE" ]; then
+            printf 'PEM bundle корпоративного CA [использовать уже установленный]: '
+            read -r KEYCLOAK_AD_CA_FILE || KEYCLOAK_AD_CA_FILE=""
+        fi
+    fi
+
+    case "$KEYCLOAK_AD_PROVIDER" in
+        ""|*[!A-Za-z0-9._-]*) die "--keycloak-ad-provider: допустимы A-Z, a-z, 0-9, точка, _ и -" ;;
+    esac
+    [ -n "$KEYCLOAK_AD_URL" ] || die "--keycloak-ad требует --keycloak-ad-url"
+    for KC_AD_ONE_URL in $KEYCLOAK_AD_URL; do
+        case "$KC_AD_ONE_URL" in
+            ldaps://*:*) ;;
+            *) die "--keycloak-ad-url принимает только ldaps:// URL с портом; незашифрованный LDAP запрещён" ;;
+        esac
+    done
+    [ -n "$KEYCLOAK_AD_USERS_DN" ] || die "--keycloak-ad требует --keycloak-ad-users-dn"
+    [ -n "$KEYCLOAK_AD_GROUPS_DN" ] || die "--keycloak-ad требует --keycloak-ad-groups-dn"
+    [ -n "$KEYCLOAK_AD_BIND_DN" ] || die "--keycloak-ad требует --keycloak-ad-bind-dn"
+    if [ -n "$KEYCLOAK_AD_BIND_PASSWORD_FILE" ]; then
+        [ -f "$KEYCLOAK_AD_BIND_PASSWORD_FILE" ] || die "нет файла с bind-паролем: $KEYCLOAK_AD_BIND_PASSWORD_FILE"
+        KC_AD_SECRET_MODE="$(stat -c '%a' "$KEYCLOAK_AD_BIND_PASSWORD_FILE" 2>/dev/null || true)"
+        [ "$KC_AD_SECRET_MODE" = 600 ] || die "$KEYCLOAK_AD_BIND_PASSWORD_FILE должен иметь права 0600 (сейчас ${KC_AD_SECRET_MODE:-неизвестно})"
+        [ "$(wc -l < "$KEYCLOAK_AD_BIND_PASSWORD_FILE" | tr -d '[:space:]')" -le 1 ] ||
+            die "bind-пароль должен занимать одну строку"
+        [ -n "$(tr -d '\r\n' < "$KEYCLOAK_AD_BIND_PASSWORD_FILE")" ] ||
+            die "файл с bind-паролем пуст"
+    else
+        [ -n "$KEYCLOAK_AD_BIND_PASSWORD" ] ||
+            die "в unattended-режиме укажите --keycloak-ad-bind-password-file"
+    fi
+
+    case "$KEYCLOAK_AD_GROUP_MODE" in
+        read-only) KEYCLOAK_AD_GROUP_MODE_API=READ_ONLY ;;
+        ldap-only) KEYCLOAK_AD_GROUP_MODE_API=LDAP_ONLY ;;
+        *) die "--keycloak-ad-group-mode принимает ldap-only или read-only" ;;
+    esac
+
+    if [ -n "$KEYCLOAK_AD_CA_FILE" ]; then
+        [ -f "$KEYCLOAK_AD_CA_FILE" ] || die "нет PEM bundle CA: $KEYCLOAK_AD_CA_FILE"
+        grep -q -- '-----BEGIN CERTIFICATE-----' "$KEYCLOAK_AD_CA_FILE" ||
+            die "$KEYCLOAK_AD_CA_FILE не содержит PEM-сертификат"
+        if grep -Eq -- '-----BEGIN ([A-Z ]*)PRIVATE KEY-----' "$KEYCLOAK_AD_CA_FILE"; then
+            die "$KEYCLOAK_AD_CA_FILE содержит закрытый ключ; truststore должен содержать только сертификаты CA"
+        fi
+    elif [ "$OIDC_EXISTING" -eq 0 ]; then
+        die "новая настройка LDAPS требует --keycloak-ad-ca-file с цепочкой корпоративного CA"
+    fi
 }
 
 # Проверяет, что для выбранного способа хватает данных, и добирает недостающее
@@ -2381,6 +2722,8 @@ prepare_oidc() {
     case "$OIDC_MODE" in
         ""|none)
             OIDC_MODE=none
+            [ "$KEYCLOAK_AD_REQUESTED" -eq 0 ] ||
+                die "--keycloak-ad работает только вместе с --oidc keycloak"
             case "$OIDC_ALLOW_LOCAL_LOGIN" in
                 ""|enabled|true) OIDC_ALLOW_LOCAL_LOGIN=true ;;
                 disabled|false) die "нельзя отключить единственный способ входа при --oidc none" ;;
@@ -2582,6 +2925,8 @@ prepare_oidc() {
                 ;;
         esac
     fi
+    # В unattended-режиме интерактивная ветка выше не выполняется.
+    prepare_keycloak_ad
 }
 
 # Соответствие групп ролям — словарь, а viper словари из переменных окружения
@@ -2685,6 +3030,80 @@ keycloak_post() {
     curl -sS -k -m 30 -o /dev/null -w '%{http_code}' \
         -H "Authorization: Bearer $KC_TOKEN" -H 'Content-Type: application/json' \
         -X POST --data-binary @- "$KEYCLOAK_API_URL/admin/realms$1" 2>/dev/null
+}
+
+keycloak_put() {
+    printf '%s' "$2" |
+    curl -sS -k -m 30 -o /dev/null -w '%{http_code}' \
+        -H "Authorization: Bearer $KC_TOKEN" -H 'Content-Type: application/json' \
+        -X PUT --data-binary @- "$KEYCLOAK_API_URL/admin/realms$1" 2>/dev/null
+}
+
+# Все значения LDAP приходят от оператора. JSON собирается без jq, потому что
+# минимальная production-система не обязана его иметь; кавычки и обратные слэши
+# при этом всё равно должны быть экранированы.
+json_quote() {
+    JQ_VALUE="$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
+    printf '"%s"' "$JQ_VALUE"
+}
+
+keycloak_component_id() {
+    KCI_NAME="$1"; KCI_PARENT="$2"; KCI_TYPE="$3"
+    KCI_JSON="$(curl -sS -k -m 30 --fail \
+        -H "Authorization: Bearer $KC_TOKEN" --get \
+        --data-urlencode "name=$KCI_NAME" \
+        --data-urlencode "parent=$KCI_PARENT" \
+        --data-urlencode "type=$KCI_TYPE" \
+        "$KEYCLOAK_API_URL/admin/realms/$KEYCLOAK_REALM/components" 2>/dev/null)" || return 1
+    KCI_IDS="$(printf '%s' "$KCI_JSON" | sed 's/},{/}\
+{/g' | sed -n \
+        's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+    KCI_COUNT="$(printf '%s\n' "$KCI_IDS" | awk 'NF { n++ } END { print n + 0 }')"
+    if [ "$KCI_COUNT" -gt 1 ]; then
+        printf 'ошибка: в realm %s найдено несколько компонентов %s с именем %s: %s\n' \
+            "$KEYCLOAK_REALM" "$KCI_TYPE" "$KCI_NAME" \
+            "$(printf '%s' "$KCI_IDS" | tr '\n' ' ')" >&2
+        printf 'Отключите дубликат в Admin Console после проверки привязанных пользователей; установщик не выберет его случайно.\n' >&2
+        return 1
+    fi
+    printf '%s' "$KCI_IDS"
+}
+
+keycloak_ldap_provider_inventory() {
+    KLPI_PARENT="$1"
+    KLPI_JSON="$(curl -sS -k -m 30 --fail \
+        -H "Authorization: Bearer $KC_TOKEN" --get \
+        --data-urlencode "parent=$KLPI_PARENT" \
+        --data-urlencode 'type=org.keycloak.storage.UserStorageProvider' \
+        "$KEYCLOAK_API_URL/admin/realms/$KEYCLOAK_REALM/components" 2>/dev/null)" || return 1
+    printf '%s' "$KLPI_JSON" | tr '\n' ' ' | sed 's/},{/}\
+{/g' |
+        while IFS= read -r KLPI_ITEM; do
+            printf '%s' "$KLPI_ITEM" |
+                grep -Eq '"providerId"[[:space:]]*:[[:space:]]*"ldap"' || continue
+            KLPI_ID="$(printf '%s' "$KLPI_ITEM" | sed -n \
+                's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+            KLPI_NAME="$(printf '%s' "$KLPI_ITEM" | sed -n \
+                's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+            [ -n "$KLPI_ID" ] || continue
+            printf '%s=%s\n' "${KLPI_NAME:-без-имени}" "$KLPI_ID"
+        done
+}
+
+keycloak_sync_users() {
+    KSU_PROVIDER_ID="$1"
+    curl -sS -k -m 300 --fail \
+        -H "Authorization: Bearer $KC_TOKEN" -X POST \
+        "$KEYCLOAK_API_URL/admin/realms/$KEYCLOAK_REALM/user-storage/$KSU_PROVIDER_ID/sync?action=triggerFullSync" \
+        2>/dev/null
+}
+
+keycloak_sync_mapper() {
+    KSM_PROVIDER_ID="$1"; KSM_MAPPER_ID="$2"
+    curl -sS -k -m 300 --fail \
+        -H "Authorization: Bearer $KC_TOKEN" -X POST \
+        "$KEYCLOAK_API_URL/admin/realms/$KEYCLOAK_REALM/user-storage/$KSM_PROVIDER_ID/mappers/$KSM_MAPPER_ID/sync?direction=fedToKeycloak" \
+        2>/dev/null
 }
 
 # Первый запуск Keycloak с пустой базой — это миграция схемы, и три минуты там
@@ -2998,6 +3417,205 @@ oidc_app_check() {
     return 1
 }
 
+keycloak_configure_ad() {
+    [ "$KEYCLOAK_AD_REQUESTED" -eq 1 ] || return 0
+
+    KC_AD_REALM_JSON="$(curl -sS -k -m 30 --fail \
+        -H "Authorization: Bearer $KC_TOKEN" \
+        "$KEYCLOAK_API_URL/admin/realms/$KEYCLOAK_REALM" 2>/dev/null)" || return 1
+    KC_AD_REALM_ID="$(printf '%s' "$KC_AD_REALM_JSON" | sed -n \
+        's/^[[:space:]]*{"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
+    [ -n "$KC_AD_REALM_ID" ] || return 1
+
+    KC_AD_PROVIDER_ID="$(keycloak_component_id "$KEYCLOAK_AD_PROVIDER" "$KC_AD_REALM_ID" \
+        'org.keycloak.storage.UserStorageProvider')" || return 1
+    if [ -z "$KC_AD_PROVIDER_ID" ]; then
+        KC_AD_EXISTING_PROVIDERS="$(keycloak_ldap_provider_inventory "$KC_AD_REALM_ID")" || return 1
+        KC_AD_EXISTING_COUNT="$(printf '%s\n' "$KC_AD_EXISTING_PROVIDERS" |
+            awk 'NF { n++ } END { print n + 0 }')"
+        if [ "$KC_AD_EXISTING_COUNT" -eq 1 ] && [ "$KEYCLOAK_AD_PROVIDER_EXPLICIT" -eq 0 ]; then
+            KEYCLOAK_AD_PROVIDER="${KC_AD_EXISTING_PROVIDERS%%=*}"
+            KC_AD_PROVIDER_ID="${KC_AD_EXISTING_PROVIDERS#*=}"
+            say "    выбран существующий LDAP provider $KEYCLOAK_AD_PROVIDER"
+        elif [ "$KC_AD_EXISTING_COUNT" -gt 0 ]; then
+            printf 'ошибка: в realm %s уже есть LDAP provider:\n%s\n' \
+                "$KEYCLOAK_REALM" "$KC_AD_EXISTING_PROVIDERS" >&2
+            printf 'Укажите его точное имя через --keycloak-ad-provider. Если providers несколько, сначала отключите и разберите дубликаты в Admin Console. Новый provider автоматически не создаётся.\n' >&2
+            return 1
+        fi
+    fi
+
+    KC_AD_Q_NAME="$(json_quote "$KEYCLOAK_AD_PROVIDER")"
+    KC_AD_Q_URL="$(json_quote "$KEYCLOAK_AD_URL")"
+    KC_AD_Q_USERS_DN="$(json_quote "$KEYCLOAK_AD_USERS_DN")"
+    KC_AD_Q_BIND_DN="$(json_quote "$KEYCLOAK_AD_BIND_DN")"
+    # Default file-vault resolver ищет <realm>_<key>. В БД хранится только эта
+    # ссылка; фактический bind-пароль находится в read-only bind mount.
+    KC_AD_Q_BIND_PASSWORD="$(json_quote '${vault.ad-bind}')"
+    KC_AD_PROVIDER_BODY="{
+        \"name\":$KC_AD_Q_NAME,
+        \"providerId\":\"ldap\",
+        \"providerType\":\"org.keycloak.storage.UserStorageProvider\",
+        \"parentId\":\"$KC_AD_REALM_ID\",
+        \"config\":{
+            \"enabled\":[\"true\"],
+            \"priority\":[\"0\"],
+            \"vendor\":[\"ad\"],
+            \"connectionUrl\":[$KC_AD_Q_URL],
+            \"usersDn\":[$KC_AD_Q_USERS_DN],
+            \"bindDn\":[$KC_AD_Q_BIND_DN],
+            \"bindCredential\":[$KC_AD_Q_BIND_PASSWORD],
+            \"authType\":[\"simple\"],
+            \"editMode\":[\"READ_ONLY\"],
+            \"importEnabled\":[\"true\"],
+            \"syncRegistrations\":[\"false\"],
+            \"usernameLDAPAttribute\":[\"sAMAccountName\"],
+            \"rdnLDAPAttribute\":[\"cn\"],
+            \"uuidLDAPAttribute\":[\"objectGUID\"],
+            \"userObjectClasses\":[\"person, organizationalPerson, user\"],
+            \"searchScope\":[\"2\"],
+            \"useTruststoreSpi\":[\"always\"],
+            \"startTls\":[\"false\"],
+            \"connectionPooling\":[\"true\"],
+            \"pagination\":[\"true\"],
+            \"batchSizeForSync\":[\"1000\"],
+            \"changedSyncPeriod\":[\"900\"],
+            \"fullSyncPeriod\":[\"86400\"],
+            \"allowKerberosAuthentication\":[\"false\"],
+            \"useKerberosForPasswordAuthentication\":[\"false\"],
+            \"trustEmail\":[\"false\"],
+            \"validatePasswordPolicy\":[\"false\"],
+            \"removeInvalidUsersEnabled\":[\"true\"]
+        }
+    }"
+
+    if [ -n "$KC_AD_PROVIDER_ID" ]; then
+        KC_AD_PROVIDER_BODY="$(printf '%s' "$KC_AD_PROVIDER_BODY" | sed \
+            "1s/{/{\"id\":\"$KC_AD_PROVIDER_ID\",/")"
+        KC_CODE="$(keycloak_put "/$KEYCLOAK_REALM/components/$KC_AD_PROVIDER_ID" "$KC_AD_PROVIDER_BODY")"
+        [ "$KC_CODE" = 204 ] || return 1
+        say "    LDAP provider $KEYCLOAK_AD_PROVIDER обновлён"
+    else
+        KC_CODE="$(keycloak_post "/$KEYCLOAK_REALM/components" "$KC_AD_PROVIDER_BODY")"
+        [ "$KC_CODE" = 201 ] || return 1
+        KC_AD_PROVIDER_ID="$(keycloak_component_id "$KEYCLOAK_AD_PROVIDER" "$KC_AD_REALM_ID" \
+            'org.keycloak.storage.UserStorageProvider')" || return 1
+        [ -n "$KC_AD_PROVIDER_ID" ] || return 1
+        say "    LDAP provider $KEYCLOAK_AD_PROVIDER создан"
+    fi
+
+    # При обновлении старого provider автоматически созданный username mapper
+    # мог остаться на cn, даже если основной параметр уже изменён.
+    KC_AD_USERNAME_ID="$(keycloak_component_id username "$KC_AD_PROVIDER_ID" \
+        'org.keycloak.storage.ldap.mappers.LDAPStorageMapper')" || return 1
+    KC_AD_USERNAME_BODY="{
+        \"name\":\"username\",
+        \"providerId\":\"user-attribute-ldap-mapper\",
+        \"providerType\":\"org.keycloak.storage.ldap.mappers.LDAPStorageMapper\",
+        \"parentId\":\"$KC_AD_PROVIDER_ID\",
+        \"config\":{
+            \"ldap.attribute\":[\"sAMAccountName\"],
+            \"user.model.attribute\":[\"username\"],
+            \"read.only\":[\"true\"],
+            \"always.read.value.from.ldap\":[\"false\"],
+            \"is.mandatory.in.ldap\":[\"true\"]
+        }
+    }"
+    if [ -n "$KC_AD_USERNAME_ID" ]; then
+        KC_AD_USERNAME_BODY="$(printf '%s' "$KC_AD_USERNAME_BODY" | sed \
+            "1s/{/{\"id\":\"$KC_AD_USERNAME_ID\",/")"
+        KC_CODE="$(keycloak_put "/$KEYCLOAK_REALM/components/$KC_AD_USERNAME_ID" "$KC_AD_USERNAME_BODY")"
+        [ "$KC_CODE" = 204 ] || return 1
+    else
+        KC_CODE="$(keycloak_post "/$KEYCLOAK_REALM/components" "$KC_AD_USERNAME_BODY")"
+        [ "$KC_CODE" = 201 ] || return 1
+    fi
+
+    KC_AD_Q_GROUPS_DN="$(json_quote "$KEYCLOAK_AD_GROUPS_DN")"
+    KC_AD_GROUP_FILTER="(|(cn=$GROUP_ADMIN)(cn=$GROUP_OPERATOR)(cn=$GROUP_VIEWER))"
+    KC_AD_Q_GROUP_FILTER="$(json_quote "$KC_AD_GROUP_FILTER")"
+    KC_AD_GROUP_MAPPER_NAME="ovirt-backup-groups"
+    KC_AD_GROUP_MAPPER_ID="$(keycloak_component_id "$KC_AD_GROUP_MAPPER_NAME" \
+        "$KC_AD_PROVIDER_ID" 'org.keycloak.storage.ldap.mappers.LDAPStorageMapper')" || return 1
+    KC_AD_GROUP_BODY="{
+        \"name\":\"$KC_AD_GROUP_MAPPER_NAME\",
+        \"providerId\":\"group-ldap-mapper\",
+        \"providerType\":\"org.keycloak.storage.ldap.mappers.LDAPStorageMapper\",
+        \"parentId\":\"$KC_AD_PROVIDER_ID\",
+        \"config\":{
+            \"groups.dn\":[$KC_AD_Q_GROUPS_DN],
+            \"group.name.ldap.attribute\":[\"cn\"],
+            \"group.object.classes\":[\"group\"],
+            \"preserve.group.inheritance\":[\"false\"],
+            \"ignore.missing.groups\":[\"true\"],
+            \"membership.ldap.attribute\":[\"member\"],
+            \"membership.attribute.type\":[\"DN\"],
+            \"membership.user.ldap.attribute\":[\"sAMAccountName\"],
+            \"user.roles.retrieve.strategy\":[\"GET_GROUPS_FROM_USER_MEMBEROF_ATTRIBUTE\"],
+            \"memberof.ldap.attribute\":[\"memberOf\"],
+            \"groups.ldap.filter\":[$KC_AD_Q_GROUP_FILTER],
+            \"groups.path\":[\"/\"],
+            \"mode\":[\"$KEYCLOAK_AD_GROUP_MODE_API\"],
+            \"mapped.group.attributes\":[\"\"],
+            \"drop.non.existing.groups.during.sync\":[\"false\"]
+        }
+    }"
+    if [ -n "$KC_AD_GROUP_MAPPER_ID" ]; then
+        KC_AD_GROUP_BODY="$(printf '%s' "$KC_AD_GROUP_BODY" | sed \
+            "1s/{/{\"id\":\"$KC_AD_GROUP_MAPPER_ID\",/")"
+        KC_CODE="$(keycloak_put "/$KEYCLOAK_REALM/components/$KC_AD_GROUP_MAPPER_ID" "$KC_AD_GROUP_BODY")"
+        [ "$KC_CODE" = 204 ] || return 1
+    else
+        KC_CODE="$(keycloak_post "/$KEYCLOAK_REALM/components" "$KC_AD_GROUP_BODY")"
+        [ "$KC_CODE" = 201 ] || return 1
+        KC_AD_GROUP_MAPPER_ID="$(keycloak_component_id "$KC_AD_GROUP_MAPPER_NAME" \
+            "$KC_AD_PROVIDER_ID" 'org.keycloak.storage.ldap.mappers.LDAPStorageMapper')" || return 1
+        [ -n "$KC_AD_GROUP_MAPPER_ID" ] || return 1
+    fi
+
+    KC_AD_USER_SYNC="$(keycloak_sync_users "$KC_AD_PROVIDER_ID")" || return 1
+    printf '%s' "$KC_AD_USER_SYNC" | grep -Eq '"failed"[[:space:]]*:[[:space:]]*0' || return 1
+    KC_AD_USER_STATUS="$(printf '%s' "$KC_AD_USER_SYNC" | sed -n \
+        's/.*"status"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+    [ -n "$KC_AD_USER_STATUS" ] || KC_AD_USER_STATUS="синхронизация завершена"
+    say "    пользователи AD: $KC_AD_USER_STATUS"
+
+    KC_AD_GROUP_SYNC="$(keycloak_sync_mapper "$KC_AD_PROVIDER_ID" "$KC_AD_GROUP_MAPPER_ID")" || return 1
+    printf '%s' "$KC_AD_GROUP_SYNC" | grep -Eq '"failed"[[:space:]]*:[[:space:]]*0' || return 1
+    KC_AD_GROUP_ADDED="$(printf '%s' "$KC_AD_GROUP_SYNC" | sed -n \
+        's/.*"added"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p')"
+    KC_AD_GROUP_UPDATED="$(printf '%s' "$KC_AD_GROUP_SYNC" | sed -n \
+        's/.*"updated"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p')"
+    [ -n "$KC_AD_GROUP_ADDED" ] || KC_AD_GROUP_ADDED=0
+    [ -n "$KC_AD_GROUP_UPDATED" ] || KC_AD_GROUP_UPDATED=0
+    KC_AD_GROUP_TOTAL=$((KC_AD_GROUP_ADDED + KC_AD_GROUP_UPDATED))
+    [ "$KC_AD_GROUP_TOTAL" -ge 3 ] || {
+        say "    AD не вернула все группы: $GROUP_ADMIN, $GROUP_OPERATOR, $GROUP_VIEWER"
+        return 1
+    }
+    KC_AD_GROUP_STATUS="$(printf '%s' "$KC_AD_GROUP_SYNC" | sed -n \
+        's/.*"status"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+    [ -n "$KC_AD_GROUP_STATUS" ] || KC_AD_GROUP_STATUS="синхронизация завершена"
+    say "    группы AD: $KC_AD_GROUP_STATUS"
+
+    KC_AD_Q_BIND_PASSWORD=""
+    KC_AD_PROVIDER_BODY=""
+    KC_AD_USER_SYNC=""
+    if [ "$KEYCLOAK_AD_SIMPLE" -eq 1 ]; then
+        set_plain_env JHV_KEYCLOAK_AD_PROVIDER "$KEYCLOAK_AD_PROVIDER" "$WORK/.env"
+        set_plain_env JHV_KEYCLOAK_AD_DOMAIN "$KEYCLOAK_AD_DOMAIN" "$WORK/.env"
+        set_plain_env JHV_KEYCLOAK_AD_CONTROLLER "$KEYCLOAK_AD_CONTROLLER" "$WORK/.env"
+        set_plain_env JHV_KEYCLOAK_AD_URL "$KEYCLOAK_AD_URL" "$WORK/.env"
+        set_plain_env JHV_KEYCLOAK_AD_USERS_DN "$KEYCLOAK_AD_USERS_DN" "$WORK/.env"
+        set_plain_env JHV_KEYCLOAK_AD_GROUPS_DN "$KEYCLOAK_AD_GROUPS_DN" "$WORK/.env"
+        case "$KEYCLOAK_AD_BIND_DN" in
+            *[!A-Za-z0-9._@-]*) set_plain_env JHV_KEYCLOAK_AD_BIND_DN "" "$WORK/.env" ;;
+            *) set_plain_env JHV_KEYCLOAK_AD_BIND_DN "$KEYCLOAK_AD_BIND_DN" "$WORK/.env" ;;
+        esac
+    fi
+    say "    доменная авторизация настроена; источник членства: $KEYCLOAK_AD_GROUP_MODE_API"
+}
+
 # Заводит realm, группы, клиента и первую прикладную учётную запись. Повторный
 # запуск не ломается: существующие объекты сохраняются, а отсутствующий первый
 # пользователь добавляется через одноразовый recovery-admin.
@@ -3066,6 +3684,11 @@ keycloak_bootstrap() {
 
     keycloak_create_app_admin || keycloak_bootstrap_die \
         "не удалось создать первого администратора приложения в realm $KEYCLOAK_REALM"
+
+    keycloak_configure_ad || keycloak_bootstrap_die \
+        "не удалось настроить Active Directory.
+Проверьте LDAPS, цепочку CA, Users DN, Groups DN и наличие групп
+$GROUP_ADMIN, $GROUP_OPERATOR, $GROUP_VIEWER в Active Directory."
 
     keycloak_remove_recovery_admin || die "не удалось удалить временного администратора
 $KC_RECOVERY_ADMIN_USER из master realm Keycloak"
@@ -3308,6 +3931,109 @@ prepare_docker_file_backup_source() {
     say "    источник файловых бэкапов: $PDFB_PATH (в контейнере только чтение)"
 }
 
+prepare_docker_keycloak_truststore() {
+    PDKT_WORK="$1"
+    [ "$OIDC_MODE" = keycloak ] || return 0
+    PDKT_VALUE="$(env_file_value "$PDKT_WORK/.env" JHV_KEYCLOAK_TRUSTSTORE_DIR)"
+    [ -n "$PDKT_VALUE" ] || return 1
+    PDKT_PATH="$(docker_host_path "$PDKT_WORK" "$PDKT_VALUE")"
+    mkdir -p "$PDKT_PATH" || die "не удалось создать каталог $PDKT_PATH"
+    if [ "$MIGRATION_ACTIVE" -eq 1 ] && [ -d "$MIGRATION_TMP/truststores" ]; then
+        for PDKT_MIGRATED in "$MIGRATION_TMP/truststores"/*; do
+            [ -f "$PDKT_MIGRATED" ] || continue
+            install -o root -g root -m 0644 "$PDKT_MIGRATED" \
+                "$PDKT_PATH/$(basename "$PDKT_MIGRATED")" ||
+                die "не удалось восстановить truststore Keycloak"
+        done
+    fi
+    if [ "$KEYCLOAK_AD_REQUESTED" -eq 1 ] && [ -n "$KEYCLOAK_AD_CA_FILE" ]; then
+        PDKT_TMP="$PDKT_PATH/.active-directory-ca.pem.$$"
+        install -o root -g root -m 0644 "$KEYCLOAK_AD_CA_FILE" "$PDKT_TMP" ||
+            die "не удалось установить CA в $PDKT_PATH"
+        mv -f "$PDKT_TMP" "$PDKT_PATH/active-directory-ca.pem" ||
+            die "не удалось опубликовать CA в $PDKT_PATH"
+        KEYCLOAK_AD_CA_TARGET="$PDKT_PATH/active-directory-ca.pem"
+    fi
+    if ! docker run --rm --network none --user 1000:0 -v "$PDKT_PATH:/trust:ro" \
+            "$POSTGRES_HELPER_IMAGE" sh -c 'test -r /trust && test -x /trust' >/dev/null 2>&1; then
+        if [ -z "$(ls -A "$PDKT_PATH" 2>/dev/null)" ]; then
+            docker run --rm --network none --user root -v "$PDKT_PATH:/trust" \
+                "$POSTGRES_HELPER_IMAGE" \
+                sh -c 'chown 1000:0 /trust && chmod 0750 /trust' >/dev/null 2>&1 || true
+        fi
+        docker run --rm --network none --user 1000:0 -v "$PDKT_PATH:/trust:ro" \
+            "$POSTGRES_HELPER_IMAGE" sh -c 'test -r /trust && test -x /trust' >/dev/null 2>&1 ||
+            die "Keycloak UID 1000 не может читать $PDKT_PATH
+Разрешите чтение каталога и CA-файлов либо задайте другой JHV_KEYCLOAK_TRUSTSTORE_DIR."
+    fi
+    if [ "$KEYCLOAK_AD_REQUESTED" -eq 1 ]; then
+        PDKT_CERT_FOUND=0
+        for PDKT_CERT in "$PDKT_PATH"/*; do
+            [ -f "$PDKT_CERT" ] || continue
+            if grep -q -- '-----BEGIN CERTIFICATE-----' "$PDKT_CERT" 2>/dev/null; then
+                PDKT_CERT_FOUND=1
+                break
+            fi
+        done
+        [ "$PDKT_CERT_FOUND" -eq 1 ] || die "в $PDKT_PATH нет PEM-сертификата CA для LDAPS"
+    fi
+    say "    доверенные CA Keycloak: $PDKT_PATH (только чтение)"
+    if [ -n "$KEYCLOAK_AD_CA_TARGET" ]; then
+        say "    CA Active Directory: $KEYCLOAK_AD_CA_TARGET"
+    fi
+}
+
+prepare_docker_keycloak_vault() {
+    PDKV_WORK="$1"
+    [ "$OIDC_MODE" = keycloak ] || return 0
+    PDKV_VALUE="$(env_file_value "$PDKV_WORK/.env" JHV_KEYCLOAK_VAULT_DIR)"
+    [ -n "$PDKV_VALUE" ] || return 1
+    PDKV_PATH="$(docker_host_path "$PDKV_WORK" "$PDKV_VALUE")"
+    PDKV_SECRET="$PDKV_PATH/${KEYCLOAK_REALM}_ad-bind"
+    mkdir -p "$PDKV_PATH" || die "не удалось создать каталог $PDKV_PATH"
+    chown root:root "$PDKV_PATH" 2>/dev/null || true
+    chmod 0750 "$PDKV_PATH" || die "не удалось защитить каталог $PDKV_PATH"
+
+    PDKV_SOURCE=""
+    if [ "$KEYCLOAK_AD_REQUESTED" -eq 1 ]; then
+        PDKV_SOURCE="$KEYCLOAK_AD_BIND_PASSWORD_FILE"
+    elif [ "$MIGRATION_ACTIVE" -eq 1 ] && [ -s "$MIGRATION_TMP/data/keycloak-ad-bind" ]; then
+        PDKV_SOURCE="$MIGRATION_TMP/data/keycloak-ad-bind"
+    fi
+    if [ -n "$PDKV_SOURCE" ]; then
+        PDKV_TMP="$PDKV_PATH/.${KEYCLOAK_REALM}_ad-bind.$$"
+        install -o root -g root -m 0440 "$PDKV_SOURCE" "$PDKV_TMP" ||
+            die "не удалось установить bind-пароль в Keycloak vault"
+        mv -f "$PDKV_TMP" "$PDKV_SECRET" ||
+            die "не удалось опубликовать bind-пароль в Keycloak vault"
+    elif [ "$KEYCLOAK_AD_REQUESTED" -eq 1 ] && [ -n "$KEYCLOAK_AD_BIND_PASSWORD" ]; then
+        PDKV_TMP="$PDKV_PATH/.${KEYCLOAK_REALM}_ad-bind.$$"
+        umask 077
+        printf '%s\n' "$KEYCLOAK_AD_BIND_PASSWORD" > "$PDKV_TMP" ||
+            die "не удалось записать bind-пароль в Keycloak vault"
+        umask 022
+        chown root:root "$PDKV_TMP" 2>/dev/null || true
+        chmod 0440 "$PDKV_TMP" || die "не удалось защитить bind-пароль Keycloak"
+        mv -f "$PDKV_TMP" "$PDKV_SECRET" ||
+            die "не удалось опубликовать bind-пароль в Keycloak vault"
+        KEYCLOAK_AD_BIND_PASSWORD=""
+    fi
+
+    if [ -f "$PDKV_SECRET" ]; then
+        chown root:root "$PDKV_SECRET" 2>/dev/null || true
+        chmod 0440 "$PDKV_SECRET" || die "не удалось защитить $PDKV_SECRET"
+        docker run --rm --network none --user 1000:0 -v "$PDKV_PATH:/vault:ro" \
+            "$POSTGRES_HELPER_IMAGE" sh -c \
+            "test -s '/vault/${KEYCLOAK_REALM}_ad-bind' && test -r '/vault/${KEYCLOAK_REALM}_ad-bind'" \
+            >/dev/null 2>&1 || die "Keycloak UID 1000:GID 0 не может прочитать $PDKV_SECRET"
+        KEYCLOAK_AD_VAULT_TARGET="$PDKV_SECRET"
+    elif [ "$KEYCLOAK_AD_REQUESTED" -eq 1 ] || \
+            { [ "$MIGRATION_ACTIVE" -eq 1 ] && [ -s "$MIGRATION_TMP/data/keycloak-ad-bind" ]; }; then
+        die "в Keycloak vault отсутствует ${KEYCLOAK_REALM}_ad-bind"
+    fi
+    say "    Keycloak file vault: $PDKV_PATH (read-only в контейнере)"
+}
+
 prepare_docker_dr_backup() {
     PDB_WORK="$1"
     PDB_VALUE="$DR_BACKUP_DIR_OVERRIDE"
@@ -3547,7 +4273,8 @@ install_containers() {
         ensure_service_user
         mkdir -p "$PREFIX/compose" "$PREFIX/config" "$PREFIX/data" "$PREFIX/logs" \
                  "$PREFIX/docs" "$PREFIX/backups" "$PREFIX/restores" \
-                 "$PREFIX/file-sources" "$PREFIX/file-restores"
+                 "$PREFIX/file-sources" "$PREFIX/file-restores" \
+                 "$PREFIX/keycloak-truststores" "$PREFIX/keycloak-vault"
         rm -rf "${PREFIX:?}/bin" "${PREFIX:?}/web"
         # Образ собирается из bin/ и web/dist рядом с Dockerfile, поэтому весь
         # комплект копируется целиком.
@@ -3568,14 +4295,27 @@ install_containers() {
         WORK="$PREFIX/compose"
         BACKUPS="$PREFIX/backups"; RESTORES="$PREFIX/restores"
         FILE_SOURCES="$PREFIX/file-sources"; FILE_RESTORES="$PREFIX/file-restores"
+        KEYCLOAK_TRUSTSTORES="$PREFIX/keycloak-truststores"
+        KEYCLOAK_VAULT="$PREFIX/keycloak-vault"
     else
         WORK="$COMPOSE_DIR"
-        mkdir -p "$WORK/backups" "$WORK/restores" "$WORK/file-sources" "$WORK/file-restores"
+        mkdir -p "$WORK/backups" "$WORK/restores" "$WORK/file-sources" "$WORK/file-restores" \
+            "$WORK/keycloak-truststores" "$WORK/keycloak-vault"
         BACKUPS="./backups"; RESTORES="./restores"
         FILE_SOURCES="./file-sources"; FILE_RESTORES="./file-restores"
+        KEYCLOAK_TRUSTSTORES="./keycloak-truststores"
+        KEYCLOAK_VAULT="./keycloak-vault"
     fi
 
     migration_apply_docker_files "$WORK"
+    if [ "$MIGRATION_ACTIVE" -eq 1 ]; then
+        # Способ входа известен только после распаковки перенесённого .env.
+        # Загрузить его нужно до подготовки тома и file vault Keycloak.
+        OIDC_MODE=""
+        load_existing_oidc
+        [ -n "$OIDC_MODE" ] || OIDC_MODE=none
+        prepare_oidc
+    fi
 
 	if [ -f "$WORK/.env" ]; then
         say "    $WORK/.env уже есть; пароль базы и пользовательские настройки сохранены"
@@ -3688,6 +4428,8 @@ PostgreSQL хранит пароль внутри тома и новый не п
             printf 'JHV_RESTORE_DIR=%s\n' "$RESTORES"
             printf 'JHV_FILE_BACKUP_DIR=%s\n' "$FILE_SOURCES"
             printf 'JHV_FILE_RESTORE_DIR=%s\n' "$FILE_RESTORES"
+            printf 'JHV_KEYCLOAK_TRUSTSTORE_DIR=%s\n' "$KEYCLOAK_TRUSTSTORES"
+            printf 'JHV_KEYCLOAK_VAULT_DIR=%s\n' "$KEYCLOAK_VAULT"
             # Внутри тома с данными, а не в /app/logs: тот каталог образ создаёт
             # в своём слое, и при пересоздании контейнера журнал пропадает — как
             # раз тогда, когда по нему разбираются, что было до обновления.
@@ -3736,8 +4478,14 @@ PostgreSQL хранит пароль внутри тома и новый не п
 		set_plain_env JHV_FILE_BACKUP_DIR "$FILE_SOURCES" "$WORK/.env"
 	[ -n "$(env_file_value "$WORK/.env" JHV_FILE_RESTORE_DIR)" ] ||
 		set_plain_env JHV_FILE_RESTORE_DIR "$FILE_RESTORES" "$WORK/.env"
+	[ -n "$(env_file_value "$WORK/.env" JHV_KEYCLOAK_TRUSTSTORE_DIR)" ] ||
+		set_plain_env JHV_KEYCLOAK_TRUSTSTORE_DIR "$KEYCLOAK_TRUSTSTORES" "$WORK/.env"
+	[ -n "$(env_file_value "$WORK/.env" JHV_KEYCLOAK_VAULT_DIR)" ] ||
+		set_plain_env JHV_KEYCLOAK_VAULT_DIR "$KEYCLOAK_VAULT" "$WORK/.env"
 	prepare_docker_data_paths "$WORK"
 	prepare_docker_file_backup_source "$WORK"
+	prepare_docker_keycloak_truststore "$WORK"
+	prepare_docker_keycloak_vault "$WORK"
 	prepare_docker_dr_backup "$WORK"
 	migration_restore_docker_database "$WORK" "$RUN"
 	ensure_docker_database_roles "$WORK" "$RUN"
@@ -3864,6 +4612,20 @@ PostgreSQL хранит пароль внутри тома и новый не п
                 say "    $KEYCLOAK_APP_ADMIN_USER → Credentials → Reset password."
             fi
         fi
+        say "    доверенные CA: $KEYCLOAK_TRUSTSTORES"
+        if [ -n "$KEYCLOAK_AD_VAULT_TARGET" ]; then
+            say "    LDAP bind secret: $KEYCLOAK_AD_VAULT_TARGET (вне БД и .env)"
+        fi
+        if [ "$KEYCLOAK_AD_REQUESTED" -eq 1 ]; then
+            say "    Active Directory: provider $KEYCLOAK_AD_PROVIDER, группы из AD ($KEYCLOAK_AD_GROUP_MODE_API)"
+            say "    роли: $GROUP_ADMIN → admin, $GROUP_OPERATOR → operator, $GROUP_VIEWER → viewer"
+            if [ "$KEYCLOAK_AD_PASSWORD_WAS_INTERACTIVE" -eq 1 ]; then
+                say "    введённый bind-пароль сохранён только в Keycloak vault"
+            else
+                say "    исходный $KEYCLOAK_AD_BIND_PASSWORD_FILE теперь можно безопасно удалить"
+            fi
+        fi
+        say "    после добавления CA: cd $WORK && $RUN restart keycloak"
         say ""
         say "  Администрирование Keycloak (не вход в ovirt-backup):"
         say "    консоль:       $KEYCLOAK_URL/admin/master/console/"

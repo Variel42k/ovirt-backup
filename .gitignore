@@ -30,3 +30,5 @@ coverage.out
 *.swp
 .DS_Store
 /deploy/restores/
+/deploy/keycloak-vault/
+/deploy/keycloak-truststores/

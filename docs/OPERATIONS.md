@@ -473,6 +473,36 @@ webhook: `notifications` в конфигурации, подробности в
 4. транспортная ошибка повторяется из PostgreSQL outbox и переживает
    перезапуск. Успешный webhook не отправляется заново из-за отказа SMTP.
 
+## Active Directory через Keycloak
+
+Источник ролей production-пользователей — три группы AD:
+`virt-admins`, `virt-operators`, `virt-readers`. Изменяйте членство в AD, затем
+синхронизируйте mapper `ovirt-backup-groups` и завершайте старые сессии при
+срочном отзыве. Роль выбирается при новом OIDC-входе; уже выданная cookie
+мгновенно не меняется.
+
+Состояние контейнеров и безопасная проверка файлов:
+
+```bash
+cd /opt/jhvirt/compose
+sudo docker compose ps keycloak
+sudo docker compose logs --since=15m keycloak
+sudo stat -c '%U:%G %a %n' \
+  /opt/jhvirt/keycloak-vault/jhvirt_ad-bind \
+  /opt/jhvirt/keycloak-truststores
+```
+
+Для ротации пароля read-only service account смените его в AD и повторно
+запустите текущий `.run`, выберите Keycloak → Active Directory → простой
+режим и введите тот же домен и новый пароль. При одном LDAP provider установщик
+выберет его автоматически. Для unattended-запуска передайте то же имя provider
+и новый файл пароля `0600`. Установщик атомарно заменит file vault, обновит
+provider и выполнит sync. После успеха уничтожьте входной файл. Не помещайте
+пароль в shell history, `.env` или YAML.
+
+Пошаговая настройка, PowerShell-команды создания групп, проверка LDAPS и
+диагностика: [KEYCLOAK-AD.md](KEYCLOAK-AD.md).
+
 ## Аварийная готовность самого сервиса
 
 Бэкапы ВМ недостаточны для восстановления управляющего сервиса. Отдельно нужны:
@@ -498,7 +528,8 @@ webhook: `notifications` в конфигурации, подробности в
 
 Для планового переноса используйте installer migration, а не ручное копирование
 отдельных файлов. Экспорт согласованно останавливает приложение, упаковывает
-PostgreSQL, YAML/env, `secret.key`, токены и TLS; импорт проверяет права,
+PostgreSQL, YAML/env, `secret.key`, токены и TLS. Для встроенного Keycloak туда
+также входят его dump, LDAPS truststore и AD bind-файл из file vault; импорт проверяет права,
 UID/GID, SAN сертификата и умеет продолжить оборванную раскладку. Репозитории и
 разрешённые file/restore roots заранее подключаются на новом сервере. Пошаговый
 cutover: [DEPLOY.md](DEPLOY.md#перенос-приложения-на-другой-сервер).

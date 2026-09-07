@@ -387,8 +387,17 @@ services:
         max-file: "5"
     environment:
       TZ: "${TZ:-UTC}"
+      # Корпоративные CA для LDAPS/внешних HTTPS-сервисов. Keycloak рекурсивно
+      # читает PEM и незашифрованные PKCS12 из каталога, но не может их менять.
+      KC_TRUSTSTORE_PATHS: "/opt/keycloak/conf/truststores"
+      # Bind-пароль LDAP лежит отдельным файлом, а в БД Keycloak хранится лишь
+      # ссылка ${vault.ad-bind}. Оба каталога доступны контейнеру только для чтения.
+      KC_VAULT: "file"
+      KC_VAULT_DIR: "/opt/keycloak/conf/vault"
     volumes:
       - keycloak-data:/opt/keycloak/data
+      - ${JHV_KEYCLOAK_TRUSTSTORE_DIR:-./keycloak-truststores}:/opt/keycloak/conf/truststores:ro
+      - ${JHV_KEYCLOAK_VAULT_DIR:-./keycloak-vault}:/opt/keycloak/conf/vault:ro
     ports:
       - "${KEYCLOAK_BIND_ADDRESS:-127.0.0.1}:${KEYCLOAK_PORT:-8081}:${KEYCLOAK_CONTAINER_PORT:-8080}"
     cap_drop:

@@ -1,5 +1,78 @@
 import type { Role } from './types'
 
+export interface IdentitySettings {
+  enabled: boolean
+  issuer: string
+  backchannel_url?: string
+  client_id: string
+  client_secret_stored: boolean
+  redirect_url: string
+  button_label: string
+  groups_claim: string
+  role_mapping: Record<string, string>
+  allow_local_login: boolean
+  session_ttl_minutes: number
+  revalidate_seconds: number
+  source: 'config' | 'database'
+  can_configure: boolean
+  domain: {
+    connected: boolean
+    name?: string
+    provider_name?: string
+    ldap_url?: string
+    users_dn?: string
+    groups_dn?: string
+    bind_dn?: string
+    checked_at?: string
+  }
+}
+
+export interface IdentitySettingsWrite {
+  local_password: string
+  enabled: boolean
+  issuer: string
+  backchannel_url: string
+  client_id: string
+  client_secret: string
+  redirect_url: string
+  button_label: string
+  groups_claim: string
+  role_mapping: Record<string, string>
+  allow_local_login: boolean
+  session_ttl_minutes: number
+  revalidate_seconds: number
+}
+
+export interface DomainSettingsWrite {
+  local_password: string
+  admin_realm: string
+  admin_client_id: string
+  admin_client_secret: string
+  domain: {
+    name: string
+    provider_name: string
+    ldap_url: string
+    users_dn: string
+    groups_dn: string
+    bind_dn: string
+    bind_password: string
+    admin_group: string
+    operator_group: string
+    viewer_group: string
+    group_mode: 'read-only' | 'ldap-only'
+  }
+}
+
+export interface DomainConfigureResult {
+  identity: IdentitySettings
+  result: {
+    provider_id: string
+    users_status: string
+    groups_status: string
+    groups_checked: number
+  }
+}
+
 export interface User {
   id: string
   username: string

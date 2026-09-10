@@ -27,7 +27,8 @@ FROM docker.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae
 # qemu-img нужен только для экспорта восстановленных образов в qcow2 и для
 # режима проверки «qemu-img check»; всё остальное работает без него.
 RUN apk upgrade --no-cache && \
-    apk add --no-cache ca-certificates tzdata qemu-img && \
+    apk add --no-cache ca-certificates tzdata qemu-img \
+        'libblkid>=2.42.3-r1' 'libmount>=2.42.3-r1' && \
     addgroup -g 10001 jhvirt && \
     adduser -u 10001 -G jhvirt -h /app -D jhvirt
 

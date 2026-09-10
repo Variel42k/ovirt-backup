@@ -38,6 +38,7 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/replication"
 	"github.com/Variel42k/ovirt-backup/internal/scheduler"
 	"github.com/Variel42k/ovirt-backup/internal/secret"
+	"github.com/Variel42k/ovirt-backup/internal/setup"
 	"github.com/Variel42k/ovirt-backup/internal/store"
 )
 
@@ -55,6 +56,7 @@ func run() error {
 	configPath := flag.String("config", "config/ovirt-backup.yaml", "путь к файлу конфигурации")
 	showVersion := flag.Bool("version", false, "показать версию и выйти")
 	checkConfig := flag.Bool("check-config", false, "проверить конфигурацию и выйти")
+	setupOperation := flag.String("setup", "", "операция установщика с YAML/JSON через stdin")
 	resetUser := flag.String("reset-password", "",
 		"задать новый пароль учётной записи (укажите имя пользователя) и выйти; "+
 			"новый пароль берётся из JHV_NEW_PASSWORD либо генерируется и печатается")
@@ -63,6 +65,9 @@ func run() error {
 	revokeAllAccess := flag.Bool("revoke-all-access", false,
 		"при -reset-password закрыть все сессии и отозвать API-токены и делегирования из БД")
 	flag.Parse()
+	if *setupOperation != "" {
+		return setup.Run(append([]string{*setupOperation}, flag.Args()...), os.Stdin, os.Stdout)
+	}
 
 	if *showVersion {
 		fmt.Printf("ovirt-backup-server %s\n", version)
@@ -158,7 +163,6 @@ func run() error {
 		return fmt.Errorf("ключ шифрования секретов: %w", err)
 	}
 	st := store.New(db, cipher)
-
 	// Recovery is deliberately completed before any scheduler, notification,
 	// DR or replication work starts. The one-off process has one job and exits.
 	if *resetUser != "" {
@@ -174,6 +178,19 @@ func run() error {
 				revoked.Sessions, revoked.APITokens, revoked.Delegations)
 		}
 		return nil
+	}
+
+	identitySettings, identityFromDB, err := st.IdentitySettings(ctx)
+	if err != nil {
+		return fmt.Errorf("загрузка настроек входа: %w", err)
+	}
+	if identityFromDB {
+		cfg.Auth.OIDC = api.OIDCConfigFromIdentity(identitySettings)
+		if err := cfg.Validate(); err != nil {
+			return fmt.Errorf("настройки входа из базы данных: %w", err)
+		}
+		log.Info().Str("issuer", cfg.Auth.OIDC.Issuer).
+			Msg("настройки внешнего входа загружены из базы данных")
 	}
 
 	// Оповещения наружу. Подписка ставится до запуска монитора и планировщика:

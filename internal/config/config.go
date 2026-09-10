@@ -50,6 +50,7 @@ type ServerConfig struct {
 	ServeSPA        bool          `mapstructure:"serve_spa"`
 	SPADir          string        `mapstructure:"spa_dir"`
 	CORSOrigins     []string      `mapstructure:"cors_origins"`
+	TrustedProxies  []string      `mapstructure:"trusted_proxies"`
 	TLS             TLSConfig     `mapstructure:"tls"`
 }
 
@@ -123,11 +124,12 @@ type OIDCConfig struct {
 	// SessionTTL — срок сессии, заведённой через провайдера. Пусто — общий
 	// auth.session_ttl.
 	//
-	// Смысл в отзыве доступа: роль пересчитывается при входе, но уже выданная
-	// сессия живёт своим сроком, и сотрудник, у которого отобрали группу,
-	// остаётся администратором до её конца. Час вместо полусуток — компромисс:
-	// мгновенного отзыва он не даёт, но и не растягивает права на смену.
+	// Ограничивает абсолютную длительность внешнего входа независимо от
+	// периодического пересчёта роли через refresh token.
 	SessionTTL time.Duration `mapstructure:"session_ttl"`
+	// RevalidateInterval bounds how long a session may use old provider claims.
+	// A provider failure denies the request; a missing refresh token requires login.
+	RevalidateInterval time.Duration `mapstructure:"revalidate_interval"`
 	// AllowLocalLogin оставляет вход по паролю рядом с внешним.
 	//
 	// Он обходит политики, блокировку и MFA внешнего провайдера, поэтому для
@@ -812,6 +814,11 @@ func readProtectedValue(path, name string) (string, error) {
 
 // Validate rejects combinations that would fail later in a confusing way.
 func (c *Config) Validate() error {
+	for _, proxy := range c.Server.TrustedProxies {
+		if _, _, err := net.ParseCIDR(proxy); err != nil && net.ParseIP(proxy) == nil {
+			return fmt.Errorf("server.trusted_proxies: требуется IP или CIDR, получено %q", proxy)
+		}
+	}
 	if c.Database.Postgres.URL == "" && c.Database.Postgres.Host == "" {
 		return fmt.Errorf("не задано подключение к базе: укажите database.url " +
 			"(или JHV_DATABASE_URL) либо блок database.postgres")
@@ -866,6 +873,10 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("logging.max_age_days must be between 1 and 3650, got %d", c.Logging.MaxAgeDays)
 	}
 	if c.Auth.OIDC.Enabled {
+		if c.Auth.OIDC.RevalidateInterval != 0 &&
+			(c.Auth.OIDC.RevalidateInterval < 30*time.Second || c.Auth.OIDC.RevalidateInterval > 15*time.Minute) {
+			return fmt.Errorf("auth.oidc.revalidate_interval должен быть от 30s до 15m; 0 использует 5m")
+		}
 		for key, value := range map[string]string{
 			"auth.oidc.issuer":       c.Auth.OIDC.Issuer,
 			"auth.oidc.client_id":    c.Auth.OIDC.ClientID,
@@ -1017,6 +1028,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.serve_spa", true)
 	v.SetDefault("server.spa_dir", "./web/dist")
 	v.SetDefault("server.cors_origins", []string{"http://localhost:9000"})
+	v.SetDefault("server.trusted_proxies", []string{})
 	v.SetDefault("server.tls.enabled", false)
 	v.SetDefault("server.tls.cert_file", "")
 	v.SetDefault("server.tls.key_file", "")
@@ -1045,9 +1057,10 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("auth.oidc.role_mapping", map[string]string{})
 	v.SetDefault("auth.oidc.default_role", "")
 	v.SetDefault("auth.oidc.post_logout_redirect_url", "")
-	// Час: отобранная у провайдера группа перестаёт действовать здесь не позже
-	// чем через час, а не через полсуток общего срока сессии.
+	// Час ограничивает абсолютный срок OIDC-сессии; группы внутри него
+	// перепроверяются чаще отдельным revalidate_interval.
 	v.SetDefault("auth.oidc.session_ttl", time.Hour)
+	v.SetDefault("auth.oidc.revalidate_interval", "5m")
 	v.SetDefault("auth.oidc.allow_local_login", false)
 	v.SetDefault("metrics.enabled", false)
 	v.SetDefault("metrics.token_file", "")

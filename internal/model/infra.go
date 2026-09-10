@@ -25,9 +25,44 @@ const (
 	KindKVM ServerKind = "kvm"
 )
 
+// AllServerKinds is the authoritative list of virtualization connectors built
+// into this binary. The API publishes it to the UI, so adding a driver does
+// not require maintaining a second list in TypeScript.
+func AllServerKinds() []ServerKind {
+	return []ServerKind{KindOVirt, KindRedVirt, KindOLVM, KindRHV, KindKVM}
+}
+
+// Valid reports whether this binary has a driver for the connection kind.
+// Unknown values must never fall through to the oVirt client: a future
+// connector can use a different authentication protocol and endpoint shape.
+func (k ServerKind) Valid() bool {
+	return k.UsesOVirtAPI() || k.UsesLibvirt()
+}
+
+// UsesOVirtAPI groups upstream oVirt and its API-compatible downstream
+// products. One such connection always represents the complete Engine scope,
+// including every cluster and host managed by it.
+func (k ServerKind) UsesOVirtAPI() bool {
+	switch k {
+	case KindOVirt, KindRedVirt, KindOLVM, KindRHV:
+		return true
+	default:
+		return false
+	}
+}
+
 // UsesLibvirt reports whether the connection talks to libvirt directly rather
 // than to an oVirt-style engine REST API.
 func (k ServerKind) UsesLibvirt() bool { return k == KindKVM }
+
+// ManagedScope tells the UI whether one connection imports a manager's full
+// inventory or one standalone hypervisor.
+func (k ServerKind) ManagedScope() string {
+	if k.UsesOVirtAPI() {
+		return "engine"
+	}
+	return "host"
+}
 
 // Title renders a Russian label for the UI.
 func (k ServerKind) Title() string {
@@ -60,14 +95,18 @@ const (
 // Server is a managed oVirt engine (a cluster manager or a single standalone
 // host running a self-hosted engine).
 type Server struct {
-	ID          string     `json:"id"`
-	Name        string     `json:"name"`
-	Kind        ServerKind `json:"kind"`
-	EngineURL   string     `json:"engine_url"` // https://engine.example.org — без /ovirt-engine/api
-	Username    string     `json:"username"`   // admin@internal / admin@ovirt@internalsso
-	Password    string     `json:"-"`          // хранится зашифрованным, наружу не отдаётся
-	CACert      string     `json:"ca_cert,omitempty"`
-	InsecureTLS bool       `json:"insecure_tls"`
+	ID        string     `json:"id"`
+	Name      string     `json:"name"`
+	Kind      ServerKind `json:"kind"`
+	EngineURL string     `json:"engine_url"` // https://engine.example.org — без /ovirt-engine/api
+	Username  string     `json:"username"`   // admin@internal / admin@ovirt@internalsso
+	Password  string     `json:"-"`          // хранится зашифрованным, наружу не отдаётся
+	// CACert is trust material used by the backend. Returning it from list/get
+	// made every browser session and browser extension able to read the full
+	// bundle even though the UI only needs to know whether it is configured.
+	CACert       string `json:"-"`
+	CACertStored bool   `json:"ca_cert_stored"`
+	InsecureTLS  bool   `json:"insecure_tls"`
 	// InsecureTLSSince — когда проверку сертификата отключили.
 	//
 	// Галку ставят на полчаса, а снимают никогда: напоминать о ней некому.
@@ -95,7 +134,8 @@ type Server struct {
 	SSHKeyStored bool `json:"ssh_key_stored"`
 	// SSHHostKey в формате authorized_keys. Пусто — ключ ещё не задан, и
 	// подключения не будет: см. SSHTrustAnyHostKey.
-	SSHHostKey string `json:"ssh_host_key,omitempty"`
+	SSHHostKey       string `json:"-"`
+	SSHHostKeyStored bool   `json:"ssh_host_key_stored"`
 
 	// SSHTrustAnyHostKey — осознанный отказ проверять подлинность гипервизора.
 	//
@@ -142,6 +182,9 @@ func (s *Server) Target() string {
 
 // Validate checks the fields that must hold for this kind of connection.
 func (s *Server) Validate() error {
+	if !s.Kind.Valid() {
+		return fmt.Errorf("неподдерживаемый тип системы виртуализации %q", s.Kind)
+	}
 	if s.Name == "" {
 		return fmt.Errorf("не указано имя подключения")
 	}

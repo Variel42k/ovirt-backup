@@ -1,0 +1,26 @@
+CREATE TABLE identity_settings (
+    id                          SMALLINT PRIMARY KEY CHECK (id = 1),
+    enabled                     BOOLEAN NOT NULL,
+    issuer                      TEXT NOT NULL,
+    backchannel_url             TEXT NOT NULL DEFAULT '',
+    client_id                   TEXT NOT NULL,
+    client_secret_enc           TEXT NOT NULL,
+    redirect_url                TEXT NOT NULL,
+    button_label                TEXT NOT NULL DEFAULT 'Войти через Keycloak',
+    groups_claim                TEXT NOT NULL DEFAULT 'groups',
+    role_mapping                JSONB NOT NULL DEFAULT '{}'::jsonb,
+    allow_local_login           BOOLEAN NOT NULL DEFAULT TRUE,
+    session_ttl_seconds         BIGINT NOT NULL DEFAULT 3600 CHECK (session_ttl_seconds BETWEEN 300 AND 86400),
+    revalidate_interval_seconds BIGINT NOT NULL DEFAULT 300 CHECK (revalidate_interval_seconds BETWEEN 30 AND 900),
+    domain_name                 TEXT NOT NULL DEFAULT '',
+    ldap_provider_name          TEXT NOT NULL DEFAULT '',
+    ldap_url                    TEXT NOT NULL DEFAULT '',
+    ldap_users_dn               TEXT NOT NULL DEFAULT '',
+    ldap_groups_dn              TEXT NOT NULL DEFAULT '',
+    ldap_bind_dn                TEXT NOT NULL DEFAULT '',
+    domain_connected            BOOLEAN NOT NULL DEFAULT FALSE,
+    domain_checked_at           TIMESTAMPTZ,
+    updated_by                  TEXT NOT NULL,
+    updated_at                  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+

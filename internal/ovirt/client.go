@@ -61,6 +61,19 @@ type APIError struct {
 	Body   string
 }
 
+func redactSecrets(text string, secrets ...string) string {
+	for _, secret := range secrets {
+		if secret == "" {
+			continue
+		}
+		text = strings.ReplaceAll(text, secret, "[скрыто]")
+		if escaped := url.QueryEscape(secret); escaped != secret {
+			text = strings.ReplaceAll(text, escaped, "[скрыто]")
+		}
+	}
+	return text
+}
+
 func (e *APIError) Error() string {
 	msg := e.Detail
 	if msg == "" {
@@ -100,17 +113,9 @@ func New(cfg Config) (*Client, error) {
 	if cfg.EngineURL == "" {
 		return nil, errors.New("не указан адрес движка")
 	}
-	raw := strings.TrimRight(cfg.EngineURL, "/")
-	if !strings.Contains(raw, "://") {
-		raw = "https://" + raw
-	}
-	// Operators habitually paste the full API URL from the admin portal.
-	raw = strings.TrimSuffix(raw, "/ovirt-engine/api")
-	raw = strings.TrimSuffix(raw, "/ovirt-engine")
-
-	base, err := url.Parse(raw)
+	base, err := normalizeEngineURL(cfg.EngineURL)
 	if err != nil {
-		return nil, fmt.Errorf("некорректный адрес движка %q: %w", cfg.EngineURL, err)
+		return nil, err
 	}
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 60 * time.Second
@@ -130,6 +135,9 @@ func New(cfg Config) (*Client, error) {
 		apiURL:  base.String() + "/ovirt-engine/api",
 		http: &http.Client{
 			Timeout: cfg.Timeout,
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+				return errors.New("движок неожиданно перенаправил запрос")
+			},
 			Transport: &http.Transport{
 				TLSClientConfig:     tlsCfg,
 				MaxIdleConns:        32,
@@ -144,6 +152,37 @@ func New(cfg Config) (*Client, error) {
 		},
 		log: cfg.Logger,
 	}, nil
+}
+
+// normalizeEngineURL prevents credentials from ever being sent over a remote
+// plaintext connection. Loopback HTTP remains available for local development
+// and the in-process contract tests; every network engine must use HTTPS.
+func normalizeEngineURL(engineURL string) (*url.URL, error) {
+	raw := strings.TrimRight(strings.TrimSpace(engineURL), "/")
+	if !strings.Contains(raw, "://") {
+		raw = "https://" + raw
+	}
+	// Operators habitually paste the full API URL from the admin portal.
+	raw = strings.TrimSuffix(raw, "/ovirt-engine/api")
+	raw = strings.TrimSuffix(raw, "/ovirt-engine")
+
+	base, err := url.Parse(raw)
+	if err != nil || base.Host == "" || base.User != nil || base.RawQuery != "" || base.Fragment != "" {
+		return nil, fmt.Errorf("некорректный адрес движка %q", engineURL)
+	}
+	scheme := strings.ToLower(base.Scheme)
+	if scheme != "https" && !(scheme == "http" && loopbackEngineHost(base.Hostname())) {
+		return nil, errors.New("удалённый адрес движка должен использовать HTTPS")
+	}
+	return base, nil
+}
+
+func loopbackEngineHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func buildTLSConfig(caPEM string, insecure bool) (*tls.Config, error) {
@@ -223,7 +262,7 @@ func (c *Client) authenticate(ctx context.Context) error {
 	var sso ssoResponse
 	if err := json.Unmarshal(body, &sso); err != nil {
 		return &APIError{Status: resp.StatusCode, Method: "POST", Path: "/ovirt-engine/sso/oauth/token",
-			Body: string(body), Detail: "неожиданный ответ SSO (не JSON)"}
+			Body: redactSecrets(string(body), c.cfg.Password), Detail: "неожиданный ответ SSO (не JSON)"}
 	}
 	if sso.Error != "" || sso.AccessToken == "" {
 		detail := sso.ErrorDescription
@@ -237,7 +276,8 @@ func (c *Client) authenticate(ctx context.Context) error {
 			status = http.StatusUnauthorized
 		}
 		return &APIError{Status: status, Method: "POST", Path: "/ovirt-engine/sso/oauth/token",
-			Reason: sso.ErrorCode, Detail: detail, Body: string(body)}
+			Reason: redactSecrets(sso.ErrorCode, c.cfg.Password),
+			Detail: redactSecrets(detail, c.cfg.Password), Body: redactSecrets(string(body), c.cfg.Password)}
 	}
 
 	exp := parseEngineTime(sso.Exp)
@@ -461,11 +501,12 @@ func (c *Client) doOnce(ctx context.Context, method, endpoint, path string, payl
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		apiErr := &APIError{Status: resp.StatusCode, Method: method, Path: path, Body: string(respBody)}
+		apiErr := &APIError{Status: resp.StatusCode, Method: method, Path: path,
+			Body: redactSecrets(string(respBody), c.cfg.Password, token)}
 		var fault Fault
 		if json.Unmarshal(respBody, &fault) == nil {
-			apiErr.Reason = fault.Reason
-			apiErr.Detail = fault.Detail
+			apiErr.Reason = redactSecrets(fault.Reason, c.cfg.Password, token)
+			apiErr.Detail = redactSecrets(fault.Detail, c.cfg.Password, token)
 		}
 		return apiErr
 	}
@@ -492,18 +533,19 @@ func (c *Client) Info(ctx context.Context) (*APIInfo, error) {
 // connection. This is the standard bootstrap: the operator confirms the
 // fingerprint once, and every later connection is verified against it.
 func FetchCACert(ctx context.Context, engineURL string, timeout time.Duration) (string, error) {
-	raw := strings.TrimRight(engineURL, "/")
-	if !strings.Contains(raw, "://") {
-		raw = "https://" + raw
+	base, err := normalizeEngineURL(engineURL)
+	if err != nil {
+		return "", err
 	}
-	raw = strings.TrimSuffix(raw, "/ovirt-engine/api")
-	raw = strings.TrimSuffix(raw, "/ovirt-engine")
 
 	if timeout <= 0 {
 		timeout = 20 * time.Second
 	}
 	client := &http.Client{
 		Timeout: timeout,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return errors.New("движок неожиданно перенаправил запрос загрузки CA")
+		},
 		Transport: &http.Transport{
 			// Unavoidable: the point of the call is to learn the CA we do not
 			// have yet. The result is shown to the operator for confirmation.
@@ -511,7 +553,7 @@ func FetchCACert(ctx context.Context, engineURL string, timeout time.Duration) (
 		},
 	}
 
-	endpoint := raw + "/ovirt-engine/services/pki-resource?resource=ca-certificate&format=X509-PEM-CA"
+	endpoint := base.String() + "/ovirt-engine/services/pki-resource?resource=ca-certificate&format=X509-PEM-CA"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return "", err

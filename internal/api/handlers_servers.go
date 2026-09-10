@@ -2,8 +2,12 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/pem"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/Variel42k/ovirt-backup/internal/events"
@@ -20,23 +24,28 @@ type serverPayload struct {
 	// сохранённый секрет. Поиск по имени для этого не годится — оператор мог
 	// заодно переименовать подключение, и тогда проба ушла бы с пустым паролем,
 	// а оператор увидел бы «доступ запрещён» вместо своей опечатки в имени.
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	Kind        string   `json:"kind"`
-	EngineURL   string   `json:"engine_url"`
-	Username    string   `json:"username"`
-	Password    string   `json:"password"`
-	CACert      string   `json:"ca_cert"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Kind      string `json:"kind"`
+	EngineURL string `json:"engine_url"`
+	Username  string `json:"username"`
+	Password  string `json:"password"`
+	CACert    string `json:"ca_cert"`
+	// ClearCACert is deliberately separate from an empty CACert. The API never
+	// echoes a stored certificate, so an edit form submits an empty value when
+	// the operator wants to keep the existing trust anchor.
+	ClearCACert bool     `json:"clear_ca_cert"`
 	InsecureTLS bool     `json:"insecure_tls"`
 	Enabled     *bool    `json:"enabled"`
 	Tags        []string `json:"tags"`
 	Notes       string   `json:"notes"`
 
 	// Поля для подключений типа kvm.
-	SSHHost       string `json:"ssh_host"`
-	SSHPort       int    `json:"ssh_port"`
-	SSHPrivateKey string `json:"ssh_private_key"`
-	SSHHostKey    string `json:"ssh_host_key"`
+	SSHHost         string `json:"ssh_host"`
+	SSHPort         int    `json:"ssh_port"`
+	SSHPrivateKey   string `json:"ssh_private_key"`
+	SSHHostKey      string `json:"ssh_host_key"`
+	ClearSSHHostKey bool   `json:"clear_ssh_host_key"`
 	// SSHTrustAnyHostKey — явный отказ проверять подлинность гипервизора.
 	SSHTrustAnyHostKey bool   `json:"ssh_trust_any_host_key"`
 	ScratchDir         string `json:"scratch_dir"`
@@ -47,13 +56,17 @@ func (p serverPayload) apply(dst *model.Server) {
 	dst.EngineURL = p.EngineURL
 	dst.Username = p.Username
 	dst.Password = p.Password
-	dst.CACert = p.CACert
+	if p.CACert != "" || p.ClearCACert {
+		dst.CACert = p.CACert
+	}
 	dst.InsecureTLS = p.InsecureTLS
 	dst.Tags = p.Tags
 	dst.Notes = p.Notes
 	dst.SSHHost = p.SSHHost
 	dst.SSHPrivateKey = p.SSHPrivateKey
-	dst.SSHHostKey = p.SSHHostKey
+	if p.SSHHostKey != "" || p.ClearSSHHostKey {
+		dst.SSHHostKey = p.SSHHostKey
+	}
 	dst.SSHTrustAnyHostKey = p.SSHTrustAnyHostKey
 	dst.ScratchDir = p.ScratchDir
 	if p.SSHPort > 0 {
@@ -73,6 +86,13 @@ func (p serverPayload) apply(dst *model.Server) {
 func validateServer(srv *model.Server, isNew bool) error {
 	if err := srv.Validate(); err != nil {
 		return badRequest("%v", err)
+	}
+	if !srv.Kind.UsesLibvirt() {
+		if _, err := ovirt.New(ovirt.Config{
+			EngineURL: srv.EngineURL, CACert: srv.CACert, InsecureTLS: srv.InsecureTLS,
+		}); err != nil {
+			return badRequest("%v", err)
+		}
 	}
 	if isNew && srv.Password == "" && srv.SSHPrivateKey == "" {
 		return badRequest("не указан пароль")
@@ -211,6 +231,7 @@ type probeResult struct {
 	ProductName string `json:"product_name,omitempty"`
 	Version     string `json:"version,omitempty"`
 	SupportsCBT bool   `json:"supports_cbt"`
+	Clusters    int    `json:"clusters"`
 	Hosts       int    `json:"hosts"`
 	VMs         int    `json:"vms"`
 	Latency     string `json:"latency,omitempty"`
@@ -235,11 +256,14 @@ func (s *Server) handleProbeServer(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
-	// An edit form submits empty secrets meaning "unchanged"; resolve them from
-	// the stored connection so the probe tests the real credentials. The id is
-	// the reliable key; the name is the fallback for the create form, where
-	// there is no id yet but the operator may be re-checking a saved one.
-	if payload.Password == "" || payload.SSHPrivateKey == "" {
+	// An edit form submits empty secrets and hidden trust material meaning
+	// "unchanged"; resolve them from the stored connection so the probe tests
+	// the actual connection. The id is the reliable key; the name is the
+	// fallback for the create form, where there is no id yet but the operator
+	// may be re-checking a saved one.
+	if payload.Password == "" || payload.SSHPrivateKey == "" ||
+		(payload.CACert == "" && !payload.ClearCACert) ||
+		(payload.SSHHostKey == "" && !payload.ClearSSHHostKey) {
 		var existing *model.Server
 		var err error
 		switch {
@@ -249,12 +273,7 @@ func (s *Server) handleProbeServer(w http.ResponseWriter, r *http.Request) {
 			existing, err = s.store.GetServerByName(r.Context(), payload.Name)
 		}
 		if err == nil && existing != nil {
-			if payload.Password == "" {
-				payload.Password = existing.Password
-			}
-			if payload.SSHPrivateKey == "" {
-				payload.SSHPrivateKey = existing.SSHPrivateKey
-			}
+			payload.fillHiddenFrom(existing)
 		}
 	}
 
@@ -292,12 +311,18 @@ func (s *Server) handleProbeServer(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, probeResult{OK: false, Error: err.Error(), Hint: probeHint(err)})
 		return
 	}
+	clusters, err := client.ListClusters(ctx, "")
+	if err != nil {
+		writeJSON(w, http.StatusOK, probeResult{OK: false, Error: "не удалось прочитать кластеры: " + err.Error(), Hint: probeHint(err)})
+		return
+	}
 
 	writeJSON(w, http.StatusOK, probeResult{
 		OK:          true,
 		ProductName: info.ProductInfo.Name,
 		Version:     info.Version(),
 		SupportsCBT: info.SupportsIncrementalBackup(),
+		Clusters:    len(clusters),
 		Hosts:       info.Summary.Hosts.Total.Int(),
 		VMs:         info.Summary.VMs.Total.Int(),
 		Latency:     time.Since(started).Round(time.Millisecond).String(),
@@ -306,6 +331,21 @@ func (s *Server) handleProbeServer(w http.ResponseWriter, r *http.Request) {
 		// может больше, чем нужно, пока он ещё не нажал «Сохранить».
 		ExcessPrivileges: client.CheckExcessPrivileges(ctx),
 	})
+}
+
+func (p *serverPayload) fillHiddenFrom(existing *model.Server) {
+	if p.Password == "" {
+		p.Password = existing.Password
+	}
+	if p.SSHPrivateKey == "" {
+		p.SSHPrivateKey = existing.SSHPrivateKey
+	}
+	if p.CACert == "" && !p.ClearCACert {
+		p.CACert = existing.CACert
+	}
+	if p.SSHHostKey == "" && !p.ClearSSHHostKey {
+		p.SSHHostKey = existing.SSHHostKey
+	}
 }
 
 // probeLibvirt tests an SSH connection to a bare libvirt host.
@@ -348,6 +388,7 @@ func (s *Server) probeLibvirt(ctx context.Context, payload serverPayload) probeR
 		ProductName: "libvirt " + version,
 		Version:     version,
 		SupportsCBT: supported,
+		Clusters:    0,
 		Hosts:       1,
 		VMs:         info.TotalVMs,
 		Latency:     time.Since(started).Round(time.Millisecond).String(),
@@ -453,10 +494,31 @@ func (s *Server) handleFetchCA(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
+	fingerprint, err := certificateFingerprint(pem)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{
-		"ca_cert": pem,
-		"warning": "Сертификат получен по непроверенному соединению. Сверьте отпечаток с тем, что показывает движок, прежде чем сохранять.",
+		"ca_cert":     pem,
+		"fingerprint": fingerprint,
+		"warning":     "Сертификат получен по непроверенному соединению. Сверьте SHA-256 с отпечатком на стороне движка, прежде чем сохранять.",
 	})
+}
+
+func certificateFingerprint(bundle string) (string, error) {
+	block, _ := pem.Decode([]byte(bundle))
+	if block == nil || block.Type != "CERTIFICATE" {
+		return "", badRequest("движок не вернул сертификат PEM")
+	}
+	sum := sha256.Sum256(block.Bytes)
+	raw := strings.ToUpper(hex.EncodeToString(sum[:]))
+	parts := make([]string, 0, len(raw)/2)
+	for len(raw) >= 2 {
+		parts = append(parts, raw[:2])
+		raw = raw[2:]
+	}
+	return strings.Join(parts, ":"), nil
 }
 
 func (s *Server) handleRefreshServer(w http.ResponseWriter, r *http.Request) {

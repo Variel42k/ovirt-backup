@@ -10,9 +10,11 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rs/zerolog"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/Variel42k/ovirt-backup/internal/auditlog"
 	"github.com/Variel42k/ovirt-backup/internal/config"
@@ -62,8 +64,12 @@ type Server struct {
 	// oidc пуст, когда внешний вход выключен: по этому полю обработчики и
 	// страница входа узнают, есть ли вторая дверь.
 	oidc *oidcClient
+	// identityMu protects hot replacement of the OIDC client from the settings
+	// page while login callbacks and session checks are running.
+	identityMu sync.RWMutex
 	// oidcLogins помнит начатые внешние входы до возврата от провайдера.
-	oidcLogins *oidcPending
+	oidcLogins  *oidcPending
+	oidcRefresh singleflight.Group
 	// roles кеширует настраиваемые роли: проверяются они на каждом запросе,
 	// а меняются редко.
 	roles *roleCache
@@ -344,6 +350,9 @@ func (s *Server) routes(mux *http.ServeMux) {
 
 	// Параметры, которые применяются без перезапуска и переживают его в БД.
 	mux.HandleFunc("GET /settings/runtime", s.perm(model.PermSettingsRead, s.handleRuntimeSettings))
+	mux.HandleFunc("GET /settings/identity", s.perm(model.PermUsersAdmin, s.handleGetIdentitySettings))
+	mux.HandleFunc("PUT /settings/identity", s.perm(model.PermUsersAdmin, s.handleSetIdentitySettings))
+	mux.HandleFunc("POST /settings/identity/domain", s.perm(model.PermUsersAdmin, s.handleConfigureDomain))
 	mux.HandleFunc("PUT /settings/runtime/compression", s.perm(model.PermSettingsAdmin, s.handleSetRuntimeCompression))
 	mux.HandleFunc("DELETE /settings/runtime/compression", s.perm(model.PermSettingsAdmin, s.handleResetRuntimeCompression))
 	mux.HandleFunc("PUT /settings/runtime/timezone", s.perm(model.PermSettingsAdmin, s.handleSetRuntimeTimezone))

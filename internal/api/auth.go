@@ -61,8 +61,10 @@ const principalKey contextKey = "principal"
 
 // principal is the authenticated caller.
 type principal struct {
+	UserID   string
 	Username string
 	Role     model.Role
+	Provider string
 	// Permissions разворачиваются из роли один раз, при аутентификации.
 	// Проверять их обращением к базе на каждом обработчике значило бы делать
 	// по запросу к базе на каждую кнопку интерфейса.
@@ -213,7 +215,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if ok, retryAfter := s.logins.Allow(req.Username); !ok {
 		s.audit(r, "auth.login", model.ScopeServer, req.Username, false,
 			fmt.Sprintf("слишком много неудачных попыток, пауза %s", retryAfter))
-		s.log.Warn().Str("пользователь", req.Username).Str("адрес", clientIP(r)).
+		s.log.Warn().Str("пользователь", req.Username).Str("адрес", s.clientIP(r)).
 			Dur("пауза", retryAfter).Msg("вход временно приостановлен: подбор пароля")
 		w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())))
 		writeJSON(w, http.StatusTooManyRequests, errorResponse{
@@ -279,7 +281,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 // различает, какой из них вошли: сессия одна и та же. Разведи это на две ветки
 // с собственными флагами куки, и однажды они разойдутся именно в том флаге,
 // который защищает.
-func (s *Server) issueSession(w http.ResponseWriter, r *http.Request, user *model.User, idToken string) (*model.Session, error) {
+func (s *Server) issueSession(w http.ResponseWriter, r *http.Request, user *model.User, idToken string, provider ...oidcSessionData) (*model.Session, error) {
 	token, err := newSessionToken()
 	if err != nil {
 		return nil, err
@@ -291,9 +293,14 @@ func (s *Server) issueSession(w http.ResponseWriter, r *http.Request, user *mode
 		Username:    user.Username,
 		Role:        user.Role,
 		UserAgent:   r.UserAgent(),
-		RemoteIP:    clientIP(r),
+		RemoteIP:    s.clientIP(r),
 		ExpiresAt:   expires,
 		OIDCIDToken: idToken,
+	}
+	if len(provider) > 0 {
+		session.OIDCRefreshToken = provider[0].refresh
+		session.OIDCSubject = provider[0].subject
+		session.OIDCIssuer = provider[0].issuer
 	}
 	if err := s.store.CreateSession(r.Context(), session); err != nil {
 		return nil, err
@@ -314,12 +321,12 @@ func (s *Server) issueSession(w http.ResponseWriter, r *http.Request, user *mode
 
 // sessionTTL выбирает срок жизни сессии.
 //
-// Внешним входам он короче общего: роль пересчитывается при входе, но уже
-// выданная сессия живёт своим сроком, и человек, у которого в каталоге отобрали
-// группу, остаётся здесь администратором до её конца.
+// Для внешнего входа срок короче общего. Роль внутри этого срока дополнительно
+// пересчитывается через refresh token в revalidateOIDCSession.
 func (s *Server) sessionTTL(external bool) time.Duration {
-	if external && s.cfg.Auth.OIDC.SessionTTL > 0 {
-		return s.cfg.Auth.OIDC.SessionTTL
+	_, cfg := s.oidcSnapshot()
+	if external && cfg.SessionTTL > 0 {
+		return cfg.SessionTTL
 	}
 	return s.cfg.Auth.SessionTTL
 }
@@ -331,8 +338,9 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	// вся разница между «вышел» и «кажется, вышел».
 	logoutURL := ""
 	if cookie, err := r.Cookie(sessionCookie); err == nil {
-		if session, sessErr := s.store.GetSession(r.Context(), cookie.Value); sessErr == nil && s.oidc != nil {
-			logoutURL = s.oidc.logoutURL(session.OIDCIDToken)
+		client, _ := s.oidcSnapshot()
+		if session, sessErr := s.store.GetSession(r.Context(), cookie.Value); sessErr == nil && client != nil {
+			logoutURL = client.logoutURL(session.OIDCIDToken)
 		}
 		_ = s.store.DeleteSession(r.Context(), cookie.Value)
 	}
@@ -363,6 +371,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"username":       p.Username,
 		"role":           p.Role,
+		"provider":       p.Provider,
 		"permissions":    p.Permissions,
 		"can_write":      model.HasAnyAction(p.Permissions, model.ActionWrite),
 		"can_administer": p.Can(model.PermUsersAdmin),
@@ -394,6 +403,9 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 			return
 		}
 		session, err := s.store.GetSession(r.Context(), cookie.Value)
+		if err == nil {
+			session, err = s.revalidateOIDCSession(r.Context(), session)
+		}
 		if err != nil {
 			if !errors.Is(err, store.ErrNotFound) {
 				s.log.Warn().Err(err).Msg("не удалось проверить сессию")
@@ -402,7 +414,8 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 			return
 		}
 		ctx := context.WithValue(r.Context(), principalKey, &principal{
-			Username: session.Username, Role: session.Role, Token: session.Token,
+			UserID: session.UserID, Username: session.Username, Role: session.Role,
+			Provider: session.Provider, Token: session.Token,
 			Permissions: s.permissionsFor(r.Context(), session.Role),
 		})
 		next.ServeHTTP(w, r.WithContext(ctx))
@@ -518,7 +531,7 @@ func (s *Server) audit(r *http.Request, action string, scope model.Scope, object
 	}
 	entry := model.AuditEntry{
 		Actor: actor, Action: action, Scope: scope, ObjectID: objectID,
-		Detail: detail, Success: success, RemoteIP: clientIP(r),
+		Detail: detail, Success: success, RemoteIP: s.clientIP(r),
 	}
 	if err := s.store.Audit(context.WithoutCancel(r.Context()), entry); err != nil {
 		s.log.Debug().Err(err).Str("действие", action).Msg("не удалось записать событие аудита")

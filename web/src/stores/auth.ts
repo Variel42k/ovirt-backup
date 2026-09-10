@@ -6,6 +6,7 @@ import type { Role } from '@/api/types'
 export const useAuthStore = defineStore('auth', () => {
   const username = ref('')
   const role = ref<Role>('viewer')
+  const provider = ref('')
   const permissions = ref<string[]>([])
   const authenticated = ref(false)
   const authRequired = ref(true)
@@ -35,6 +36,7 @@ export const useAuthStore = defineStore('auth', () => {
       const me = await api.me()
       username.value = me.username
       role.value = me.role
+      provider.value = me.provider
       permissions.value = me.permissions ?? []
       authenticated.value = true
     } catch {
@@ -67,6 +69,7 @@ export const useAuthStore = defineStore('auth', () => {
       authenticated.value = false
       username.value = ''
       role.value = 'viewer'
+      provider.value = ''
       permissions.value = []
     }
     // Своя сессия закрыта, но у провайдера она осталась: без этого перехода
@@ -81,11 +84,12 @@ export const useAuthStore = defineStore('auth', () => {
   function invalidate(): void {
     authenticated.value = false
     username.value = ''
+    provider.value = ''
     permissions.value = []
   }
 
   return {
-    username, role, permissions, authenticated, authRequired, checked,
+    username, role, provider, permissions, authenticated, authRequired, checked,
     can, canAny, canWrite, canAdmin, check, login, logout, invalidate,
   }
 })

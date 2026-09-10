@@ -150,13 +150,27 @@ func (c *oidcClient) connect(ctx context.Context) (*oauth2.Config, *oidc.IDToken
 		scopes = append([]string{oidc.ScopeOpenID}, scopes...)
 	}
 
-	// end_session_endpoint не входит в разобранные библиотекой поля, но лежит
-	// в том же документе.
+	// Проверяем и те endpoint, которыми библиотека пользуется внутри. HTTPS
+	// issuer с HTTP authorization_endpoint иначе отправил бы пароль пользователя
+	// по открытому каналу, хотя сама настройка на вид оставалась бы HTTPS.
 	var discovered struct {
-		EndSessionEndpoint string `json:"end_session_endpoint"`
+		AuthorizationEndpoint string `json:"authorization_endpoint"`
+		TokenEndpoint         string `json:"token_endpoint"`
+		JWKSURI               string `json:"jwks_uri"`
+		UserInfoEndpoint      string `json:"userinfo_endpoint"`
+		EndSessionEndpoint    string `json:"end_session_endpoint"`
 	}
 	if err := provider.Claims(&discovered); err != nil {
 		return nil, nil, fmt.Errorf("разбор настроек провайдера %s: %w", issuer, err)
+	}
+	if err := validateOIDCEndpoints(issuer, map[string]string{
+		"authorization_endpoint": discovered.AuthorizationEndpoint,
+		"token_endpoint":         discovered.TokenEndpoint,
+		"jwks_uri":               discovered.JWKSURI,
+		"userinfo_endpoint":      discovered.UserInfoEndpoint,
+		"end_session_endpoint":   discovered.EndSessionEndpoint,
+	}); err != nil {
+		return nil, nil, err
 	}
 
 	c.provider = provider
@@ -170,6 +184,23 @@ func (c *oidcClient) connect(ctx context.Context) (*oauth2.Config, *oidc.IDToken
 	}
 	c.verifier = provider.Verifier(&oidc.Config{ClientID: c.cfg.ClientID})
 	return c.oauth, c.verifier, nil
+}
+
+func validateOIDCEndpoints(issuer string, endpoints map[string]string) error {
+	issuerURL, err := url.Parse(issuer)
+	if err != nil || !strings.EqualFold(issuerURL.Scheme, "https") {
+		return nil
+	}
+	for name, raw := range endpoints {
+		if strings.TrimSpace(raw) == "" {
+			continue
+		}
+		u, err := url.Parse(raw)
+		if err != nil || !strings.EqualFold(u.Scheme, "https") || u.Host == "" || u.User != nil {
+			return fmt.Errorf("OIDC discovery: %s должен использовать HTTPS", name)
+		}
+	}
+	return nil
 }
 
 // logoutURL строит адрес выхода у провайдера.
@@ -204,23 +235,26 @@ func (c *oidcClient) logoutURL(idToken string) string {
 // ADFS и Azure кладут членство не в id_token, а отдают его на /userinfo, и без
 // этого запроса вход у них отказывался бы всем подряд с формулировкой «группы
 // не отобразились».
-func (c *oidcClient) groupsFromUserInfo(ctx context.Context, token *oauth2.Token) []string {
+func (c *oidcClient) groupsFromUserInfo(ctx context.Context, token *oauth2.Token, subject string) ([]string, error) {
 	c.mu.Lock()
 	provider, claim := c.provider, c.cfg.GroupsClaim
 	c.mu.Unlock()
 
 	if provider == nil || claim == "" {
-		return nil
+		return nil, errors.New("userinfo не настроен")
 	}
 	info, err := provider.UserInfo(ctx, oauth2.StaticTokenSource(token))
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("userinfo: %w", err)
+	}
+	if subject == "" || info.Subject != subject {
+		return nil, errors.New("userinfo относится к другой личности")
 	}
 	var claims map[string]any
 	if err := info.Claims(&claims); err != nil {
-		return nil
+		return nil, fmt.Errorf("разбор userinfo: %w", err)
 	}
-	return claimStrings(lookupClaim(claims, claim))
+	return claimStrings(lookupClaim(claims, claim)), nil
 }
 
 // oidcInfoResponse — то, что странице входа нужно знать до входа.
@@ -234,12 +268,13 @@ type oidcInfoResponse struct {
 // handleOIDCInfo отвечает без аутентификации: страница входа спрашивает его
 // раньше, чем у неё появляется сессия.
 func (s *Server) handleOIDCInfo(w http.ResponseWriter, r *http.Request) {
-	label := strings.TrimSpace(s.cfg.Auth.OIDC.ButtonLabel)
+	client, cfg := s.oidcSnapshot()
+	label := strings.TrimSpace(cfg.ButtonLabel)
 	if label == "" {
 		label = "Войти через провайдера"
 	}
 	writeJSON(w, http.StatusOK, oidcInfoResponse{
-		Enabled:     s.oidc != nil,
+		Enabled:     client != nil,
 		ButtonLabel: label,
 		LocalLogin:  s.localLoginAllowed(),
 	})
@@ -247,19 +282,21 @@ func (s *Server) handleOIDCInfo(w http.ResponseWriter, r *http.Request) {
 
 // localLoginAllowed сообщает, принимается ли вход по паролю.
 func (s *Server) localLoginAllowed() bool {
-	return s.oidc == nil || s.cfg.Auth.OIDC.AllowLocalLogin
+	client, cfg := s.oidcSnapshot()
+	return client == nil || cfg.AllowLocalLogin
 }
 
 // handleOIDCStart отправляет браузер к провайдеру.
 func (s *Server) handleOIDCStart(w http.ResponseWriter, r *http.Request) {
-	if s.oidc == nil {
+	client, _ := s.oidcSnapshot()
+	if client == nil {
 		writeJSON(w, http.StatusNotFound, errorResponse{
 			Error: "внешний вход не настроен", Code: "oidc_disabled",
 		})
 		return
 	}
 
-	oauthCfg, _, err := s.oidc.connect(r.Context())
+	oauthCfg, _, err := client.connect(r.Context())
 	if err != nil {
 		s.oidcFailed(w, r, "провайдер недоступен", err)
 		return
@@ -302,7 +339,8 @@ func (s *Server) handleOIDCStart(w http.ResponseWriter, r *http.Request) {
 
 // handleOIDCCallback принимает возврат от провайдера и заводит сессию.
 func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
-	if s.oidc == nil {
+	client, oidcCfg := s.oidcSnapshot()
+	if client == nil {
 		writeJSON(w, http.StatusNotFound, errorResponse{
 			Error: "внешний вход не настроен", Code: "oidc_disabled",
 		})
@@ -345,7 +383,7 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	oauthCfg, verifier, err := s.oidc.connect(r.Context())
+	oauthCfg, verifier, err := client.connect(r.Context())
 	if err != nil {
 		s.oidcFailed(w, r, "провайдер недоступен", err)
 		return
@@ -353,7 +391,7 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), oidcExchangeTimeout)
 	defer cancel()
-	ctx = s.oidc.requestContext(ctx)
+	ctx = client.requestContext(ctx)
 
 	token, err := oauthCfg.Exchange(ctx, code, oauth2.VerifierOption(login.verifier))
 	if err != nil {
@@ -389,13 +427,17 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	var raw map[string]any
 	_ = idToken.Claims(&raw)
 
-	groups := claimStrings(lookupClaim(raw, s.cfg.Auth.OIDC.GroupsClaim))
+	groups := claimStrings(lookupClaim(raw, oidcCfg.GroupsClaim))
 	if len(groups) == 0 {
 		// Часть провайдеров членство в токен не кладёт, но отдаёт на
 		// /userinfo. Без этого запроса им отказывали бы во входе всем.
-		groups = s.oidc.groupsFromUserInfo(ctx, token)
+		groups, err = client.groupsFromUserInfo(ctx, token, idToken.Subject)
+		if err != nil {
+			s.oidcFailed(w, r, "не удалось проверить группы пользователя", err)
+			return
+		}
 	}
-	role, err := mapOIDCRole(s.cfg.Auth.OIDC, groups)
+	role, err := mapOIDCRole(oidcCfg, groups)
 	if err != nil {
 		// Причина уходит человеку целиком: в ней перечислены пришедшие группы,
 		// без них разбор шёл бы по двум журналам сразу.
@@ -410,7 +452,9 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Токен личности остаётся при сессии: он понадобится провайдеру при выходе.
-	if _, err := s.issueSession(w, r, user, rawIDToken); err != nil {
+	if _, err := s.issueSession(w, r, user, rawIDToken, oidcSessionData{
+		refresh: token.RefreshToken, subject: idToken.Subject, issuer: oidcCfg.Issuer,
+	}); err != nil {
 		s.oidcFailed(w, r, "не удалось завести сессию", err)
 		return
 	}
@@ -499,7 +543,7 @@ func (s *Server) usernameFree(ctx context.Context, name string) bool {
 // показать причину можно только тем, что он откроет следующим. Подробности
 // остаются в журнале — в адресной строке им не место.
 func (s *Server) oidcFailed(w http.ResponseWriter, r *http.Request, reason string, cause error) {
-	s.log.Warn().Err(cause).Str("адрес", clientIP(r)).Msg("внешний вход не удался: " + reason)
+	s.log.Warn().Err(cause).Str("адрес", s.clientIP(r)).Msg("внешний вход не удался: " + reason)
 	s.audit(r, "auth.login", model.ScopeServer, "oidc", false, reason)
 	http.Redirect(w, r, loginPagePath+"?"+url.Values{"oidc_error": {reason}}.Encode(),
 		http.StatusFound)

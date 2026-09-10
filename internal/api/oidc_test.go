@@ -48,6 +48,20 @@ type fakeCode struct {
 	challenge string
 }
 
+func TestHTTPSIssuerRejectsPlaintextDiscoveryEndpoint(t *testing.T) {
+	err := validateOIDCEndpoints("https://sso.example.org/realms/jhvirt", map[string]string{
+		"authorization_endpoint": "http://sso.example.org/authorize",
+	})
+	if err == nil {
+		t.Fatal("HTTPS issuer accepted a plaintext authorization endpoint")
+	}
+	if err := validateOIDCEndpoints("http://127.0.0.1:8080/realms/test", map[string]string{
+		"authorization_endpoint": "http://127.0.0.1:8080/authorize",
+	}); err != nil {
+		t.Fatalf("loopback test issuer rejected: %v", err)
+	}
+}
+
 func newFakeProvider(t *testing.T) *fakeProvider {
 	t.Helper()
 

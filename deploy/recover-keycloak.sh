@@ -304,18 +304,13 @@ printf ']' >> "$RECOVERY_DIR/role-map.json"
     die "пароль изменён, но не удалось завершить прежние сессии $ADMIN_USER"
 api_status DELETE "/attack-detection/brute-force/users/$ADMIN_ID" >/dev/null 2>&1 || true
 
-PERMANENT_TOKEN="$(admin_user_token)"
-[ -n "$PERMANENT_TOKEN" ] ||
-    die "пароль изменён, но постоянный администратор $ADMIN_USER не смог войти"
-printf 'header = "Authorization: Bearer %s"\n' "$PERMANENT_TOKEN" \
-    > "$RECOVERY_DIR/permanent-curl.conf"
-chmod 0600 "$RECOVERY_DIR/permanent-curl.conf"
-PERMANENT_ADMIN_CODE="$(curl -k -sS -m 30 -o /dev/null -w '%{http_code}' \
-    --config "$RECOVERY_DIR/permanent-curl.conf" \
-    "$KC_API_URL/admin/realms/master/users" 2>/dev/null)"
-[ "$PERMANENT_ADMIN_CODE" = 200 ] ||
-    die "пароль принят, но у $ADMIN_USER нет административного доступа к master realm"
-PERMANENT_TOKEN=""
+# Password grants are disabled for admin-cli: testing a password-only login
+# here would bypass the mandatory browser MFA policy. Verify the role through
+# the temporary service credential and keep OTP credentials unchanged.
+api_get "/users/$ADMIN_ID/role-mappings/realm" > "$RECOVERY_DIR/verified-roles.json" ||
+    die "не удалось проверить права восстановленного администратора"
+grep -Eq '"name"[[:space:]]*:[[:space:]]*"admin"' "$RECOVERY_DIR/verified-roles.json" ||
+    die "у восстановленного пользователя нет роли admin"
 
 remove_temp_client || die "не удалось удалить временный admin service account $TEMP_CLIENT"
 FINAL_PASSWORD="$(cat "$RECOVERY_DIR/admin.password")"
@@ -332,5 +327,5 @@ say "  администратор: $ADMIN_USER"
 say "  новый пароль:  $FINAL_PASSWORD"
 say ""
 say "Пароль напечатан один раз и нигде не сохранён. Временный recovery account удалён."
-say "После входа настройте MFA и сохраните пароль в принятом менеджере секретов."
+say "При первом входе обязательный flow потребует настроить MFA. Сохраните пароль в принятом менеджере секретов."
 FINAL_PASSWORD=""

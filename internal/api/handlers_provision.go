@@ -22,10 +22,11 @@ import (
 
 // provisionRequest — что нужно для настройки.
 type provisionRequest struct {
-	Name        string `json:"name"`
-	EngineURL   string `json:"engine_url"`
-	CACert      string `json:"ca_cert"`
-	InsecureTLS bool   `json:"insecure_tls"`
+	Name        string           `json:"name"`
+	Kind        model.ServerKind `json:"kind"`
+	EngineURL   string           `json:"engine_url"`
+	CACert      string           `json:"ca_cert"`
+	InsecureTLS bool             `json:"insecure_tls"`
 
 	// Административные учётные данные. Используются только на время этого
 	// запроса и не сохраняются нигде: ни в базе, ни в журнале.
@@ -71,11 +72,17 @@ func (s *Server) handleProvisionServer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	req.Name = strings.TrimSpace(req.Name)
+	if req.Kind == "" {
+		req.Kind = model.KindOVirt
+	}
 	req.EngineURL = strings.TrimSpace(req.EngineURL)
 	req.AdminUsername = strings.TrimSpace(req.AdminUsername)
 	req.ServiceUsername = strings.TrimSpace(req.ServiceUsername)
 
 	switch {
+	case !req.Kind.UsesOVirtAPI():
+		s.writeError(w, r, badRequest("безопасный мастер поддерживает oVirt и совместимые форки, получен тип %q", req.Kind))
+		return
 	case req.Name == "" || req.EngineURL == "":
 		s.writeError(w, r, badRequest("нужны название подключения и адрес движка"))
 		return
@@ -108,7 +115,7 @@ func (s *Server) handleProvisionServer(w http.ResponseWriter, r *http.Request) {
 	// Сохраняется только сервисная запись. Административная не попадает ни в
 	// одно поле — ровно ради этого всё и затевалось.
 	server := &model.Server{
-		Name: req.Name, Kind: model.KindOVirt, EngineURL: req.EngineURL,
+		Name: req.Name, Kind: req.Kind, EngineURL: req.EngineURL,
 		Username: req.ServiceUsername, Password: req.ServicePassword,
 		CACert: req.CACert, InsecureTLS: req.InsecureTLS, Enabled: true,
 	}
@@ -122,7 +129,11 @@ func (s *Server) handleProvisionServer(w http.ResponseWriter, r *http.Request) {
 
 	result.ServerID = server.ID
 	s.audit(r, "server.provision", model.ScopeServer, server.ID, true,
-		"роль "+req.RoleName+", учётная запись "+req.ServiceUsername)
+		"тип "+string(req.Kind)+", роль "+req.RoleName+", учётная запись "+req.ServiceUsername)
+	// The first refresh imports the complete Engine inventory immediately. The
+	// operator should not have to wait for the monitor interval to see the
+	// clusters and hosts that were just connected.
+	go s.refreshServer(context.WithoutCancel(r.Context()), server.ID)
 	writeJSON(w, http.StatusOK, result)
 }
 

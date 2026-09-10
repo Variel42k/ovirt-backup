@@ -63,6 +63,9 @@ func (s *Store) CreateServer(ctx context.Context, srv *model.Server) error {
 		}
 		return fmt.Errorf("insert server: %w", err)
 	}
+	srv.CACertStored = strings.TrimSpace(srv.CACert) != ""
+	srv.SSHHostKeyStored = strings.TrimSpace(srv.SSHHostKey) != ""
+	srv.SSHKeyStored = strings.TrimSpace(srv.SSHPrivateKey) != ""
 	return nil
 }
 
@@ -123,6 +126,9 @@ func (s *Store) UpdateServer(ctx context.Context, srv *model.Server) error {
 		}
 		return fmt.Errorf("update server: %w", err)
 	}
+	srv.CACertStored = strings.TrimSpace(srv.CACert) != ""
+	srv.SSHHostKeyStored = strings.TrimSpace(srv.SSHHostKey) != ""
+	srv.SSHKeyStored = strings.TrimSpace(srv.SSHPrivateKey) != ""
 	return nil
 }
 
@@ -242,6 +248,8 @@ func (s *Store) scanServer(row rowScanner) (*model.Server, error) {
 	}
 
 	srv.SSHKeyStored = srv.SSHPrivateKey != ""
+	srv.SSHHostKeyStored = strings.TrimSpace(srv.SSHHostKey) != ""
+	srv.CACertStored = strings.TrimSpace(srv.CACert) != ""
 	srv.InsecureTLSSince = nullTime(insecureSince)
 	srv.Kind = model.ServerKind(kind)
 	srv.State = model.ConnState(state)

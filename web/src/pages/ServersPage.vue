@@ -6,7 +6,7 @@ import DirectoryPicker from '@/components/DirectoryPicker.vue'
 import { ago, connState } from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
-import type { ProvisionResult, Server } from '@/api/types'
+import type { ProvisionResult, Server, VirtualizationKind } from '@/api/types'
 
 const $q = useQuasar()
 const app = useAppStore()
@@ -17,6 +17,9 @@ const dialog = ref(false)
 const editing = ref<Server | null>(null)
 const probing = ref(false)
 const probeResult = ref<Record<string, unknown> | null>(null)
+const caUpload = ref<File | null>(null)
+const fetchedCAFingerprint = ref('')
+const scannedHostFingerprint = ref('')
 
 /**
  * Что учётная запись может сверх нужного. Определяет сервер фактической
@@ -31,9 +34,10 @@ const emptyForm = () => ({
   name: '',
   kind: 'ovirt',
   engine_url: '',
-  username: 'admin@internal',
+  username: 'jhvirt-backup@internal',
   password: '',
   ca_cert: '',
+  clear_ca_cert: false,
   insecure_tls: false,
   enabled: true,
   tags: [] as string[],
@@ -43,33 +47,63 @@ const emptyForm = () => ({
   ssh_port: 22,
   ssh_private_key: '',
   ssh_host_key: '',
+  clear_ssh_host_key: false,
   ssh_trust_any_host_key: false,
   scratch_dir: '/var/lib/libvirt/qemu',
 })
 
 const form = ref(emptyForm())
 
-const kinds = [
-  { value: 'ovirt', label: 'oVirt' },
-  { value: 'redvirt', label: 'РЕД Виртуализация' },
-  { value: 'olvm', label: 'Oracle Linux Virtualization Manager' },
-  { value: 'rhv', label: 'Red Hat Virtualization' },
-  { value: 'kvm', label: 'libvirt/KVM (без движка)' },
+watch(dialog, (open) => {
+  if (open) return
+  form.value.password = ''
+  form.value.ssh_private_key = ''
+  form.value.ca_cert = ''
+  form.value.ssh_host_key = ''
+  caUpload.value = null
+  fetchedCAFingerprint.value = ''
+  scannedHostFingerprint.value = ''
+  probeResult.value = null
+})
+
+const fallbackKinds: VirtualizationKind[] = [
+  { value: 'ovirt', title: 'oVirt', description: 'Весь контур, управляемый Engine.', family: 'ovirt-api', managed_scope: 'engine', connection_method: 'https', safe_provision: true, supports_backup: true, supports_restore: true, supports_engine_config: true },
+  { value: 'redvirt', title: 'РЕД Виртуализация', description: 'Весь контур РЕД Виртуализации.', family: 'ovirt-api', managed_scope: 'engine', connection_method: 'https', safe_provision: true, supports_backup: true, supports_restore: true, supports_engine_config: true },
+  { value: 'olvm', title: 'Oracle Linux Virtualization Manager', description: 'Все кластеры под управлением OLVM.', family: 'ovirt-api', managed_scope: 'engine', connection_method: 'https', safe_provision: true, supports_backup: true, supports_restore: true, supports_engine_config: true },
+  { value: 'rhv', title: 'Red Hat Virtualization', description: 'Все кластеры под управлением RHV Manager.', family: 'ovirt-api', managed_scope: 'engine', connection_method: 'https', safe_provision: true, supports_backup: true, supports_restore: true, supports_engine_config: true },
+  { value: 'kvm', title: 'libvirt/KVM (без движка)', description: 'Один самостоятельный гипервизор по SSH.', family: 'libvirt', managed_scope: 'host', connection_method: 'ssh', safe_provision: false, supports_backup: true, supports_restore: true, supports_engine_config: false },
 ]
+const virtualizationKinds = computed(() => app.meta?.virtualization_kinds?.length ? app.meta.virtualization_kinds : fallbackKinds)
+const kinds = computed(() => virtualizationKinds.value.map((item) => ({ value: item.value, label: item.title })))
+const provisionKinds = computed(() => virtualizationKinds.value.filter((item) => item.safe_provision).map((item) => ({ value: item.value, label: item.title })))
+const selectedKind = computed(() => virtualizationKinds.value.find((item) => item.value === form.value.kind))
+
+function kindUsesLibvirt(kind: string): boolean {
+  return virtualizationKinds.value.find((item) => item.value === kind)?.family === 'libvirt'
+}
 
 /** У голого libvirt нет движка: подключение идёт по SSH, а не по REST. */
-const isLibvirt = computed(() => form.value.kind === 'kvm')
+const isLibvirt = computed(() => kindUsesLibvirt(form.value.kind))
+
+// Trust material is write-only. The backend only returns presence flags;
+// newly selected material remains in memory until this dialog closes.
+const caStored = computed(
+  () => Boolean(form.value.ca_cert) || Boolean(editing.value?.ca_cert_stored && !form.value.clear_ca_cert),
+)
+const hostKeyStored = computed(
+  () => Boolean(form.value.ssh_host_key) || Boolean(editing.value?.ssh_host_key_stored && !form.value.clear_ssh_host_key),
+)
 
 /** Подсказка по умолчанию для имени пользователя меняется вместе с типом. */
 watch(
   () => form.value.kind,
   (kind, previous) => {
     if (kind === previous) return
-    if (kind === 'kvm' && form.value.username === 'admin@internal') {
+    if (kindUsesLibvirt(kind) && form.value.username === 'jhvirt-backup@internal') {
       form.value.username = 'root'
     }
-    if (kind !== 'kvm' && form.value.username === 'root') {
-      form.value.username = 'admin@internal'
+    if (!kindUsesLibvirt(kind) && form.value.username === 'root') {
+      form.value.username = 'jhvirt-backup@internal'
     }
   },
 )
@@ -88,8 +122,11 @@ async function load() {
 const provisionOpen = ref(false)
 const provisionBusy = ref(false)
 const provisionResult = ref<ProvisionResult | null>(null)
+const provisionCAUpload = ref<File | null>(null)
+const provisionCAFingerprint = ref('')
 const provisionForm = ref({
   name: '',
+  kind: 'ovirt',
   engine_url: '',
   ca_cert: '',
   insecure_tls: false,
@@ -102,25 +139,62 @@ const provisionForm = ref({
 function openProvision() {
   provisionResult.value = null
   provisionForm.value = {
-    name: '', engine_url: '', ca_cert: '', insecure_tls: false,
+    name: '', kind: 'ovirt', engine_url: '', ca_cert: '', insecure_tls: false,
     admin_username: '', admin_password: '', service_username: '', service_password: '',
   }
+  provisionCAUpload.value = null
+  provisionCAFingerprint.value = ''
   provisionOpen.value = true
+}
+
+async function useProvisionCAFile(file: File | null) {
+  if (!file) return
+  try {
+    const body = await file.text()
+    if (!body.includes('BEGIN CERTIFICATE')) throw new Error('Файл не содержит PEM-сертификат')
+    provisionForm.value.ca_cert = body
+    provisionForm.value.insecure_tls = false
+    provisionCAFingerprint.value = ''
+  } catch (err) {
+    provisionCAUpload.value = null
+    notifyError(err, 'Не удалось прочитать сертификат')
+  }
+}
+
+async function fetchProvisionCA() {
+  if (!provisionForm.value.engine_url) {
+    notifyError('Сначала укажите адрес движка')
+    return
+  }
+  try {
+    const result = await api.fetchCA(provisionForm.value.engine_url)
+    provisionForm.value.ca_cert = result.ca_cert
+    provisionForm.value.insecure_tls = false
+    provisionCAFingerprint.value = result.fingerprint
+    notify({ type: 'warning', message: `SHA-256 ${result.fingerprint}. ${result.warning}`, timeout: 20000, multiLine: true })
+  } catch (err) {
+    notifyError(err, 'Не удалось получить сертификат')
+  }
+}
+
+function clearProvisionCA() {
+  provisionForm.value.ca_cert = ''
+  provisionCAUpload.value = null
+  provisionCAFingerprint.value = ''
 }
 
 async function runProvision() {
   provisionBusy.value = true
   provisionResult.value = null
   try {
-    const result = await api.provisionServer({ ...provisionForm.value })
+    const payload = { ...provisionForm.value }
+    provisionForm.value.admin_password = ''
+    provisionForm.value.service_password = ''
+    const result = await api.provisionServer(payload)
     provisionResult.value = result
     if (result.ok) {
       notifyOk('Подключение настроено: сохранена только сервисная учётная запись')
       await app.loadServers()
-      // Пароли не должны пережить диалог даже в памяти вкладки: настройка
-      // прошла, держать их больше незачем.
-      provisionForm.value.admin_password = ''
-      provisionForm.value.service_password = ''
     }
   } catch (err) {
     notifyError(err, 'Не удалось настроить подключение')
@@ -129,10 +203,22 @@ async function runProvision() {
   }
 }
 
+watch(provisionOpen, (open) => {
+  if (open) return
+  provisionForm.value.admin_password = ''
+  provisionForm.value.service_password = ''
+  provisionForm.value.ca_cert = ''
+  provisionCAUpload.value = null
+  provisionCAFingerprint.value = ''
+})
+
 function openCreate() {
   editing.value = null
   probeResult.value = null
   form.value = emptyForm()
+  caUpload.value = null
+  fetchedCAFingerprint.value = ''
+  scannedHostFingerprint.value = ''
   dialog.value = true
 }
 
@@ -148,18 +234,51 @@ function openEdit(server: Server) {
     // Секреты с сервера не приходят; пустые поля означают «оставить прежние».
     password: '',
     ssh_private_key: '',
-    ca_cert: server.ca_cert ?? '',
+    ca_cert: '',
+    clear_ca_cert: false,
     insecure_tls: server.insecure_tls,
     enabled: server.enabled,
     tags: server.tags ?? [],
     notes: server.notes ?? '',
     ssh_host: server.ssh_host ?? '',
     ssh_port: server.ssh_port || 22,
-    ssh_host_key: server.ssh_host_key ?? '',
+    ssh_host_key: '',
+    clear_ssh_host_key: false,
     ssh_trust_any_host_key: server.ssh_trust_any_host_key ?? false,
     scratch_dir: server.scratch_dir ?? '/var/lib/libvirt/qemu',
   }
+  caUpload.value = null
+  fetchedCAFingerprint.value = ''
+  scannedHostFingerprint.value = ''
   dialog.value = true
+}
+
+async function useCAFile(file: File | null) {
+  if (!file) return
+  try {
+    const body = await file.text()
+    if (!body.includes('BEGIN CERTIFICATE')) throw new Error('Файл не содержит PEM-сертификат')
+    form.value.ca_cert = body
+    form.value.clear_ca_cert = false
+    form.value.insecure_tls = false
+    fetchedCAFingerprint.value = ''
+  } catch (err) {
+    caUpload.value = null
+    notifyError(err, 'Не удалось прочитать сертификат')
+  }
+}
+
+function clearCA() {
+  form.value.ca_cert = ''
+  form.value.clear_ca_cert = true
+  caUpload.value = null
+  fetchedCAFingerprint.value = ''
+}
+
+function clearHostKey() {
+  form.value.ssh_host_key = ''
+  form.value.clear_ssh_host_key = true
+  scannedHostFingerprint.value = ''
 }
 
 async function probe() {
@@ -184,8 +303,10 @@ async function fetchCA() {
   try {
     const result = await api.fetchCA(form.value.engine_url)
     form.value.ca_cert = result.ca_cert
+    form.value.clear_ca_cert = false
     form.value.insecure_tls = false
-    notify({ type: 'warning', message: result.warning, timeout: 12000, multiLine: true })
+    fetchedCAFingerprint.value = result.fingerprint
+    notify({ type: 'warning', message: `SHA-256 ${result.fingerprint}. ${result.warning}`, timeout: 20000, multiLine: true })
   } catch (err) {
     notifyError(err, 'Не удалось получить сертификат')
   }
@@ -216,6 +337,8 @@ async function scanHostKey() {
   try {
     const result = await api.scanServerHostKey(form.value.ssh_host, form.value.ssh_port || 22)
     form.value.ssh_host_key = result.line
+    form.value.clear_ssh_host_key = false
+    scannedHostFingerprint.value = result.fingerprint
     form.value.ssh_trust_any_host_key = false
     notify({
       type: 'warning',
@@ -289,30 +412,34 @@ onMounted(load)
 <template>
   <q-page padding>
     <div class="row items-center q-mb-md">
-      <div class="text-h5">Серверы</div>
+      <div class="text-h5">Платформы виртуализации</div>
       <q-space />
       <q-btn flat dense round icon="refresh" :loading="loading" @click="load" />
       <q-btn
         v-if="auth.canAdmin()"
         color="primary"
-        icon="add"
-        label="Подключить сервер"
-        unelevated
-        class="q-ml-sm"
-        @click="openCreate"
-      />
-      <q-btn
-        v-if="auth.canAdmin()"
-        outline
-        color="primary"
         icon="verified_user"
-        label="Безопасное подключение"
+        label="Подключить oVirt-контур"
+        unelevated
         class="q-ml-sm"
         @click="openProvision"
       >
         <q-tooltip>
           Административная учётная запись понадобится один раз и сохранена не будет:
           под ней создаётся роль с минимальными правами для отдельной сервисной записи
+        </q-tooltip>
+      </q-btn>
+      <q-btn
+        v-if="auth.canAdmin()"
+        outline
+        color="primary"
+        icon="add"
+        label="Другой способ подключения"
+        class="q-ml-sm"
+        @click="openCreate"
+      >
+        <q-tooltip>
+          Ручное подключение с уже созданной сервисной записью либо SSH-ключом KVM
         </q-tooltip>
       </q-btn>
     </div>
@@ -326,7 +453,7 @@ onMounted(load)
       :loading="loading"
       class="jhv-table"
       :pagination="{ rowsPerPage: 25 }"
-      no-data-label="Серверы не подключены"
+      no-data-label="Платформы виртуализации не подключены"
     >
       <template #body-cell-name="props">
         <q-td :props="props">
@@ -335,7 +462,7 @@ onMounted(load)
           </router-link>
           <q-badge v-if="!props.row.enabled" color="grey-7" class="q-ml-sm">отключён</q-badge>
           <q-badge
-            v-if="props.row.kind === 'kvm' && !props.row.ssh_key_stored"
+            v-if="kindUsesLibvirt(props.row.kind) && !props.row.ssh_key_stored"
             color="warning"
             text-color="dark"
             class="q-ml-sm"
@@ -382,7 +509,7 @@ onMounted(load)
         <q-td :props="props">
           <span class="jhv-mono">
             {{
-              props.row.kind === 'kvm'
+              kindUsesLibvirt(props.row.kind)
                 ? `ssh://${props.row.username}@${props.row.ssh_host}:${props.row.ssh_port || 22}`
                 : props.row.engine_url
             }}
@@ -432,7 +559,7 @@ onMounted(load)
     <q-dialog v-model="dialog" persistent>
       <q-card style="width: 720px; max-width: 95vw">
         <q-card-section class="text-h6">
-          {{ editing ? `Подключение «${editing.name}»` : 'Новое подключение' }}
+          {{ editing ? `Подключение «${editing.name}»` : 'Ручное подключение' }}
         </q-card-section>
         <q-separator />
 
@@ -444,11 +571,22 @@ onMounted(load)
           колонкам: col-12 — во всю ширину, col-sm-6 — пара в строку.
         -->
         <q-card-section class="row q-col-gutter-md">
+          <div v-if="!editing && !isLibvirt" class="col-12">
+            <q-banner dense class="bg-blue-1">
+              <template #avatar><q-icon name="info" color="primary" /></template>
+              Введённая здесь учётная запись будет сохранена для заданий. Используйте готовую
+              сервисную запись с минимальными правами. Для настройки через администратора закройте
+              окно и выберите «Подключить oVirt-контур».
+            </q-banner>
+          </div>
           <div class="col-12 col-sm-6">
             <q-input v-model="form.name" label="Имя подключения" outlined dense />
           </div>
           <div class="col-12 col-sm-6">
             <q-select v-model="form.kind" :options="kinds" emit-value map-options label="Продукт" outlined dense />
+            <div v-if="selectedKind" class="text-caption text-grey-7 q-mt-xs">
+              {{ selectedKind.description }}
+            </div>
           </div>
 
           <!-- Подключение к движку oVirt: REST API поверх HTTPS. -->
@@ -482,7 +620,7 @@ onMounted(load)
             <q-input
               v-model="form.username"
               label="Пользователь"
-              :hint="isLibvirt ? 'Пользователь SSH; должен состоять в группе libvirt' : 'admin@internal или admin@ovirt@internalsso'"
+              :hint="isLibvirt ? 'Пользователь SSH; должен состоять в группе libvirt' : 'Готовая сервисная запись, например jhvirt-backup@internal'"
               outlined
               dense
             />
@@ -512,27 +650,30 @@ onMounted(load)
               />
             </div>
             <div class="col-12">
-              <q-input
-                v-model="form.ssh_host_key"
-                label="Ключ хоста (authorized_keys)"
-                hint="Без ключа подключения не будет. Получите отпечаток и сверьте его на самом хосте."
-                outlined
-                dense
-                :disable="form.ssh_trust_any_host_key"
-              >
-                <template #append>
+              <q-card flat bordered>
+                <q-card-section class="row items-center q-gutter-sm">
+                  <q-icon :name="hostKeyStored ? 'verified' : 'gpp_bad'" :color="hostKeyStored ? 'positive' : 'negative'" size="sm" />
+                  <div class="col">
+                    <div class="text-subtitle2">Проверка ключа SSH-хоста</div>
+                    <div class="text-caption text-grey-7">
+                      {{ hostKeyStored ? 'Ключ хоста сохранён' : 'Ключ хоста не задан' }}
+                      <span v-if="scannedHostFingerprint"> · {{ scannedHostFingerprint }}</span>
+                    </div>
+                  </div>
                   <q-btn
-                    flat
-                    dense
-                    no-caps
-                    icon="fingerprint"
-                    label="Получить"
-                    :loading="scanningKey"
-                    :disable="form.ssh_trust_any_host_key"
-                    @click="scanHostKey"
+                    outline dense no-caps icon="fingerprint" label="Получить ключ"
+                    :loading="scanningKey" :disable="form.ssh_trust_any_host_key" @click="scanHostKey"
                   />
-                </template>
-              </q-input>
+                  <q-btn v-if="hostKeyStored" flat dense round icon="delete_outline" color="negative" @click="clearHostKey">
+                    <q-tooltip>Удалить закреплённый ключ</q-tooltip>
+                  </q-btn>
+                </q-card-section>
+                <q-card-section class="q-pt-none text-caption">
+                  Сверьте SHA-256 отпечаток с результатом
+                  <code>ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub</code> на самом гипервизоре.
+                  Полный ключ после сохранения в браузер не возвращается.
+                </q-card-section>
+              </q-card>
             </div>
             <div class="col-12">
               <q-checkbox
@@ -574,21 +715,35 @@ onMounted(load)
 
           <template v-else>
             <div class="col-12">
-              <q-input
-                v-model="form.ca_cert"
-                label="CA-сертификат движка (PEM)"
-                type="textarea"
-                outlined
-                dense
-                autogrow
-                :input-style="{ maxHeight: '140px' }"
-              >
-                <template #after>
-                  <q-btn flat dense icon="download" label="Получить" @click="fetchCA">
-                    <q-tooltip>Скачать сертификат с движка и показать для сверки</q-tooltip>
+              <q-card flat bordered>
+                <q-card-section class="row items-center q-gutter-sm">
+                  <q-icon :name="caStored ? 'verified_user' : 'gpp_bad'" :color="caStored ? 'positive' : 'negative'" size="sm" />
+                  <div class="col">
+                    <div class="text-subtitle2">CA-сертификат движка</div>
+                    <div class="text-caption text-grey-7">
+                      {{ caStored ? 'Сертификат сохранён' : 'Сертификат не задан' }}
+                      <span v-if="fetchedCAFingerprint"> · SHA-256 {{ fetchedCAFingerprint }}</span>
+                    </div>
+                  </div>
+                  <q-file
+                    v-model="caUpload"
+                    accept=".pem,.crt,.cer,application/x-pem-file"
+                    outlined dense label="Выбрать файл" style="width: 190px"
+                    @update:model-value="useCAFile"
+                  >
+                    <template #prepend><q-icon name="upload_file" /></template>
+                  </q-file>
+                  <q-btn outline dense no-caps icon="download" label="Получить" @click="fetchCA">
+                    <q-tooltip>Получить сертификат по непроверенному соединению; затем сверить его на стороне движка</q-tooltip>
                   </q-btn>
-                </template>
-              </q-input>
+                  <q-btn v-if="caStored" flat dense round icon="delete_outline" color="negative" @click="clearCA">
+                    <q-tooltip>Удалить сохранённый сертификат</q-tooltip>
+                  </q-btn>
+                </q-card-section>
+                <q-card-section class="q-pt-none text-caption">
+                  Содержимое сертификата намеренно не показывается и после сохранения не возвращается браузеру.
+                </q-card-section>
+              </q-card>
             </div>
 
             <div class="col-12">
@@ -618,6 +773,7 @@ onMounted(load)
               </template>
               <template v-if="probeResult.ok">
                 Подключение установлено: {{ probeResult.product_name }} {{ probeResult.version }},
+                <template v-if="!isLibvirt">кластеров {{ probeResult.clusters }}, </template>
                 хостов {{ probeResult.hosts }}, ВМ {{ probeResult.vms }}, отклик {{ probeResult.latency }}.
                 <div v-if="!probeResult.supports_cbt" class="text-warning">
                   Движок не поддерживает инкрементальный бэкап — будут доступны только полные копии через снапшот.
@@ -670,19 +826,29 @@ onMounted(load)
          выдаёт её сервисной записи. В базу попадает только сервисная. -->
     <q-dialog v-model="provisionOpen" persistent>
       <q-card style="width: 680px; max-width: 96vw">
-        <q-card-section class="text-h6">Безопасное подключение движка</q-card-section>
+        <q-card-section class="text-h6">Подключение oVirt-кластера или совместимого форка</q-card-section>
         <q-separator />
 
         <q-card-section class="q-gutter-md">
           <q-banner dense class="bg-blue-1">
             <template #avatar><q-icon name="info" color="primary" /></template>
+            Одно подключение к Engine охватывает весь управляемый контур: все кластеры,
+            гипервизоры, ВМ, диски и домены хранения. Добавлять узлы по одному не требуется.
+            <br><br>
             Административные данные нужны только на время настройки и нигде не сохраняются.
             Сервисная запись должна уже существовать в каталоге: движок пользователями
             не управляет, и создать её через API нельзя — во встроенном домене она
             заводится командой <code>ovirt-aaa-jdbc-tool user add</code> на самом движке.
           </q-banner>
 
-          <q-input v-model="provisionForm.name" label="Название подключения" outlined dense autofocus />
+          <div class="row q-col-gutter-md">
+            <div class="col-12 col-sm-6">
+              <q-input v-model="provisionForm.name" label="Название контура" outlined dense autofocus />
+            </div>
+            <div class="col-12 col-sm-6">
+              <q-select v-model="provisionForm.kind" :options="provisionKinds" emit-value map-options label="Продукт" outlined dense />
+            </div>
+          </div>
           <q-input
             v-model="provisionForm.engine_url"
             label="Адрес движка"
@@ -690,6 +856,31 @@ onMounted(load)
             outlined
             dense
           />
+
+          <q-card flat bordered>
+            <q-card-section class="row items-center q-gutter-sm">
+              <q-icon :name="provisionForm.ca_cert ? 'verified_user' : 'gpp_bad'" :color="provisionForm.ca_cert ? 'positive' : 'negative'" size="sm" />
+              <div class="col">
+                <div class="text-subtitle2">CA-сертификат движка</div>
+                <div class="text-caption text-grey-7">
+                  {{ provisionForm.ca_cert ? 'Сертификат выбран' : 'Сертификат не задан' }}
+                  <span v-if="provisionCAFingerprint"> · SHA-256 {{ provisionCAFingerprint }}</span>
+                </div>
+              </div>
+              <q-file
+                v-model="provisionCAUpload" accept=".pem,.crt,.cer,application/x-pem-file"
+                outlined dense label="Выбрать файл" style="width: 190px"
+                @update:model-value="useProvisionCAFile"
+              >
+                <template #prepend><q-icon name="upload_file" /></template>
+              </q-file>
+              <q-btn outline dense no-caps icon="download" label="Получить" @click="fetchProvisionCA" />
+              <q-btn v-if="provisionForm.ca_cert" flat dense round icon="delete_outline" color="negative" @click="clearProvisionCA" />
+            </q-card-section>
+            <q-card-section class="q-pt-none text-caption">
+              PEM не показывается. Полученный SHA-256 нужно сверить на стороне движка до подключения.
+            </q-card-section>
+          </q-card>
 
           <div class="text-subtitle2">Административная запись — только на время настройки</div>
           <q-input v-model="provisionForm.admin_username" label="Пользователь" hint="например admin@internal" outlined dense />
@@ -710,6 +901,9 @@ onMounted(load)
             label="Не проверять сертификат движка"
             color="negative"
           />
+          <div v-if="provisionForm.insecure_tls" class="text-caption text-negative">
+            Соединение можно подменить. Используйте только на изолированном тестовом стенде.
+          </div>
         </q-card-section>
 
         <q-card-section v-if="provisionResult" class="q-pt-none">

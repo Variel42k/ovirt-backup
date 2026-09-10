@@ -73,3 +73,27 @@ func TestEngineServerDoesNotNeedHostKey(t *testing.T) {
 		t.Fatalf("подключение к движку потребовало ключ SSH: %v", err)
 	}
 }
+
+func TestServerKindFamiliesAreExplicit(t *testing.T) {
+	for _, kind := range []ServerKind{KindOVirt, KindRedVirt, KindOLVM, KindRHV} {
+		if !kind.Valid() || !kind.UsesOVirtAPI() || kind.UsesLibvirt() || kind.ManagedScope() != "engine" {
+			t.Errorf("oVirt-compatible kind classified incorrectly: %q", kind)
+		}
+	}
+	if !KindKVM.Valid() || KindKVM.UsesOVirtAPI() || !KindKVM.UsesLibvirt() || KindKVM.ManagedScope() != "host" {
+		t.Fatalf("libvirt kind classified incorrectly: %q", KindKVM)
+	}
+	if ServerKind("future-driver").Valid() {
+		t.Fatal("unknown connector silently accepted")
+	}
+}
+
+func TestServerRejectsUnknownVirtualizationConnector(t *testing.T) {
+	srv := &Server{
+		Name: "unknown", Kind: ServerKind("future-driver"), Username: "user",
+		EngineURL: "https://manager.example.org",
+	}
+	if err := srv.Validate(); err == nil || !strings.Contains(err.Error(), "неподдерживаемый") {
+		t.Fatalf("unknown connector accepted: %v", err)
+	}
+}

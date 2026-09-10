@@ -201,10 +201,17 @@ func (s *Store) CreateSession(ctx context.Context, sess *model.Session) error {
 	if err != nil {
 		return fmt.Errorf("encrypt session id token: %w", err)
 	}
+	refreshToken, err := s.cipher.Encrypt(sess.OIDCRefreshToken)
+	if err != nil {
+		return fmt.Errorf("encrypt refresh token: %w", err)
+	}
+	if sess.OIDCCheckedAt.IsZero() {
+		sess.OIDCCheckedAt = sess.CreatedAt
+	}
 	_, err = s.db.Exec(ctx, `INSERT INTO sessions (token_hash, user_id, user_agent, remote_ip,
-		expires_at, created_at, oidc_id_token) VALUES (?,?,?,?,?,?,?)`,
+		expires_at, created_at, oidc_id_token, oidc_refresh_token, oidc_subject, oidc_issuer, oidc_checked_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
 		sessionTokenHash(sess.Token), sess.UserID, sess.UserAgent, sess.RemoteIP, sess.ExpiresAt,
-		sess.CreatedAt, nullString(idToken))
+		sess.CreatedAt, nullString(idToken), nullString(refreshToken), sess.OIDCSubject, sess.OIDCIssuer, sess.OIDCCheckedAt)
 	if err != nil {
 		return fmt.Errorf("insert session: %w", err)
 	}
@@ -215,18 +222,21 @@ func (s *Store) CreateSession(ctx context.Context, sess *model.Session) error {
 // expired sessions and disabled accounts.
 func (s *Store) GetSession(ctx context.Context, token string) (*model.Session, error) {
 	row := s.db.QueryRow(ctx, `SELECT s.user_id, s.user_agent, s.remote_ip, s.expires_at,
-		s.created_at, s.oidc_id_token, u.username, u.role, u.disabled
+		s.created_at, s.oidc_id_token, u.username, u.role, u.disabled, u.provider,
+		s.oidc_refresh_token, s.oidc_subject, s.oidc_issuer, s.oidc_checked_at
 		FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash=?`, sessionTokenHash(token))
 
 	var (
 		sess                 model.Session
 		role                 string
 		idToken              sql.NullString
+		refreshToken         sql.NullString
 		disabled             bool
 		expiresAt, createdAt time.Time
 	)
 	err := row.Scan(&sess.UserID, &sess.UserAgent, &sess.RemoteIP, &expiresAt,
-		&createdAt, &idToken, &sess.Username, &role, &disabled)
+		&createdAt, &idToken, &sess.Username, &role, &disabled, &sess.Provider,
+		&refreshToken, &sess.OIDCSubject, &sess.OIDCIssuer, &sess.OIDCCheckedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -238,6 +248,9 @@ func (s *Store) GetSession(ctx context.Context, token string) (*model.Session, e
 	sess.Role = model.Role(role)
 	if sess.OIDCIDToken, err = s.cipher.Decrypt(idToken.String); err != nil {
 		return nil, fmt.Errorf("decrypt session id token: %w", err)
+	}
+	if sess.OIDCRefreshToken, err = s.cipher.Decrypt(refreshToken.String); err != nil {
+		return nil, fmt.Errorf("decrypt refresh token: %w", err)
 	}
 	sess.ExpiresAt = utc(expiresAt)
 	sess.CreatedAt = utc(createdAt)

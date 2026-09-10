@@ -12,6 +12,7 @@ import {
 import { bytes, dateTime } from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
+import IdentitySettingsPanel from '@/components/IdentitySettingsPanel.vue'
 import type {
   ApiToken,
   ApprovalDelegation,
@@ -944,8 +945,9 @@ watch(() => route.query, applyDeepLink)
       <q-tabs v-model="tab" align="left" active-color="primary" indicator-color="primary" dense>
         <q-tab name="system" label="Система" />
         <q-tab v-if="auth.canAdmin()" name="monitoring" label="Мониторинг" />
-		<q-tab v-if="auth.canAdmin()" name="notifications" label="Уведомления" />
-		<q-tab v-if="auth.canAdmin()" name="dr" label="Аварийная готовность" />
+        <q-tab v-if="auth.canAdmin()" name="identity" label="Keycloak и домен" />
+        <q-tab v-if="auth.canAdmin()" name="notifications" label="Уведомления" />
+        <q-tab v-if="auth.canAdmin()" name="dr" label="Аварийная готовность" />
         <q-tab v-if="auth.canAdmin()" name="users" :label="`Пользователи (${users.length})`" />
         <q-tab v-if="auth.canAdmin()" name="roles" :label="`Роли (${roles.length})`" />
         <q-tab name="approvals" :label="`Согласования (${openApprovals.length})`" />
@@ -956,6 +958,9 @@ watch(() => route.query, applyDeepLink)
       <q-separator />
 
       <q-tab-panels v-model="tab">
+        <q-tab-panel v-if="auth.canAdmin()" name="identity">
+          <IdentitySettingsPanel />
+        </q-tab-panel>
         <q-tab-panel name="system">
           <div class="row q-col-gutter-md">
             <div class="col-12 col-md-6">

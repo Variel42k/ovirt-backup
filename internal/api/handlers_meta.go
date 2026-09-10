@@ -24,14 +24,31 @@ type optionDescriptor struct {
 	NeedsHypervisor bool `json:"needs_hypervisor,omitempty"`
 }
 
+// virtualizationKindDescriptor describes a concrete connector and its scope.
+// Capability flags let the UI stay honest as more virtualization systems are
+// added: merely appearing in the inventory must not imply backup or restore.
+type virtualizationKindDescriptor struct {
+	Value                string `json:"value"`
+	Title                string `json:"title"`
+	Description          string `json:"description"`
+	Family               string `json:"family"`
+	ManagedScope         string `json:"managed_scope"`
+	ConnectionMethod     string `json:"connection_method"`
+	SafeProvision        bool   `json:"safe_provision"`
+	SupportsBackup       bool   `json:"supports_backup"`
+	SupportsRestore      bool   `json:"supports_restore"`
+	SupportsEngineConfig bool   `json:"supports_engine_config"`
+}
+
 // metaResponse tells the SPA what this deployment can do, which is what lets
 // the UI hide features that would only fail.
 type metaResponse struct {
-	BackupTypes  []optionDescriptor `json:"backup_types"`
-	VerifyModes  []optionDescriptor `json:"verify_modes"`
-	StorageKinds []optionDescriptor `json:"storage_kinds"`
-	Actions      []optionDescriptor `json:"remediation_actions"`
-	Roles        []optionDescriptor `json:"roles"`
+	BackupTypes         []optionDescriptor             `json:"backup_types"`
+	VerifyModes         []optionDescriptor             `json:"verify_modes"`
+	StorageKinds        []optionDescriptor             `json:"storage_kinds"`
+	VirtualizationKinds []virtualizationKindDescriptor `json:"virtualization_kinds"`
+	Actions             []optionDescriptor             `json:"remediation_actions"`
+	Roles               []optionDescriptor             `json:"roles"`
 	// AlertAudiences — кому адресованы оповещения. Список приходит с сервера:
 	// раскладка типов по адресатам живёт в коде, и повторять её в интерфейсе
 	// значило бы завести второй список, который разойдётся с первым.
@@ -58,6 +75,34 @@ type metaResponse struct {
 	} `json:"capabilities"`
 
 	DefaultRetention model.RetentionPolicy `json:"default_retention"`
+}
+
+func virtualizationKindOptions() []virtualizationKindDescriptor {
+	descriptions := map[model.ServerKind]string{
+		model.KindOVirt:   "Подключение к Engine импортирует все его кластеры, гипервизоры, ВМ, диски и домены хранения.",
+		model.KindRedVirt: "Подключение к менеджеру РЕД Виртуализации через совместимый oVirt API; импортируется весь контур.",
+		model.KindOLVM:    "Подключение к Oracle Linux Virtualization Manager; импортируются все управляемые кластеры.",
+		model.KindRHV:     "Подключение к Red Hat Virtualization Manager; импортируются все управляемые кластеры.",
+		model.KindKVM:     "Прямое подключение к одному самостоятельному libvirt/KVM-гипервизору по SSH.",
+	}
+	out := make([]virtualizationKindDescriptor, 0, len(descriptions))
+	for _, kind := range model.AllServerKinds() {
+		item := virtualizationKindDescriptor{
+			Value: string(kind), Title: kind.Title(), Description: descriptions[kind],
+			ManagedScope: kind.ManagedScope(), SupportsBackup: true, SupportsRestore: true,
+		}
+		if kind.UsesOVirtAPI() {
+			item.Family = "ovirt-api"
+			item.ConnectionMethod = "https"
+			item.SafeProvision = true
+			item.SupportsEngineConfig = true
+		} else {
+			item.Family = "libvirt"
+			item.ConnectionMethod = "ssh"
+		}
+		out = append(out, item)
+	}
+	return out
 }
 
 // storageKindOptions describes the backup repositories this build can write to.
@@ -123,6 +168,7 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp.StorageKinds = storageKindOptions()
+	resp.VirtualizationKinds = virtualizationKindOptions()
 
 	for _, a := range []model.RemediationAction{model.ActionVMStart, model.ActionVMUnpause,
 		model.ActionVMReset, model.ActionHostActivate, model.ActionHostFence, model.ActionReconnect} {
@@ -152,7 +198,8 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 	resp.Capabilities.RemediationDryRun = s.remediator.DryRun()
 	resp.Capabilities.AuthEnabled = s.cfg.Auth.Enabled
 	resp.Capabilities.FileBackup = s.fileBackup != nil
-	resp.Capabilities.OIDCEnabled = s.oidc != nil
+	client, _ := s.oidcSnapshot()
+	resp.Capabilities.OIDCEnabled = client != nil
 	resp.Capabilities.LocalLogin = s.localLoginAllowed()
 
 	writeJSON(w, http.StatusOK, resp)

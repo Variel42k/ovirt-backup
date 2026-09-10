@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -106,6 +107,10 @@ func badRequest(format string, args ...any) error {
 	return fmt.Errorf("%w: %s", errBadRequest, fmt.Sprintf(format, args...))
 }
 
+func forbidden(format string, args ...any) error {
+	return fmt.Errorf("%w: %s", errForbidden, fmt.Sprintf(format, args...))
+}
+
 // decodeJSON reads and validates a JSON request body.
 func decodeJSON(r *http.Request, dst any) error {
 	if r.Body == nil {
@@ -148,21 +153,46 @@ func queryBool(r *http.Request, name string) bool {
 	return raw == "1" || raw == "true" || raw == "yes"
 }
 
-// clientIP extracts the caller address for the audit log, preferring the
-// forwarding header when the service sits behind a reverse proxy.
-func clientIP(r *http.Request) string {
-	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-		if idx := strings.IndexByte(fwd, ','); idx > 0 {
-			return strings.TrimSpace(fwd[:idx])
+// Walk from the socket peer towards the client, stopping at the first
+// untrusted hop. A client-supplied prefix must never become an audit identity.
+func (s *Server) clientIP(r *http.Request) string {
+	peer, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		peer = r.RemoteAddr
+	}
+	if !s.trustedProxy(peer) {
+		return peer
+	}
+	if raw := r.Header.Get("X-Forwarded-For"); raw != "" {
+		hops := strings.Split(raw, ",")
+		current := peer
+		for i := len(hops) - 1; i >= 0 && s.trustedProxy(current); i-- {
+			hop := net.ParseIP(strings.TrimSpace(hops[i]))
+			if hop == nil {
+				return peer
+			}
+			current = hop.String()
 		}
-		return strings.TrimSpace(fwd)
+		return current
 	}
-	if real := r.Header.Get("X-Real-Ip"); real != "" {
-		return real
+	if real := net.ParseIP(strings.TrimSpace(r.Header.Get("X-Real-IP"))); real != nil {
+		return real.String()
 	}
-	host := r.RemoteAddr
-	if idx := strings.LastIndexByte(host, ':'); idx > 0 {
-		return host[:idx]
+	return peer
+}
+
+func (s *Server) trustedProxy(raw string) bool {
+	ip := net.ParseIP(raw)
+	if ip == nil {
+		return false
 	}
-	return host
+	for _, entry := range s.cfg.Server.TrustedProxies {
+		if address := net.ParseIP(entry); address != nil && address.Equal(ip) {
+			return true
+		}
+		if _, network, err := net.ParseCIDR(entry); err == nil && network.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }

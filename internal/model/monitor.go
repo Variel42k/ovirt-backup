@@ -13,6 +13,7 @@ const (
 	ScopeStorageDomain Scope = "storage_domain"
 	ScopeStorageTarget Scope = "storage_target"
 	ScopeBackup        Scope = "backup"
+	ScopeSettings      Scope = "settings"
 )
 
 // Severity ranks an alert.

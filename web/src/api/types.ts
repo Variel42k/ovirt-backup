@@ -45,6 +45,7 @@ export interface ProvisionResult {
 export interface MeResponse {
   username: string
   role: Role
+  provider: 'local' | 'oidc' | string
   /** Права вида 'раздел.действие'. Единственный источник для показа разделов. */
   permissions: string[]
   can_write: boolean
@@ -103,14 +104,16 @@ export interface Server {
   kind: string
   engine_url: string
   username: string
-  ca_cert?: string
+  /** Сертификат хранится на сервере; его содержимое API не возвращает. */
+  ca_cert_stored: boolean
   insecure_tls: boolean
   /** Когда отключили проверку сертификата: режим временный, а не настройка. */
   insecure_tls_since?: string
   /** Поля ниже заполняются только для kind === 'kvm'. */
   ssh_host?: string
   ssh_port?: number
-  ssh_host_key?: string
+  /** Закреплён ли публичный ключ хоста; сам ключ API не возвращает. */
+  ssh_host_key_stored?: boolean
   /** Явный отказ проверять подлинность гипервизора — виден в списке значком. */
   ssh_trust_any_host_key?: boolean
   /** Есть ли сохранённый приватный ключ. Сам ключ наружу не отдаётся. */
@@ -953,6 +956,19 @@ export interface OptionDescriptor {
   needs_hypervisor?: boolean
 }
 
+export interface VirtualizationKind {
+  value: string
+  title: string
+  description: string
+  family: string
+  managed_scope: 'engine' | 'host'
+  connection_method: 'https' | 'ssh' | string
+  safe_provision: boolean
+  supports_backup: boolean
+  supports_restore: boolean
+  supports_engine_config: boolean
+}
+
 /** Параметры пробного запуска ВМ из бэкапа (режим проверки boot). */
 export interface BootVerifyOptions {
   boot_host_id: string
@@ -1024,6 +1040,7 @@ export interface Meta {
   backup_types: OptionDescriptor[]
   verify_modes: OptionDescriptor[]
   storage_kinds: OptionDescriptor[]
+  virtualization_kinds: VirtualizationKind[]
   remediation_actions: OptionDescriptor[]
   roles: OptionDescriptor[]
   /** Кому адресованы оповещения: ключ, название, пояснение. */

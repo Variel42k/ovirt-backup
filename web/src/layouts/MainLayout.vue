@@ -43,7 +43,7 @@ const themeOptions: { value: ThemeMode; label: string; icon: string }[] = [
 // не тыкался в разделы, которые ему всё равно ответят 403.
 const allLinks = [
   { name: 'dashboard', label: 'Обзор', icon: 'dashboard', perm: 'monitoring.read' },
-  { name: 'servers', label: 'Серверы', icon: 'dns', perm: 'servers.read' },
+  { name: 'servers', label: 'Виртуализация', icon: 'dns', perm: 'servers.read' },
   { name: 'jobs', label: 'Задания бэкапа', icon: 'event_repeat', perm: 'jobs.read' },
   { name: 'backups', label: 'Бэкапы', icon: 'backup', perm: 'backups.read' },
   { name: 'engine-config', label: 'Конфигурация Engine', icon: 'account_tree', perm: 'engine_config.read' },

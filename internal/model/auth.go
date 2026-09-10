@@ -55,6 +55,7 @@ type Session struct {
 	UserID    string    `json:"user_id"`
 	Username  string    `json:"username"`
 	Role      Role      `json:"role"`
+	Provider  string    `json:"provider"`
 	UserAgent string    `json:"user_agent,omitempty"`
 	RemoteIP  string    `json:"remote_ip,omitempty"`
 	ExpiresAt time.Time `json:"expires_at"`
@@ -62,7 +63,11 @@ type Session struct {
 	// OIDCIDToken — токен личности, по которому эта сессия заведена. Нужен
 	// провайдеру при выходе как id_token_hint. Пуст у входов по паролю и
 	// наружу не отдаётся.
-	OIDCIDToken string `json:"-"`
+	OIDCIDToken      string    `json:"-"`
+	OIDCRefreshToken string    `json:"-"`
+	OIDCSubject      string    `json:"-"`
+	OIDCIssuer       string    `json:"-"`
+	OIDCCheckedAt    time.Time `json:"-"`
 }
 
 // Expired reports whether the session is no longer valid at t.

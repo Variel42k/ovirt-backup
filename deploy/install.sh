@@ -35,7 +35,7 @@
 #                --tls-key-file /root/server.key
 #                                      подключить существующую пару сертификат/ключ
 #
-# Вход в систему (только для docker-вариантов):
+# Вход в систему (встроенный Keycloak — Docker; внешний OIDC — также systemd):
 #   ./install.sh --oidc none           только по паролю (по умолчанию)
 #   ./install.sh --oidc keycloak       поднять Keycloak рядом и настроить
 #   ./install.sh --keycloak-port 8081  порт Keycloak наружу
@@ -118,6 +118,8 @@ MIGRATION_TLS_AVAILABLE=0
 MIGRATION_KEEP_SOURCE=0; MIGRATION_SOURCE_STOPPED=""; MIGRATION_EXPORT_COMMITTED=0
 TLS_MODE=""; TLS_CERT_FILE=""; TLS_KEY_FILE=""
 TLS_DAYS=825; TLS_MATERIAL_DIR=""; TLS_RESTART_REQUIRED=0; READY_SCHEME=http
+SETUP_TMP=""; SETUP_BINARY=""; OIDC_CONFIG_SOURCE=""; OIDC_GROUPS_EXISTING=0
+ALLOW_HTTP=0; BIND_ADDRESS=0.0.0.0
 # Внешний вход: none — только пароль, keycloak — поднять рядом, external —
 # подключить существующего провайдера.
 OIDC_MODE=""; OIDC_EXISTING=0; OIDC_ISSUER=""; OIDC_BACKCHANNEL_URL=""; OIDC_CLIENT_ID=""; OIDC_CLIENT_SECRET_FILE=""
@@ -149,6 +151,7 @@ have() { command -v "$1" >/dev/null 2>&1; }
 
 while [ $# -gt 0 ]; do
     case "$1" in
+        --allow-http) ALLOW_HTTP=1; shift ;;
         --mode) [ $# -ge 2 ] || die "--mode требует значение"; MODE="$2"; shift 2 ;;
         --mode=*) MODE="${1#--mode=}"; shift ;;
         --url) [ $# -ge 2 ] || die "--url требует значение"; URL="$2"; URL_EXPLICIT=1; shift 2 ;;
@@ -763,6 +766,7 @@ migration_cleanup() {
         rm -rf "$MIGRATION_TMP"
     [ -n "${TLS_MATERIAL_DIR:-}" ] && [ -d "$TLS_MATERIAL_DIR" ] &&
         rm -rf "$TLS_MATERIAL_DIR"
+    [ -z "${SETUP_TMP:-}" ] || rm -rf "$SETUP_TMP"
 }
 
 migration_quiesce_source() {
@@ -1354,7 +1358,7 @@ migration_send_package() {
     say ""
     say "Пакет на месте. На новом сервере выполните:"
     say "  sudo bash deploy/install.sh --migrate-from $MSP_REMOTE \\"
-    say "    --url http://<адрес нового сервера>:8080 \\"
+    say "    --url https://<адрес нового сервера>:8080 \\"
     say "    --backup-dir /путь/к/копиям --restore-dir /путь/к/восстановлению"
     say ""
     say "Локальные каталоги бекапов не копировались; подключите их на новом узле отдельно."
@@ -1785,7 +1789,7 @@ choose() {
 
     if [ ! -t 0 ]; then
         die "нет терминала — укажите способ ключом:
-  ./install.sh --mode docker|docker-compose|systemd --url http://host:8080"
+  ./install.sh --mode docker|docker-compose|systemd --url https://host:8080"
     fi
 
     say ""
@@ -1933,10 +1937,10 @@ validate_url() {
 
 ask_url() {
     if [ -z "$URL" ]; then
-        [ -t 0 ] || die "без диалога внешний адрес обязателен: --url http://host:$PORT"
+        [ -t 0 ] || die "без диалога внешний адрес обязателен: --url https://host:$PORT"
         HOST="$(hostname -I 2>/dev/null | awk '{print $1}')"
         [ -n "$HOST" ] || HOST="$(hostname -f 2>/dev/null || hostname)"
-        GUESS="http://$HOST:$PORT"
+        GUESS="https://$HOST:$PORT"
         say ""
         say "Адрес, по которому интерфейс открывают в браузере."
         say "Указывайте https только если TLS уже настроен здесь или на прокси:"
@@ -2025,22 +2029,22 @@ choose_tls() {
         done
     fi
     if [ ! -t 0 ]; then
-        TLS_MODE=none
+        case "$URL" in https://*) TLS_MODE=self-signed ;; *) TLS_MODE=none ;; esac
         return 0
     fi
 
     say ""
     say "Как обслуживать HTTPS?"
-    say "  1) без собственного TLS — HTTP или TLS на reverse proxy (по умолчанию)"
-    say "  2) создать самоподписанный сертификат и включить HTTPS приложения"
+    say "  1) создать самоподписанный сертификат (по умолчанию; CA можно заменить позже)"
+    say "  2) TLS на reverse proxy — приложение слушает только 127.0.0.1"
     say "  3) подключить существующие сертификат и закрытый ключ"
     while :; do
         printf 'Номер [1]: '
         read -r TLS_CHOICE || TLS_CHOICE=""
         [ -n "$TLS_CHOICE" ] || TLS_CHOICE=1
         case "$TLS_CHOICE" in
-            1) TLS_MODE=none; return 0 ;;
-            2) TLS_MODE=self-signed; return 0 ;;
+            1) TLS_MODE=self-signed; return 0 ;;
+            2) TLS_MODE=none; return 0 ;;
             3) TLS_MODE=files; return 0 ;;
             *) say "Нет такого варианта." ;;
         esac
@@ -2082,7 +2086,17 @@ tls_validate_pair() {
 
 prepare_tls() {
     case "$TLS_MODE" in
-        none) return 0 ;;
+        none)
+            case "$URL" in
+                https://*) BIND_ADDRESS=127.0.0.1 ;;
+                http://*)
+                    PLAIN_HOST="$(url_host "$URL")"
+                    case "$PLAIN_HOST" in localhost|127.*|::1) BIND_ADDRESS=127.0.0.1 ;;
+                        *) [ "$ALLOW_HTTP" -eq 1 ] || die "сетевой HTTP запрещён по умолчанию. Используйте HTTPS; для изолированного тестового стенда явно задайте --allow-http --tls none." ;;
+                    esac
+                    ;;
+            esac
+            return 0 ;;
         preserve)
             if [ "$MIGRATION_ACTIVE" -eq 0 ]; then
                 READY_SCHEME=https
@@ -2304,7 +2318,7 @@ ensure_container_port() {
   sudo ss -ltnp 'sport = :$PORT'
 
 Повторите установку с другим портом:
-  $SELF --mode $MODE --url http://host:$CHECK_SUGGESTED --port $CHECK_SUGGESTED"
+  $SELF --mode $MODE --url https://host:$CHECK_SUGGESTED --port $CHECK_SUGGESTED"
         fi
         say ""
         say "Порт $PORT уже занят другим процессом или контейнером."
@@ -2355,12 +2369,10 @@ wait_ready() {
 
 # --- Внешний вход -----------------------------------------------------------
 
-# Спрашивается только для docker-вариантов: Keycloak поднимается тем же
-# compose. Для systemd остаётся вход по паролю — существующего провайдера там
-# подключают правкой конфигурации, отдельного вопроса это не стоит.
+# Внешний OIDC доступен в обоих режимах; встроенный Keycloak требует Compose.
 choose_oidc() {
     [ -z "$OIDC_MODE" ] || return 0
-    if [ "$MODE" = systemd ] || [ ! -t 0 ]; then
+    if [ ! -t 0 ]; then
         OIDC_MODE=none
         return 0
     fi
@@ -2369,8 +2381,9 @@ choose_oidc() {
     say "Как входить в систему?"
     say ""
     say "  1) только по паролю — учётные записи ведутся здесь (по умолчанию)"
-    say "  2) поднять Keycloak рядом — он же настраивается на домены и"
-    say "     второй фактор (FreeOTP и совместимые)"
+    if [ "$MODE" != systemd ]; then
+        say "  2) поднять Keycloak рядом — AD и обязательный второй фактор"
+    fi
     say "  3) подключить существующий Keycloak или другой OIDC-провайдер"
     say ""
     say "При OIDC локальный парольный вход настраивается отдельно."
@@ -2381,7 +2394,7 @@ choose_oidc() {
         [ -n "$OIDC_CHOICE" ] || OIDC_CHOICE=1
         case "$OIDC_CHOICE" in
             1) OIDC_MODE=none; return 0 ;;
-            2) OIDC_MODE=keycloak; return 0 ;;
+            2) if [ "$MODE" != systemd ]; then OIDC_MODE=keycloak; return 0; fi ;;
             3) OIDC_MODE=external; return 0 ;;
             *) say "Нет такого варианта." ;;
         esac
@@ -2532,8 +2545,11 @@ prepare_keycloak_ad_simple() {
     KEYCLOAK_AD_DOMAIN="$(printf '%s' "${KEYCLOAK_AD_DOMAIN%.}" | tr '[:upper:]' '[:lower:]')"
     [ -n "$KEYCLOAK_AD_DOMAIN" ] ||
         die "для простой настройки укажите --keycloak-ad-domain"
-    validate_ad_domain "$KEYCLOAK_AD_DOMAIN" ||
-        die "некорректный DNS-домен Active Directory: $KEYCLOAK_AD_DOMAIN"
+    while ! validate_ad_domain "$KEYCLOAK_AD_DOMAIN"; do
+        [ -t 0 ] || die "некорректный DNS-домен Active Directory"
+        say "Некорректное имя DNS-домена; повторите ввод."
+        ask_nonempty "DNS-домен: "; KEYCLOAK_AD_DOMAIN="$ANSWER"
+    done
 
     KC_AD_BASE_DN="$(ad_domain_to_base_dn "$KEYCLOAK_AD_DOMAIN")"
     [ -n "$KEYCLOAK_AD_USERS_DN" ] || KEYCLOAK_AD_USERS_DN="$KC_AD_BASE_DN"
@@ -2577,13 +2593,14 @@ prepare_keycloak_ad_simple() {
 
     if [ -z "$KEYCLOAK_AD_BIND_PASSWORD_FILE" ] &&
             [ -z "$KEYCLOAK_AD_BIND_PASSWORD" ] && [ -t 0 ]; then
+        while :; do
         KEYCLOAK_AD_BIND_PASSWORD="$(read_hidden_value 'Пароль bind-пользователя: ')" ||
             die "не удалось безопасно прочитать bind-пароль"
         KC_AD_PASSWORD_CONFIRM="$(read_hidden_value 'Повторите пароль: ')" ||
             die "не удалось безопасно прочитать подтверждение bind-пароля"
-        [ -n "$KEYCLOAK_AD_BIND_PASSWORD" ] || die "bind-пароль не может быть пустым"
-        [ "$KEYCLOAK_AD_BIND_PASSWORD" = "$KC_AD_PASSWORD_CONFIRM" ] ||
-            die "введённые bind-пароли не совпадают"
+        if [ -n "$KEYCLOAK_AD_BIND_PASSWORD" ] && [ "$KEYCLOAK_AD_BIND_PASSWORD" = "$KC_AD_PASSWORD_CONFIRM" ]; then break; fi
+        say "Пароли пусты или не совпадают; повторите ввод."
+        done
         KC_AD_PASSWORD_CONFIRM=""
         KEYCLOAK_AD_PASSWORD_WAS_INTERACTIVE=1
     fi
@@ -2713,6 +2730,16 @@ prepare_keycloak_ad() {
     elif [ "$OIDC_EXISTING" -eq 0 ]; then
         die "новая настройка LDAPS требует --keycloak-ad-ca-file с цепочкой корпоративного CA"
     fi
+    # Host-side preflight precedes changes to the LDAP provider. The Keycloak
+    # test below separately exercises container DNS, its truststore and bind.
+    if [ -n "$KEYCLOAK_AD_CA_FILE" ]; then
+        while ! setup_tool tls-check "$KEYCLOAK_AD_URL" "$KEYCLOAK_AD_CA_FILE"; do
+            [ -t 0 ] || die "предварительная проверка LDAPS не пройдена"
+            say "Исправьте DNS/доступ к DC или укажите правильную цепочку CA."
+            ask_nonempty "PEM-файл CA для повторной проверки: "; KEYCLOAK_AD_CA_FILE="$ANSWER"
+        done
+    fi
+    setup_tool ldap-filter "$GROUP_ADMIN" "$GROUP_OPERATOR" "$GROUP_VIEWER" >/dev/null || die "неверные имена групп"
 }
 
 # Проверяет, что для выбранного способа хватает данных, и добирает недостающее
@@ -2735,18 +2762,22 @@ prepare_oidc() {
         *) die "--oidc принимает none, keycloak или external" ;;
     esac
 
-    [ "$MODE" = systemd ] && die "--oidc поддерживается только для docker-вариантов"
+    if [ "$MODE" = systemd ] && [ "$OIDC_MODE" = keycloak ]; then
+        die "для systemd используйте --oidc external; встроенный Keycloak устанавливается в Docker"
+    fi
     have curl || die "для настройки внешнего входа нужен curl"
+    case "$URL" in https://*) ;; *) die "OIDC требует HTTPS-адрес приложения" ;; esac
 
     if [ "$OIDC_MODE" = external ]; then
         if [ -t 0 ]; then
             [ -n "$OIDC_ISSUER" ] || { ask_nonempty "Адрес realm (issuer), например https://keycloak.example.org/realms/infra: "; OIDC_ISSUER="$ANSWER"; }
             [ -n "$OIDC_CLIENT_ID" ] || { ask_nonempty "Идентификатор клиента [jhvirt]: "; OIDC_CLIENT_ID="$ANSWER"; }
             if [ -z "$OIDC_CLIENT_SECRET_FILE" ] && [ -z "${OIDC_CLIENT_SECRET:-}" ]; then
-                ask_nonempty "Секрет клиента: "; OIDC_CLIENT_SECRET="$ANSWER"
+                OIDC_CLIENT_SECRET="$(read_hidden_value 'Секрет клиента: ')" || die "не удалось прочитать секрет"
             fi
         fi
         [ -n "$OIDC_ISSUER" ] || die "--oidc external требует --oidc-issuer"
+        case "$OIDC_ISSUER" in https://*) ;; *) die "внешний OIDC issuer должен использовать HTTPS" ;; esac
         # Чужой провайдер стоит не здесь: петлевой адрес к нему не ведёт.
         KEYCLOAK_API_URL="$KEYCLOAK_URL"
         [ -n "$OIDC_CLIENT_ID" ] || OIDC_CLIENT_ID="jhvirt"
@@ -2878,6 +2909,7 @@ prepare_oidc() {
         # функции, её статус становится статусом функции. Со `set -e` в начале
         # скрипта это молчаливый выход посреди установки — ровно на самом
         # частом ответе, когда все три умолчания принимают Enter'ом.
+        if [ "$OIDC_GROUPS_EXISTING" -eq 0 ]; then
         printf 'Группа администраторов [%s]: ' "$GROUP_ADMIN"
         read -r ANSWER || ANSWER=""
         if [ -n "$ANSWER" ]; then GROUP_ADMIN="$ANSWER"; fi
@@ -2887,6 +2919,9 @@ prepare_oidc() {
         printf 'Группа наблюдателей [%s]: ' "$GROUP_VIEWER"
         read -r ANSWER || ANSWER=""
         if [ -n "$ANSWER" ]; then GROUP_VIEWER="$ANSWER"; fi
+        else
+            say "Существующее role_mapping сохраняется; группы изменяются в YAML."
+        fi
 
         if [ "$OIDC_MODE" = keycloak ] && [ "$OIDC_EXISTING" -eq 0 ] &&
                 [ "$KEYCLOAK_APP_ADMIN_USER_EXPLICIT" -eq 0 ]; then
@@ -2929,6 +2964,62 @@ prepare_oidc() {
     prepare_keycloak_ad
 }
 
+load_systemd_oidc() {
+    LSO_ENV="$PREFIX/config/jhvirt.env"
+    LSO_ENABLED="$(env_file_value "$LSO_ENV" JHV_AUTH_OIDC_ENABLED)"
+    if [ -z "$LSO_ENABLED" ] && [ -n "$OIDC_CONFIG_SOURCE" ]; then
+        LSO_ENABLED="$(setup_tool config-get auth oidc enabled < "$OIDC_CONFIG_SOURCE")"
+    fi
+    [ "$LSO_ENABLED" = true ] || return 0
+    [ -z "$OIDC_MODE" ] || [ "$OIDC_MODE" = external ] || return 0
+    OIDC_MODE=external; OIDC_EXISTING=1
+    for LSO_KEY in issuer client_id backchannel_url allow_local_login client_secret_file; do
+        LSO_ENV_KEY="JHV_AUTH_OIDC_$(printf '%s' "$LSO_KEY" | tr '[:lower:]' '[:upper:]')"
+        LSO_VALUE="$(env_file_value "$LSO_ENV" "$LSO_ENV_KEY")"
+        if [ -z "$LSO_VALUE" ] && [ -n "$OIDC_CONFIG_SOURCE" ]; then
+            LSO_VALUE="$(setup_tool config-get auth oidc "$LSO_KEY" < "$OIDC_CONFIG_SOURCE")"
+        fi
+        case "$LSO_KEY" in
+            issuer) [ -n "$OIDC_ISSUER" ] || OIDC_ISSUER="$LSO_VALUE" ;;
+            client_id) [ -n "$OIDC_CLIENT_ID" ] || OIDC_CLIENT_ID="$LSO_VALUE" ;;
+            backchannel_url) [ -n "$OIDC_BACKCHANNEL_URL" ] || OIDC_BACKCHANNEL_URL="$LSO_VALUE" ;;
+            allow_local_login) [ -n "$OIDC_ALLOW_LOCAL_LOGIN" ] || OIDC_ALLOW_LOCAL_LOGIN="$LSO_VALUE" ;;
+            client_secret_file) [ -n "$OIDC_CLIENT_SECRET_FILE" ] || OIDC_CLIENT_SECRET_FILE="$LSO_VALUE" ;;
+        esac
+    done
+    if [ -z "$OIDC_CLIENT_SECRET_FILE" ]; then
+        OIDC_CLIENT_SECRET="$(env_file_value "$LSO_ENV" JHV_AUTH_OIDC_CLIENT_SECRET)"
+        if [ -z "$OIDC_CLIENT_SECRET" ] && [ -n "$OIDC_CONFIG_SOURCE" ]; then
+            OIDC_CLIENT_SECRET="$(setup_tool config-get auth oidc client_secret < "$OIDC_CONFIG_SOURCE")"
+        fi
+    fi
+}
+
+write_systemd_oidc() {
+    [ "$OIDC_MODE" != none ] || { set_env JHV_AUTH_OIDC_ENABLED false "$ENV_FILE"; return 0; }
+    write_oidc_config "$PREFIX/config/$CONFIG_NAME"
+    # Existing inline secrets are kept until explicitly migrated; do not create
+    # two simultaneous secret sources in a manually maintained configuration.
+    if [ "$OIDC_EXISTING" -eq 0 ] || [ -n "$OIDC_CLIENT_SECRET_FILE" ]; then
+        WSO_SECRET="$PREFIX/config/oidc-client.secret"
+        WSO_TMP="$(mktemp "$WSO_SECRET.XXXXXX")"
+        printf '%s' "$OIDC_CLIENT_SECRET" > "$WSO_TMP"
+        install -o "$USER_NAME" -g "$USER_NAME" -m 0600 "$WSO_TMP" "$WSO_SECRET"
+        rm -f "$WSO_TMP"
+        set_env JHV_AUTH_OIDC_CLIENT_SECRET_FILE "$WSO_SECRET" "$ENV_FILE"
+        set_env JHV_AUTH_OIDC_CLIENT_SECRET "" "$ENV_FILE"
+    fi
+    set_env JHV_AUTH_OIDC_ENABLED true "$ENV_FILE"
+    set_env JHV_AUTH_OIDC_ISSUER "$OIDC_ISSUER" "$ENV_FILE"
+    set_env JHV_AUTH_OIDC_CLIENT_ID "$OIDC_CLIENT_ID" "$ENV_FILE"
+    set_env JHV_AUTH_OIDC_BACKCHANNEL_URL "$OIDC_BACKCHANNEL_URL" "$ENV_FILE"
+    set_env JHV_AUTH_OIDC_REDIRECT_URL "$URL/api/v1/auth/oidc/callback" "$ENV_FILE"
+    set_env JHV_AUTH_OIDC_POST_LOGOUT_REDIRECT_URL "$URL/login" "$ENV_FILE"
+    set_env JHV_AUTH_OIDC_ALLOW_LOCAL_LOGIN "$OIDC_ALLOW_LOCAL_LOGIN" "$ENV_FILE"
+    chown "$USER_NAME:$USER_NAME" "$OIDC_CONFIG"
+    chmod 640 "$OIDC_CONFIG"
+}
+
 # Соответствие групп ролям — словарь, а viper словари из переменных окружения
 # не собирает. Поэтому оно пишется в файл настроек, который compose монтирует
 # в контейнер.
@@ -2936,26 +3027,82 @@ prepare_oidc() {
 # Файл делается из штатного образца заменой единственной строки role_mapping,
 # а не дописыванием секции в конец: второй ключ auth: в том же документе — это
 # дубликат, и разбор YAML откажет целиком.
+prepare_setup_tool() {
+    [ -z "$SETUP_BINARY" ] || return 0
+    if [ "$BUNDLE" -eq 1 ]; then
+        SETUP_BINARY="$HERE/bin/$SERVER_BINARY"
+        return 0
+    fi
+    SETUP_TMP="$(mktemp -d "${TMPDIR:-/tmp}/jhvirt-setup.XXXXXX")"
+    chmod 700 "$SETUP_TMP"
+    trap migration_cleanup EXIT INT TERM HUP
+    SETUP_BINARY="$SETUP_TMP/setup"
+    if have go; then
+        (cd "$HERE/.." && go build -mod=readonly -o "$SETUP_BINARY" ./cmd/jhvirt-setup) || die "сборка setup helper не удалась"
+    else
+        docker run --rm -v "$HERE/..:/src:ro" -v "$SETUP_TMP:/out" -w /src \
+            docker.io/library/golang:1.27-alpine@sha256:4c9fe60190a2a3350ddc51de80d0224b8a6698d12bdfc999fee45ea9d6c46dbc \
+            go build -mod=readonly -o /out/setup ./cmd/jhvirt-setup || die "сборка setup helper не удалась"
+    fi
+}
+
+setup_tool() {
+    "$SETUP_BINARY" -setup "$@"
+}
+
+select_oidc_config() {
+    prepare_setup_tool
+    if [ "$MODE" = systemd ]; then
+        [ ! -f "$PREFIX/config/$CONFIG_NAME" ] || OIDC_CONFIG_SOURCE="$PREFIX/config/$CONFIG_NAME"
+    elif [ -f "$WORK/.env" ]; then
+        SOC_PATH="$(env_file_value "$WORK/.env" JHV_CONFIG_FILE)"
+        if [ -n "$SOC_PATH" ]; then
+            OIDC_CONFIG_SOURCE="$(docker_host_path "$WORK" "$SOC_PATH")"
+            [ -f "$OIDC_CONFIG_SOURCE" ] || die "сохранённая конфигурация не найдена: $OIDC_CONFIG_SOURCE"
+        fi
+    fi
+    [ -n "$OIDC_CONFIG_SOURCE" ] || return 0
+    SOC_GROUPS="$(setup_tool config-groups < "$OIDC_CONFIG_SOURCE")" || die "не удалось прочитать role_mapping"
+    SOC_ADMIN="$(printf '%s' "$SOC_GROUPS" | setup_tool json-get admin)"
+    SOC_OPERATOR="$(printf '%s' "$SOC_GROUPS" | setup_tool json-get operator)"
+    SOC_VIEWER="$(printf '%s' "$SOC_GROUPS" | setup_tool json-get viewer)"
+    if [ "$SOC_GROUPS" != '{}' ]; then
+        OIDC_GROUPS_EXISTING=1
+        [ -z "$SOC_ADMIN" ] || GROUP_ADMIN="$SOC_ADMIN"
+        [ -z "$SOC_OPERATOR" ] || GROUP_OPERATOR="$SOC_OPERATOR"
+        [ -z "$SOC_VIEWER" ] || GROUP_VIEWER="$SOC_VIEWER"
+    fi
+}
+
 write_oidc_config() {
     OIDC_CONFIG="$1"
+    [ -z "$OIDC_CONFIG_SOURCE" ] || OIDC_CONFIG="$OIDC_CONFIG_SOURCE"
     OIDC_SAMPLE="$COMPOSE_DIR/../config/$CONFIG_NAME"
     [ -f "$OIDC_SAMPLE" ] || OIDC_SAMPLE="$HERE/config/$CONFIG_NAME"
-    [ -f "$OIDC_SAMPLE" ] || die "не найден образец конфигурации $CONFIG_NAME"
-
-    awk -v a="$GROUP_ADMIN" -v o="$GROUP_OPERATOR" -v v="$GROUP_VIEWER" '
-        /^[[:space:]]*role_mapping: \{\}[[:space:]]*$/ {
-            print "    role_mapping:"
-            printf "      \"%s\": \"admin\"\n", a
-            printf "      \"%s\": \"operator\"\n", o
-            printf "      \"%s\": \"viewer\"\n", v
-            found = 1
-            next
-        }
-        { print }
-        END { if (!found) exit 3 }
-    ' "$OIDC_SAMPLE" > "$OIDC_CONFIG" ||
-        die "в образце $CONFIG_NAME не нашлась строка role_mapping: {} — впишите соответствие групп вручную"
-    chmod 644 "$OIDC_CONFIG"
+    [ ! -f "$OIDC_CONFIG" ] || OIDC_SAMPLE="$OIDC_CONFIG"
+    [ -f "$OIDC_SAMPLE" ] || die "не найдена конфигурация $CONFIG_NAME"
+    OIDC_CONFIG_TMP="$(mktemp "$OIDC_CONFIG.tmp.XXXXXX")"
+    chmod 600 "$OIDC_CONFIG_TMP"
+    if ! setup_tool config-init-roles "$GROUP_ADMIN" "$GROUP_OPERATOR" "$GROUP_VIEWER" \
+            < "$OIDC_SAMPLE" > "$OIDC_CONFIG_TMP"; then
+        rm -f "$OIDC_CONFIG_TMP"
+        die "конфигурация не изменена: проверьте YAML и role_mapping"
+    fi
+    if [ -f "$OIDC_CONFIG" ] && cmp -s "$OIDC_CONFIG" "$OIDC_CONFIG_TMP"; then
+        rm -f "$OIDC_CONFIG_TMP"
+        return 0
+    fi
+    if [ -f "$OIDC_CONFIG" ]; then
+        OIDC_CONFIG_BACKUP="$(mktemp "$OIDC_CONFIG.before-auth.XXXXXX")"
+        cat "$OIDC_CONFIG" > "$OIDC_CONFIG_BACKUP"
+        chmod 600 "$OIDC_CONFIG_BACKUP"
+        chmod --reference="$OIDC_CONFIG" "$OIDC_CONFIG_TMP"
+        chown --reference="$OIDC_CONFIG" "$OIDC_CONFIG_TMP"
+        say "    прежняя конфигурация: $OIDC_CONFIG_BACKUP"
+    else
+        chmod 644 "$OIDC_CONFIG_TMP"
+    fi
+    mv -f "$OIDC_CONFIG_TMP" "$OIDC_CONFIG"
 }
 
 # Настройки внешнего входа в .env. Секрет клиента живёт только здесь: файл
@@ -2984,7 +3131,7 @@ write_oidc_env() {
 
     write_oidc_config "$WORK/$CONFIG_NAME"
 
-    set_plain_env JHV_CONFIG_FILE "./$CONFIG_NAME" "$OIDC_ENV_FILE"
+    set_plain_env JHV_CONFIG_FILE "$OIDC_CONFIG" "$OIDC_ENV_FILE"
     set_plain_env JHV_OIDC_ENABLED true "$OIDC_ENV_FILE"
     set_plain_env JHV_OIDC_ISSUER "$OIDC_ISSUER" "$OIDC_ENV_FILE"
     set_plain_env JHV_OIDC_BACKCHANNEL_URL "$OIDC_BACKCHANNEL_URL" "$OIDC_ENV_FILE"
@@ -3150,8 +3297,8 @@ keycloak_start_recovery_admin() {
     if ! (cd "$WORK" && KC_RECOVERY_PASSWORD="$KEYCLOAK_RECOVERY_PASSWORD" \
             $RUN run --rm --no-deps -e KC_RECOVERY_PASSWORD keycloak \
             --config-file=/opt/keycloak/data/ovirt-backup/keycloak.conf \
-            bootstrap-admin user --optimized --username "$KC_RECOVERY_ADMIN_USER" \
-            --password:env KC_RECOVERY_PASSWORD) >/dev/null; then
+            bootstrap-admin service --optimized --client-id "$KC_RECOVERY_ADMIN_USER" \
+            --client-secret:env=KC_RECOVERY_PASSWORD --no-prompt) >/dev/null; then
         # shellcheck disable=SC2086
         (cd "$WORK" && $RUN up -d keycloak) >/dev/null 2>&1 || true
         return 1
@@ -3166,7 +3313,10 @@ keycloak_start_recovery_admin() {
     # shellcheck disable=SC2086
     (cd "$WORK" && $RUN up -d keycloak) >/dev/null 2>&1 || return 1
     keycloak_wait || return 1
-    KC_TOKEN="$(keycloak_token)"
+    KC_TOKEN="$(printf 'grant_type=client_credentials&client_id=%s&client_secret=%s' \
+        "$KC_RECOVERY_ADMIN_USER" "$KEYCLOAK_RECOVERY_PASSWORD" | \
+        curl -sS -k --fail -m 30 -H 'Content-Type: application/x-www-form-urlencoded' --data-binary @- \
+        "$KEYCLOAK_API_URL/realms/master/protocol/openid-connect/token" | setup_tool json-get access_token)"
     [ -n "$KC_TOKEN" ]
 }
 
@@ -3174,15 +3324,13 @@ keycloak_remove_recovery_admin() {
     [ "${KC_RECOVERY_ACTIVE:-0}" -eq 1 ] || return 0
     KC_RECOVERY_USERS="$(curl -sS -k -m 30 --fail \
         -H "Authorization: Bearer $KC_TOKEN" \
-        --get --data-urlencode "username=$KC_RECOVERY_ADMIN_USER" \
-        --data-urlencode 'exact=true' \
-        "$KEYCLOAK_API_URL/admin/realms/master/users" 2>/dev/null)" || return 1
-    KC_RECOVERY_USER_ID="$(printf '%s' "$KC_RECOVERY_USERS" | sed -n \
-        's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+        --get --data-urlencode "clientId=$KC_RECOVERY_ADMIN_USER" \
+        "$KEYCLOAK_API_URL/admin/realms/master/clients" 2>/dev/null)" || return 1
+    KC_RECOVERY_USER_ID="$(printf '%s' "$KC_RECOVERY_USERS" | setup_tool json-find clientId "$KC_RECOVERY_ADMIN_USER" | setup_tool json-get id)"
     [ -n "$KC_RECOVERY_USER_ID" ] || return 1
     KC_RECOVERY_DELETE_CODE="$(curl -sS -k -m 30 -o /dev/null -w '%{http_code}' \
         -H "Authorization: Bearer $KC_TOKEN" -X DELETE \
-        "$KEYCLOAK_API_URL/admin/realms/master/users/$KC_RECOVERY_USER_ID" 2>/dev/null)"
+        "$KEYCLOAK_API_URL/admin/realms/master/clients/$KC_RECOVERY_USER_ID" 2>/dev/null)"
     [ "$KC_RECOVERY_DELETE_CODE" = 204 ] || return 1
 
     KC_RECOVERY_ACTIVE=0
@@ -3197,29 +3345,21 @@ keycloak_remove_recovery_admin() {
 # установка. Активную запись текущего запуска удаляет обычный cleanup после
 # настройки realm, чтобы токен оставался действительным до конца операции.
 keycloak_remove_stale_recovery_admins() {
-    KC_STALE_USERS="$(curl -sS -k -m 30 --fail \
+    KC_STALE_CLIENTS="$(curl -sS -k -m 30 --fail \
         -H "Authorization: Bearer $KC_TOKEN" --get \
-        --data-urlencode 'search=kc-install-recovery-' \
-        --data-urlencode 'max=100' \
-        "$KEYCLOAK_API_URL/admin/realms/master/users" 2>/dev/null)" || return 1
+        --data-urlencode 'clientId=kc-install-recovery-' \
+        --data-urlencode 'search=true' --data-urlencode 'max=1000' \
+        "$KEYCLOAK_API_URL/admin/realms/master/clients" 2>/dev/null)" || return 1
 
-    printf '%s' "$KC_STALE_USERS" | sed 's/},{/}\n{/g' |
-        while IFS= read -r KC_STALE_ITEM; do
-            KC_STALE_NAME="$(printf '%s' "$KC_STALE_ITEM" | sed -n \
-                's/.*"username"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
-            case "$KC_STALE_NAME" in
-                kc-install-recovery-*) ;;
-                *) continue ;;
-            esac
+    printf '%s' "$KC_STALE_CLIENTS" | setup_tool json-prefix clientId kc-install-recovery- |
+        while IFS=' ' read -r KC_STALE_ID KC_STALE_NAME; do
             [ "$KC_STALE_NAME" = "${KC_RECOVERY_ADMIN_USER:-}" ] && continue
-            KC_STALE_ID="$(printf '%s' "$KC_STALE_ITEM" | sed -n \
-                's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
             [ -n "$KC_STALE_ID" ] || return 1
             KC_STALE_CODE="$(curl -sS -k -m 30 -o /dev/null -w '%{http_code}' \
                 -H "Authorization: Bearer $KC_TOKEN" -X DELETE \
-                "$KEYCLOAK_API_URL/admin/realms/master/users/$KC_STALE_ID" 2>/dev/null)"
+                "$KEYCLOAK_API_URL/admin/realms/master/clients/$KC_STALE_ID" 2>/dev/null)"
             [ "$KC_STALE_CODE" = 204 ] || return 1
-            say "    удалён оставшийся временный администратор $KC_STALE_NAME"
+            say "    удалён оставшийся временный service account $KC_STALE_NAME"
         done
 }
 
@@ -3419,6 +3559,20 @@ oidc_app_check() {
 
 keycloak_configure_ad() {
     [ "$KEYCLOAK_AD_REQUESTED" -eq 1 ] || return 0
+    [ -r "$KEYCLOAK_AD_VAULT_TARGET" ] || {
+        say "    bind-секрет не найден в защищённом Keycloak vault"
+        return 1
+    }
+    KC_AD_TEST_PASSWORD="$(cat "$KEYCLOAK_AD_VAULT_TARGET")"
+    for KC_AD_ACTION in testConnection testAuthentication; do
+        KC_AD_TEST="{\"action\":\"$KC_AD_ACTION\",\"connectionUrl\":$(json_quote "$KEYCLOAK_AD_URL"),\"bindDn\":$(json_quote "$KEYCLOAK_AD_BIND_DN"),\"bindCredential\":$(json_quote "$KC_AD_TEST_PASSWORD"),\"useTruststoreSpi\":\"always\",\"connectionTimeout\":\"10000\",\"startTls\":\"false\"}"
+        KC_AD_TEST_CODE="$(keycloak_post "/$KEYCLOAK_REALM/testLDAPConnection" "$KC_AD_TEST")"
+        [ "$KC_AD_TEST_CODE" = 204 ] || {
+            say "    AD: $KC_AD_ACTION не пройден из Keycloak (HTTP $KC_AD_TEST_CODE). Проверьте DNS контейнера, CA и bind-учётную запись."
+            return 1
+        }
+    done
+    KC_AD_TEST_PASSWORD=""; KC_AD_TEST=""
 
     KC_AD_REALM_JSON="$(curl -sS -k -m 30 --fail \
         -H "Authorization: Bearer $KC_TOKEN" \
@@ -3532,7 +3686,7 @@ keycloak_configure_ad() {
     fi
 
     KC_AD_Q_GROUPS_DN="$(json_quote "$KEYCLOAK_AD_GROUPS_DN")"
-    KC_AD_GROUP_FILTER="(|(cn=$GROUP_ADMIN)(cn=$GROUP_OPERATOR)(cn=$GROUP_VIEWER))"
+    KC_AD_GROUP_FILTER="$(setup_tool ldap-filter "$GROUP_ADMIN" "$GROUP_OPERATOR" "$GROUP_VIEWER")" || return 1
     KC_AD_Q_GROUP_FILTER="$(json_quote "$KC_AD_GROUP_FILTER")"
     KC_AD_GROUP_MAPPER_NAME="ovirt-backup-groups"
     KC_AD_GROUP_MAPPER_ID="$(keycloak_component_id "$KC_AD_GROUP_MAPPER_NAME" \
@@ -3593,6 +3747,12 @@ keycloak_configure_ad() {
         say "    AD не вернула все группы: $GROUP_ADMIN, $GROUP_OPERATOR, $GROUP_VIEWER"
         return 1
     }
+    for KC_AD_EXPECTED_GROUP in "$GROUP_ADMIN" "$GROUP_OPERATOR" "$GROUP_VIEWER"; do
+        KC_AD_GROUPS="$(curl -sS -k --fail -m 30 -H "Authorization: Bearer $KC_TOKEN" --get \
+            --data-urlencode "search=$KC_AD_EXPECTED_GROUP" --data-urlencode 'exact=true' \
+            "$KEYCLOAK_API_URL/admin/realms/$KEYCLOAK_REALM/groups")" || return 1
+        printf '%s' "$KC_AD_GROUPS" | setup_tool json-groups "$KC_AD_EXPECTED_GROUP" || return 1
+    done
     KC_AD_GROUP_STATUS="$(printf '%s' "$KC_AD_GROUP_SYNC" | sed -n \
         's/.*"status"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
     [ -n "$KC_AD_GROUP_STATUS" ] || KC_AD_GROUP_STATUS="синхронизация завершена"
@@ -3640,7 +3800,7 @@ keycloak_bootstrap() {
     esac
 
     for KC_GROUP in "$GROUP_ADMIN" "$GROUP_OPERATOR" "$GROUP_VIEWER"; do
-        KC_CODE="$(keycloak_post "/$KEYCLOAK_REALM/groups" "{\"name\":\"$KC_GROUP\"}")"
+        KC_CODE="$(keycloak_post "/$KEYCLOAK_REALM/groups" "{\"name\":$(json_quote "$KC_GROUP")}")"
         case "$KC_CODE" in
             201|409) ;;
             *) keycloak_bootstrap_die "не удалось создать группу $KC_GROUP (код $KC_CODE)" ;;
@@ -3672,10 +3832,20 @@ keycloak_bootstrap() {
             }
         }]
     }"
+    KC_CLIENT="$(printf '%s' "$KC_CLIENT" | setup_tool json-client "$URL")" || keycloak_bootstrap_die "не удалось подготовить OIDC client"
     KC_CODE="$(keycloak_post "/$KEYCLOAK_REALM/clients" "$KC_CLIENT")"
     case "$KC_CODE" in
         201) ;;
-        409) say "    клиент $OIDC_CLIENT_ID уже был заведён; секрет из .env должен совпадать с его" ;;
+        409)
+            KC_CLIENT_LIST="$(curl -sS -k --fail -m 30 -H "Authorization: Bearer $KC_TOKEN" --get \
+                --data-urlencode "clientId=$OIDC_CLIENT_ID" "$KEYCLOAK_API_URL/admin/realms/$KEYCLOAK_REALM/clients")" || keycloak_bootstrap_die "не удалось прочитать OIDC client"
+            KC_EXISTING_CLIENT="$(printf '%s' "$KC_CLIENT_LIST" | setup_tool json-find clientId "$OIDC_CLIENT_ID")" || keycloak_bootstrap_die "OIDC client неоднозначен"
+            KC_CLIENT_UUID="$(printf '%s' "$KC_EXISTING_CLIENT" | setup_tool json-get id)"
+            [ -n "$KC_CLIENT_UUID" ] || keycloak_bootstrap_die "OIDC client не найден"
+            KC_UPDATED_CLIENT="$(printf '%s' "$KC_EXISTING_CLIENT" | setup_tool json-client "$URL")" || keycloak_bootstrap_die "не удалось обновить OIDC client"
+            [ "$(keycloak_put "/$KEYCLOAK_REALM/clients/$KC_CLIENT_UUID" "$KC_UPDATED_CLIENT")" = 204 ] || keycloak_bootstrap_die "не удалось сохранить redirect URI и mapper клиента"
+            say "    адрес возврата, PKCE и groups mapper клиента сверены"
+            ;;
         *) keycloak_bootstrap_die "не удалось создать клиента $OIDC_CLIENT_ID (код $KC_CODE)" ;;
     esac
 
@@ -3690,8 +3860,42 @@ keycloak_bootstrap() {
 Проверьте LDAPS, цепочку CA, Users DN, Groups DN и наличие групп
 $GROUP_ADMIN, $GROUP_OPERATOR, $GROUP_VIEWER в Active Directory."
 
+    keycloak_secure_realm "$KEYCLOAK_REALM" || keycloak_bootstrap_die "не удалось включить MFA прикладного realm"
+    keycloak_secure_realm master || keycloak_bootstrap_die "не удалось защитить master realm"
+    KC_ADMIN_CLI="$(curl -sS -k --fail -m 30 -H "Authorization: Bearer $KC_TOKEN" --get \
+        --data-urlencode 'clientId=admin-cli' "$KEYCLOAK_API_URL/admin/realms/master/clients" | \
+        setup_tool json-find clientId admin-cli | setup_tool json-get id)"
+    [ -n "$KC_ADMIN_CLI" ] || keycloak_bootstrap_die "не найден admin-cli"
+    [ "$(keycloak_put "/master/clients/$KC_ADMIN_CLI" '{"directAccessGrantsEnabled":false}')" = 204 ] || keycloak_bootstrap_die "не удалось закрыть парольный grant admin-cli"
+
     keycloak_remove_recovery_admin || die "не удалось удалить временного администратора
 $KC_RECOVERY_ADMIN_USER из master realm Keycloak"
+}
+
+keycloak_secure_realm() {
+    KSR_REALM="$1"
+    KSR_FLOW=jhvirt-browser-mfa-v1
+    KSR_PATH="/$KSR_REALM/authentication/flows/$KSR_FLOW"
+    KSR_CODE="$(keycloak_post "/$KSR_REALM/authentication/flows" \
+        "{\"alias\":\"$KSR_FLOW\",\"description\":\"Password and mandatory OTP\",\"providerId\":\"basic-flow\",\"topLevel\":true,\"builtIn\":false}")"
+    case "$KSR_CODE" in 201|409) ;; *) return 1 ;; esac
+    for KSR_PROVIDER in auth-username-password-form auth-otp-form; do
+        KSR_EXECUTIONS="$(curl -sS -k --fail -m 30 -H "Authorization: Bearer $KC_TOKEN" \
+            "$KEYCLOAK_API_URL/admin/realms$KSR_PATH/executions")" || return 1
+        KSR_EXECUTION="$(printf '%s' "$KSR_EXECUTIONS" | setup_tool json-find providerId "$KSR_PROVIDER")" || return 1
+        if [ -z "$KSR_EXECUTION" ]; then
+            KSR_CODE="$(keycloak_post "$KSR_PATH/executions/execution" "{\"provider\":\"$KSR_PROVIDER\"}")"
+            [ "$KSR_CODE" = 201 ] || return 1
+            KSR_EXECUTIONS="$(curl -sS -k --fail -m 30 -H "Authorization: Bearer $KC_TOKEN" \
+                "$KEYCLOAK_API_URL/admin/realms$KSR_PATH/executions")" || return 1
+            KSR_EXECUTION="$(printf '%s' "$KSR_EXECUTIONS" | setup_tool json-find providerId "$KSR_PROVIDER")" || return 1
+        fi
+        KSR_ID="$(printf '%s' "$KSR_EXECUTION" | setup_tool json-get id)"
+        [ -n "$KSR_ID" ] || return 1
+        [ "$(keycloak_put "$KSR_PATH/executions" "{\"id\":\"$KSR_ID\",\"requirement\":\"REQUIRED\"}")" = 204 ] || return 1
+    done
+    [ "$(keycloak_put "/$KSR_REALM" "{\"browserFlow\":\"$KSR_FLOW\",\"bruteForceProtected\":true,\"permanentLockout\":false,\"failureFactor\":5,\"waitIncrementSeconds\":60,\"maxFailureWaitSeconds\":900,\"maxDeltaTimeSeconds\":1800}")" = 204 ] || return 1
+    say "    $KSR_REALM: обязательный OTP и ограничение перебора включены"
 }
 
 # --- Контейнеры -------------------------------------------------------------
@@ -3732,6 +3936,7 @@ migration_apply_docker_files() {
     rewrite_prefix_file "$MAD_WORK/.env" "$MIGRATION_SOURCE_PREFIX" "$PREFIX"
     set_plain_env JHV_EXTERNAL_URL "$URL" "$MAD_WORK/.env"
     set_plain_env JHV_PORT "$PORT" "$MAD_WORK/.env"
+    set_plain_env JHV_BIND_ADDRESS "$BIND_ADDRESS" "$MAD_WORK/.env"
     set_plain_env JHV_ADMIN_PASSWORD "" "$MAD_WORK/.env"
     if [ "$(env_file_value "$MAD_WORK/.env" JHV_OIDC_ENABLED)" = true ]; then
         set_plain_env JHV_OIDC_REDIRECT_URL "$URL/api/v1/auth/oidc/callback" "$MAD_WORK/.env"
@@ -4261,6 +4466,7 @@ install_containers() {
     # Спрашивается после адреса службы: из него складывается и адрес Keycloak,
     # и адрес возврата, который провайдер сверяет побуквенно.
     if [ "$MIGRATION_ACTIVE" -eq 0 ]; then
+        select_oidc_config
         load_existing_oidc
         choose_oidc
         prepare_oidc
@@ -4312,6 +4518,7 @@ install_containers() {
         # Способ входа известен только после распаковки перенесённого .env.
         # Загрузить его нужно до подготовки тома и file vault Keycloak.
         OIDC_MODE=""
+        select_oidc_config
         load_existing_oidc
         [ -n "$OIDC_MODE" ] || OIDC_MODE=none
         prepare_oidc
@@ -4323,6 +4530,7 @@ install_containers() {
         [ -n "$LOCAL_ADMIN_USER" ] || LOCAL_ADMIN_USER=admin
         set_plain_env JHV_EXTERNAL_URL "$URL" "$WORK/.env"
 		set_plain_env JHV_PORT "$PORT" "$WORK/.env"
+		set_plain_env JHV_BIND_ADDRESS "$BIND_ADDRESS" "$WORK/.env"
 		set_plain_env JHV_METRICS_ENABLED true "$WORK/.env"
         [ "$MIGRATION_ACTIVE" -eq 1 ] || write_oidc_env "$WORK/.env"
     else
@@ -4422,6 +4630,7 @@ PostgreSQL хранит пароль внутри тома и новый не п
             printf 'POSTGRES_DB=jhvirt\n'
             printf 'JHV_EXTERNAL_URL=%s\n' "$URL"
             printf 'JHV_PORT=%s\n' "$PORT"
+            printf 'JHV_BIND_ADDRESS=%s\n' "$BIND_ADDRESS"
             printf 'JHV_AUTH_BOOTSTRAP_USER=%s\n' "$LOCAL_ADMIN_USER"
             printf 'JHV_ADMIN_PASSWORD=%s\n' "$ADMPASS"
             printf 'JHV_BACKUP_DIR=%s\n' "$BACKUPS"
@@ -4962,6 +5171,10 @@ install_systemd() {
 
     detect_postgres_family
     [ "$START" -eq 0 ] || ensure_http_client
+    select_oidc_config
+    load_systemd_oidc
+    choose_oidc
+    prepare_oidc
 
     UPGRADE=0
     # Бинарь мог остаться от прерванной первой установки; наличие unit
@@ -5066,6 +5279,8 @@ install_systemd() {
 
 	set_env JHV_SERVER_EXTERNAL_URL "$URL" "$ENV_FILE"
 	set_env JHV_SERVER_PORT "$PORT" "$ENV_FILE"
+	set_env JHV_SERVER_ADDR "$BIND_ADDRESS" "$ENV_FILE"
+	write_systemd_oidc
 	RECOVERY_TOKEN_FILE="$PREFIX/config/recovery.token"
 	step "host-only recovery-токен"
 	ensure_recovery_token "$RECOVERY_TOKEN_FILE"

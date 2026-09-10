@@ -282,8 +282,8 @@ export const api = {
   deleteServer: (id: string) => http.delete(`/servers/${id}`).then((r) => r.data),
   probeServer: (payload: Record<string, unknown>) =>
     http.post('/servers/probe', payload, { timeout: 60_000 }).then((r) => r.data),
-  fetchCA: (engineUrl: string) =>
-    http.post<{ ca_cert: string; fingerprint: string; warning: string }>('/servers/ca-certificate', { engine_url: engineUrl }).then((r) => r.data),
+  fetchCA: (engineUrl: string, kind = 'ovirt') =>
+    http.post<{ ca_cert: string; fingerprint: string; warning: string }>('/servers/ca-certificate', { engine_url: engineUrl, kind }).then((r) => r.data),
   refreshServer: (id: string) => http.post<Server>(`/servers/${id}/refresh`).then((r) => r.data),
   browseDirectories: (params: { scope: string; root?: string; path?: string; owner?: string }) =>
     http

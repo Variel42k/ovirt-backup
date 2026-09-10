@@ -67,11 +67,12 @@ watch(dialog, (open) => {
 })
 
 const fallbackKinds: VirtualizationKind[] = [
-  { value: 'ovirt', title: 'oVirt', description: 'Весь контур, управляемый Engine.', family: 'ovirt-api', managed_scope: 'engine', connection_method: 'https', safe_provision: true, supports_backup: true, supports_restore: true, supports_engine_config: true },
-  { value: 'redvirt', title: 'РЕД Виртуализация', description: 'Весь контур РЕД Виртуализации.', family: 'ovirt-api', managed_scope: 'engine', connection_method: 'https', safe_provision: true, supports_backup: true, supports_restore: true, supports_engine_config: true },
-  { value: 'olvm', title: 'Oracle Linux Virtualization Manager', description: 'Все кластеры под управлением OLVM.', family: 'ovirt-api', managed_scope: 'engine', connection_method: 'https', safe_provision: true, supports_backup: true, supports_restore: true, supports_engine_config: true },
-  { value: 'rhv', title: 'Red Hat Virtualization', description: 'Все кластеры под управлением RHV Manager.', family: 'ovirt-api', managed_scope: 'engine', connection_method: 'https', safe_provision: true, supports_backup: true, supports_restore: true, supports_engine_config: true },
-  { value: 'kvm', title: 'libvirt/KVM (без движка)', description: 'Один самостоятельный гипервизор по SSH.', family: 'libvirt', managed_scope: 'host', connection_method: 'ssh', safe_provision: false, supports_backup: true, supports_restore: true, supports_engine_config: false },
+  { value: 'ovirt', title: 'oVirt', description: 'Весь контур, управляемый Engine.', family: 'ovirt-api', managed_scope: 'engine', connection_method: 'https', safe_provision: true, supports_backup: true, supports_restore: true, supports_engine_config: true, supports_vm_management: true, supports_host_management: true },
+  { value: 'redvirt', title: 'РЕД Виртуализация', description: 'Весь контур РЕД Виртуализации.', family: 'ovirt-api', managed_scope: 'engine', connection_method: 'https', safe_provision: true, supports_backup: true, supports_restore: true, supports_engine_config: true, supports_vm_management: true, supports_host_management: true },
+  { value: 'olvm', title: 'Oracle Linux Virtualization Manager', description: 'Все кластеры под управлением OLVM.', family: 'ovirt-api', managed_scope: 'engine', connection_method: 'https', safe_provision: true, supports_backup: true, supports_restore: true, supports_engine_config: true, supports_vm_management: true, supports_host_management: true },
+  { value: 'rhv', title: 'Red Hat Virtualization', description: 'Все кластеры под управлением RHV Manager.', family: 'ovirt-api', managed_scope: 'engine', connection_method: 'https', safe_provision: true, supports_backup: true, supports_restore: true, supports_engine_config: true, supports_vm_management: true, supports_host_management: true },
+  { value: 'proxmox', title: 'Proxmox VE', description: 'Весь кластер через API любого узла.', family: 'proxmox-api', managed_scope: 'engine', connection_method: 'https', safe_provision: false, supports_backup: false, supports_restore: false, supports_engine_config: false, supports_vm_management: true, supports_host_management: false },
+  { value: 'kvm', title: 'libvirt/KVM (без движка)', description: 'Один самостоятельный гипервизор по SSH.', family: 'libvirt', managed_scope: 'host', connection_method: 'ssh', safe_provision: false, supports_backup: true, supports_restore: true, supports_engine_config: false, supports_vm_management: true, supports_host_management: false },
 ]
 const virtualizationKinds = computed(() => app.meta?.virtualization_kinds?.length ? app.meta.virtualization_kinds : fallbackKinds)
 const kinds = computed(() => virtualizationKinds.value.map((item) => ({ value: item.value, label: item.title })))
@@ -82,8 +83,13 @@ function kindUsesLibvirt(kind: string): boolean {
   return virtualizationKinds.value.find((item) => item.value === kind)?.family === 'libvirt'
 }
 
+function kindSupportsBackup(kind: string): boolean {
+  return virtualizationKinds.value.find((item) => item.value === kind)?.supports_backup ?? false
+}
+
 /** У голого libvirt нет движка: подключение идёт по SSH, а не по REST. */
 const isLibvirt = computed(() => kindUsesLibvirt(form.value.kind))
+const isProxmox = computed(() => selectedKind.value?.family === 'proxmox-api')
 
 // Trust material is write-only. The backend only returns presence flags;
 // newly selected material remains in memory until this dialog closes.
@@ -99,10 +105,13 @@ watch(
   () => form.value.kind,
   (kind, previous) => {
     if (kind === previous) return
-    if (kindUsesLibvirt(kind) && form.value.username === 'jhvirt-backup@internal') {
+    if (kind === 'proxmox' && (form.value.username === 'jhvirt-backup@internal' || form.value.username === 'root')) {
+      form.value.username = 'backup@pve!jhvirt'
+    }
+    if (kindUsesLibvirt(kind) && (form.value.username === 'jhvirt-backup@internal' || form.value.username === 'backup@pve!jhvirt')) {
       form.value.username = 'root'
     }
-    if (!kindUsesLibvirt(kind) && form.value.username === 'root') {
+    if (!kindUsesLibvirt(kind) && kind !== 'proxmox' && (form.value.username === 'root' || form.value.username === 'backup@pve!jhvirt')) {
       form.value.username = 'jhvirt-backup@internal'
     }
   },
@@ -167,7 +176,7 @@ async function fetchProvisionCA() {
     return
   }
   try {
-    const result = await api.fetchCA(provisionForm.value.engine_url)
+    const result = await api.fetchCA(provisionForm.value.engine_url, provisionForm.value.kind)
     provisionForm.value.ca_cert = result.ca_cert
     provisionForm.value.insecure_tls = false
     provisionCAFingerprint.value = result.fingerprint
@@ -301,7 +310,7 @@ async function fetchCA() {
     return
   }
   try {
-    const result = await api.fetchCA(form.value.engine_url)
+    const result = await api.fetchCA(form.value.engine_url, form.value.kind)
     form.value.ca_cert = result.ca_cert
     form.value.clear_ca_cert = false
     form.value.insecure_tls = false
@@ -399,7 +408,7 @@ async function refresh(server: Server) {
 const columns = [
   { name: 'name', label: 'Имя', field: 'name', align: 'left' as const, sortable: true },
   { name: 'state', label: 'Состояние', field: 'state', align: 'left' as const, sortable: true },
-  { name: 'engine', label: 'Движок', field: 'engine_url', align: 'left' as const },
+  { name: 'engine', label: 'Адрес', field: 'engine_url', align: 'left' as const },
   { name: 'version', label: 'Версия', field: 'engine_version', align: 'left' as const },
   { name: 'cbt', label: 'Инкременты', field: 'supports_cbt', align: 'center' as const },
   { name: 'seen', label: 'Последний ответ', field: 'last_seen_at', align: 'left' as const },
@@ -434,12 +443,12 @@ onMounted(load)
         outline
         color="primary"
         icon="add"
-        label="Другой способ подключения"
+        label="Добавить подключение"
         class="q-ml-sm"
         @click="openCreate"
       >
         <q-tooltip>
-          Ручное подключение с уже созданной сервисной записью либо SSH-ключом KVM
+          Proxmox VE, готовая сервисная запись oVirt или SSH-ключ KVM
         </q-tooltip>
       </q-btn>
     </div>
@@ -460,6 +469,9 @@ onMounted(load)
           <router-link :to="{ name: 'server', params: { serverId: props.row.id } }" class="text-primary">
             {{ props.row.name }}
           </router-link>
+          <q-badge outline color="primary" class="q-ml-sm">
+            {{ virtualizationKinds.find((kind) => kind.value === props.row.kind)?.title ?? props.row.kind }}
+          </q-badge>
           <q-badge v-if="!props.row.enabled" color="grey-7" class="q-ml-sm">отключён</q-badge>
           <q-badge
             v-if="kindUsesLibvirt(props.row.kind) && !props.row.ssh_key_stored"
@@ -527,12 +539,14 @@ onMounted(load)
       <template #body-cell-cbt="props">
         <q-td :props="props">
           <q-icon
-            :name="props.row.supports_cbt ? 'check_circle' : 'remove_circle_outline'"
-            :color="props.row.supports_cbt ? 'positive' : 'grey-6'"
+            :name="!kindSupportsBackup(props.row.kind) ? 'block' : props.row.supports_cbt ? 'check_circle' : 'remove_circle_outline'"
+            :color="!kindSupportsBackup(props.row.kind) ? 'warning' : props.row.supports_cbt ? 'positive' : 'grey-6'"
           >
             <q-tooltip>
               {{
-                props.row.supports_cbt
+                !kindSupportsBackup(props.row.kind)
+                  ? 'Резервное копирование для этого коннектора ещё не реализовано'
+                  : props.row.supports_cbt
                   ? 'Движок поддерживает Backup API с отслеживанием изменённых блоков'
                   : 'Инкрементальный бэкап недоступен: будет использоваться копия через снапшот'
               }}
@@ -571,12 +585,20 @@ onMounted(load)
           колонкам: col-12 — во всю ширину, col-sm-6 — пара в строку.
         -->
         <q-card-section class="row q-col-gutter-md">
-          <div v-if="!editing && !isLibvirt" class="col-12">
+          <div v-if="!editing && !isLibvirt && !isProxmox" class="col-12">
             <q-banner dense class="bg-blue-1">
               <template #avatar><q-icon name="info" color="primary" /></template>
               Введённая здесь учётная запись будет сохранена для заданий. Используйте готовую
               сервисную запись с минимальными правами. Для настройки через администратора закройте
               окно и выберите «Подключить oVirt-контур».
+            </q-banner>
+          </div>
+          <div v-if="!editing && isProxmox" class="col-12">
+            <q-banner dense class="bg-blue-1">
+              <template #avatar><q-icon name="info" color="primary" /></template>
+              Укажите API-токен с разделением привилегий. Подключение к любому доступному
+              узлу импортирует весь кластер Proxmox VE. Доступны мониторинг и управление ВМ;
+              резервное копирование и восстановление будут добавлены отдельным драйвером.
             </q-banner>
           </div>
           <div class="col-12 col-sm-6">
@@ -589,12 +611,12 @@ onMounted(load)
             </div>
           </div>
 
-          <!-- Подключение к движку oVirt: REST API поверх HTTPS. -->
+          <!-- Кластерные API oVirt и Proxmox работают поверх HTTPS. -->
           <div v-if="!isLibvirt" class="col-12">
             <q-input
               v-model="form.engine_url"
-              label="Адрес движка"
-              hint="Например https://engine.example.org — без /ovirt-engine/api"
+              :label="isProxmox ? 'Адрес узла Proxmox VE' : 'Адрес движка'"
+              :hint="isProxmox ? 'Например https://pve01.example.org:8006 — путь /api2/json добавится автоматически' : 'Например https://engine.example.org — без /ovirt-engine/api'"
               outlined
               dense
             />
@@ -619,8 +641,8 @@ onMounted(load)
           <div class="col-12 col-sm-6">
             <q-input
               v-model="form.username"
-              label="Пользователь"
-              :hint="isLibvirt ? 'Пользователь SSH; должен состоять в группе libvirt' : 'Готовая сервисная запись, например jhvirt-backup@internal'"
+              :label="isProxmox ? 'API token ID' : 'Пользователь'"
+              :hint="isLibvirt ? 'Пользователь SSH; должен состоять в группе libvirt' : isProxmox ? 'Формат user@realm!token-name, например backup@pve!jhvirt' : 'Готовая сервисная запись, например jhvirt-backup@internal'"
               outlined
               dense
             />
@@ -628,9 +650,9 @@ onMounted(load)
           <div class="col-12 col-sm-6">
             <q-input
               v-model="form.password"
-              label="Пароль"
+              :label="isProxmox ? 'Secret API token' : 'Пароль'"
               type="password"
-              :hint="editing ? 'Пусто — оставить прежний' : isLibvirt ? 'Либо пароль, либо приватный ключ' : ''"
+              :hint="editing ? 'Пусто — оставить прежний' : isLibvirt ? 'Либо пароль, либо приватный ключ' : isProxmox ? 'Значение токена показывается Proxmox только при создании' : ''"
               outlined
               dense
             />
@@ -719,7 +741,7 @@ onMounted(load)
                 <q-card-section class="row items-center q-gutter-sm">
                   <q-icon :name="caStored ? 'verified_user' : 'gpp_bad'" :color="caStored ? 'positive' : 'negative'" size="sm" />
                   <div class="col">
-                    <div class="text-subtitle2">CA-сертификат движка</div>
+                    <div class="text-subtitle2">{{ isProxmox ? 'Сертификат Proxmox' : 'CA-сертификат движка' }}</div>
                     <div class="text-caption text-grey-7">
                       {{ caStored ? 'Сертификат сохранён' : 'Сертификат не задан' }}
                       <span v-if="fetchedCAFingerprint"> · SHA-256 {{ fetchedCAFingerprint }}</span>
@@ -734,7 +756,7 @@ onMounted(load)
                     <template #prepend><q-icon name="upload_file" /></template>
                   </q-file>
                   <q-btn outline dense no-caps icon="download" label="Получить" @click="fetchCA">
-                    <q-tooltip>Получить сертификат по непроверенному соединению; затем сверить его на стороне движка</q-tooltip>
+                    <q-tooltip>Получить сертификат по непроверенному соединению; затем сверить SHA-256 на стороне платформы</q-tooltip>
                   </q-btn>
                   <q-btn v-if="caStored" flat dense round icon="delete_outline" color="negative" @click="clearCA">
                     <q-tooltip>Удалить сохранённый сертификат</q-tooltip>
@@ -753,8 +775,8 @@ onMounted(load)
                 color="negative"
               />
               <div v-if="form.insecure_tls" class="jhv-reason text-negative">
-                Соединение с движком и с ovirt-imageio перестанет проверяться. Допустимо в лаборатории,
-                в бою лучше указать CA-сертификат.
+                Подлинность платформы перестанет проверяться. Допустимо в лаборатории,
+                в бою укажите доверенный сертификат.
               </div>
             </div>
           </template>
@@ -775,9 +797,13 @@ onMounted(load)
                 Подключение установлено: {{ probeResult.product_name }} {{ probeResult.version }},
                 <template v-if="!isLibvirt">кластеров {{ probeResult.clusters }}, </template>
                 хостов {{ probeResult.hosts }}, ВМ {{ probeResult.vms }}, отклик {{ probeResult.latency }}.
-                <div v-if="!probeResult.supports_cbt" class="text-warning">
+                <div v-if="probeResult.supports_backup === false" class="text-warning">
+                  Резервное копирование и восстановление для этого коннектора пока недоступны.
+                </div>
+                <div v-else-if="!probeResult.supports_cbt" class="text-warning">
                   Движок не поддерживает инкрементальный бэкап — будут доступны только полные копии через снапшот.
                 </div>
+                <div v-if="probeResult.hint" class="text-weight-medium q-mt-xs">{{ probeResult.hint }}</div>
               </template>
               <template v-else>
                 <div class="jhv-wrap">{{ probeResult.error }}</div>

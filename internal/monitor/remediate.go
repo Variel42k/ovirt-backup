@@ -14,6 +14,7 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/libvirtx"
 	"github.com/Variel42k/ovirt-backup/internal/model"
 	"github.com/Variel42k/ovirt-backup/internal/ovirt"
+	"github.com/Variel42k/ovirt-backup/internal/proxmox"
 	"github.com/Variel42k/ovirt-backup/internal/store"
 )
 
@@ -30,6 +31,7 @@ type Remediator struct {
 	store   *store.Store
 	pool    *ovirt.Pool
 	libvirt *libvirtx.Pool
+	proxmox *proxmox.Pool
 	cfg     config.RemediationConfig
 	bus     *events.Bus
 	log     zerolog.Logger
@@ -52,6 +54,10 @@ func NewRemediator(st *store.Store, pool *ovirt.Pool, libvirtPool *libvirtx.Pool
 	r.periodID.Store("")
 	return r
 }
+
+// SetProxmoxPool adds the Proxmox management driver while preserving the
+// constructor used by existing integrations.
+func (r *Remediator) SetProxmoxPool(pool *proxmox.Pool) { r.proxmox = pool }
 
 // SetMode switches between check and live mode at runtime.
 func (r *Remediator) SetMode(dryRun bool, periodID string) {
@@ -289,14 +295,12 @@ func (r *Remediator) gate(ctx context.Context, sit Situation) (string, error) {
 		}
 	}
 
-	// A bare libvirt host has no engine above it to activate or fence it
-	// through. Recording that as a skip with the reason is more useful than
-	// letting the attempt fail later with the same explanation.
-	if srv, err := r.store.GetServer(ctx, sit.ServerID); err == nil && srv.Kind.UsesLibvirt() {
+	// Some connectors do not implement host maintenance or fencing. Recording
+	// that as a skip is more useful than letting the attempt fail later.
+	if srv, err := r.store.GetServer(ctx, sit.ServerID); err == nil && !srv.Kind.SupportsHostManagement() {
 		switch sit.Action {
 		case model.ActionHostActivate, model.ActionHostFence:
-			return "хостом libvirt управляет его операционная система, а не движок — " +
-				"действие неприменимо", nil
+			return fmt.Sprintf("управление узлами для %s этим драйвером не поддерживается", srv.Kind.Title()), nil
 		}
 	}
 
@@ -355,8 +359,15 @@ func (r *Remediator) allowed(action model.RemediationAction) bool {
 }
 
 func (r *Remediator) execute(ctx context.Context, sit Situation) error {
-	if srv, err := r.store.GetServer(ctx, sit.ServerID); err == nil && srv.Kind.UsesLibvirt() {
-		return r.executeLibvirt(ctx, sit)
+	if srv, err := r.store.GetServer(ctx, sit.ServerID); err == nil {
+		switch {
+		case srv.Kind.UsesLibvirt():
+			return r.executeLibvirt(ctx, sit)
+		case srv.Kind.UsesProxmoxAPI():
+			return r.executeProxmox(ctx, sit)
+		case !srv.Kind.UsesOVirtAPI():
+			return fmt.Errorf("действия для драйвера %q не поддерживаются", srv.Kind)
+		}
 	}
 
 	client, err := r.pool.Get(ctx, sit.ServerID)

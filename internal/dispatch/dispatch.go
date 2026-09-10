@@ -56,6 +56,9 @@ func (d *Dispatcher) Execute(ctx context.Context, req backup.RunRequest) (*model
 	if srv.Kind.UsesLibvirt() {
 		return d.executeLibvirt(ctx, srv, req)
 	}
+	if !srv.Kind.UsesOVirtAPI() {
+		return nil, fmt.Errorf("резервное копирование %s в этой версии не поддерживается", srv.Kind.Title())
+	}
 	return d.Engine.Execute(ctx, req)
 }
 

@@ -15,6 +15,7 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/libvirtx"
 	"github.com/Variel42k/ovirt-backup/internal/model"
 	"github.com/Variel42k/ovirt-backup/internal/ovirt"
+	"github.com/Variel42k/ovirt-backup/internal/proxmox"
 	"github.com/Variel42k/ovirt-backup/internal/store"
 )
 
@@ -29,6 +30,7 @@ type Monitor struct {
 	store      *store.Store
 	pool       *ovirt.Pool
 	libvirt    *libvirtx.Pool
+	proxmox    *proxmox.Pool
 	remediator *Remediator
 	cfg        config.MonitorConfig
 	bus        *events.Bus
@@ -42,11 +44,11 @@ type Monitor struct {
 }
 
 // New builds the monitor.
-func New(st *store.Store, pool *ovirt.Pool, libvirtPool *libvirtx.Pool, rem *Remediator,
+func New(st *store.Store, pool *ovirt.Pool, libvirtPool *libvirtx.Pool, proxmoxPool *proxmox.Pool, rem *Remediator,
 	cfg config.MonitorConfig, bus *events.Bus, log zerolog.Logger) *Monitor {
 	return &Monitor{
 		io:    newCounterCache(),
-		store: st, pool: pool, libvirt: libvirtPool, remediator: rem,
+		store: st, pool: pool, libvirt: libvirtPool, proxmox: proxmoxPool, remediator: rem,
 		cfg: cfg, bus: bus, log: log,
 		inFlight: map[string]bool{},
 	}
@@ -133,6 +135,13 @@ func (m *Monitor) PollServer(ctx context.Context, srv *model.Server) error {
 	// inventory is shared, so the split is confined to fetching it.
 	if srv.Kind.UsesLibvirt() {
 		return m.pollLibvirt(ctx, srv)
+	}
+	if srv.Kind.UsesProxmoxAPI() {
+		return m.pollProxmox(ctx, srv)
+	}
+	if !srv.Kind.UsesOVirtAPI() {
+		return m.recordServerFailure(ctx, srv,
+			fmt.Errorf("драйвер %q не поддерживается", srv.Kind), time.Now())
 	}
 
 	started := time.Now()
@@ -325,7 +334,7 @@ func (m *Monitor) evaluateHosts(ctx context.Context, srv *model.Server, hosts []
 				Kind: model.AlertHostDown, Severity: model.SeverityWarning,
 				Message: fmt.Sprintf("хост %s выключен", h.Name),
 			})
-			if failures >= threshold {
+			if failures >= threshold && srv.Kind.SupportsHostManagement() {
 				_, _ = m.remediator.Consider(ctx, Situation{
 					ServerID: srv.ID, Scope: model.ScopeHost, ObjectID: h.ID, ObjectName: h.Name,
 					Action: model.ActionHostActivate,

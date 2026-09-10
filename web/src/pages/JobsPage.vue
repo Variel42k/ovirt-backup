@@ -79,6 +79,7 @@ const schedulePresets = [
 const needsFullEvery = computed(() => ['incremental', 'differential'].includes(form.value.type))
 const usesCBT = computed(() => ['full', 'incremental', 'differential'].includes(form.value.type))
 const bootHosts = computed(() => app.servers.filter((s) => s.kind === 'kvm' && s.enabled))
+const backupServers = computed(() => app.servers.filter((s) => s.enabled && app.serverSupports(s, 'supports_backup')))
 const selectedVMs = computed(() => {
   const excluded = new Set(form.value.exclude_vm_ids)
   const selected = new Set(form.value.vm_ids)
@@ -262,7 +263,7 @@ function openCreate() {
   editing.value = null
   preserveUnavailableType = false
   form.value = emptyForm()
-  form.value.server_id = app.servers[0]?.id ?? ''
+  form.value.server_id = backupServers.value[0]?.id ?? ''
   const source = app.servers.find((s) => s.id === form.value.server_id)
   form.value.verify_options.boot_host_id = source?.kind === 'kvm' ? source.id : ''
   form.value.storage_target_ids = app.enabledStorages[0] ? [app.enabledStorages[0].id] : []
@@ -586,7 +587,7 @@ const columns = [
           <div class="col-12 col-sm-6">
             <q-select
               :model-value="form.server_id"
-              :options="app.servers.map((s) => ({ label: s.name, value: s.id }))"
+              :options="backupServers.map((s) => ({ label: s.name, value: s.id }))"
               emit-value
               map-options
               label="Сервер"

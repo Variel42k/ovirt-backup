@@ -168,6 +168,7 @@ export interface VM {
   description?: string
   cluster_id?: string
   cluster_name?: string
+  host_id?: string
   host_name?: string
   status: string
   pause_status?: string
@@ -967,6 +968,8 @@ export interface VirtualizationKind {
   supports_backup: boolean
   supports_restore: boolean
   supports_engine_config: boolean
+  supports_vm_management: boolean
+  supports_host_management: boolean
 }
 
 /** Параметры пробного запуска ВМ из бэкапа (режим проверки boot). */

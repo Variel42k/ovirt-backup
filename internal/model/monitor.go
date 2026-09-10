@@ -38,6 +38,7 @@ const (
 // engine can match on them without parsing free text.
 const (
 	AlertEngineUnreachable    = "engine_unreachable"
+	AlertClusterNoQuorum      = "cluster_no_quorum"
 	AlertHostNonResponsive    = "host_non_responsive"
 	AlertHostDown             = "host_down"
 	AlertHostMaintenance      = "host_unexpected_maintenance"

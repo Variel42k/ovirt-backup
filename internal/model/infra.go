@@ -18,6 +18,7 @@ const (
 	KindRedVirt ServerKind = "redvirt" // РЕД Виртуализация
 	KindOLVM    ServerKind = "olvm"    // Oracle Linux Virtualization Manager
 	KindRHV     ServerKind = "rhv"
+	KindProxmox ServerKind = "proxmox"
 
 	// KindKVM — голый хост libvirt/KVM без управляющего движка. Подключение
 	// идёт по SSH: у libvirt нет отдельного сетевого API, который стоило бы
@@ -29,14 +30,14 @@ const (
 // into this binary. The API publishes it to the UI, so adding a driver does
 // not require maintaining a second list in TypeScript.
 func AllServerKinds() []ServerKind {
-	return []ServerKind{KindOVirt, KindRedVirt, KindOLVM, KindRHV, KindKVM}
+	return []ServerKind{KindOVirt, KindRedVirt, KindOLVM, KindRHV, KindProxmox, KindKVM}
 }
 
 // Valid reports whether this binary has a driver for the connection kind.
 // Unknown values must never fall through to the oVirt client: a future
 // connector can use a different authentication protocol and endpoint shape.
 func (k ServerKind) Valid() bool {
-	return k.UsesOVirtAPI() || k.UsesLibvirt()
+	return k.UsesOVirtAPI() || k.UsesProxmoxAPI() || k.UsesLibvirt()
 }
 
 // UsesOVirtAPI groups upstream oVirt and its API-compatible downstream
@@ -51,14 +52,33 @@ func (k ServerKind) UsesOVirtAPI() bool {
 	}
 }
 
+// UsesProxmoxAPI reports whether the connection talks to the Proxmox VE
+// cluster-wide REST API.
+func (k ServerKind) UsesProxmoxAPI() bool { return k == KindProxmox }
+
 // UsesLibvirt reports whether the connection talks to libvirt directly rather
 // than to an oVirt-style engine REST API.
 func (k ServerKind) UsesLibvirt() bool { return k == KindKVM }
 
+// SupportsBackup reports whether this build has a data-plane reader for the
+// connector. Proxmox inventory and power operations are intentionally useful
+// on their own, but must not be sent through an oVirt backup implementation.
+func (k ServerKind) SupportsBackup() bool {
+	return k.UsesOVirtAPI() || k.UsesLibvirt()
+}
+
+func (k ServerKind) SupportsRestore() bool { return k.SupportsBackup() }
+
+func (k ServerKind) SupportsEngineConfig() bool { return k.UsesOVirtAPI() }
+
+func (k ServerKind) SupportsVMManagement() bool { return k.Valid() }
+
+func (k ServerKind) SupportsHostManagement() bool { return k.UsesOVirtAPI() }
+
 // ManagedScope tells the UI whether one connection imports a manager's full
 // inventory or one standalone hypervisor.
 func (k ServerKind) ManagedScope() string {
-	if k.UsesOVirtAPI() {
+	if k.UsesOVirtAPI() || k.UsesProxmoxAPI() {
 		return "engine"
 	}
 	return "host"
@@ -75,6 +95,8 @@ func (k ServerKind) Title() string {
 		return "Oracle Linux Virtualization Manager"
 	case KindRHV:
 		return "Red Hat Virtualization"
+	case KindProxmox:
+		return "Proxmox VE"
 	case KindKVM:
 		return "libvirt/KVM (без движка)"
 	default:
@@ -210,7 +232,7 @@ func (s *Server) Validate() error {
 	}
 
 	if s.EngineURL == "" {
-		return fmt.Errorf("не указан адрес движка")
+		return fmt.Errorf("не указан адрес платформы виртуализации")
 	}
 	return nil
 }

@@ -751,7 +751,7 @@ TLS завершается на прокси, но прокси и прилож�
 Не перенаправляйте внутренний `proxy_pass http://127.0.0.1:8080` на HTTPS.
 Внешний URL при этом должен оставаться `https://...`.
 
-## 7. Подключение к oVirt и KVM
+## 7. Подключение к oVirt, Proxmox и KVM
 
 ### `lookup ... on 127.0.0.11:53: server misbehaving`
 
@@ -802,6 +802,32 @@ backup:
 ```
 
 Тогда данные пойдут через прокси движка на 54323, обычно медленнее.
+
+### Proxmox VE: API-токен и права
+
+Адрес задаётся как `https://pve01.example.org:8006`; путь `/api2/json` клиент
+добавляет сам. Рекомендуется отдельный API-токен с разделением привилегий.
+Пример минимальной роли для инвентаря и доступных в интерфейсе действий над ВМ:
+
+```bash
+pveum user add backup@pve
+pveum role add JHVMonitor -privs "Datastore.Audit Sys.Audit VM.Audit VM.PowerMgmt VM.Migrate"
+pveum acl modify / -user backup@pve -role JHVMonitor
+pveum user token add backup@pve jhvirt -privsep 1
+pveum acl modify / -token 'backup@pve!jhvirt' -role JHVMonitor
+```
+
+Последняя команда создания токена показывает secret один раз. В форме
+`API token ID` — это `backup@pve!jhvirt`, а `Secret API token` — выданное
+значение. При `401` проверьте обе части токена; при `403` — ACL пользователя и
+токена. Для режима только наблюдения исключите `VM.PowerMgmt` и `VM.Migrate`.
+
+Сертификат `pveproxy` можно получить в форме, но такое первое соединение ещё не
+проверено. Сверьте показанный SHA-256 на узле или через доверенный канал. Режим
+без проверки TLS оставляйте только для лаборатории.
+
+Резервное копирование и восстановление Proxmox пока не реализованы. Сервер и
+интерфейс не позволяют создать такое задание и не направляют Proxmox в oVirt-драйвер.
 
 ### KVM: TCP 22 открыт, но SSH зависает на banner
 

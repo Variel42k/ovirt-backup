@@ -149,6 +149,10 @@ func (s *Server) handleListRestoreNetworks(w http.ResponseWriter, r *http.Reques
 		writeList(w, items)
 		return
 	}
+	if srv.Kind.UsesProxmoxAPI() {
+		writeList(w, []*model.RestoreNetworkTarget{})
+		return
+	}
 	client, err := s.pool.Get(r.Context(), serverID)
 	if err != nil {
 		s.writeError(w, r, err)
@@ -222,6 +226,34 @@ func (s *Server) handleVMAction(w http.ResponseWriter, r *http.Request) {
 			"status":  "accepted",
 			"message": "команда отправлена гипервизору",
 		})
+		return
+	}
+	if srv.Kind.UsesProxmoxAPI() {
+		if s.proxmox == nil {
+			s.writeError(w, r, badRequest("клиент Proxmox не настроен"))
+			return
+		}
+		client, clientErr := s.proxmox.ForServer(srv)
+		if clientErr == nil {
+			action := req.Action
+			if action == "start" && vm.Status == "paused" {
+				action = "resume"
+			}
+			clientErr = client.VMAction(ctx, vm.ID, vm.HostName, action, req.HostID)
+		}
+		s.audit(r, "vm."+req.Action, model.ScopeVM, vmID, clientErr == nil, vm.Name)
+		if clientErr != nil {
+			s.writeError(w, r, clientErr)
+			return
+		}
+		go s.refreshServer(context.WithoutCancel(r.Context()), serverID)
+		writeJSON(w, http.StatusAccepted, map[string]string{
+			"status": "accepted", "message": "команда отправлена в Proxmox; состояние обновится после её выполнения",
+		})
+		return
+	}
+	if !srv.Kind.UsesOVirtAPI() {
+		s.writeError(w, r, badRequest("управление ВМ для драйвера %q не поддерживается", srv.Kind))
 		return
 	}
 
@@ -396,13 +428,12 @@ func (s *Server) handleHostAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if srv, err := s.store.GetServer(r.Context(), serverID); err == nil && srv.Kind.UsesLibvirt() {
+	if srv, err := s.store.GetServer(r.Context(), serverID); err == nil && !srv.Kind.SupportsHostManagement() {
 		// There is no engine above a bare libvirt host: maintenance mode and
 		// fencing are engine concepts, and the hypervisor's own operating
 		// system is what manages it.
 		s.writeError(w, r, badRequest(
-			"хостом libvirt управляет его операционная система, а не движок — "+
-				"действия обслуживания и перезагрузки по питанию отсюда недоступны"))
+			"управление узлами для подключения %s не реализовано; доступны инвентарь и действия над ВМ", srv.Kind.Title()))
 		return
 	}
 
@@ -461,13 +492,16 @@ func (s *Server) handleDiskBackupMode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if srv, err := s.store.GetServer(r.Context(), serverID); err == nil && srv.Kind.UsesLibvirt() {
+	if srv, err := s.store.GetServer(r.Context(), serverID); err == nil && !srv.Kind.UsesOVirtAPI() {
 		// In libvirt, changed block tracking is not a switch: a bitmap lives
 		// inside the qcow2 header, so the format alone decides. Pretending
 		// there is a toggle would record a change that changes nothing.
-		s.writeError(w, r, badRequest(
-			"для libvirt отслеживание изменённых блоков определяется форматом диска: "+
-				"оно доступно для qcow2 и невозможно для raw. Отдельно включать нечего"))
+		message := "для этого подключения нельзя переключать oVirt Backup API"
+		if srv.Kind.UsesLibvirt() {
+			message = "для libvirt отслеживание изменённых блоков определяется форматом диска: " +
+				"оно доступно для qcow2 и невозможно для raw. Отдельно включать нечего"
+		}
+		s.writeError(w, r, badRequest("%s", message))
 		return
 	}
 

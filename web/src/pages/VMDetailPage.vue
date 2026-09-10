@@ -45,6 +45,8 @@ const allDisksRaw = computed(
 
 const assessment = computed(() => recommendation.value?.assessment)
 const bootHosts = computed(() => app.servers.filter((s) => s.kind === 'kvm' && s.enabled))
+const sourceServer = computed(() => app.servers.find((s) => s.id === props.serverId))
+const backupSupported = computed(() => Boolean(sourceServer.value && app.serverSupports(sourceServer.value, 'supports_backup')))
 
 async function load() {
   loading.value = true
@@ -72,6 +74,10 @@ async function load() {
 }
 
 async function loadRecommendation() {
+  if (!backupSupported.value) {
+    recommendation.value = null
+    return
+  }
   try {
     recommendation.value = await api.backupOptions(props.serverId, props.vmId, selectedStorage.value ?? undefined)
     const recommended = recommendation.value.options.find((o) => o.recommended)
@@ -201,6 +207,12 @@ onMounted(load)
     <div class="row q-col-gutter-md">
       <div class="col-12 col-lg-8">
         <q-card flat bordered>
+          <q-banner v-if="!backupSupported" dense class="bg-blue-1">
+            <template #avatar><q-icon name="info" color="primary" /></template>
+            Для Proxmox VE сейчас доступны инвентарь, мониторинг и управление ВМ.
+            Резервное копирование этой платформы ещё не реализовано.
+          </q-banner>
+          <template v-if="backupSupported">
           <q-card-section>
             <div class="text-subtitle1">Варианты бэкапа</div>
             <div class="text-caption text-grey-7">
@@ -331,6 +343,7 @@ onMounted(load)
               @click="startBackup"
             />
           </q-card-actions>
+          </template>
         </q-card>
 
         <q-card flat bordered class="q-mt-md">

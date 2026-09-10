@@ -91,8 +91,12 @@ func (s *Server) validateJob(ctx context.Context, job *model.BackupJob) error {
 	if err := job.Validate(); err != nil {
 		return badRequest("%v", err)
 	}
-	if _, err := s.store.GetServer(ctx, job.ServerID); err != nil {
+	srv, err := s.store.GetServer(ctx, job.ServerID)
+	if err != nil {
 		return badRequest("сервер %s не найден", job.ServerID)
+	}
+	if !srv.Kind.SupportsBackup() {
+		return badRequest("резервное копирование %s в этой версии не поддерживается", srv.Kind.Title())
 	}
 	for _, id := range job.StorageTargetIDs {
 		target, err := s.store.GetStorageTarget(ctx, id)
@@ -349,6 +353,15 @@ func (s *Server) handleAdHocBackup(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Type == "" {
 		req.Type = string(model.BackupFull)
+	}
+	srv, err := s.store.GetServer(r.Context(), req.ServerID)
+	if err != nil {
+		s.writeError(w, r, badRequest("сервер не найден"))
+		return
+	}
+	if !srv.Kind.SupportsBackup() {
+		s.writeError(w, r, badRequest("резервное копирование %s в этой версии не поддерживается", srv.Kind.Title()))
+		return
 	}
 	verifyMode := model.VerifyMode(req.VerifyAfter)
 	if verifyMode != "" {
@@ -924,6 +937,15 @@ func (s *Server) evaluateRetention(r *http.Request, dryRun bool) (retention.Plan
 // reasoning behind each. This is the screen an operator lands on before
 // creating a job.
 func (s *Server) handleBackupOptions(w http.ResponseWriter, r *http.Request) {
+	srv, err := s.store.GetServer(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	if !srv.Kind.SupportsBackup() {
+		s.writeError(w, r, badRequest("резервное копирование %s в этой версии не поддерживается", srv.Kind.Title()))
+		return
+	}
 	rec, err := s.engine.Recommend(r.Context(), r.PathValue("id"), r.PathValue("vmID"),
 		r.URL.Query().Get("storage_target_id"))
 	if err != nil {

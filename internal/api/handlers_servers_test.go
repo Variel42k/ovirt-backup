@@ -66,11 +66,16 @@ func TestVirtualizationKindOptionsCoverEveryBuiltInDriver(t *testing.T) {
 			t.Errorf("тип виртуализации %q отсутствует в /meta", kind)
 			continue
 		}
-		if option.ManagedScope != kind.ManagedScope() || option.SupportsBackup != true || option.SupportsRestore != true {
+		if option.ManagedScope != kind.ManagedScope() || option.SupportsBackup != kind.SupportsBackup() ||
+			option.SupportsRestore != kind.SupportsRestore() {
 			t.Errorf("неверные возможности %q: %+v", kind, option)
 		}
 		if option.SafeProvision != kind.UsesOVirtAPI() {
 			t.Errorf("неверный признак безопасного мастера %q: %+v", kind, option)
+		}
+		if option.SupportsVMManagement != kind.SupportsVMManagement() ||
+			option.SupportsHostManagement != kind.SupportsHostManagement() {
+			t.Errorf("неверные возможности управления %q: %+v", kind, option)
 		}
 	}
 }
@@ -82,6 +87,18 @@ func TestValidateServerRejectsUnknownVirtualizationConnector(t *testing.T) {
 	}
 	if err := validateServer(srv, true); err == nil || !strings.Contains(err.Error(), "неподдерживаемый") {
 		t.Fatalf("unknown connector accepted by API: %v", err)
+	}
+}
+
+func TestValidateServerAcceptsProxmoxTokenAndRejectsUserPasswordShape(t *testing.T) {
+	srv := &model.Server{Name: "pve", Kind: model.KindProxmox, EngineURL: "https://pve.example.org:8006",
+		Username: "backup@pve!jhvirt", Password: "token-secret", Enabled: true}
+	if err := validateServer(srv, true); err != nil {
+		t.Fatalf("valid Proxmox token rejected: %v", err)
+	}
+	srv.Username = "root@pam"
+	if err := validateServer(srv, true); err == nil || !strings.Contains(err.Error(), "token ID") {
+		t.Fatalf("user/password-shaped Proxmox credentials accepted: %v", err)
 	}
 }
 

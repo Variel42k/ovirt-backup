@@ -118,6 +118,10 @@ func (e *Engine) validateRestoreVMTarget(ctx context.Context, source *model.Back
 		plan.Blockers = append(plan.Blockers, "целевой сервер не найден")
 		return
 	}
+	if !target.Kind.SupportsRestore() {
+		plan.Blockers = append(plan.Blockers, "восстановление в "+target.Kind.Title()+" в этой версии не поддерживается")
+		return
+	}
 	sourceServer, err := e.store.GetServer(ctx, source.ServerID)
 	if err == nil && sourceServer.Kind.UsesLibvirt() != target.Kind.UsesLibvirt() {
 		plan.Blockers = append(plan.Blockers, "межплатформенное восстановление не поддерживается")

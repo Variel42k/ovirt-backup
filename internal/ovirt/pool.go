@@ -63,6 +63,9 @@ func (p *Pool) ForServer(srv *model.Server) (*Client, error) {
 	if srv == nil {
 		return nil, fmt.Errorf("сервер не задан")
 	}
+	if !srv.Kind.UsesOVirtAPI() {
+		return nil, fmt.Errorf("подключение %q имеет тип %q, а не oVirt-совместимый", srv.Name, srv.Kind)
+	}
 	if !srv.Enabled {
 		return nil, fmt.Errorf("сервер %q отключён", srv.Name)
 	}

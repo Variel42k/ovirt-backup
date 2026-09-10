@@ -25,6 +25,9 @@ func (d *Dispatcher) PlanRestoreVM(ctx context.Context, req *model.RestoreVMRequ
 	if err != nil {
 		return nil, err
 	}
+	if !target.Kind.SupportsRestore() {
+		return nil, fmt.Errorf("восстановление в %s в этой версии не поддерживается", target.Kind.Title())
+	}
 	if !target.Kind.UsesLibvirt() {
 		return d.Engine.PlanRestoreVM(ctx, req)
 	}
@@ -110,6 +113,9 @@ func (d *Dispatcher) RestoreVM(ctx context.Context, req *model.RestoreVMRequest)
 	target, err := d.restoreTargetServer(ctx, req)
 	if err != nil {
 		return nil, err
+	}
+	if !target.Kind.SupportsRestore() {
+		return nil, fmt.Errorf("восстановление в %s в этой версии не поддерживается", target.Kind.Title())
 	}
 	if !target.Kind.UsesLibvirt() {
 		return d.Engine.RestoreVM(ctx, req)

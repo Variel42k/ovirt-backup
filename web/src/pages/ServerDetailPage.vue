@@ -14,13 +14,15 @@ const props = defineProps<{ serverId: string }>()
 const $q = useQuasar()
 const auth = useAuthStore()
 const app = useAppStore()
+const server = ref<Server | null>(null)
 
 // canManage — можно ли вообще управлять ВМ и хостами в этой установке.
 // Управление выключается настройкой на сервере: там, где нужен только бэкап,
 // служба не должна давать рычаг для остановки production. Кнопка, которая
 // гарантированно вернёт 403, хуже отсутствующей.
 const canManage = computed(
-  () => auth.canWrite() && app.meta?.capabilities.management_enabled !== false,
+  () => auth.canWrite() && app.meta?.capabilities.management_enabled !== false &&
+    Boolean(server.value && app.serverSupports(server.value, 'supports_vm_management')),
 )
 
 // canDisrupt — отдельное право на действия, обрывающие работу без остановки
@@ -115,7 +117,8 @@ async function loadIO() {
   }
 }
 const loading = ref(false)
-const server = ref<Server | null>(null)
+const canManageHosts = computed(() => canManage.value && Boolean(server.value &&
+  app.serverSupports(server.value, 'supports_host_management')))
 const vms = ref<VM[]>([])
 const hosts = ref<Host[]>([])
 const disks = ref<Disk[]>([])
@@ -179,14 +182,29 @@ async function refreshInventory() {
 const DISRUPTIVE = new Set(['stop', 'reset'])
 
 async function vmAction(vm: VM, action: string) {
-  const run = async (confirm: boolean) => {
+  const run = async (confirm: boolean, hostID = '') => {
     try {
-      await api.vmAction(props.serverId, vm.id, action, confirm ? { confirm: true } : {})
+      await api.vmAction(props.serverId, vm.id, action, { ...(confirm ? { confirm: true } : {}), ...(hostID ? { host_id: hostID } : {}) })
       notifyOk(`Команда «${action}» отправлена для ${vm.name}`)
       window.setTimeout(load, 2500)
     } catch (err) {
       notifyError(err, 'Команда не выполнена')
     }
+  }
+  if (action === 'migrate') {
+    const targets = hosts.value.filter((host) => host.id !== vm.host_id && host.status === 'up')
+    if (!targets.length) {
+      notifyError('Нет другого доступного узла для миграции')
+      return
+    }
+    $q.dialog({
+      title: `Миграция «${vm.name}»`,
+      message: 'Выберите целевой узел',
+      options: { type: 'radio', model: targets[0].id, items: targets.map((host) => ({ label: host.name, value: host.id })) },
+      cancel: { label: 'Отмена', flat: true },
+      ok: { label: 'Перенести', color: 'primary' },
+    }).onOk((hostID: string) => void run(false, hostID))
+    return
   }
 
   if (!DISRUPTIVE.has(action)) {
@@ -533,7 +551,7 @@ const domainColumns = [
             </template>
             <template #body-cell-actions="props">
               <q-td :props="props">
-                <template v-if="canManage">
+                <template v-if="canManageHosts">
                   <q-btn
                     flat
                     dense

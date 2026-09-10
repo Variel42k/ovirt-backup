@@ -28,6 +28,7 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/monitor"
 	"github.com/Variel42k/ovirt-backup/internal/notify"
 	"github.com/Variel42k/ovirt-backup/internal/ovirt"
+	"github.com/Variel42k/ovirt-backup/internal/proxmox"
 	"github.com/Variel42k/ovirt-backup/internal/quality"
 	"github.com/Variel42k/ovirt-backup/internal/replication"
 	"github.com/Variel42k/ovirt-backup/internal/repo"
@@ -42,6 +43,7 @@ type Server struct {
 	store         *store.Store
 	pool          *ovirt.Pool
 	libvirt       *libvirtx.Pool
+	proxmox       *proxmox.Pool
 	engine        *dispatch.Dispatcher
 	scheduler     *scheduler.Scheduler
 	monitor       *monitor.Monitor
@@ -87,6 +89,7 @@ type Deps struct {
 	Store         *store.Store
 	Pool          *ovirt.Pool
 	LibvirtPool   *libvirtx.Pool
+	ProxmoxPool   *proxmox.Pool
 	Engine        *dispatch.Dispatcher
 	Scheduler     *scheduler.Scheduler
 	Monitor       *monitor.Monitor
@@ -125,7 +128,8 @@ func New(d Deps) *Server {
 		metricsToken = bytes.TrimSpace(body)
 	}
 	srv := &Server{
-		cfg: d.Config, baseCfg: base, store: d.Store, pool: d.Pool, libvirt: d.LibvirtPool, engine: d.Engine,
+		cfg: d.Config, baseCfg: base, store: d.Store, pool: d.Pool, libvirt: d.LibvirtPool,
+		proxmox: d.ProxmoxPool, engine: d.Engine,
 		scheduler: d.Scheduler, monitor: d.Monitor, remediator: d.Remediator,
 		bus: d.Bus, log: d.Logger, logs: d.Logs, quality: d.Quality, replicator: d.Replicator, notifier: d.Notifier,
 		notifications: d.Notifications,

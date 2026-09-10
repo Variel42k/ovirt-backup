@@ -28,16 +28,18 @@ type optionDescriptor struct {
 // Capability flags let the UI stay honest as more virtualization systems are
 // added: merely appearing in the inventory must not imply backup or restore.
 type virtualizationKindDescriptor struct {
-	Value                string `json:"value"`
-	Title                string `json:"title"`
-	Description          string `json:"description"`
-	Family               string `json:"family"`
-	ManagedScope         string `json:"managed_scope"`
-	ConnectionMethod     string `json:"connection_method"`
-	SafeProvision        bool   `json:"safe_provision"`
-	SupportsBackup       bool   `json:"supports_backup"`
-	SupportsRestore      bool   `json:"supports_restore"`
-	SupportsEngineConfig bool   `json:"supports_engine_config"`
+	Value                  string `json:"value"`
+	Title                  string `json:"title"`
+	Description            string `json:"description"`
+	Family                 string `json:"family"`
+	ManagedScope           string `json:"managed_scope"`
+	ConnectionMethod       string `json:"connection_method"`
+	SafeProvision          bool   `json:"safe_provision"`
+	SupportsBackup         bool   `json:"supports_backup"`
+	SupportsRestore        bool   `json:"supports_restore"`
+	SupportsEngineConfig   bool   `json:"supports_engine_config"`
+	SupportsVMManagement   bool   `json:"supports_vm_management"`
+	SupportsHostManagement bool   `json:"supports_host_management"`
 }
 
 // metaResponse tells the SPA what this deployment can do, which is what lets
@@ -83,20 +85,27 @@ func virtualizationKindOptions() []virtualizationKindDescriptor {
 		model.KindRedVirt: "Подключение к менеджеру РЕД Виртуализации через совместимый oVirt API; импортируется весь контур.",
 		model.KindOLVM:    "Подключение к Oracle Linux Virtualization Manager; импортируются все управляемые кластеры.",
 		model.KindRHV:     "Подключение к Red Hat Virtualization Manager; импортируются все управляемые кластеры.",
+		model.KindProxmox: "Подключение к любому узлу Proxmox VE импортирует весь кластер: узлы, QEMU-ВМ, LXC-контейнеры и хранилища.",
 		model.KindKVM:     "Прямое подключение к одному самостоятельному libvirt/KVM-гипервизору по SSH.",
 	}
 	out := make([]virtualizationKindDescriptor, 0, len(descriptions))
 	for _, kind := range model.AllServerKinds() {
 		item := virtualizationKindDescriptor{
 			Value: string(kind), Title: kind.Title(), Description: descriptions[kind],
-			ManagedScope: kind.ManagedScope(), SupportsBackup: true, SupportsRestore: true,
+			ManagedScope: kind.ManagedScope(), SupportsBackup: kind.SupportsBackup(),
+			SupportsRestore: kind.SupportsRestore(), SupportsEngineConfig: kind.SupportsEngineConfig(),
+			SupportsVMManagement:   kind.SupportsVMManagement(),
+			SupportsHostManagement: kind.SupportsHostManagement(),
 		}
-		if kind.UsesOVirtAPI() {
+		switch {
+		case kind.UsesOVirtAPI():
 			item.Family = "ovirt-api"
 			item.ConnectionMethod = "https"
 			item.SafeProvision = true
-			item.SupportsEngineConfig = true
-		} else {
+		case kind.UsesProxmoxAPI():
+			item.Family = "proxmox-api"
+			item.ConnectionMethod = "https"
+		case kind.UsesLibvirt():
 			item.Family = "libvirt"
 			item.ConnectionMethod = "ssh"
 		}

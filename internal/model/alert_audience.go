@@ -72,6 +72,7 @@ var alertAudienceByKind = map[string]AlertAudience{
 	AlertCBTUnavailable:       AudienceBackup,
 
 	AlertEngineUnreachable:   AudienceInfrastructure,
+	AlertClusterNoQuorum:     AudienceInfrastructure,
 	AlertHostNonResponsive:   AudienceInfrastructure,
 	AlertHostDown:            AudienceInfrastructure,
 	AlertHostMaintenance:     AudienceInfrastructure,

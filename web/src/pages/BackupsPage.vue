@@ -60,7 +60,8 @@ const vmTargetServer = computed(() => app.servers.find((server) => server.id ===
 const compatibleRestoreServers = computed(() => {
   const source = app.servers.find((server) => server.id === detail.value?.server_id)
   if (!source) return []
-  return app.servers.filter((server) => server.enabled && ((server.kind === 'kvm') === (source.kind === 'kvm')))
+  return app.servers.filter((server) => server.enabled && app.serverSupports(server, 'supports_restore') &&
+    ((server.kind === 'kvm') === (source.kind === 'kvm')))
 })
 
 async function loadVMTargetInventory(serverId: string) {

@@ -41,8 +41,8 @@ func (s *Server) validateEngineConfigJob(ctx context.Context, job *model.EngineC
 	if err != nil {
 		return badRequest("целевой Engine не найден")
 	}
-	if srv.Kind.UsesLibvirt() {
-		return badRequest("снимок конфигурации Engine недоступен для KVM")
+	if !srv.Kind.SupportsEngineConfig() {
+		return badRequest("снимок конфигурации Engine недоступен для %s", srv.Kind.Title())
 	}
 	target, err := s.store.GetStorageTarget(ctx, job.StorageTargetID)
 	if err != nil || !target.Enabled {

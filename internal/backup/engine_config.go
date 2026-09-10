@@ -45,8 +45,8 @@ func (e *Engine) snapshotEngineConfig(ctx context.Context, jobID, serverID, targ
 	if err != nil {
 		return fail(err)
 	}
-	if srv.Kind.UsesLibvirt() {
-		return fail(fmt.Errorf("снимок Engine доступен только для oVirt"))
+	if !srv.Kind.SupportsEngineConfig() {
+		return fail(fmt.Errorf("снимок Engine доступен только для oVirt-совместимых платформ"))
 	}
 	target, err := e.store.GetStorageTarget(ctx, targetID)
 	if err != nil {

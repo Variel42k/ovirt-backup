@@ -34,6 +34,7 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/monitor"
 	"github.com/Variel42k/ovirt-backup/internal/notify"
 	"github.com/Variel42k/ovirt-backup/internal/ovirt"
+	"github.com/Variel42k/ovirt-backup/internal/proxmox"
 	"github.com/Variel42k/ovirt-backup/internal/quality"
 	"github.com/Variel42k/ovirt-backup/internal/replication"
 	"github.com/Variel42k/ovirt-backup/internal/scheduler"
@@ -302,6 +303,7 @@ func run() error {
 	// hypervisor and redials when it dies.
 	libvirtPool := libvirtx.NewPool(loadServer, cfg.Monitor.Timeout, log)
 	defer libvirtPool.Close()
+	proxmoxPool := proxmox.NewPool(loadServer, cfg.Monitor.Timeout)
 
 	bus := events.NewBus(128)
 	notificationManager := notify.NewManager(st, cfg.Notifications, notifier, bus, log)
@@ -364,7 +366,8 @@ func run() error {
 	}
 
 	remediator := monitor.NewRemediator(st, pool, libvirtPool, cfg.Monitor.Remediation, bus, log)
-	mon := monitor.New(st, pool, libvirtPool, remediator, cfg.Monitor, bus, log)
+	remediator.SetProxmoxPool(proxmoxPool)
+	mon := monitor.New(st, pool, libvirtPool, proxmoxPool, remediator, cfg.Monitor, bus, log)
 	qualityService := quality.New(st, cfg.Monitor.BackupQuality, cfg.Location())
 	replicator := replication.New(st, cfg.Backup.ReplicationWorkers, bus, log)
 	replicator.SetVerifier(func(ctx context.Context, runID, copyID string, mode model.VerifyMode, opts model.VerifyOptions) error {
@@ -418,7 +421,8 @@ func run() error {
 	}
 
 	apiServer := api.New(api.Deps{
-		Config: *cfg, BaseConfig: baseCfg, Store: st, Pool: pool, LibvirtPool: libvirtPool, Engine: dispatcher,
+		Config: *cfg, BaseConfig: baseCfg, Store: st, Pool: pool, LibvirtPool: libvirtPool,
+		ProxmoxPool: proxmoxPool, Engine: dispatcher,
 		Scheduler: sched, Monitor: mon, Remediator: remediator, Bus: bus, Logger: log,
 		Logs: logs, Quality: qualityService, Replicator: replicator, Notifier: notifier,
 		Notifications: notificationManager, DR: drChecker,

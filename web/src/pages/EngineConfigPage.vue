@@ -19,7 +19,7 @@ const editingID = ref('')
 const selected = ref<EngineConfigRun[]>([])
 const comparison = ref<any>(null)
 const filterServer = ref('')
-const ovirtServers = computed(() => app.servers.filter((server) => server.kind !== 'kvm' && server.enabled))
+const ovirtServers = computed(() => app.servers.filter((server) => server.enabled && app.serverSupports(server, 'supports_engine_config')))
 
 const defaultRetention = () => ({
   keep_last: 3, keep_hourly: 0, keep_daily: 7, keep_weekly: 4,

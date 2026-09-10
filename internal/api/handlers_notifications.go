@@ -11,7 +11,7 @@ import (
 )
 
 var knownNotificationKinds = []string{
-	model.AlertEngineUnreachable, model.AlertHostNonResponsive, model.AlertHostDown,
+	model.AlertEngineUnreachable, model.AlertClusterNoQuorum, model.AlertHostNonResponsive, model.AlertHostDown,
 	model.AlertHostMaintenance, model.AlertVMDown, model.AlertVMPaused, model.AlertVMUnknown,
 	model.AlertStorageDomainDown, model.AlertStorageDomainFull, model.AlertBackupFailed,
 	model.AlertBackupUnprotected, model.AlertBackupStale, model.AlertBackupReplicaFailed,

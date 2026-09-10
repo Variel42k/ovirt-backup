@@ -37,6 +37,17 @@ export const useAppStore = defineStore('app', () => {
     return servers.value.find((s) => s.id === id)?.name ?? id ?? '—'
   }
 
+  function serverSupports(server: Server, capability: 'supports_backup' | 'supports_restore' | 'supports_engine_config' | 'supports_vm_management' | 'supports_host_management'): boolean {
+    const descriptor = meta.value?.virtualization_kinds.find((item) => item.value === server.kind)
+    if (descriptor) return Boolean(descriptor[capability])
+    if (capability === 'supports_vm_management') return ['ovirt', 'redvirt', 'olvm', 'rhv', 'proxmox', 'kvm'].includes(server.kind)
+    if (capability === 'supports_engine_config' || capability === 'supports_host_management') {
+      return ['ovirt', 'redvirt', 'olvm', 'rhv'].includes(server.kind)
+    }
+    if (server.kind === 'proxmox') return false
+    return ['ovirt', 'redvirt', 'olvm', 'rhv', 'kvm'].includes(server.kind)
+  }
+
   function storageName(id?: string): string {
     return storages.value.find((s) => s.id === id)?.name ?? id ?? '—'
   }
@@ -95,6 +106,7 @@ export const useAppStore = defineStore('app', () => {
     verifyModeTitle,
     actionTitle,
     serverName,
+    serverSupports,
     storageName,
     help,
     loadHelp,

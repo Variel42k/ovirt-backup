@@ -14,6 +14,7 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/libvirtx"
 	"github.com/Variel42k/ovirt-backup/internal/model"
 	"github.com/Variel42k/ovirt-backup/internal/ovirt"
+	"github.com/Variel42k/ovirt-backup/internal/proxmox"
 )
 
 // serverPayload is the write shape of a connection. It is separate from the
@@ -87,9 +88,17 @@ func validateServer(srv *model.Server, isNew bool) error {
 	if err := srv.Validate(); err != nil {
 		return badRequest("%v", err)
 	}
-	if !srv.Kind.UsesLibvirt() {
+	switch {
+	case srv.Kind.UsesOVirtAPI():
 		if _, err := ovirt.New(ovirt.Config{
 			EngineURL: srv.EngineURL, CACert: srv.CACert, InsecureTLS: srv.InsecureTLS,
+		}); err != nil {
+			return badRequest("%v", err)
+		}
+	case srv.Kind.UsesProxmoxAPI():
+		if _, err := proxmox.New(proxmox.Config{
+			BaseURL: srv.EngineURL, TokenID: srv.Username, TokenSecret: srv.Password,
+			CACert: srv.CACert, InsecureTLS: srv.InsecureTLS,
 		}); err != nil {
 			return badRequest("%v", err)
 		}
@@ -205,6 +214,9 @@ func (s *Server) handleUpdateServer(w http.ResponseWriter, r *http.Request) {
 	}
 	// The cached client holds the old credentials and TLS settings.
 	s.pool.Invalidate(id)
+	if s.proxmox != nil {
+		s.proxmox.Invalidate(id)
+	}
 	s.audit(r, "server.update", model.ScopeServer, id, true, existing.Name)
 	s.auditHostKeyTrust(r, model.ScopeServer, id, existing.Name, existing.SSHTrustAnyHostKey,
 		existing.Kind.UsesLibvirt())
@@ -220,21 +232,26 @@ func (s *Server) handleDeleteServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.pool.Invalidate(id)
+	if s.proxmox != nil {
+		s.proxmox.Invalidate(id)
+	}
 	s.audit(r, "server.delete", model.ScopeServer, id, true, "")
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
 // probeResult is what the "проверить подключение" button gets back.
 type probeResult struct {
-	OK          bool   `json:"ok"`
-	Error       string `json:"error,omitempty"`
-	ProductName string `json:"product_name,omitempty"`
-	Version     string `json:"version,omitempty"`
-	SupportsCBT bool   `json:"supports_cbt"`
-	Clusters    int    `json:"clusters"`
-	Hosts       int    `json:"hosts"`
-	VMs         int    `json:"vms"`
-	Latency     string `json:"latency,omitempty"`
+	OK              bool   `json:"ok"`
+	Error           string `json:"error,omitempty"`
+	ProductName     string `json:"product_name,omitempty"`
+	Version         string `json:"version,omitempty"`
+	SupportsCBT     bool   `json:"supports_cbt"`
+	SupportsBackup  bool   `json:"supports_backup"`
+	SupportsRestore bool   `json:"supports_restore"`
+	Clusters        int    `json:"clusters"`
+	Hosts           int    `json:"hosts"`
+	VMs             int    `json:"vms"`
+	Latency         string `json:"latency,omitempty"`
 	// Hint даёт понятное объяснение частым ошибкам вместо текста от библиотеки.
 	Hint string `json:"hint,omitempty"`
 	// ExcessPrivileges перечисляет то, что эта учётная запись может сверх
@@ -280,8 +297,20 @@ func (s *Server) handleProbeServer(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
 	defer cancel()
 
-	if model.ServerKind(payload.Kind).UsesLibvirt() {
+	kind := model.ServerKind(payload.Kind)
+	if kind == "" {
+		kind = model.KindOVirt
+	}
+	if kind.UsesLibvirt() {
 		writeJSON(w, http.StatusOK, s.probeLibvirt(ctx, payload))
+		return
+	}
+	if kind.UsesProxmoxAPI() {
+		writeJSON(w, http.StatusOK, s.probeProxmox(ctx, payload))
+		return
+	}
+	if !kind.UsesOVirtAPI() {
+		s.writeError(w, r, badRequest("неподдерживаемый тип системы виртуализации %q", kind))
 		return
 	}
 
@@ -318,19 +347,63 @@ func (s *Server) handleProbeServer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, probeResult{
-		OK:          true,
-		ProductName: info.ProductInfo.Name,
-		Version:     info.Version(),
-		SupportsCBT: info.SupportsIncrementalBackup(),
-		Clusters:    len(clusters),
-		Hosts:       info.Summary.Hosts.Total.Int(),
-		VMs:         info.Summary.VMs.Total.Int(),
-		Latency:     time.Since(started).Round(time.Millisecond).String(),
+		OK:              true,
+		ProductName:     info.ProductInfo.Name,
+		Version:         info.Version(),
+		SupportsCBT:     info.SupportsIncrementalBackup(),
+		SupportsBackup:  true,
+		SupportsRestore: true,
+		Clusters:        len(clusters),
+		Hosts:           info.Summary.Hosts.Total.Int(),
+		VMs:             info.Summary.VMs.Total.Int(),
+		Latency:         time.Since(started).Round(time.Millisecond).String(),
 		// Проверка прав идёт после успешного входа и только чтением. Она не
 		// мешает подключиться — её дело показать оператору, что учётная запись
 		// может больше, чем нужно, пока он ещё не нажал «Сохранить».
 		ExcessPrivileges: client.CheckExcessPrivileges(ctx),
 	})
+}
+
+func (s *Server) probeProxmox(ctx context.Context, payload serverPayload) probeResult {
+	if payload.EngineURL == "" || payload.Username == "" || payload.Password == "" {
+		return probeResult{OK: false, Error: "нужны адрес Proxmox, API token ID и secret токена"}
+	}
+	client, err := proxmox.New(proxmox.Config{
+		BaseURL: payload.EngineURL, TokenID: payload.Username, TokenSecret: payload.Password,
+		CACert: payload.CACert, InsecureTLS: payload.InsecureTLS, Timeout: 25 * time.Second,
+	})
+	if err != nil {
+		return probeResult{OK: false, Error: err.Error()}
+	}
+	started := time.Now()
+	info, hosts, vms, err := client.Probe(ctx)
+	if err != nil {
+		return probeResult{OK: false, Error: err.Error(), Hint: proxmoxHint(err)}
+	}
+	hint := "Инвентарь и управление ВМ доступны. Резервное копирование и восстановление Proxmox в этой версии ещё не реализованы."
+	if info.Clustered && !info.Quorate {
+		hint = "Кластер ответил, но не имеет кворума. " + hint
+	}
+	return probeResult{OK: true, ProductName: "Proxmox VE", Version: info.FullVersion(),
+		SupportsCBT: false, SupportsBackup: false, SupportsRestore: false,
+		Clusters: 1, Hosts: hosts, VMs: vms,
+		Latency: time.Since(started).Round(time.Millisecond).String(), Hint: hint}
+}
+
+func proxmoxHint(err error) string {
+	text := err.Error()
+	switch {
+	case containsAny(text, "401", "403", "permission", "authentication"):
+		return "Proxmox отверг API-токен или ему не хватает прав Sys.Audit, VM.Audit и Datastore.Audit."
+	case containsAny(text, "certificate", "x509", "tls"):
+		return "Сертификат Proxmox не проверяется. Получите сертификат, сверьте SHA-256 и сохраните его."
+	case containsAny(text, "no such host", "lookup"):
+		return "Имя узла Proxmox не разрешается на сервере приложения. Проверьте DNS."
+	case containsAny(text, "connection refused", "timeout", "deadline"):
+		return "API Proxmox не отвечает. Обычно pveproxy доступен по HTTPS на порту 8006."
+	default:
+		return ""
+	}
 }
 
 func (p *serverPayload) fillHiddenFrom(existing *model.Server) {
@@ -384,14 +457,16 @@ func (s *Server) probeLibvirt(ctx context.Context, payload serverPayload) probeR
 	}
 
 	result := probeResult{
-		OK:          true,
-		ProductName: "libvirt " + version,
-		Version:     version,
-		SupportsCBT: supported,
-		Clusters:    0,
-		Hosts:       1,
-		VMs:         info.TotalVMs,
-		Latency:     time.Since(started).Round(time.Millisecond).String(),
+		OK:              true,
+		ProductName:     "libvirt " + version,
+		Version:         version,
+		SupportsCBT:     supported,
+		SupportsBackup:  true,
+		SupportsRestore: true,
+		Clusters:        0,
+		Hosts:           1,
+		VMs:             info.TotalVMs,
+		Latency:         time.Since(started).Round(time.Millisecond).String(),
 	}
 	if !supported {
 		result.Hint = "libvirt старше 6.0: инкрементальный бэкап недоступен, будут только полные копии."
@@ -476,33 +551,44 @@ func containsAny(haystack string, needles ...string) bool {
 func (s *Server) handleFetchCA(w http.ResponseWriter, r *http.Request) {
 	var payload struct {
 		EngineURL string `json:"engine_url"`
+		Kind      string `json:"kind"`
 	}
 	if err := decodeJSON(r, &payload); err != nil {
 		s.writeError(w, r, err)
 		return
 	}
 	if payload.EngineURL == "" {
-		s.writeError(w, r, badRequest("не указан адрес движка"))
+		s.writeError(w, r, badRequest("не указан адрес платформы виртуализации"))
 		return
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
 
-	pem, err := ovirt.FetchCACert(ctx, payload.EngineURL, 15*time.Second)
+	var certPEM string
+	var err error
+	kind := model.ServerKind(payload.Kind)
+	if kind.UsesProxmoxAPI() {
+		certPEM, err = proxmox.FetchCertificateChain(ctx, payload.EngineURL, 15*time.Second)
+	} else if kind == "" || kind.UsesOVirtAPI() {
+		certPEM, err = ovirt.FetchCACert(ctx, payload.EngineURL, 15*time.Second)
+	} else {
+		s.writeError(w, r, badRequest("получение TLS-сертификата для %q не поддерживается", kind))
+		return
+	}
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	fingerprint, err := certificateFingerprint(pem)
+	fingerprint, err := certificateFingerprint(certPEM)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{
-		"ca_cert":     pem,
+		"ca_cert":     certPEM,
 		"fingerprint": fingerprint,
-		"warning":     "Сертификат получен по непроверенному соединению. Сверьте SHA-256 с отпечатком на стороне движка, прежде чем сохранять.",
+		"warning":     "Сертификат получен по непроверенному соединению. Сверьте SHA-256 на стороне платформы, прежде чем сохранять.",
 	})
 }
 

@@ -83,6 +83,15 @@ func TestServerKindFamiliesAreExplicit(t *testing.T) {
 	if !KindKVM.Valid() || KindKVM.UsesOVirtAPI() || !KindKVM.UsesLibvirt() || KindKVM.ManagedScope() != "host" {
 		t.Fatalf("libvirt kind classified incorrectly: %q", KindKVM)
 	}
+	if !KindProxmox.Valid() || !KindProxmox.UsesProxmoxAPI() || KindProxmox.UsesOVirtAPI() ||
+		KindProxmox.UsesLibvirt() || KindProxmox.ManagedScope() != "engine" {
+		t.Fatalf("Proxmox kind classified incorrectly: %q", KindProxmox)
+	}
+	if KindProxmox.SupportsBackup() || KindProxmox.SupportsRestore() ||
+		KindProxmox.SupportsEngineConfig() || !KindProxmox.SupportsVMManagement() ||
+		KindProxmox.SupportsHostManagement() {
+		t.Fatal("Proxmox capability flags do not match the implemented driver")
+	}
 	if ServerKind("future-driver").Valid() {
 		t.Fatal("unknown connector silently accepted")
 	}

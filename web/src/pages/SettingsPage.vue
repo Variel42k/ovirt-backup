@@ -313,6 +313,7 @@ const availableNotificationKinds = computed(() => {
 
 const NOTIFICATION_KIND_RU: Record<string, string> = {
   engine_unreachable: 'Engine недоступен',
+  cluster_no_quorum: 'Кластер не имеет кворума',
   host_non_responsive: 'Хост не отвечает',
   host_down: 'Хост выключен',
   host_unexpected_maintenance: 'Хост неожиданно в maintenance',

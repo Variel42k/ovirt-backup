@@ -71,6 +71,10 @@ type Server struct {
 	// identityMu protects hot replacement of the OIDC client from the settings
 	// page while login callbacks and session checks are running.
 	identityMu sync.RWMutex
+	// identityChangeMu serializes Keycloak and domain changes. A detached
+	// deployment survives a browser refresh, so a second request must fail fast
+	// instead of racing the first one against the same realm and stored secret.
+	identityChangeMu sync.Mutex
 	// oidcLogins помнит начатые внешние входы до возврата от провайдера.
 	oidcLogins  *oidcPending
 	oidcRefresh singleflight.Group

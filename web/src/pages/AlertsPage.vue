@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useQuasar } from 'quasar'
+import { useRoute } from 'vue-router'
 import { api, notify, notifyError, notifyOk } from '@/api/client'
 import { ago, dateTime } from '@/api/format'
 import { useAppStore } from '@/stores/app'
@@ -8,6 +9,7 @@ import { useAuthStore } from '@/stores/auth'
 import type { Alert, RemediationRecord } from '@/api/types'
 
 const $q = useQuasar()
+const route = useRoute()
 const app = useAppStore()
 const auth = useAuthStore()
 
@@ -16,6 +18,7 @@ const alerts = ref<Alert[]>([])
 const remediations = ref<RemediationRecord[]>([])
 const loading = ref(false)
 const includeResolved = ref(false)
+const highlightedAlert = computed(() => String(route.query.alert ?? ''))
 
 /**
  * Отбор по адресату. Пусто — показывать всё.
@@ -241,7 +244,7 @@ onBeforeUnmount(() => {
                 {{ audienceFilter ? 'Для этого адресата оповещений нет' : 'Оповещений нет' }}
               </q-item-section>
             </q-item>
-            <q-item v-for="alert in visibleAlerts" :key="alert.id">
+            <q-item v-for="alert in visibleAlerts" :key="alert.id" :class="highlightedAlert === alert.id ? 'bg-blue-1' : ''">
               <q-item-section avatar top>
                 <q-icon
                   :name="alert.severity === 'critical' ? 'error' : alert.severity === 'warning' ? 'warning' : 'info'"

@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { api, notifyError, notifyOk } from '@/api/client'
 import type { DomainSettingsWrite, EmbeddedKeycloakWrite, IdentitySettings, IdentitySettingsWrite } from '@/api/settings-types'
+import { useOperationsStore } from '@/stores/operations'
 
 function defaultKeycloakURL(): string {
   const hostname = window.location.hostname.includes(':') ? `[${window.location.hostname}]` : window.location.hostname
@@ -12,6 +13,7 @@ const loading = ref(false)
 const saving = ref(false)
 const startingEmbedded = ref(false)
 const connectingDomain = ref(false)
+const operations = useOperationsStore()
 const settings = ref<IdentitySettings | null>(null)
 const step = ref(1)
 const domainCAFile = ref<File | null>(null)
@@ -68,6 +70,16 @@ function domainDN(name: string): string {
 
 function applySettings(value: IdentitySettings) {
   settings.value = value
+  operations.reconcile(
+    'identity-keycloak',
+    Boolean(value.enabled && value.client_secret_stored && value.embedded_keycloak.running),
+    value.embedded_keycloak.running ? 'Keycloak запущен и подключён' : 'Ожидается подтверждение состояния Keycloak',
+  )
+  operations.reconcile(
+    'identity-domain',
+    Boolean(value.domain.connected),
+    value.domain.connected ? `Домен ${value.domain.name} подключён` : 'Ожидается подтверждение подключения домена',
+  )
   oidc.value = {
     local_password: '', enabled: value.enabled, issuer: value.issuer ?? '',
     backchannel_url: value.backchannel_url ?? '', client_id: value.client_id || 'jhvirt',
@@ -121,7 +133,13 @@ async function startEmbedded() {
   try {
     const payload: EmbeddedKeycloakWrite = { ...embedded.value, role_mapping: roleMapping() }
     embedded.value.local_password = ''
-    const value = await api.bootstrapEmbeddedKeycloak(payload)
+    const value = await operations.track(
+      'Запуск Keycloak',
+      'Создание базы, realm и OIDC-клиента',
+      () => api.bootstrapEmbeddedKeycloak(payload),
+      '/administration/access',
+      'identity-keycloak',
+    )
     applySettings(value)
     notifyOk('Встроенный Keycloak запущен и подключён к приложению')
     step.value = 2
@@ -159,7 +177,13 @@ async function configureDomain() {
     domain.value.domain.bind_password = ''
     domain.value.ca_certificate = ''
     domainCAFile.value = null
-    const result = await api.configureIdentityDomain(payload)
+    const result = await operations.track(
+      'Подключение домена',
+      `Проверка LDAP и групп ${payload.domain.name}`,
+      () => api.configureIdentityDomain(payload),
+      '/administration/access',
+      'identity-domain',
+    )
     applySettings(result.identity)
     notifyOk(`Домен подключён: проверено групп ${result.result.groups_checked}`)
   } catch (err) { notifyError(err, 'Не удалось подключить домен') }

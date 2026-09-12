@@ -36,6 +36,14 @@ const routes = [
       { path: 'alerts', name: 'alerts', component: () => import('@/pages/AlertsPage.vue') },
       { path: 'documentation', name: 'documentation', component: () => import('@/pages/DocumentationPage.vue') },
       { path: 'settings', name: 'settings', component: () => import('@/pages/SettingsPage.vue') },
+      {
+        path: 'administration/access', name: 'access-settings',
+        component: () => import('@/pages/SettingsPage.vue'), meta: { settingsTab: 'identity' },
+      },
+      {
+        path: 'operations/approvals', name: 'approvals',
+        component: () => import('@/pages/SettingsPage.vue'), meta: { settingsTab: 'approvals' },
+      },
     ],
   },
   { path: '/:catchAll(.*)*', redirect: '/' },

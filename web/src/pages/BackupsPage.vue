@@ -1,21 +1,31 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useQuasar } from 'quasar'
+import { useRoute, useRouter } from 'vue-router'
 import { api, notify, notifyError, notifyOk } from '@/api/client'
 import DirectoryPicker from '@/components/DirectoryPicker.vue'
 import { bytes, dateTime, elapsed, runStatus, statusColor } from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
+import { useOperationsStore } from '@/stores/operations'
 import HelpButton from '@/components/HelpButton.vue'
 import type { BackupCopy, BackupDisk, BackupRun, BootReport, Cluster, ReplicationDetail, RepositoryArtifact, RestoreNetworkTarget, RestoreRun, RestoreVMPlan, StorageDomain, VerifyRun } from '@/api/types'
 
 const $q = useQuasar()
+const route = useRoute()
+const router = useRouter()
 const app = useAppStore()
 const auth = useAuthStore()
+const operations = useOperationsStore()
 
 const runs = ref<BackupRun[]>([])
+const selectedRuns = ref<BackupRun[]>([])
 const loading = ref(false)
-const filters = ref({ server_id: '', status: '', days: 30 })
+const filters = ref({
+  server_id: String(route.query.server ?? ''),
+  status: String(route.query.status ?? ''),
+  days: Number(route.query.days ?? 30) || 30,
+})
 const tab = ref('runs')
 
 const detail = ref<BackupRun | null>(null)
@@ -32,6 +42,9 @@ let liveRefreshTimer: number | undefined
 let fallbackPollTimer: number | undefined
 
 const restoreOpen = ref(false)
+const restoreStep = ref(1)
+const restoreBusy = ref(false)
+const restoreFormError = ref('')
 const restoreForm = ref({
   copy_id: '',
   target: 'file',
@@ -253,6 +266,40 @@ async function submitVerify() {
   }
 }
 
+async function verifySelected() {
+  const chosen = selectedRuns.value.filter((run) => !run.deleted && ['succeeded', 'partial'].includes(run.status))
+  if (!chosen.length) {
+    notify({ type: 'warning', message: 'Среди выбранных строк нет завершённых доступных копий' })
+    return
+  }
+  try {
+    const results = await operations.track(
+      'Проверка выбранных бэкапов',
+      `Копий: ${chosen.length}`,
+      async () => {
+        const output: PromiseSettledResult<VerifyRun>[] = []
+        let next = 0
+        const workers = Array.from({ length: Math.min(3, chosen.length) }, async () => {
+          while (next < chosen.length) {
+            const run = chosen[next++]
+            output.push(...await Promise.allSettled([api.verifyRun(run.id, 'manifest')]))
+          }
+        })
+        await Promise.all(workers)
+        return output
+      },
+      '/backups',
+      'bulk-verify',
+    )
+    const failed = results.filter((result) => result.status === 'rejected' || (result.status === 'fulfilled' && result.value.status !== 'succeeded')).length
+    notifyOk(`Проверено копий: ${results.length - failed}${failed ? `, ошибок: ${failed}` : ''}`)
+    if (!failed) selectedRuns.value = []
+    await load()
+  } catch (err) {
+    notifyError(err, 'Не удалось проверить выбранные бэкапы')
+  }
+}
+
 /** Итог пробного запуска из сохранённого отчёта проверки. */
 function bootReport(check: VerifyRun): BootReport | null {
   return (parseDetails(check.details)?.boot as BootReport) ?? null
@@ -276,9 +323,34 @@ async function openRestore(run: BackupRun) {
   }
   vmPlan.value = null
   vmPlanDirty.value = false
+  restoreStep.value = 1
+  restoreFormError.value = ''
   vmForm.value = { server_id: run.server_id, name: '', cluster_id: '', network: 'detached', start: false, confirm: false, network_mappings: [] }
   await loadVMTargetInventory(run.server_id)
   restoreOpen.value = true
+}
+
+function nextRestoreStep() {
+	restoreFormError.value = ''
+	if (restoreStep.value === 1 && !restoreForm.value.copy_id) {
+		restoreFormError.value = 'Выберите доступную физическую копию.'
+		return
+	}
+	if (restoreStep.value === 2) {
+		if (restoreForm.value.target === 'new_vm' && (!vmPlan.value || vmPlanDirty.value || vmPlan.value.blockers?.length)) {
+			restoreFormError.value = !vmPlan.value ? 'Сначала постройте план восстановления.' : vmPlanDirty.value ? 'Параметры изменились — обновите план.' : 'В плане остались блокирующие проблемы.'
+			return
+		}
+		if (restoreForm.value.target === 'new_disk' && !restoreForm.value.target_domain_id) {
+			restoreFormError.value = 'Выберите домен хранения для нового диска.'
+			return
+		}
+		if (restoreForm.value.target === 'disk' && !restoreForm.value.target_disk_id.trim()) {
+			restoreFormError.value = 'Укажите ID существующего диска.'
+			return
+		}
+	}
+	restoreStep.value = Math.min(3, restoreStep.value + 1)
 }
 
 function healthyCopies(run: BackupRun | null): BackupCopy[] {
@@ -408,17 +480,21 @@ function useOutputDir(value: { rootId: string; path: string; absolute?: string }
 
 async function submitRestoreVM() {
   if (!detail.value) return
+  restoreBusy.value = true
   try {
-    await api.restoreVM(detail.value.id, {
-      copy_id: restoreForm.value.copy_id,
-      storage_domain_id: restoreForm.value.target_domain_id,
-      ...vmForm.value,
-    })
+    await operations.track('Восстановление виртуальной машины', detail.value.vm_name, () => api.restoreVM(detail.value!.id, {
+        copy_id: restoreForm.value.copy_id,
+        storage_domain_id: restoreForm.value.target_domain_id,
+        ...vmForm.value,
+      }), '/backups?tab=restores')
     notifyOk('Сборка машины запущена — ход виден на вкладке «Восстановления»')
     restoreOpen.value = false
     await loadRestores()
   } catch (err) {
+    restoreFormError.value = `Не удалось запустить восстановление: ${err instanceof Error ? err.message : String(err)}`
     notifyError(err, 'Не удалось запустить сборку машины')
+  } finally {
+    restoreBusy.value = false
   }
 }
 
@@ -435,12 +511,16 @@ async function submitRestore() {
     payload.confirm = true
   }
   try {
-    await api.restore(detail.value.id, payload)
+    restoreBusy.value = true
+    await operations.track('Восстановление данных', detail.value.vm_name, () => api.restore(detail.value!.id, payload), '/backups?tab=restores')
     notifyOk('Восстановление запущено — ход виден на вкладке «Восстановления»')
     restoreOpen.value = false
     await loadRestores()
   } catch (err) {
+    restoreFormError.value = `Не удалось запустить восстановление: ${err instanceof Error ? err.message : String(err)}`
     notifyError(err, 'Не удалось запустить восстановление')
+  } finally {
+    restoreBusy.value = false
   }
 }
 
@@ -509,13 +589,41 @@ function parseDetails(raw?: string): Record<string, unknown> | null {
 watch(tab, (value) => {
   if (value === 'restores' && !restores.value.length) void loadRestores()
 	if (value === 'replications' && !replications.value.length) void loadReplications()
+	if (String(route.query.tab ?? 'runs') !== value) syncRoute()
 })
+
+function syncRoute(extra: Record<string, string | number | undefined> = {}) {
+	const query: Record<string, string | number> = {}
+	if (tab.value !== 'runs') query.tab = tab.value
+	if (filters.value.server_id) query.server = filters.value.server_id
+	if (filters.value.status) query.status = filters.value.status
+	if (filters.value.days !== 30) query.days = filters.value.days
+	for (const [key, value] of Object.entries(extra)) if (value !== undefined && value !== '') query[key] = value
+	void router.replace({ name: 'backups', query })
+}
+
+async function applyRoute() {
+	const wantedTab = String(route.query.tab ?? 'runs')
+	if (['runs', 'replications', 'restores'].includes(wantedTab)) tab.value = wantedTab
+	const runID = String(route.query.run ?? '')
+	if (runID && (!detailOpen.value || detail.value?.id !== runID)) {
+		try {
+			const run = runs.value.find((item) => item.id === runID) ?? await api.getRun(runID)
+			await openDetail(run)
+		} catch (err) {
+			notifyError(err, 'Не удалось открыть бэкап по ссылке')
+		}
+	}
+}
 
 onMounted(async () => {
   await app.bootstrap()
   await load()
+	await applyRoute()
 	connectLiveUpdates()
 })
+
+watch(() => route.query, () => void applyRoute())
 
 onBeforeUnmount(() => {
 	liveSource?.close()
@@ -562,6 +670,7 @@ const replicationColumns = [
         dense
         round
         icon="refresh"
+		aria-label="Обновить данные"
 		:loading="tab === 'runs' ? loading : tab === 'restores' ? restoresLoading : replicationsLoading"
 		@click="tab === 'runs' ? load() : tab === 'restores' ? loadRestores() : loadReplications()"
       />
@@ -586,6 +695,7 @@ const replicationColumns = [
         flat
         bordered
         :loading="restoresLoading"
+        :grid="$q.screen.lt.md"
         class="jhv-table"
         :pagination="{ rowsPerPage: 50 }"
         no-data-label="Восстановлений не было"
@@ -631,7 +741,7 @@ const replicationColumns = [
 
 	<template v-else-if="tab === 'replications'">
 		<q-table :rows="replications" :columns="replicationColumns" row-key="id" flat bordered
-			:loading="replicationsLoading" class="jhv-table" no-data-label="Реплик в очереди и истории нет">
+			:loading="replicationsLoading" :grid="$q.screen.lt.md" class="jhv-table" no-data-label="Реплик в очереди и истории нет">
 			<template #body-cell-storage="props">
 				<q-td :props="props">
 					{{ props.row.storage_target_name || app.storageName(props.row.storage_target_id) }}
@@ -654,9 +764,9 @@ const replicationColumns = [
 			<template #body-cell-retry="props"><q-td :props="props">{{ dateTime(props.row.next_retry_at) }}</q-td></template>
 			<template #body-cell-actions="props">
 				<q-td :props="props">
-					<q-btn flat dense round icon="history" @click="showReplication(props.row)"><q-tooltip>История попыток</q-tooltip></q-btn>
-					<q-btn v-if="auth.canWrite() && ['failed','canceled'].includes(props.row.status)" flat dense round icon="refresh" color="primary" @click="retryCopy(props.row)"><q-tooltip>Повторить сейчас</q-tooltip></q-btn>
-					<q-btn v-if="auth.canWrite() && ['pending','copying','verifying'].includes(props.row.status)" flat dense round icon="stop" color="negative" @click="cancelCopy(props.row)"><q-tooltip>Отменить</q-tooltip></q-btn>
+					<q-btn flat dense round icon="history" aria-label="История попыток репликации" @click="showReplication(props.row)"><q-tooltip>История попыток</q-tooltip></q-btn>
+					<q-btn v-if="auth.canWrite() && ['failed','canceled'].includes(props.row.status)" flat dense round icon="refresh" color="primary" aria-label="Повторить репликацию" @click="retryCopy(props.row)"><q-tooltip>Повторить сейчас</q-tooltip></q-btn>
+					<q-btn v-if="auth.canWrite() && ['pending','copying','verifying'].includes(props.row.status)" flat dense round icon="stop" color="negative" aria-label="Отменить репликацию" @click="cancelCopy(props.row)"><q-tooltip>Отменить</q-tooltip></q-btn>
 				</q-td>
 			</template>
 		</q-table>
@@ -674,7 +784,7 @@ const replicationColumns = [
             label="Сервер"
             outlined
             dense
-            @update:model-value="load"
+            @update:model-value="() => { syncRoute(); load() }"
           />
         </div>
         <div class="col-12 col-sm-4">
@@ -692,7 +802,7 @@ const replicationColumns = [
             label="Статус"
             outlined
             dense
-            @update:model-value="load"
+            @update:model-value="() => { syncRoute(); load() }"
           />
         </div>
         <div class="col-12 col-sm-4">
@@ -709,16 +819,28 @@ const replicationColumns = [
             label="Период"
             outlined
             dense
-            @update:model-value="load"
+            @update:model-value="() => { syncRoute(); load() }"
           />
         </div>
       </q-card-section>
     </q-card>
 
+    <q-banner v-if="selectedRuns.length" dense rounded class="bg-blue-1 q-mb-md">
+      <div class="row items-center q-gutter-sm">
+        <div>Выбрано копий: {{ selectedRuns.length }}</div>
+        <q-space />
+        <q-btn v-if="auth.canWrite()" color="primary" unelevated icon="fact_check" label="Проверить выбранные" @click="verifySelected" />
+        <q-btn flat label="Снять выбор" @click="selectedRuns = []" />
+      </div>
+    </q-banner>
+
     <q-table
       :rows="runs"
       :columns="columns"
       row-key="id"
+      selection="multiple"
+      v-model:selected="selectedRuns"
+      :grid="$q.screen.lt.md"
       flat
       bordered
       :loading="loading"
@@ -726,6 +848,31 @@ const replicationColumns = [
       :pagination="{ rowsPerPage: 50 }"
       no-data-label="Бэкапов за выбранный период нет"
     >
+      <template #item="props">
+        <div class="q-pa-xs col-12">
+          <q-card flat bordered>
+            <q-card-section class="row items-start no-wrap">
+              <q-checkbox v-model="props.selected" class="q-mr-sm" :aria-label="`Выбрать копию ${props.row.vm_name}`" />
+              <div class="col" @click="openDetail(props.row)">
+                <div class="text-subtitle1 text-weight-medium text-primary">{{ props.row.vm_name }}</div>
+                <div class="text-caption text-grey-7">{{ props.row.job_name || 'разовый запуск' }} · {{ app.backupTypeTitle(props.row.type) }}</div>
+                <div class="q-mt-xs"><q-chip dense :color="statusColor(props.row.status)" text-color="white">{{ runStatus(props.row.status) }}</q-chip></div>
+                <div class="text-caption">{{ dateTime(props.row.created_at) }} · {{ bytes(props.row.stored_bytes) }}</div>
+                <div class="text-caption text-grey-7">{{ app.storageName(props.row.storage_target_id) }}</div>
+                <div v-if="props.row.error" class="text-caption text-negative jhv-wrap">{{ props.row.error }}</div>
+              </div>
+              <q-btn-dropdown v-if="auth.canWrite()" flat round dense dropdown-icon="more_vert" aria-label="Действия с копией" @click.stop>
+                <q-list dense>
+                  <q-item clickable v-close-popup @click="openDetail(props.row)"><q-item-section avatar><q-icon name="visibility" /></q-item-section><q-item-section>Подробности</q-item-section></q-item>
+                  <q-item v-if="!props.row.deleted && ['succeeded', 'partial'].includes(props.row.status)" clickable v-close-popup @click="verify(props.row)"><q-item-section avatar><q-icon name="fact_check" /></q-item-section><q-item-section>Проверить</q-item-section></q-item>
+                  <q-item v-if="!props.row.deleted && ['succeeded', 'partial'].includes(props.row.status)" clickable v-close-popup @click="openRestore(props.row)"><q-item-section avatar><q-icon name="restore" color="primary" /></q-item-section><q-item-section>Восстановить</q-item-section></q-item>
+                  <q-item v-if="!props.row.deleted" clickable v-close-popup @click="confirmDelete(props.row)"><q-item-section avatar><q-icon name="delete" color="negative" /></q-item-section><q-item-section class="text-negative">Удалить</q-item-section></q-item>
+                </q-list>
+              </q-btn-dropdown>
+            </q-card-section>
+          </q-card>
+        </div>
+      </template>
       <template #body-cell-vm="props">
         <q-td :props="props">
           <a href="#" class="text-primary" @click.prevent="openDetail(props.row)">{{ props.row.vm_name }}</a>
@@ -818,10 +965,10 @@ const replicationColumns = [
             <q-tooltip>Отменить</q-tooltip>
           </q-btn>
           <template v-if="!props.row.deleted && ['succeeded', 'partial'].includes(props.row.status)">
-            <q-btn v-if="auth.canWrite()" flat dense round icon="fact_check" @click="verify(props.row)">
+            <q-btn v-if="auth.canWrite()" flat dense round icon="fact_check" aria-label="Проверить копию" @click="verify(props.row)">
               <q-tooltip>Проверить</q-tooltip>
             </q-btn>
-            <q-btn v-if="auth.canWrite()" flat dense round icon="restore" color="primary" @click="openRestore(props.row)">
+            <q-btn v-if="auth.canWrite()" flat dense round icon="restore" color="primary" aria-label="Восстановить копию" @click="openRestore(props.row)">
               <q-tooltip>Восстановить</q-tooltip>
             </q-btn>
           </template>
@@ -841,8 +988,9 @@ const replicationColumns = [
             round
             icon="delete"
             color="negative"
+            aria-label="Удалить копию"
             @click="confirmDelete(props.row)"
-          />
+          ><q-tooltip>Удалить</q-tooltip></q-btn>
         </q-td>
       </template>
     </q-table>
@@ -1257,14 +1405,22 @@ const replicationColumns = [
 
     <!-- Восстановление -->
     <q-dialog v-model="restoreOpen">
-      <q-card style="width: 640px; max-width: 95vw">
+      <q-card style="width: 760px; max-width: 95vw" class="jhv-dialog-page">
         <q-card-section class="text-h6">
           Восстановление: {{ detail?.vm_name }}
           <div class="text-caption text-grey-7">точка от {{ dateTime(detail?.created_at) }}</div>
         </q-card-section>
         <q-separator />
 
-        <q-card-section class="q-gutter-md">
+        <q-tabs v-model="restoreStep" dense align="justify" active-color="primary" indicator-color="primary">
+          <q-tab :name="1" icon="backup" label="Источник" />
+          <q-tab :name="2" icon="tune" label="Назначение" />
+          <q-tab :name="3" icon="task_alt" label="Проверка" />
+        </q-tabs>
+        <q-separator />
+
+        <q-card-section class="q-gutter-md scroll" style="max-height: 70vh">
+			<template v-if="restoreStep === 1">
 			<q-select
 				v-model="restoreForm.copy_id"
 				:options="healthyCopies(detail).map((copy) => ({ label: `${copy.role === 'primary' ? 'Основное' : 'Реплика'} · ${copy.storage_target_name || app.storageName(copy.storage_target_id)}`, value: copy.id }))"
@@ -1282,7 +1438,10 @@ const replicationColumns = [
             ]"
             @update:model-value="changeRestoreTarget"
           />
+			<q-banner dense class="bg-blue-1">Физическая копия выбирается отдельно от точки восстановления. Это позволяет восстановиться с реплики при недоступности основного хранилища.</q-banner>
+			</template>
 
+          <template v-if="restoreStep === 2">
           <!-- Сборка машины целиком -->
           <template v-if="restoreForm.target === 'new_vm'">
             <div class="col-12">
@@ -1548,29 +1707,50 @@ const replicationColumns = [
               использующая этот диск, остановлена.
             </q-banner>
           </template>
+          </template>
+
+          <template v-if="restoreStep === 3">
+            <q-banner dense class="bg-blue-1">
+              Запуск создаст фоновую операцию. Окно можно закрыть, а ход выполнения смотреть в центре операций и на вкладке «Восстановления».
+            </q-banner>
+            <q-list bordered separator>
+              <q-item><q-item-section><q-item-label caption>Точка</q-item-label><q-item-label>{{ detail?.vm_name }} · {{ dateTime(detail?.created_at) }}</q-item-label></q-item-section><q-item-section side><q-btn flat label="Изменить" @click="restoreStep = 1" /></q-item-section></q-item>
+              <q-item><q-item-section><q-item-label caption>Действие</q-item-label><q-item-label>{{ ({ new_vm: 'Собрать виртуальную машину', file: 'Собрать образ в файл', new_disk: 'Создать новый диск', disk: 'Перезаписать существующий диск' } as Record<string, string>)[restoreForm.target] }}</q-item-label></q-item-section><q-item-section side><q-btn flat label="Изменить" @click="restoreStep = 2" /></q-item-section></q-item>
+              <q-item v-if="restoreForm.target === 'new_vm'"><q-item-section><q-item-label caption>Целевая платформа</q-item-label><q-item-label>{{ app.serverName(vmForm.server_id) }} · сеть {{ vmForm.network === 'attached' ? 'будет подключена' : 'останется отключённой' }} · {{ vmPlan?.disks.length ?? 0 }} дисков</q-item-label></q-item-section></q-item>
+              <q-item v-if="restoreForm.target === 'file'"><q-item-section><q-item-label caption>Файл</q-item-label><q-item-label>{{ restoreForm.output_dir || 'временный каталог сервиса' }} · {{ restoreForm.output_format }}</q-item-label></q-item-section></q-item>
+              <q-item v-if="restoreForm.target === 'new_disk'"><q-item-section><q-item-label caption>Новый диск</q-item-label><q-item-label>{{ restoreForm.target_domain_id }}{{ restoreForm.attach_to_vm_id ? ` · подключить к ${restoreForm.attach_to_vm_id}` : '' }}</q-item-label></q-item-section></q-item>
+              <q-item v-if="restoreForm.target === 'disk'" class="bg-red-1"><q-item-section><q-item-label caption>Перезаписываемый диск</q-item-label><q-item-label class="text-negative text-weight-medium">{{ restoreForm.target_disk_id }}</q-item-label></q-item-section></q-item>
+            </q-list>
+          </template>
+
+          <q-banner v-if="restoreFormError" dense class="bg-red-1 text-negative"><template #avatar><q-icon name="error" /></template>{{ restoreFormError }}</q-banner>
         </q-card-section>
 
         <q-separator />
         <q-card-actions align="right">
           <q-btn flat label="Отмена" v-close-popup />
+          <q-space />
+          <q-btn v-if="restoreStep > 1" flat label="Назад" icon="arrow_back" @click="restoreStep--" />
+          <q-btn v-if="restoreStep < 3" color="primary" unelevated label="Продолжить" icon-right="arrow_forward" @click="nextRestoreStep" />
           <!--
             Сборка машины требует показанного плана: она создаёт машину и диски
             в движке и длится десятки минут. Нажать её вслепую нельзя — сначала
             надо увидеть объём и предупреждения.
           -->
           <q-btn
-            v-if="restoreForm.target === 'new_vm'"
+            v-if="restoreStep === 3 && restoreForm.target === 'new_vm'"
             color="primary"
             unelevated
             label="Собрать машину"
             :disable="!vmPlan || vmPlanDirty || !!vmPlan.blockers?.length"
+            :loading="restoreBusy"
             @click="submitRestoreVM"
           >
             <q-tooltip v-if="!vmPlan">Сначала посмотрите план</q-tooltip>
             <q-tooltip v-else-if="vmPlanDirty">После изменения сети обновите план</q-tooltip>
             <q-tooltip v-else-if="vmPlan.blockers?.length">Сначала устраните то, что мешает</q-tooltip>
           </q-btn>
-          <q-btn v-else color="primary" unelevated label="Восстановить" @click="submitRestore" />
+          <q-btn v-else-if="restoreStep === 3" color="primary" unelevated label="Восстановить" :loading="restoreBusy" @click="submitRestore" />
         </q-card-actions>
       </q-card>
     </q-dialog>

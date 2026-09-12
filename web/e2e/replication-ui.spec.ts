@@ -22,7 +22,8 @@ test('replication, catalog, Object Lock and DR controls are usable', async ({ pa
 
 	await page.goto('/backups')
 	await page.getByRole('tab', { name: 'Репликация' }).click()
-	await expect(page.getByRole('table')).toBeVisible()
+	await expect(page.getByRole('tab', { name: 'Репликация' })).toHaveAttribute('aria-selected', 'true')
+	await expect(page.locator('.q-table__container')).toBeVisible()
 
   await page.goto('/storages')
   await page.getByRole('button', { name: 'Добавить хранилище' }).click()
@@ -37,6 +38,7 @@ test('replication, catalog, Object Lock and DR controls are usable', async ({ pa
   await page.getByRole('button', { name: 'Отмена' }).click()
 
   await page.goto('/settings')
+  await page.getByRole('button', { name: 'Эксплуатация' }).click()
   await page.getByRole('tab', { name: 'Аварийная готовность' }).click()
   await expect(page.getByRole('alert')).toContainText('Контроль выключен')
   await expect(page.getByText('Дамп PostgreSQL')).toBeVisible()

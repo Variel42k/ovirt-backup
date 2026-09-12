@@ -1,5 +1,5 @@
 [Unit]
-Description=ovirt-backup PostgreSQL and secret.key backup
+Description=JustHPC Virt Manager PostgreSQL and secret.key backup
 Documentation=file:@PREFIX@/docs/OPERATIONS.md
 After=postgresql.service
 Wants=postgresql.service

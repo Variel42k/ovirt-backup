@@ -1210,7 +1210,7 @@ migration_export() {
     say ""
     say "Либо сразу отправьте его отсюда:"
     say "  $SELF --migration-export $MIGRATION_EXPORT_FILE --migration-to user@сервер:/каталог"
-    say "Локальные каталоги бекапов не копировались; подключите их на новом узле отдельно."
+    say "Локальные каталоги бэкапов не копировались; подключите их на новом узле отдельно."
     if [ "$MIGRATION_KEEP_SOURCE" -eq 1 ]; then
         say "Исходное приложение снова запущено: пакет предназначен для репетиции."
     elif [ -n "$MIGRATION_SOURCE_STOPPED" ]; then
@@ -1369,7 +1369,7 @@ migration_send_package() {
     say "    --url https://<адрес нового сервера>:8080 \\"
     say "    --backup-dir /путь/к/копиям --restore-dir /путь/к/восстановлению"
     say ""
-    say "Локальные каталоги бекапов не копировались; подключите их на новом узле отдельно."
+    say "Локальные каталоги бэкапов не копировались; подключите их на новом узле отдельно."
     say "После успешного импорта уничтожьте пакет с обеих машин: он содержит secret.key."
     say "  shred -u $MIGRATION_EXPORT_FILE"
     if [ "$MIGRATION_KEEP_SOURCE" -eq 1 ]; then
@@ -2945,7 +2945,7 @@ prepare_oidc() {
         if [ "$OIDC_MODE" = keycloak ] && [ "$OIDC_EXISTING" -eq 0 ] &&
                 [ "$KEYCLOAK_APP_ADMIN_USER_EXPLICIT" -eq 0 ]; then
             say ""
-            say "Эта запись входит в ovirt-backup через realm $KEYCLOAK_REALM."
+            say "Эта запись входит в JustHPC Virt Manager через realm $KEYCLOAK_REALM."
             say "Она отличается от администратора консоли Keycloak."
             printf 'Первый администратор приложения [%s; none — не создавать]: ' "$KEYCLOAK_APP_ADMIN_USER"
             read -r ANSWER || ANSWER=""
@@ -3812,7 +3812,7 @@ keycloak_bootstrap() {
     keycloak_remove_stale_recovery_admins || keycloak_bootstrap_die \
         "не удалось удалить временного администратора от прерванной установки"
 
-    KC_CODE="$(keycloak_post "" "{\"realm\":\"$KEYCLOAK_REALM\",\"enabled\":true,\"displayName\":\"ovirt-backup\",\"displayNameHtml\":\"ovirt-backup\"}")"
+    KC_CODE="$(keycloak_post "" "{\"realm\":\"$KEYCLOAK_REALM\",\"enabled\":true,\"displayName\":\"JustHPC Virt Manager\",\"displayNameHtml\":\"JustHPC Virt Manager\",\"internationalizationEnabled\":true,\"defaultLocale\":\"ru\",\"supportedLocales\":[\"ru\",\"en\"]}")"
     case "$KC_CODE" in
         201|409) ;;
         *) keycloak_bootstrap_die "не удалось создать realm $KEYCLOAK_REALM (код $KC_CODE)" ;;
@@ -4898,7 +4898,7 @@ PostgreSQL хранит пароль внутри тома и новый не п
     fi
     if [ "$OIDC_MODE" = keycloak ]; then
         say ""
-        say "  Вход в ovirt-backup через Keycloak:"
+        say "  Вход в JustHPC Virt Manager через Keycloak:"
         say "    realm:        $KEYCLOAK_REALM"
         if [ "$KEYCLOAK_APP_ADMIN_USER" = none ]; then
             say "    первый пользователь не создавался (--keycloak-app-admin-user none)"
@@ -4929,7 +4929,7 @@ PostgreSQL хранит пароль внутри тома и новый не п
         fi
         say "    после добавления CA: cd $WORK && $RUN restart keycloak"
         say ""
-        say "  Администрирование Keycloak (не вход в ovirt-backup):"
+        say "  Администрирование Keycloak (не вход в JustHPC Virt Manager):"
         say "    консоль:       $KEYCLOAK_URL/admin/master/console/"
         say "    realm:         master"
         say "    администратор: $KEYCLOAK_ADMIN_USER"

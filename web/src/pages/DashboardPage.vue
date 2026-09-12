@@ -1,16 +1,36 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { api, notifyError } from '@/api/client'
 import { ago, bytes, connState, dateTime, percent, runStatus, statusColor, storageKindIcon } from '@/api/format'
 import type { Dashboard } from '@/api/types'
 
 const data = ref<Dashboard | null>(null)
 const loading = ref(true)
+const router = useRouter()
+const jobsCount = ref(0)
+const restoreTested = ref(false)
+const oidcEnabled = ref(false)
 let timer: number | undefined
+
+const setupSteps = computed(() => [
+  { title: 'Подключить платформу', detail: 'oVirt, РЕД Виртуализация, Proxmox VE или KVM', done: (data.value?.totals.servers ?? 0) > 0, icon: 'dns', to: { name: 'servers' } },
+  { title: 'Добавить хранилище', detail: 'Основная точка и при необходимости реплики', done: (data.value?.storages.length ?? 0) > 0, icon: 'inventory_2', to: { name: 'storages' } },
+  { title: 'Создать политику защиты', detail: 'Выбор ВМ, расписание, хранение и проверка', done: jobsCount.value > 0 || (data.value?.totals.protected_vms ?? 0) > 0, icon: 'event_repeat', to: { name: 'jobs', query: { create: '1' } } },
+  { title: 'Получить первую копию', detail: 'Успешный запуск подтверждает весь путь записи', done: Boolean(data.value?.recent_runs.some((item) => item.status === 'succeeded')), icon: 'backup', to: { name: 'backups' } },
+  { title: 'Проверить восстановление', detail: 'Соберите тестовую ВМ или выполните глубокую проверку', done: restoreTested.value, icon: 'restore', to: { name: 'backups', query: { tab: 'restores' } } },
+  { title: 'Подключить единый вход', detail: 'Keycloak и доменные группы для рабочих пользователей', done: oidcEnabled.value, optional: true, icon: 'admin_panel_settings', to: { name: 'access-settings' } },
+])
+const completedSteps = computed(() => setupSteps.value.filter((item) => item.done).length)
+const setupReady = computed(() => setupSteps.value.slice(0, 5).every((item) => item.done))
 
 async function load() {
   try {
     data.value = await api.dashboard()
+    const [jobs, restores, oidc] = await Promise.allSettled([api.listJobs(), api.listRestores(), api.oidcInfo()])
+    if (jobs.status === 'fulfilled') jobsCount.value = jobs.value.length
+    if (restores.status === 'fulfilled') restoreTested.value = restores.value.some((item) => item.status === 'succeeded')
+    if (oidc.status === 'fulfilled') oidcEnabled.value = oidc.value.enabled
   } catch (err) {
     notifyError(err, 'Не удалось загрузить обзор')
   } finally {
@@ -32,12 +52,44 @@ onBeforeUnmount(() => {
     <div class="row items-center q-mb-md">
       <div class="text-h5">Обзор</div>
       <q-space />
-      <q-btn flat dense round icon="refresh" :loading="loading" @click="load" />
+      <q-btn flat dense round icon="refresh" aria-label="Обновить обзор" :loading="loading" @click="load"><q-tooltip>Обновить</q-tooltip></q-btn>
     </div>
 
-    <div v-if="data" class="row q-col-gutter-md q-mb-md">
+    <div v-if="loading && !data" class="row q-col-gutter-md q-mb-md" aria-label="Загрузка обзора">
+      <div v-for="index in 6" :key="index" class="col-6 col-md-3 col-lg-2"><q-skeleton type="rect" height="104px" /></div>
+    </div>
+
+    <q-card v-if="data && !setupReady" flat bordered class="q-mb-lg jhv-onboarding">
+      <q-card-section class="row items-center">
+        <div>
+          <div class="text-h6">Подготовка защиты</div>
+          <div class="text-caption text-grey-7">Пройдите обязательные шаги слева направо. Уже настроенное определяется автоматически.</div>
+        </div>
+        <q-space />
+        <q-circular-progress show-value :value="completedSteps / setupSteps.length * 100" size="54px" color="primary" track-color="grey-3">
+          {{ completedSteps }}/{{ setupSteps.length }}
+        </q-circular-progress>
+      </q-card-section>
+      <q-separator />
+      <q-list separator>
+        <q-item v-for="(item, index) in setupSteps" :key="item.title" clickable @click="router.push(item.to)">
+          <q-item-section avatar>
+            <q-avatar :color="item.done ? 'positive' : 'grey-3'" :text-color="item.done ? 'white' : 'grey-8'">
+              <q-icon :name="item.done ? 'check' : item.icon" />
+            </q-avatar>
+          </q-item-section>
+          <q-item-section>
+            <q-item-label>{{ index + 1 }}. {{ item.title }} <q-badge v-if="item.optional" outline color="primary">рекомендуется</q-badge></q-item-label>
+            <q-item-label caption>{{ item.detail }}</q-item-label>
+          </q-item-section>
+          <q-item-section side><q-icon name="chevron_right" /></q-item-section>
+        </q-item>
+      </q-list>
+    </q-card>
+
+    <div v-if="data && data.totals.servers > 0" class="row q-col-gutter-md q-mb-md">
       <div class="col-6 col-md-3 col-lg-2">
-        <q-card flat bordered class="q-pa-md jhv-metric">
+        <q-card flat bordered class="q-pa-md jhv-metric jhv-action-card" tabindex="0" @click="router.push({ name: 'servers' })" @keyup.enter="router.push({ name: 'servers' })">
           <div class="jhv-metric__label">Серверы на связи</div>
           <div class="jhv-metric__value">
             {{ data.totals.servers_online }}<span class="text-h6 text-grey-6">/{{ data.totals.servers }}</span>
@@ -45,7 +97,7 @@ onBeforeUnmount(() => {
         </q-card>
       </div>
       <div class="col-6 col-md-3 col-lg-2">
-        <q-card flat bordered class="q-pa-md jhv-metric">
+        <q-card flat bordered class="q-pa-md jhv-metric jhv-action-card" tabindex="0" @click="router.push({ name: 'servers' })" @keyup.enter="router.push({ name: 'servers' })">
           <div class="jhv-metric__label">Хосты в строю</div>
           <div class="jhv-metric__value">
             {{ data.totals.hosts_up }}<span class="text-h6 text-grey-6">/{{ data.totals.hosts }}</span>
@@ -53,7 +105,7 @@ onBeforeUnmount(() => {
         </q-card>
       </div>
       <div class="col-6 col-md-3 col-lg-2">
-        <q-card flat bordered class="q-pa-md jhv-metric">
+        <q-card flat bordered class="q-pa-md jhv-metric jhv-action-card" tabindex="0" @click="router.push({ name: 'servers' })" @keyup.enter="router.push({ name: 'servers' })">
           <div class="jhv-metric__label">ВМ работают</div>
           <div class="jhv-metric__value">
             {{ data.totals.vms_up }}<span class="text-h6 text-grey-6">/{{ data.totals.vms }}</span>
@@ -64,7 +116,7 @@ onBeforeUnmount(() => {
         </q-card>
       </div>
       <div class="col-6 col-md-3 col-lg-2">
-        <q-card flat bordered class="q-pa-md jhv-metric">
+        <q-card flat bordered class="q-pa-md jhv-metric jhv-action-card" tabindex="0" @click="router.push({ name: 'coverage' })" @keyup.enter="router.push({ name: 'coverage' })">
           <div class="jhv-metric__label">Под защитой</div>
           <div class="jhv-metric__value" :class="data.totals.protected_vms < data.totals.vms ? 'text-warning' : ''">
             {{ data.totals.protected_vms }}<span class="text-h6 text-grey-6">/{{ data.totals.vms }}</span>
@@ -73,7 +125,7 @@ onBeforeUnmount(() => {
         </q-card>
       </div>
       <div class="col-6 col-md-3 col-lg-2">
-        <q-card flat bordered class="q-pa-md jhv-metric">
+        <q-card flat bordered class="q-pa-md jhv-metric jhv-action-card" tabindex="0" @click="router.push({ name: 'alerts' })" @keyup.enter="router.push({ name: 'alerts' })">
           <div class="jhv-metric__label">Открытые оповещения</div>
           <div class="jhv-metric__value" :class="data.totals.alerts_critical ? 'text-negative' : ''">
             {{ data.totals.alerts_firing }}
@@ -84,7 +136,7 @@ onBeforeUnmount(() => {
         </q-card>
       </div>
       <div class="col-6 col-md-3 col-lg-2">
-        <q-card flat bordered class="q-pa-md jhv-metric">
+        <q-card flat bordered class="q-pa-md jhv-metric jhv-action-card" tabindex="0" @click="router.push({ name: 'backups' })" @keyup.enter="router.push({ name: 'backups' })">
           <div class="jhv-metric__label">Бэкапы сейчас</div>
           <div class="jhv-metric__value">{{ data.totals.running_backups }}</div>
           <div class="text-caption text-grey-7">за неделю: {{ bytes(data.totals.stored_bytes) }}</div>
@@ -92,7 +144,7 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <div v-if="data" class="row q-gutter-sm items-center q-mb-md">
+    <div v-if="data && data.totals.servers > 0" class="row q-gutter-sm items-center q-mb-md">
       <q-chip dense icon="schedule" :color="data.totals.overdue_policies ? 'warning' : 'grey-3'"
               :text-color="data.totals.overdue_policies ? 'white' : 'grey-9'">
         Просрочено политик: {{ data.totals.overdue_policies }}
@@ -107,7 +159,7 @@ onBeforeUnmount(() => {
       </q-chip>
     </div>
 
-    <div class="row q-col-gutter-md">
+    <div v-if="data?.totals.servers" class="row q-col-gutter-md">
       <div class="col-12 col-lg-7">
         <q-card flat bordered>
           <q-card-section class="text-subtitle1">Серверы</q-card-section>

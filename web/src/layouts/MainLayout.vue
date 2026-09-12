@@ -14,6 +14,8 @@ import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import { displayTimezone, displayTimezoneWarning } from '@/api/format'
 import { setThemeMode, themeIcon, themeMode, type ThemeMode } from '@/theme'
+import GlobalSearch from '@/components/GlobalSearch.vue'
+import OperationCenter from '@/components/OperationCenter.vue'
 
 const auth = useAuthStore()
 const app = useAppStore()
@@ -42,21 +44,35 @@ const themeOptions: { value: ThemeMode; label: string; icon: string }[] = [
 // а не что разрешить. Скрывать его надо не ради безопасности, а чтобы человек
 // не тыкался в разделы, которые ему всё равно ответят 403.
 const allLinks = [
-  { name: 'dashboard', label: 'Обзор', icon: 'dashboard', perm: 'monitoring.read' },
-  { name: 'servers', label: 'Виртуализация', icon: 'dns', perm: 'servers.read' },
-  { name: 'jobs', label: 'Задания бэкапа', icon: 'event_repeat', perm: 'jobs.read' },
-  { name: 'backups', label: 'Бэкапы', icon: 'backup', perm: 'backups.read' },
-  { name: 'engine-config', label: 'Конфигурация Engine', icon: 'account_tree', perm: 'engine_config.read' },
-	{ name: 'file-backups', label: 'Файловые бекапы', icon: 'folder_copy', perm: 'file_backups.read' },
-  { name: 'coverage', label: 'Покрытие бэкапами', icon: 'shield', perm: 'monitoring.read' },
-  { name: 'retention', label: 'Хранение', icon: 'auto_delete', perm: 'backups.read' },
-  { name: 'storages', label: 'Хранилища', icon: 'inventory_2', perm: 'storages.read' },
-  { name: 'alerts', label: 'Оповещения', icon: 'notifications_active', perm: 'alerts.read' },
-  { name: 'documentation', label: 'Документация', icon: 'menu_book', perm: '' },
-  { name: 'settings', label: 'Настройки', icon: 'settings', perm: '' },
+  { name: 'dashboard', label: 'Обзор', icon: 'dashboard', perm: 'monitoring.read', group: '' },
+  { name: 'servers', label: 'Виртуализация', icon: 'dns', perm: 'servers.read', group: 'Инфраструктура' },
+  { name: 'storages', label: 'Хранилища', icon: 'inventory_2', perm: 'storages.read', group: 'Инфраструктура' },
+  { name: 'jobs', label: 'Задания ВМ', icon: 'event_repeat', perm: 'jobs.read', group: 'Защита данных' },
+	{ name: 'file-backups', label: 'Файловые задания', icon: 'folder_copy', perm: 'file_backups.read', group: 'Защита данных' },
+  { name: 'backups', label: 'Точки восстановления', icon: 'backup', perm: 'backups.read', group: 'Защита данных' },
+  { name: 'coverage', label: 'Покрытие защитой', icon: 'shield', perm: 'monitoring.read', group: 'Защита данных' },
+  { name: 'retention', label: 'Правила хранения', icon: 'auto_delete', perm: 'backups.read', group: 'Защита данных' },
+  { name: 'engine-config', label: 'Конфигурация Engine', icon: 'account_tree', perm: 'engine_config.read', group: 'Защита данных' },
+  { name: 'alerts', label: 'Оповещения', icon: 'notifications_active', perm: 'alerts.read', group: 'Операции' },
+  { name: 'approvals', label: 'Согласования', icon: 'approval', perm: '', group: 'Операции' },
+  { name: 'access-settings', label: 'Доступ и роли', icon: 'admin_panel_settings', perm: 'users.admin', group: 'Администрирование' },
+  { name: 'settings', label: 'Параметры системы', icon: 'settings', perm: '', group: 'Администрирование' },
+  { name: 'documentation', label: 'Документация', icon: 'menu_book', perm: '', group: 'Справка' },
 ]
 
 const links = computed(() => allLinks.filter((l) => !l.perm || auth.can(l.perm)))
+const linkGroups = computed(() => {
+  const groups: { title: string; links: typeof allLinks }[] = []
+  for (const link of links.value) {
+    let group = groups.find((item) => item.title === link.group)
+    if (!group) {
+      group = { title: link.group, links: [] }
+      groups.push(group)
+    }
+    group.links.push(link)
+  }
+  return groups
+})
 
 async function refreshAlertCount() {
   try {
@@ -148,10 +164,13 @@ onBeforeUnmount(() => {
     <q-header elevated class="bg-primary text-white">
       <q-toolbar>
         <q-btn dense flat round icon="menu" aria-label="Меню" @click="drawer = !drawer" />
-        <q-toolbar-title class="text-weight-medium">
-          ovirt-backup
-          <span class="text-caption q-ml-sm opacity-70">резервное копирование виртуальных машин</span>
+        <q-toolbar-title class="text-weight-medium jhv-brand-title">
+          JustHPC Virt Manager
+          <span class="text-caption q-ml-sm opacity-70 gt-xs">защита виртуальной инфраструктуры</span>
         </q-toolbar-title>
+
+        <GlobalSearch />
+        <OperationCenter />
 
         <q-btn
           v-if="notificationCount > 0"
@@ -173,7 +192,7 @@ onBeforeUnmount(() => {
           </q-tooltip>
         </q-btn>
 
-        <q-btn flat dense round :icon="liveConnected ? 'sensors' : 'sensors_off'">
+        <q-btn flat dense round :icon="liveConnected ? 'sensors' : 'sensors_off'" aria-label="Состояние потока событий">
           <q-tooltip>{{ liveConnected ? 'Поток событий подключён' : 'Поток событий недоступен' }}</q-tooltip>
         </q-btn>
 
@@ -197,7 +216,7 @@ onBeforeUnmount(() => {
           </q-menu>
         </q-btn>
 
-        <q-btn flat dense round icon="account_circle">
+        <q-btn flat dense round icon="account_circle" aria-label="Меню пользователя">
           <q-menu>
             <q-list style="min-width: 320px">
               <q-item-label header>{{ auth.username }} — {{ auth.role }}</q-item-label>
@@ -231,32 +250,37 @@ onBeforeUnmount(() => {
 
     <q-drawer v-model="drawer" show-if-above bordered :width="240">
       <q-list padding>
-        <q-item
-          v-for="link in links"
-          :key="link.name"
-          clickable
-          :to="{ name: link.name }"
-          active-class="jhv-nav-active"
-        >
-          <q-item-section avatar>
-            <q-icon :name="link.icon" />
-          </q-item-section>
-          <q-item-section>{{ link.label }}</q-item-section>
-          <q-item-section v-if="link.name === 'alerts' && firingAlerts > 0" side>
-            <q-badge color="negative">{{ firingAlerts }}</q-badge>
-          </q-item-section>
-        </q-item>
+        <template v-for="group in linkGroups" :key="group.title || 'main'">
+          <div v-if="group.title" class="jhv-nav-group">{{ group.title }}</div>
+          <q-item
+            v-for="link in group.links"
+            :key="link.name"
+            clickable
+            :to="{ name: link.name }"
+            active-class="jhv-nav-active"
+          >
+            <q-item-section avatar>
+              <q-icon :name="link.icon" />
+            </q-item-section>
+            <q-item-section>{{ link.label }}</q-item-section>
+            <q-item-section v-if="link.name === 'alerts' && firingAlerts > 0" side>
+              <q-badge color="negative">{{ firingAlerts }}</q-badge>
+            </q-item-section>
+          </q-item>
+        </template>
       </q-list>
 
       <template v-if="app.meta">
         <q-separator class="q-my-sm" />
-        <div class="q-pa-md text-caption text-grey-7">
-          <div>СУБД: {{ app.meta.capabilities.database_type }}</div>
-          <div>Сжатие: {{ app.meta.capabilities.compression }}</div>
-          <div>qemu-img: {{ app.meta.capabilities.qemu_img ? 'доступен' : 'нет' }}</div>
-          <div>Часовой пояс: {{ displayTimezone }}</div>
-          <div v-if="displayTimezoneWarning" class="text-warning q-mt-xs">{{ displayTimezoneWarning }}</div>
-        </div>
+        <q-expansion-item dense dense-toggle icon="memory" label="Среда приложения" header-class="text-caption text-grey-7">
+          <div class="q-px-md q-pb-md text-caption text-grey-7">
+            <div>СУБД: {{ app.meta.capabilities.database_type }}</div>
+            <div>Сжатие: {{ app.meta.capabilities.compression }}</div>
+            <div>qemu-img: {{ app.meta.capabilities.qemu_img ? 'доступен' : 'нет' }}</div>
+            <div>Часовой пояс: {{ displayTimezone }}</div>
+            <div v-if="displayTimezoneWarning" class="text-warning q-mt-xs">{{ displayTimezoneWarning }}</div>
+          </div>
+        </q-expansion-item>
       </template>
     </q-drawer>
 

@@ -71,7 +71,7 @@ test('engine and native file backup pages are discoverable', async ({ page }) =>
 
   if ((page.viewportSize()?.width ?? 0) >= 1024) {
     await expect(page.getByRole('link', { name: 'Конфигурация Engine' })).toBeVisible()
-    await expect(page.getByRole('link', { name: 'Файловые бекапы' })).toBeVisible()
+    await expect(page.getByRole('link', { name: 'Файловые задания' })).toBeVisible()
   }
 
   await page.goto('/engine-config')
@@ -79,7 +79,7 @@ test('engine and native file backup pages are discoverable', async ({ page }) =>
   await expect(page.getByText('Задания Engine', { exact: true })).toBeVisible()
 
   await page.goto('/file-backups')
-  await expect(page.getByRole('main').getByText('Файловые бекапы', { exact: true })).toBeVisible()
+  await expect(page.getByRole('main').getByText('Файловые бэкапы', { exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Новое задание' })).toBeVisible()
   await expect(page.getByText('Функция выключена', { exact: false })).toHaveCount(0)
 })
@@ -103,8 +103,9 @@ test('timezone change is pushed to another open web session', async ({ page, con
     expect(status).toBe(200)
 
     if (testInfo.project.name === 'mobile') {
-      await observer.getByRole('button', { name: 'Меню' }).click()
+      await observer.getByRole('button', { name: 'Меню', exact: true }).click()
     }
+    await observer.getByText('Среда приложения', { exact: true }).click()
     await expect(observer.getByText('Часовой пояс: Asia/Yekaterinburg')).toBeVisible({ timeout: 10_000 })
 
     const metaTimezone = await observer.evaluate(async () => {

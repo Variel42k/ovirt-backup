@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { useQuasar } from 'quasar'
+import { useRoute, useRouter } from 'vue-router'
 import { api, notifyError, notifyOk } from '@/api/client'
 import { dateTime, runStatus, statusColor } from '@/api/format'
 import { useAppStore } from '@/stores/app'
@@ -10,12 +11,17 @@ import HelpButton from '@/components/HelpButton.vue'
 import type { BackupJob, BackupOption, Disk, Host, Recommendation, VM } from '@/api/types'
 
 const $q = useQuasar()
+const route = useRoute()
+const router = useRouter()
 const app = useAppStore()
 const auth = useAuthStore()
 
 const jobs = ref<BackupJob[]>([])
+const selectedJobs = ref<BackupJob[]>([])
 const loading = ref(false)
 const dialog = ref(false)
+const jobStep = ref(1)
+const jobFormError = ref('')
 const editing = ref<BackupJob | null>(null)
 const vmsOfServer = ref<VM[]>([])
 const disksOfServer = ref<Disk[]>([])
@@ -259,15 +265,20 @@ function changeServer(serverID: string) {
   form.value.verify_options.boot_host_id = source?.kind === 'kvm' ? source.id : ''
 }
 
-function openCreate() {
+function openCreate(serverID = '', vmIDs: string[] = []) {
   editing.value = null
   preserveUnavailableType = false
   form.value = emptyForm()
-  form.value.server_id = backupServers.value[0]?.id ?? ''
+  form.value.server_id = backupServers.value.some((server) => server.id === serverID)
+    ? serverID
+    : (backupServers.value[0]?.id ?? '')
+  form.value.vm_ids = vmIDs
   const source = app.servers.find((s) => s.id === form.value.server_id)
   form.value.verify_options.boot_host_id = source?.kind === 'kvm' ? source.id : ''
   form.value.storage_target_ids = app.enabledStorages[0] ? [app.enabledStorages[0].id] : []
   void loadVMs()
+  jobStep.value = 1
+  jobFormError.value = ''
   dialog.value = true
 }
 
@@ -287,20 +298,40 @@ function openEdit(job: BackupJob) {
     verify_options: { ...emptyForm().verify_options, ...(job.verify_options ?? {}) },
   }
   void loadVMs()
+  jobStep.value = 1
+  jobFormError.value = ''
   dialog.value = true
 }
 
+function nextJobStep() {
+  jobFormError.value = ''
+  if (jobStep.value === 1 && (!form.value.name.trim() || !form.value.server_id)) {
+    jobFormError.value = 'Укажите имя задания и платформу виртуализации.'
+    return
+  }
+  if (jobStep.value === 2 && (!form.value.type || selectedBackupOption.value?.available === false)) {
+    jobFormError.value = 'Выберите доступный способ резервного копирования.'
+    return
+  }
+  if (jobStep.value === 3 && form.value.type !== 'ova' && !form.value.storage_target_ids.length) {
+    jobFormError.value = 'Выберите хотя бы одно хранилище.'
+    return
+  }
+  jobStep.value = Math.min(5, jobStep.value + 1)
+}
+
 async function save() {
+  jobFormError.value = ''
   if (backupOptionsLoading.value) {
-    notifyError('Дождитесь проверки доступных типов бэкапа')
+    jobFormError.value = 'Дождитесь проверки доступных типов бэкапа.'
     return
   }
   if (!form.value.type) {
-    notifyError('Выберите доступный тип бэкапа')
+    jobFormError.value = 'Выберите доступный тип бэкапа.'
     return
   }
   if (selectedBackupOption.value && !selectedBackupOption.value.available) {
-    notifyError(`Тип «${selectedBackupOption.value.title}» недоступен для выбранных ВМ`)
+    jobFormError.value = `Тип «${selectedBackupOption.value.title}» недоступен для выбранных ВМ.`
     return
   }
   try {
@@ -314,6 +345,7 @@ async function save() {
     dialog.value = false
     await load()
   } catch (err) {
+    jobFormError.value = `Не удалось сохранить задание: ${err instanceof Error ? err.message : String(err)}`
     notifyError(err, 'Не удалось сохранить задание')
   }
 }
@@ -325,6 +357,16 @@ async function runNow(job: BackupJob) {
   } catch (err) {
     notifyError(err, 'Не удалось запустить задание')
   }
+}
+
+async function runSelected() {
+  const chosen = [...selectedJobs.value]
+  if (!chosen.length) return
+  const results = await Promise.allSettled(chosen.map((job) => api.runJob(job.id)))
+  const succeeded = results.filter((result) => result.status === 'fulfilled').length
+  const failed = results.length - succeeded
+  notifyOk(`Задания поставлены в очередь: ${succeeded}${failed ? `, ошибок: ${failed}` : ''}`)
+  if (!failed) selectedJobs.value = []
 }
 
 function enableReplication(job: BackupJob) {
@@ -415,10 +457,34 @@ watch(() => [...form.value.cluster_ids], () => void loadBackupOptions())
 watch(() => [...form.value.tags], () => void loadBackupOptions())
 watch(() => [...form.value.exclude_vm_ids], () => void loadBackupOptions())
 watch(() => form.value.storage_target_ids[0] ?? '', () => void loadBackupOptions())
+
+async function applyRouteIntent() {
+	if (route.query.create === '1' && auth.canWrite()) {
+		const serverID = String(route.query.server ?? '')
+		const vmIDs = String(route.query.vms ?? '').split(',').filter(Boolean)
+		openCreate(serverID, vmIDs)
+		await router.replace({ name: 'jobs' })
+		return
+	}
+	const jobID = String(route.query.job ?? '')
+	if (jobID && auth.canWrite()) {
+		try {
+			const job = jobs.value.find((item) => item.id === jobID) ?? await api.getJob(jobID)
+			openEdit(job)
+			await router.replace({ name: 'jobs' })
+		} catch (err) {
+			notifyError(err, 'Не удалось открыть задание по ссылке')
+		}
+	}
+}
+
 onMounted(async () => {
   await app.bootstrap()
   await load()
+	await applyRouteIntent()
 })
+
+watch(() => route.query, () => void applyRouteIntent())
 
 /**
  * Три способа доставки данных во второе и последующие хранилища.
@@ -461,7 +527,7 @@ const columns = [
     <div class="row items-center q-mb-md">
       <div class="text-h5">Задания бэкапа</div>
       <q-space />
-      <q-btn flat dense round icon="refresh" :loading="loading" @click="load" />
+      <q-btn flat dense round icon="refresh" aria-label="Обновить задания" :loading="loading" @click="load"><q-tooltip>Обновить</q-tooltip></q-btn>
       <q-btn
         v-if="auth.canWrite()"
         color="primary"
@@ -469,20 +535,55 @@ const columns = [
         label="Новое задание"
         unelevated
         class="q-ml-sm"
-        @click="openCreate"
+        @click="openCreate()"
       />
     </div>
+
+    <q-banner v-if="selectedJobs.length" dense rounded class="bg-blue-1 q-mb-md">
+      <div class="row items-center q-gutter-sm">
+        <div>Выбрано заданий: {{ selectedJobs.length }}</div>
+        <q-space />
+        <q-btn v-if="auth.canWrite()" color="primary" unelevated icon="play_arrow" label="Запустить выбранные" @click="runSelected" />
+        <q-btn flat label="Снять выбор" @click="selectedJobs = []" />
+      </div>
+    </q-banner>
 
     <q-table
       :rows="jobs"
       :columns="columns"
       row-key="id"
+      selection="multiple"
+      v-model:selected="selectedJobs"
+      :grid="$q.screen.lt.md"
       flat
       bordered
       :loading="loading"
       class="jhv-table"
       no-data-label="Заданий нет. Создайте первое или используйте готовое расписание на странице ВМ."
     >
+      <template #item="props">
+        <div class="q-pa-xs col-12">
+          <q-card flat bordered>
+            <q-card-section class="row items-start no-wrap">
+              <q-checkbox v-model="props.selected" class="q-mr-sm" :aria-label="`Выбрать задание ${props.row.name}`" />
+              <div class="col">
+                <div class="text-subtitle1 text-weight-medium">{{ props.row.name }}</div>
+                <div class="text-caption text-grey-7">{{ app.serverName(props.row.server_id) }} · {{ app.backupTypeTitle(props.row.type) }}</div>
+                <div class="q-mt-xs"><q-chip dense :color="props.row.last_status ? statusColor(props.row.last_status) : 'grey-5'" text-color="white">{{ props.row.last_status ? runStatus(props.row.last_status) : 'ещё не запускалось' }}</q-chip></div>
+                <div class="text-caption">Следующий запуск: {{ dateTime(props.row.next_run_at) }}</div>
+              </div>
+              <q-btn-dropdown v-if="auth.canWrite()" flat round dense dropdown-icon="more_vert" aria-label="Действия с заданием">
+                <q-list dense>
+                  <q-item clickable v-close-popup @click="preview(props.row)"><q-item-section avatar><q-icon name="visibility" /></q-item-section><q-item-section>Показать охват</q-item-section></q-item>
+                  <q-item clickable v-close-popup @click="runNow(props.row)"><q-item-section avatar><q-icon name="play_arrow" color="positive" /></q-item-section><q-item-section>Запустить сейчас</q-item-section></q-item>
+                  <q-item clickable v-close-popup @click="openEdit(props.row)"><q-item-section avatar><q-icon name="edit" /></q-item-section><q-item-section>Изменить</q-item-section></q-item>
+                  <q-item clickable v-close-popup @click="confirmDelete(props.row)"><q-item-section avatar><q-icon name="delete" color="negative" /></q-item-section><q-item-section class="text-negative">Удалить</q-item-section></q-item>
+                </q-list>
+              </q-btn-dropdown>
+            </q-card-section>
+          </q-card>
+        </div>
+      </template>
       <template #body-cell-name="props">
         <q-td :props="props">
           {{ props.row.name }}
@@ -551,16 +652,16 @@ const columns = [
 
       <template #body-cell-actions="props">
         <q-td :props="props">
-          <q-btn flat dense round icon="visibility" @click="preview(props.row)">
+          <q-btn flat dense round icon="visibility" aria-label="Показать охват задания" @click="preview(props.row)">
             <q-tooltip>Показать, какие ВМ попадают под отбор</q-tooltip>
           </q-btn>
-          <q-btn v-if="auth.canWrite()" flat dense round icon="play_arrow" color="positive" @click="runNow(props.row)">
+          <q-btn v-if="auth.canWrite()" flat dense round icon="play_arrow" color="positive" aria-label="Запустить задание" @click="runNow(props.row)">
             <q-tooltip>Запустить сейчас</q-tooltip>
           </q-btn>
-			<q-btn v-if="auth.canAdmin() && !props.row.replication_enabled && props.row.type !== 'ova'" flat dense round icon="sync_alt" color="primary" @click="enableReplication(props.row)">
+			<q-btn v-if="auth.canAdmin() && !props.row.replication_enabled && props.row.type !== 'ova'" flat dense round icon="sync_alt" color="primary" aria-label="Включить репликацию" @click="enableReplication(props.row)">
 				<q-tooltip>Перевести задание на основное хранилище и реплики</q-tooltip>
 			</q-btn>
-			<q-btn-dropdown v-if="auth.canAdmin() && props.row.replication_enabled && props.row.storage_target_ids.length > 1" flat dense round dropdown-icon="swap_horiz">
+			<q-btn-dropdown v-if="auth.canAdmin() && props.row.replication_enabled && props.row.storage_target_ids.length > 1" flat dense round dropdown-icon="swap_horiz" aria-label="Сменить основное хранилище">
 				<q-list dense>
 					<q-item v-for="id in props.row.storage_target_ids.slice(1)" :key="id" clickable v-close-popup @click="changePrimary(props.row, id)">
 						<q-item-section avatar><q-icon name="storage" /></q-item-section>
@@ -568,21 +669,30 @@ const columns = [
 					</q-item>
 				</q-list>
 			</q-btn-dropdown>
-          <q-btn v-if="auth.canWrite()" flat dense round icon="edit" @click="openEdit(props.row)" />
-          <q-btn v-if="auth.canWrite()" flat dense round icon="delete" color="negative" @click="confirmDelete(props.row)" />
+          <q-btn v-if="auth.canWrite()" flat dense round icon="edit" aria-label="Изменить задание" @click="openEdit(props.row)"><q-tooltip>Изменить</q-tooltip></q-btn>
+          <q-btn v-if="auth.canWrite()" flat dense round icon="delete" color="negative" aria-label="Удалить задание" @click="confirmDelete(props.row)"><q-tooltip>Удалить</q-tooltip></q-btn>
         </q-td>
       </template>
     </q-table>
 
-    <q-dialog v-model="dialog" persistent>
-      <q-card style="width: 860px; max-width: 96vw">
+    <q-dialog v-model="dialog" persistent :maximized="$q.screen.lt.sm">
+      <q-card class="jhv-dialog-page" style="width: 860px; max-width: 96vw">
         <q-card-section class="text-h6">{{ editing ? 'Изменить задание' : 'Новое задание' }}</q-card-section>
         <q-separator />
 
-        <!-- Одна сетка на всю форму; почему не .row внутри .q-gutter-* — см. ServersPage.vue. -->
+        <q-tabs v-model="jobStep" dense align="justify" active-color="primary" indicator-color="primary" outside-arrows mobile-arrows>
+          <q-tab :name="1" icon="filter_alt" label="Охват" />
+          <q-tab :name="2" icon="backup" label="Способ" />
+          <q-tab :name="3" icon="inventory_2" label="Хранение" />
+          <q-tab :name="4" icon="fact_check" label="Проверка" />
+          <q-tab :name="5" icon="task_alt" label="Итог" />
+        </q-tabs>
+        <q-separator />
+
         <q-card-section style="max-height: 70vh" class="scroll row q-col-gutter-md">
+          <template v-if="jobStep === 1">
           <div class="col-12 col-sm-6">
-            <q-input v-model="form.name" label="Имя задания" outlined dense />
+            <q-input v-model="form.name" label="Имя задания" outlined dense autofocus :error="Boolean(jobFormError) && !form.name.trim()" />
           </div>
           <div class="col-12 col-sm-6">
             <q-select
@@ -657,7 +767,10 @@ const columns = [
               label="Исключить диски" outlined dense
             />
           </div>
+          <div class="col-12"><q-banner dense class="bg-blue-1">Под условия сейчас попадает ВМ: {{ selectedVMs.length }}. Перед сохранением отбор можно проверить из списка заданий.</q-banner></div>
+          </template>
 
+          <template v-if="jobStep === 2">
           <div class="col-12 row items-center">
             <div class="text-subtitle2">Что и как копировать</div>
             <HelpButton article="hot-backup" label="Останавливается ли ВМ" />
@@ -790,8 +903,10 @@ const columns = [
               />
             </div>
           </template>
+          </template>
 
-          <template v-else>
+          <template v-if="jobStep === 3">
+          <template v-if="form.type !== 'ova'">
           <div class="col-12">
             <q-select
               v-model="form.storage_target_ids"
@@ -856,7 +971,9 @@ const columns = [
               сохраняемые инкременты, не удаляются никогда — иначе цепочка перестала бы восстанавливаться.
             </div>
           </div>
+          </template>
 
+          <template v-if="jobStep === 4">
           <div class="col-12 col-sm-4">
             <q-select
               v-model="form.verify_after"
@@ -940,12 +1057,42 @@ const columns = [
               </div>
             </template>
           </template>
+          </template>
+
+          <template v-if="jobStep === 5">
+            <div class="col-12">
+              <q-banner dense class="bg-blue-1 q-mb-md">
+                Проверьте итог. После сохранения задание можно сразу запустить из списка.
+              </q-banner>
+              <q-list bordered separator>
+                <q-item><q-item-section><q-item-label caption>Задание и охват</q-item-label><q-item-label>{{ form.name || 'Без имени' }} · {{ selectedVMs.length }} ВМ на {{ app.serverName(form.server_id) }}</q-item-label></q-item-section><q-item-section side><q-btn flat label="Изменить" @click="jobStep = 1" /></q-item-section></q-item>
+                <q-item><q-item-section><q-item-label caption>Способ и расписание</q-item-label><q-item-label>{{ app.backupTypeTitle(form.type) }} · {{ form.schedule || 'только вручную' }}</q-item-label></q-item-section><q-item-section side><q-btn flat label="Изменить" @click="jobStep = 2" /></q-item-section></q-item>
+                <q-item><q-item-section><q-item-label caption>Хранение</q-item-label><q-item-label>{{ form.type === 'ova' ? `${form.ova_host_id || 'хост не выбран'} · ${form.ova_directory || 'каталог не задан'}` : form.storage_target_ids.map(app.storageName).join(', ') || 'не выбрано' }}</q-item-label></q-item-section><q-item-section side><q-btn flat label="Изменить" @click="jobStep = 3" /></q-item-section></q-item>
+                <q-item><q-item-section><q-item-label caption>Защита и проверка</q-item-label><q-item-label>{{ form.encrypt ? 'шифрование включено' : 'без шифрования' }} · {{ form.verify_after ? `проверка: ${app.verifyModeTitle(form.verify_after)}` : 'без автоматической проверки' }}</q-item-label></q-item-section><q-item-section side><q-btn flat label="Изменить" @click="jobStep = 4" /></q-item-section></q-item>
+              </q-list>
+            </div>
+          </template>
+
+          <div v-if="jobFormError" class="col-12">
+            <q-banner dense class="bg-red-1 text-negative"><template #avatar><q-icon name="error" /></template>{{ jobFormError }}</q-banner>
+          </div>
         </q-card-section>
 
         <q-separator />
         <q-card-actions align="right">
           <q-btn flat label="Отмена" v-close-popup />
+          <q-space />
+          <q-btn v-if="jobStep > 1" flat label="Назад" icon="arrow_back" @click="jobStep--" />
           <q-btn
+            v-if="jobStep < 5"
+            color="primary"
+            unelevated
+            label="Продолжить"
+            icon-right="arrow_forward"
+            @click="nextJobStep"
+          />
+          <q-btn
+            v-else
             color="primary"
             unelevated
             label="Сохранить"

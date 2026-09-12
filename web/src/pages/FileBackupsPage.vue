@@ -128,7 +128,7 @@ async function load(silent = false) {
       api.listFileBackupRuns(),
     ])
   } catch (err) {
-    if (!silent) notifyError(err, 'Не удалось загрузить файловые бекапы')
+    if (!silent) notifyError(err, 'Не удалось загрузить файловые бэкапы')
   } finally {
     if (!silent) loading.value = false
   }
@@ -196,10 +196,10 @@ function deleteJob(job: FileBackupJob) {
 async function runJob(job: FileBackupJob) {
   try {
     await api.runFileBackupJob(job.id)
-    notifyOk('Файловый бекап поставлен на выполнение')
+    notifyOk('Файловый бэкап поставлен на выполнение')
     await load()
   } catch (err) {
-    notifyError(err, 'Не удалось запустить файловый бекап')
+    notifyError(err, 'Не удалось запустить файловый бэкап')
   }
 }
 
@@ -226,10 +226,10 @@ function deleteRun(run: FileBackupRun) {
   }).onOk(async () => {
     try {
       await api.deleteFileBackupRun(run.id)
-      notifyOk('Точка файлового бекапа удалена')
+      notifyOk('Точка файлового бэкапа удалена')
       await load()
     } catch (err) {
-      notifyError(err, 'Не удалось удалить точку файлового бекапа')
+      notifyError(err, 'Не удалось удалить точку файлового бэкапа')
     }
   })
 }
@@ -276,7 +276,7 @@ onBeforeUnmount(() => {
   <q-page padding>
     <div class="row items-center q-mb-md">
       <div>
-        <div class="text-h5">Файловые бекапы</div>
+        <div class="text-h5">Файловые бэкапы</div>
         <div class="text-caption text-grey-7">Файлы и каталоги сохраняются нативным manifest в общий репозиторий.</div>
       </div>
       <q-space />

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useQuasar } from 'quasar'
 import {
   api,
@@ -36,8 +36,41 @@ import type { DRReadiness, RemediationArchive, RemediationMode, RemediationPerio
 const $q = useQuasar()
 const app = useAppStore()
 const auth = useAuthStore()
+const router = useRouter()
 
 const tab = ref('system')
+const settingsCategory = ref('system')
+const settingsGroups = computed(() => [
+  { value: 'system', label: 'Общие', icon: 'settings', tabs: [{ value: 'system', label: 'Система' }] },
+  { value: 'operations', label: 'Эксплуатация', icon: 'monitor_heart', tabs: [
+    ...(auth.canAdmin() ? [
+      { value: 'monitoring', label: 'Мониторинг' }, { value: 'notifications', label: 'Уведомления' },
+      { value: 'dr', label: 'Аварийная готовность' }, { value: 'logs', label: 'Журнал' },
+    ] : []),
+  ] },
+  { value: 'access', label: 'Доступ', icon: 'admin_panel_settings', tabs: [
+    ...(auth.canAdmin() ? [
+      { value: 'identity', label: 'Keycloak и домен' }, { value: 'users', label: `Пользователи (${users.value.length})` },
+      { value: 'roles', label: `Роли (${roles.value.length})` }, { value: 'tokens', label: `Токены API (${apiTokens.value.length})` },
+    ] : []),
+  ] },
+  { value: 'control', label: 'Контроль', icon: 'policy', tabs: [
+    { value: 'approvals', label: `Согласования (${openApprovals.value.length})` },
+    ...(auth.canAdmin() ? [{ value: 'audit', label: 'Аудит' }] : []),
+  ] },
+].filter((group) => group.tabs.length > 0))
+const visibleSettingsTabs = computed(() => settingsGroups.value.find((group) => group.value === settingsCategory.value)?.tabs ?? [])
+
+function selectSettingsCategory(value: string) {
+  settingsCategory.value = value
+  const group = settingsGroups.value.find((item) => item.value === value)
+  if (group && !group.tabs.some((item) => item.value === tab.value)) tab.value = group.tabs[0].value
+}
+
+function alignSettingsCategory(value: string) {
+  const group = settingsGroups.value.find((item) => item.tabs.some((candidate) => candidate.value === value))
+  if (group) settingsCategory.value = group.value
+}
 const users = ref<User[]>([])
 const audit = ref<AuditEntry[]>([])
 const apiTokens = ref<ApiToken[]>([])
@@ -912,7 +945,11 @@ async function openArchive(period: RemediationPeriod) {
 }
 
 watch(tab, (value) => {
+  alignSettingsCategory(value)
   if (value === 'logs' && !logStatus.value) void loadLogs()
+  if (String(route.query.tab ?? '') !== value) {
+    void router.replace({ query: { ...route.query, tab: value } })
+  }
 })
 
 // Ссылка из оповещения ведёт сюда: ?tab=approvals&approval=<id>. Она не
@@ -923,8 +960,10 @@ const route = useRoute()
 const highlightedApproval = ref('')
 
 function applyDeepLink() {
-  const wanted = String(route.query.tab ?? '')
-  if (wanted) tab.value = wanted
+  const wanted = String(route.query.tab ?? route.meta.settingsTab ?? '')
+  const allowed = settingsGroups.value.flatMap((group) => group.tabs).some((candidate) => candidate.value === wanted)
+  if (wanted && allowed) tab.value = wanted
+  alignSettingsCategory(tab.value)
   highlightedApproval.value = String(route.query.approval ?? '')
 }
 
@@ -935,26 +974,24 @@ onMounted(async () => {
   await load()
 })
 
-watch(() => route.query, applyDeepLink)
+watch(() => [route.query, route.meta.settingsTab], applyDeepLink)
 </script>
 
 <template>
   <q-page padding>
-    <div class="text-h5 q-mb-md">Настройки</div>
+    <div class="text-h5 q-mb-md">Администрирование</div>
 
     <q-card flat bordered>
-      <q-tabs v-model="tab" align="left" active-color="primary" indicator-color="primary" dense>
-        <q-tab name="system" label="Система" />
-        <q-tab v-if="auth.canAdmin()" name="monitoring" label="Мониторинг" />
-        <q-tab v-if="auth.canAdmin()" name="identity" label="Keycloak и домен" />
-        <q-tab v-if="auth.canAdmin()" name="notifications" label="Уведомления" />
-        <q-tab v-if="auth.canAdmin()" name="dr" label="Аварийная готовность" />
-        <q-tab v-if="auth.canAdmin()" name="users" :label="`Пользователи (${users.length})`" />
-        <q-tab v-if="auth.canAdmin()" name="roles" :label="`Роли (${roles.length})`" />
-        <q-tab name="approvals" :label="`Согласования (${openApprovals.length})`" />
-        <q-tab v-if="auth.canAdmin()" name="tokens" :label="`Токены API (${apiTokens.length})`" />
-        <q-tab v-if="auth.canAdmin()" name="audit" label="Аудит" />
-        <q-tab v-if="auth.canAdmin()" name="logs" label="Журнал" />
+      <div class="row q-pa-sm q-gutter-sm">
+        <q-btn
+          v-for="group in settingsGroups" :key="group.value" no-caps unelevated
+          :outline="settingsCategory !== group.value" :color="settingsCategory === group.value ? 'primary' : 'grey-7'"
+          :icon="group.icon" :label="group.label" @click="selectSettingsCategory(group.value)"
+        />
+      </div>
+      <q-separator />
+      <q-tabs v-model="tab" align="left" active-color="primary" indicator-color="primary" dense outside-arrows mobile-arrows>
+        <q-tab v-for="item in visibleSettingsTabs" :key="item.value" :name="item.value" :label="item.label" />
       </q-tabs>
       <q-separator />
 

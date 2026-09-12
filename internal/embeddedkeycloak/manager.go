@@ -1197,8 +1197,31 @@ func readAdminResponse(resp *http.Response) ([]byte, error) {
 
 func (a *adminAPI) ensureRealm(ctx context.Context, realm string) error {
 	_, err := a.do(ctx, http.MethodPost, "/admin/realms", map[string]any{
-		"realm": realm, "enabled": true, "displayName": "justhpc virt manager",
+		"realm": realm, "enabled": true, "displayName": "JustHPC Virt Manager",
+		"displayNameHtml": "JustHPC Virt Manager", "internationalizationEnabled": true,
+		"defaultLocale": "ru", "supportedLocales": []string{"ru", "en"},
 	}, http.StatusCreated, http.StatusConflict)
+	if err != nil {
+		return err
+	}
+	// Repair the visible name and locale for realms created by an earlier
+	// installer. Preserve the complete representation so an update never resets
+	// an administrator's unrelated realm policy.
+	path := "/admin/realms/" + url.PathEscape(realm)
+	raw, err := a.do(ctx, http.MethodGet, path, nil, http.StatusOK)
+	if err != nil {
+		return err
+	}
+	var current map[string]any
+	if json.Unmarshal(raw, &current) != nil {
+		return errors.New("не удалось прочитать настройки realm Keycloak")
+	}
+	current["displayName"] = "JustHPC Virt Manager"
+	current["displayNameHtml"] = "JustHPC Virt Manager"
+	current["internationalizationEnabled"] = true
+	current["defaultLocale"] = "ru"
+	current["supportedLocales"] = []string{"ru", "en"}
+	_, err = a.do(ctx, http.MethodPut, path, current, http.StatusNoContent)
 	return err
 }
 

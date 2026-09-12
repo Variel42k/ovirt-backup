@@ -61,9 +61,9 @@ async function submit() {
       <q-page class="flex flex-center bg-grey-2">
         <q-card style="width: 420px; max-width: 92vw" class="q-pa-sm">
           <q-card-section>
-            <div class="text-h6">ovirt-backup</div>
+            <div class="text-h6">JustHPC Virt Manager</div>
             <div class="text-caption text-grey-7">
-              Резервное копирование и восстановление виртуальных машин oVirt, РЕД Виртуализации и KVM
+              Защита и управление oVirt, РЕД Виртуализацией, Proxmox VE и KVM
             </div>
           </q-card-section>
 

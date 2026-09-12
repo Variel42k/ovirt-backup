@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { useQuasar } from 'quasar'
-import { api, notify, notifyError, notifyOk } from '@/api/client'
+import { api, errorMessage, notify, notifyError, notifyOk } from '@/api/client'
 import DirectoryPicker from '@/components/DirectoryPicker.vue'
 import { ago, connState } from '@/api/format'
 import { useAppStore } from '@/stores/app'
@@ -20,6 +20,7 @@ const probeResult = ref<Record<string, unknown> | null>(null)
 const caUpload = ref<File | null>(null)
 const fetchedCAFingerprint = ref('')
 const scannedHostFingerprint = ref('')
+const formError = ref('')
 
 /**
  * Что учётная запись может сверх нужного. Определяет сервер фактической
@@ -133,6 +134,7 @@ const provisionBusy = ref(false)
 const provisionResult = ref<ProvisionResult | null>(null)
 const provisionCAUpload = ref<File | null>(null)
 const provisionCAFingerprint = ref('')
+const provisionFormError = ref('')
 const provisionForm = ref({
   name: '',
   kind: 'ovirt',
@@ -153,6 +155,7 @@ function openProvision() {
   }
   provisionCAUpload.value = null
   provisionCAFingerprint.value = ''
+  provisionFormError.value = ''
   provisionOpen.value = true
 }
 
@@ -195,6 +198,7 @@ function clearProvisionCA() {
 async function runProvision() {
   provisionBusy.value = true
   provisionResult.value = null
+  provisionFormError.value = ''
   try {
     const payload = { ...provisionForm.value }
     provisionForm.value.admin_password = ''
@@ -206,6 +210,7 @@ async function runProvision() {
       await app.loadServers()
     }
   } catch (err) {
+    provisionFormError.value = errorMessage(err)
     notifyError(err, 'Не удалось настроить подключение')
   } finally {
     provisionBusy.value = false
@@ -228,6 +233,7 @@ function openCreate() {
   caUpload.value = null
   fetchedCAFingerprint.value = ''
   scannedHostFingerprint.value = ''
+  formError.value = ''
   dialog.value = true
 }
 
@@ -259,6 +265,7 @@ function openEdit(server: Server) {
   caUpload.value = null
   fetchedCAFingerprint.value = ''
   scannedHostFingerprint.value = ''
+  formError.value = ''
   dialog.value = true
 }
 
@@ -363,6 +370,7 @@ async function scanHostKey() {
 }
 
 async function save() {
+  formError.value = ''
   try {
     if (editing.value) {
       await api.updateServer(editing.value.id, form.value)
@@ -374,6 +382,7 @@ async function save() {
     dialog.value = false
     await load()
   } catch (err) {
+    formError.value = errorMessage(err)
     notifyError(err, 'Не удалось сохранить')
   }
 }
@@ -423,7 +432,7 @@ onMounted(load)
     <div class="row items-center q-mb-md">
       <div class="text-h5">Платформы виртуализации</div>
       <q-space />
-      <q-btn flat dense round icon="refresh" :loading="loading" @click="load" />
+      <q-btn flat dense round icon="refresh" aria-label="Обновить платформы" :loading="loading" @click="load"><q-tooltip>Обновить</q-tooltip></q-btn>
       <q-btn
         v-if="auth.canAdmin()"
         color="primary"
@@ -460,10 +469,34 @@ onMounted(load)
       flat
       bordered
       :loading="loading"
+      :grid="$q.screen.lt.md"
       class="jhv-table"
       :pagination="{ rowsPerPage: 25 }"
       no-data-label="Платформы виртуализации не подключены"
     >
+      <template #item="props">
+        <div class="q-pa-xs col-12">
+          <q-card flat bordered>
+            <q-card-section class="row items-start no-wrap">
+              <div class="col">
+                <router-link :to="{ name: 'server', params: { serverId: props.row.id } }" class="text-subtitle1 text-weight-medium text-primary">{{ props.row.name }}</router-link>
+                <q-badge outline color="primary" class="q-ml-sm">{{ virtualizationKinds.find((kind) => kind.value === props.row.kind)?.title ?? props.row.kind }}</q-badge>
+                <div class="q-mt-sm"><q-chip dense :color="props.row.state === 'online' ? 'positive' : props.row.state === 'degraded' ? 'warning' : 'negative'" text-color="white">{{ connState(props.row.state) }}</q-chip></div>
+                <div class="text-caption jhv-mono jhv-wrap">{{ kindUsesLibvirt(props.row.kind) ? `ssh://${props.row.username}@${props.row.ssh_host}:${props.row.ssh_port || 22}` : props.row.engine_url }}</div>
+                <div class="text-caption text-grey-7">Сертификат: {{ props.row.ca_cert_stored ? 'сохранён' : 'не задан' }} · последний ответ: {{ ago(props.row.last_seen_at) }}</div>
+                <div v-if="props.row.state_message" class="text-caption text-negative jhv-wrap q-mt-xs">{{ props.row.state_message }}</div>
+              </div>
+              <q-btn-dropdown flat round dense dropdown-icon="more_vert" aria-label="Действия с подключением">
+                <q-list dense>
+                  <q-item clickable v-close-popup @click="refresh(props.row)"><q-item-section avatar><q-icon name="sync" /></q-item-section><q-item-section>Опросить сейчас</q-item-section></q-item>
+                  <q-item v-if="auth.canAdmin()" clickable v-close-popup @click="openEdit(props.row)"><q-item-section avatar><q-icon name="edit" /></q-item-section><q-item-section>Изменить</q-item-section></q-item>
+                  <q-item v-if="auth.canAdmin()" clickable v-close-popup @click="confirmDelete(props.row)"><q-item-section avatar><q-icon name="delete" color="negative" /></q-item-section><q-item-section class="text-negative">Удалить</q-item-section></q-item>
+                </q-list>
+              </q-btn-dropdown>
+            </q-card-section>
+          </q-card>
+        </div>
+      </template>
       <template #body-cell-name="props">
         <q-td :props="props">
           <router-link :to="{ name: 'server', params: { serverId: props.row.id } }" class="text-primary">
@@ -561,21 +594,25 @@ onMounted(load)
 
       <template #body-cell-actions="props">
         <q-td :props="props">
-          <q-btn flat dense round icon="sync" @click="refresh(props.row)">
+          <q-btn flat dense round icon="sync" aria-label="Опросить подключение" @click="refresh(props.row)">
             <q-tooltip>Опросить сейчас</q-tooltip>
           </q-btn>
-          <q-btn v-if="auth.canAdmin()" flat dense round icon="edit" @click="openEdit(props.row)" />
-          <q-btn v-if="auth.canAdmin()" flat dense round icon="delete" color="negative" @click="confirmDelete(props.row)" />
+          <q-btn v-if="auth.canAdmin()" flat dense round icon="edit" aria-label="Изменить подключение" @click="openEdit(props.row)"><q-tooltip>Изменить</q-tooltip></q-btn>
+          <q-btn v-if="auth.canAdmin()" flat dense round icon="delete" color="negative" aria-label="Удалить подключение" @click="confirmDelete(props.row)"><q-tooltip>Удалить</q-tooltip></q-btn>
         </q-td>
       </template>
     </q-table>
 
-    <q-dialog v-model="dialog" persistent>
-      <q-card style="width: 720px; max-width: 95vw">
+    <q-dialog v-model="dialog" persistent :maximized="$q.screen.lt.sm">
+      <q-card class="jhv-dialog-page" style="width: 720px; max-width: 95vw">
         <q-card-section class="text-h6">
           {{ editing ? `Подключение «${editing.name}»` : 'Ручное подключение' }}
         </q-card-section>
         <q-separator />
+
+        <q-banner v-if="formError" dense class="bg-red-1 text-negative q-ma-md q-mb-none">
+          <template #avatar><q-icon name="error" /></template>{{ formError }}
+        </q-banner>
 
         <!--
           Одна сетка на всю форму, без вложенных .row внутри .q-gutter-*: оба
@@ -686,7 +723,7 @@ onMounted(load)
                     outline dense no-caps icon="fingerprint" label="Получить ключ"
                     :loading="scanningKey" :disable="form.ssh_trust_any_host_key" @click="scanHostKey"
                   />
-                  <q-btn v-if="hostKeyStored" flat dense round icon="delete_outline" color="negative" @click="clearHostKey">
+                  <q-btn v-if="hostKeyStored" flat dense round icon="delete_outline" color="negative" aria-label="Удалить ключ хоста" @click="clearHostKey">
                     <q-tooltip>Удалить закреплённый ключ</q-tooltip>
                   </q-btn>
                 </q-card-section>
@@ -758,7 +795,7 @@ onMounted(load)
                   <q-btn outline dense no-caps icon="download" label="Получить" @click="fetchCA">
                     <q-tooltip>Получить сертификат по непроверенному соединению; затем сверить SHA-256 на стороне платформы</q-tooltip>
                   </q-btn>
-                  <q-btn v-if="caStored" flat dense round icon="delete_outline" color="negative" @click="clearCA">
+                  <q-btn v-if="caStored" flat dense round icon="delete_outline" color="negative" aria-label="Удалить сертификат" @click="clearCA">
                     <q-tooltip>Удалить сохранённый сертификат</q-tooltip>
                   </q-btn>
                 </q-card-section>
@@ -850,10 +887,14 @@ onMounted(load)
     <!-- Безопасное подключение: административная запись вводится один раз и не
          сохраняется, служба заводит под ней роль с минимальными правами и
          выдаёт её сервисной записи. В базу попадает только сервисная. -->
-    <q-dialog v-model="provisionOpen" persistent>
-      <q-card style="width: 680px; max-width: 96vw">
+    <q-dialog v-model="provisionOpen" persistent :maximized="$q.screen.lt.sm">
+      <q-card class="jhv-dialog-page" style="width: 680px; max-width: 96vw">
         <q-card-section class="text-h6">Подключение oVirt-кластера или совместимого форка</q-card-section>
         <q-separator />
+
+        <q-banner v-if="provisionFormError" dense class="bg-red-1 text-negative q-ma-md q-mb-none">
+          <template #avatar><q-icon name="error" /></template>{{ provisionFormError }}
+        </q-banner>
 
         <q-card-section class="q-gutter-md">
           <q-banner dense class="bg-blue-1">
@@ -901,7 +942,7 @@ onMounted(load)
                 <template #prepend><q-icon name="upload_file" /></template>
               </q-file>
               <q-btn outline dense no-caps icon="download" label="Получить" @click="fetchProvisionCA" />
-              <q-btn v-if="provisionForm.ca_cert" flat dense round icon="delete_outline" color="negative" @click="clearProvisionCA" />
+              <q-btn v-if="provisionForm.ca_cert" flat dense round icon="delete_outline" color="negative" aria-label="Удалить сертификат" @click="clearProvisionCA"><q-tooltip>Удалить сертификат</q-tooltip></q-btn>
             </q-card-section>
             <q-card-section class="q-pt-none text-caption">
               PEM не показывается. Полученный SHA-256 нужно сверить на стороне движка до подключения.

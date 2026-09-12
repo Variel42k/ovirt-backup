@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { useQuasar } from 'quasar'
+import { useRoute, useRouter } from 'vue-router'
 import { api, notifyError, notifyOk } from '@/api/client'
 import { ago, bytes, connState, hostStatus, percent, statusColor, vmStatus } from '@/api/format'
 import { useAuthStore } from '@/stores/auth'
@@ -12,6 +13,8 @@ import type { Disk, DiskSample, HealthSample, Host, MountSample, Server, Storage
 const props = defineProps<{ serverId: string }>()
 
 const $q = useQuasar()
+const route = useRoute()
+const router = useRouter()
 const auth = useAuthStore()
 const app = useAppStore()
 const server = ref<Server | null>(null)
@@ -29,7 +32,8 @@ const canManage = computed(
 // гостевой ОС: аппаратный сброс ВМ и перезагрузка хоста по питанию.
 const canDisrupt = computed(() => canManage.value && auth.can('servers.disruptive'))
 
-const tab = ref('vms')
+const knownTabs = new Set(['vms', 'hosts', 'disks', 'domains', 'health', 'io'])
+const tab = ref(knownTabs.has(String(route.query.tab)) ? String(route.query.tab) : 'vms')
 const health = ref<HealthSample[]>([])
 const healthHours = ref(24)
 const healthLoading = ref(false)
@@ -120,12 +124,34 @@ const loading = ref(false)
 const canManageHosts = computed(() => canManage.value && Boolean(server.value &&
   app.serverSupports(server.value, 'supports_host_management')))
 const vms = ref<VM[]>([])
+const selectedVMs = ref<VM[]>([])
 const hosts = ref<Host[]>([])
 const disks = ref<Disk[]>([])
 const domains = ref<StorageDomain[]>([])
-const search = ref('')
+const search = ref(String(route.query.search ?? ''))
+
+function syncViewRoute() {
+  const query = { ...route.query }
+  if (tab.value === 'vms') delete query.tab
+  else query.tab = tab.value
+  if (search.value) query.search = search.value
+  else delete query.search
+  void router.replace({ query })
+}
+
+watch(tab, syncViewRoute)
+watch(search, syncViewRoute)
 
 const dataDisks = computed(() => disks.value.filter((d) => !d.content_type || d.content_type === 'data'))
+
+function createPolicyForSelected() {
+  if (!selectedVMs.value.length) return
+  void router.push({ name: 'jobs', query: {
+    create: '1',
+    server: props.serverId,
+    vms: selectedVMs.value.map((vm) => vm.id).join(','),
+  } })
+}
 
 async function load() {
   loading.value = true
@@ -358,10 +384,21 @@ const domainColumns = [
 
       <q-tab-panels v-model="tab" animated>
         <q-tab-panel name="vms" class="q-pa-none">
+          <q-banner v-if="selectedVMs.length" dense class="bg-blue-1 q-ma-sm">
+            <div class="row items-center q-gutter-sm">
+              <div>Выбрано ВМ: {{ selectedVMs.length }}</div>
+              <q-space />
+              <q-btn v-if="auth.canWrite()" color="primary" unelevated icon="add_task" label="Создать задание бэкапа" @click="createPolicyForSelected" />
+              <q-btn flat label="Снять выбор" @click="selectedVMs = []" />
+            </div>
+          </q-banner>
           <q-table
             :rows="vms"
             :columns="vmColumns"
             row-key="id"
+            selection="multiple"
+            v-model:selected="selectedVMs"
+            :grid="$q.screen.lt.md"
             flat
             :loading="loading"
             :filter="search"

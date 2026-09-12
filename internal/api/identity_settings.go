@@ -234,6 +234,11 @@ func (s *Server) handleSetIdentitySettings(w http.ResponseWriter, r *http.Reques
 		s.writeError(w, r, err)
 		return
 	}
+	if !s.identityChangeMu.TryLock() {
+		writeJSON(w, http.StatusConflict, errorResponse{Error: "другая настройка Keycloak или домена ещё выполняется", Code: "identity_busy"})
+		return
+	}
+	defer s.identityChangeMu.Unlock()
 	_, current := s.oidcSnapshot()
 	clientSecret := req.ClientSecret
 	if clientSecret == "" && strings.TrimSpace(req.ClientID) == strings.TrimSpace(current.ClientID) &&
@@ -331,6 +336,11 @@ func (s *Server) handleBootstrapEmbeddedKeycloak(w http.ResponseWriter, r *http.
 		s.writeError(w, r, err)
 		return
 	}
+	if !s.identityChangeMu.TryLock() {
+		writeJSON(w, http.StatusConflict, errorResponse{Error: "другая настройка Keycloak или домена ещё выполняется", Code: "identity_busy"})
+		return
+	}
+	defer s.identityChangeMu.Unlock()
 	if s.hostHelper == nil {
 		s.writeError(w, r, badRequest("host helper недоступен; встроенный Keycloak поддерживается в Docker-установке из .run"))
 		return
@@ -341,13 +351,17 @@ func (s *Server) handleBootstrapEmbeddedKeycloak(w http.ResponseWriter, r *http.
 		return
 	}
 	redirectURL := external + "/api/v1/auth/oidc/callback"
-	bootstrapCtx, cancel := context.WithTimeout(r.Context(), 7*time.Minute)
+	// The host helper owns a long-running deployment. Detach it from the HTTP
+	// request so a navigation or browser refresh cannot leave Keycloak half
+	// configured. The bounded context still prevents a stuck helper from
+	// running forever.
+	bootstrapCtx, cancel := context.WithTimeout(context.Background(), 7*time.Minute)
+	defer cancel()
 	result, err := s.hostHelper.Bootstrap(bootstrapCtx, hosthelper.BootstrapRequest{
 		PublicURL: req.PublicURL, Port: req.Port, DirectTLS: req.DirectTLS,
 		Realm: req.Realm, ClientID: req.ClientID, RedirectURL: redirectURL,
 		RoleMapping: cloneRoleMapping(req.RoleMapping),
 	})
-	cancel()
 	if err != nil {
 		s.audit(r, "identity.embedded.bootstrap", model.ScopeSettings, "keycloak", false, err.Error())
 		s.writeError(w, r, badRequest("встроенный Keycloak не запущен: %v", err))
@@ -372,7 +386,7 @@ func (s *Server) handleBootstrapEmbeddedKeycloak(w http.ResponseWriter, r *http.
 	if value.RevalidateInterval == 0 {
 		value.RevalidateInterval = 5 * time.Minute
 	}
-	stored, found, loadErr := s.store.IdentitySettings(r.Context())
+	stored, found, loadErr := s.store.IdentitySettings(bootstrapCtx)
 	if loadErr != nil {
 		s.writeError(w, r, loadErr)
 		return
@@ -389,7 +403,7 @@ func (s *Server) handleBootstrapEmbeddedKeycloak(w http.ResponseWriter, r *http.
 		s.writeError(w, r, badRequest("%v", err))
 		return
 	}
-	checkCtx, checkCancel := context.WithTimeout(r.Context(), oidcDiscoveryTimeout)
+	checkCtx, checkCancel := context.WithTimeout(bootstrapCtx, oidcDiscoveryTimeout)
 	_, _, err = newOIDCClient(candidate).connect(checkCtx)
 	checkCancel()
 	if err != nil {
@@ -399,13 +413,13 @@ func (s *Server) handleBootstrapEmbeddedKeycloak(w http.ResponseWriter, r *http.
 	_, current := s.oidcSnapshot()
 	var revoked int64
 	if identityDomainBindingChanged(identityFromConfig(current), value) {
-		revoked, err = s.store.DeleteOIDCSessions(r.Context())
+		revoked, err = s.store.DeleteOIDCSessions(bootstrapCtx)
 		if err != nil {
 			s.writeError(w, r, err)
 			return
 		}
 	}
-	if err := s.store.SetIdentitySettings(r.Context(), value); err != nil {
+	if err := s.store.SetIdentitySettings(bootstrapCtx, value); err != nil {
 		s.writeError(w, r, err)
 		return
 	}
@@ -551,6 +565,11 @@ func (s *Server) handleConfigureDomain(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
+	if !s.identityChangeMu.TryLock() {
+		writeJSON(w, http.StatusConflict, errorResponse{Error: "другая настройка Keycloak или домена ещё выполняется", Code: "identity_busy"})
+		return
+	}
+	defer s.identityChangeMu.Unlock()
 	_, oidcCfg := s.oidcSnapshot()
 	if !oidcCfg.Enabled {
 		s.writeError(w, r, badRequest("сначала сохраните подключение к Keycloak"))
@@ -564,7 +583,10 @@ func (s *Server) handleConfigureDomain(w http.ResponseWriter, r *http.Request) {
 		OperatorGroup: strings.TrimSpace(req.Domain.OperatorGroup), ViewerGroup: strings.TrimSpace(req.Domain.ViewerGroup),
 		GroupMode: strings.TrimSpace(req.Domain.GroupMode),
 	}
-	configureCtx, cancel := context.WithTimeout(r.Context(), 6*time.Minute)
+	// Domain discovery and federation setup must finish even if the operator
+	// closes the settings page. Credentials stay only in this bounded goroutine
+	// stack and are cleared before the handler returns.
+	configureCtx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
 	defer cancel()
 	var result keycloakadmin.Result
 	if strings.TrimSpace(req.AdminClientID) == "" && strings.TrimSpace(req.AdminClientSecret) == "" {
@@ -597,7 +619,7 @@ func (s *Server) handleConfigureDomain(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, badRequest("настройка домена не завершена: %v", err))
 		return
 	}
-	value, found, err := s.store.IdentitySettings(r.Context())
+	value, found, err := s.store.IdentitySettings(configureCtx)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
@@ -613,12 +635,12 @@ func (s *Server) handleConfigureDomain(w http.ResponseWriter, r *http.Request) {
 		domain.AdminGroup: "admin", domain.OperatorGroup: "operator", domain.ViewerGroup: "viewer",
 	}
 	value.UpdatedBy = user.Username
-	revoked, err := s.store.DeleteOIDCSessions(r.Context())
+	revoked, err := s.store.DeleteOIDCSessions(configureCtx)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	if err := s.store.SetIdentitySettings(r.Context(), value); err != nil {
+	if err := s.store.SetIdentitySettings(configureCtx, value); err != nil {
 		s.writeError(w, r, err)
 		return
 	}

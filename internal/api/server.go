@@ -22,6 +22,7 @@ import (
 	drcheck "github.com/Variel42k/ovirt-backup/internal/dr"
 	"github.com/Variel42k/ovirt-backup/internal/events"
 	"github.com/Variel42k/ovirt-backup/internal/filebackup"
+	"github.com/Variel42k/ovirt-backup/internal/hosthelper"
 	"github.com/Variel42k/ovirt-backup/internal/libvirtx"
 	"github.com/Variel42k/ovirt-backup/internal/logging"
 	"github.com/Variel42k/ovirt-backup/internal/model"
@@ -57,6 +58,7 @@ type Server struct {
 	notifications *notify.Manager
 	dr            *drcheck.Checker
 	fileBackup    *filebackup.Engine
+	hostHelper    *hosthelper.Client
 	metricsToken  []byte
 	storageMounts func() []string
 	// logins притормаживает подбор пароля. В памяти, а не в базе: ограничение
@@ -135,6 +137,7 @@ func New(d Deps) *Server {
 		notifications: d.Notifications,
 		dr:            d.DR, metricsToken: metricsToken,
 		fileBackup:    d.FileBackup,
+		hostHelper:    hosthelper.New(os.Getenv("JHV_HOST_HELPER_SOCKET")),
 		storageMounts: d.StorageMounts,
 		logins:        newLoginLimiter(),
 		oidcLogins:    newOIDCPending(),
@@ -356,6 +359,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /settings/runtime", s.perm(model.PermSettingsRead, s.handleRuntimeSettings))
 	mux.HandleFunc("GET /settings/identity", s.perm(model.PermUsersAdmin, s.handleGetIdentitySettings))
 	mux.HandleFunc("PUT /settings/identity", s.perm(model.PermUsersAdmin, s.handleSetIdentitySettings))
+	mux.HandleFunc("POST /settings/identity/embedded-keycloak", s.perm(model.PermUsersAdmin, s.handleBootstrapEmbeddedKeycloak))
 	mux.HandleFunc("POST /settings/identity/domain", s.perm(model.PermUsersAdmin, s.handleConfigureDomain))
 	mux.HandleFunc("PUT /settings/runtime/compression", s.perm(model.PermSettingsAdmin, s.handleSetRuntimeCompression))
 	mux.HandleFunc("DELETE /settings/runtime/compression", s.perm(model.PermSettingsAdmin, s.handleResetRuntimeCompression))

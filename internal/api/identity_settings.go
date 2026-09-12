@@ -14,6 +14,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/Variel42k/ovirt-backup/internal/config"
+	"github.com/Variel42k/ovirt-backup/internal/hosthelper"
 	"github.com/Variel42k/ovirt-backup/internal/keycloakadmin"
 	"github.com/Variel42k/ovirt-backup/internal/model"
 )
@@ -34,6 +35,7 @@ type identityResponse struct {
 	Source             string            `json:"source"`
 	CanConfigure       bool              `json:"can_configure"`
 	Domain             domainResponse    `json:"domain"`
+	Embedded           hosthelper.Status `json:"embedded_keycloak"`
 }
 
 type domainResponse struct {
@@ -68,6 +70,7 @@ type domainWriteRequest struct {
 	AdminRealm        string `json:"admin_realm"`
 	AdminClientID     string `json:"admin_client_id"`
 	AdminClientSecret string `json:"admin_client_secret"`
+	CACertificate     string `json:"ca_certificate"`
 	Domain            struct {
 		Name          string `json:"name"`
 		ProviderName  string `json:"provider_name"`
@@ -81,6 +84,20 @@ type domainWriteRequest struct {
 		ViewerGroup   string `json:"viewer_group"`
 		GroupMode     string `json:"group_mode"`
 	} `json:"domain"`
+}
+
+type embeddedKeycloakRequest struct {
+	LocalPassword     string            `json:"local_password"`
+	PublicURL         string            `json:"public_url"`
+	Port              int               `json:"port"`
+	DirectTLS         bool              `json:"direct_tls"`
+	Realm             string            `json:"realm"`
+	ClientID          string            `json:"client_id"`
+	ButtonLabel       string            `json:"button_label"`
+	RoleMapping       map[string]string `json:"role_mapping"`
+	AllowLocalLogin   bool              `json:"allow_local_login"`
+	SessionTTLMinutes int               `json:"session_ttl_minutes"`
+	RevalidateSeconds int               `json:"revalidate_seconds"`
 }
 
 // OIDCConfigFromIdentity translates the database representation used by both
@@ -147,6 +164,15 @@ func (s *Server) handleGetIdentitySettings(w http.ResponseWriter, r *http.Reques
 
 func (s *Server) identityResponse(value model.IdentitySettings, source string, r *http.Request) identityResponse {
 	p := principalFrom(r.Context())
+	embedded := hosthelper.Status{}
+	if s.hostHelper != nil {
+		statusCtx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		status, err := s.hostHelper.Status(statusCtx)
+		cancel()
+		if err == nil {
+			embedded = status
+		}
+	}
 	return identityResponse{
 		Enabled: value.Enabled, Issuer: value.Issuer, BackchannelURL: value.BackchannelURL,
 		ClientID: value.ClientID, ClientSecretStored: value.ClientSecret != "",
@@ -156,6 +182,7 @@ func (s *Server) identityResponse(value model.IdentitySettings, source string, r
 		SessionTTLMinutes: int(value.SessionTTL / time.Minute),
 		RevalidateSeconds: int(value.RevalidateInterval / time.Second), Source: source,
 		CanConfigure: p != nil && p.Provider == model.ProviderLocal && p.Can(model.PermUsersAdmin),
+		Embedded:     embedded,
 		Domain: domainResponse{
 			Connected: value.DomainConnected, Name: value.DomainName,
 			ProviderName: value.LDAPProviderName, LDAPURL: value.LDAPURL,
@@ -288,6 +315,104 @@ func (s *Server) handleSetIdentitySettings(w http.ResponseWriter, r *http.Reques
 	req.ClientSecret = ""
 	s.audit(r, "identity.update", model.ScopeSettings, "oidc", true,
 		fmt.Sprintf("OIDC-настройки обновлены локальным администратором; отозвано внешних сессий: %d", revoked))
+	writeJSON(w, http.StatusOK, s.identityResponse(value, "database", r))
+}
+
+func (s *Server) handleBootstrapEmbeddedKeycloak(w http.ResponseWriter, r *http.Request) {
+	var req embeddedKeycloakRequest
+	if err := decodeJSON(r, &req); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	user, err := s.verifyLocalAdmin(r, req.LocalPassword)
+	req.LocalPassword = ""
+	if err != nil {
+		s.audit(r, "identity.embedded.bootstrap", model.ScopeSettings, "keycloak", false, err.Error())
+		s.writeError(w, r, err)
+		return
+	}
+	if s.hostHelper == nil {
+		s.writeError(w, r, badRequest("host helper недоступен; встроенный Keycloak поддерживается в Docker-установке из .run"))
+		return
+	}
+	external := strings.TrimRight(strings.TrimSpace(s.cfg.Server.ExternalURL), "/")
+	if external == "" {
+		s.writeError(w, r, badRequest("для встроенного Keycloak задайте server.external_url"))
+		return
+	}
+	redirectURL := external + "/api/v1/auth/oidc/callback"
+	bootstrapCtx, cancel := context.WithTimeout(r.Context(), 7*time.Minute)
+	result, err := s.hostHelper.Bootstrap(bootstrapCtx, hosthelper.BootstrapRequest{
+		PublicURL: req.PublicURL, Port: req.Port, DirectTLS: req.DirectTLS,
+		Realm: req.Realm, ClientID: req.ClientID, RedirectURL: redirectURL,
+		RoleMapping: cloneRoleMapping(req.RoleMapping),
+	})
+	cancel()
+	if err != nil {
+		s.audit(r, "identity.embedded.bootstrap", model.ScopeSettings, "keycloak", false, err.Error())
+		s.writeError(w, r, badRequest("встроенный Keycloak не запущен: %v", err))
+		return
+	}
+	value := model.IdentitySettings{
+		Enabled: true, Issuer: result.Issuer, BackchannelURL: result.BackchannelURL,
+		ClientID: strings.TrimSpace(req.ClientID), ClientSecret: result.ClientSecret,
+		RedirectURL: redirectURL, ButtonLabel: strings.TrimSpace(req.ButtonLabel),
+		GroupsClaim: "groups", RoleMapping: cloneRoleMapping(req.RoleMapping),
+		AllowLocalLogin:    req.AllowLocalLogin,
+		SessionTTL:         time.Duration(req.SessionTTLMinutes) * time.Minute,
+		RevalidateInterval: time.Duration(req.RevalidateSeconds) * time.Second,
+		UpdatedBy:          user.Username,
+	}
+	if value.ButtonLabel == "" {
+		value.ButtonLabel = "Войти через Keycloak"
+	}
+	if value.SessionTTL == 0 {
+		value.SessionTTL = time.Hour
+	}
+	if value.RevalidateInterval == 0 {
+		value.RevalidateInterval = 5 * time.Minute
+	}
+	stored, found, loadErr := s.store.IdentitySettings(r.Context())
+	if loadErr != nil {
+		s.writeError(w, r, loadErr)
+		return
+	}
+	if found && !identityDomainBindingChanged(stored, value) {
+		copyDomainMetadata(&value, stored)
+	}
+	if err := validateLocalLoginFallback(value); err != nil {
+		s.writeError(w, r, badRequest("%v", err))
+		return
+	}
+	candidate := OIDCConfigFromIdentity(value)
+	if err := s.validateIdentityConfig(candidate); err != nil {
+		s.writeError(w, r, badRequest("%v", err))
+		return
+	}
+	checkCtx, checkCancel := context.WithTimeout(r.Context(), oidcDiscoveryTimeout)
+	_, _, err = newOIDCClient(candidate).connect(checkCtx)
+	checkCancel()
+	if err != nil {
+		s.writeError(w, r, badRequest("Keycloak запущен, но discovery приложения не прошёл: %v", err))
+		return
+	}
+	_, current := s.oidcSnapshot()
+	var revoked int64
+	if identityDomainBindingChanged(identityFromConfig(current), value) {
+		revoked, err = s.store.DeleteOIDCSessions(r.Context())
+		if err != nil {
+			s.writeError(w, r, err)
+			return
+		}
+	}
+	if err := s.store.SetIdentitySettings(r.Context(), value); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	s.applyOIDCConfig(candidate)
+	result.ClientSecret = ""
+	s.audit(r, "identity.embedded.bootstrap", model.ScopeSettings, req.Realm, true,
+		fmt.Sprintf("встроенный Keycloak запущен; отозвано внешних сессий: %d", revoked))
 	writeJSON(w, http.StatusOK, s.identityResponse(value, "database", r))
 }
 
@@ -431,12 +556,6 @@ func (s *Server) handleConfigureDomain(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, badRequest("сначала сохраните подключение к Keycloak"))
 		return
 	}
-	admin, err := keycloakadmin.NewWithBackchannel(oidcCfg.Issuer, oidcCfg.BackchannelURL,
-		req.AdminRealm, req.AdminClientID, req.AdminClientSecret)
-	if err != nil {
-		s.writeError(w, r, badRequest("%v", err))
-		return
-	}
 	domain := keycloakadmin.Domain{
 		Name: strings.TrimSpace(req.Domain.Name), ProviderName: strings.TrimSpace(req.Domain.ProviderName),
 		URL: strings.TrimSpace(req.Domain.LDAPURL), UsersDN: strings.TrimSpace(req.Domain.UsersDN),
@@ -447,13 +566,32 @@ func (s *Server) handleConfigureDomain(w http.ResponseWriter, r *http.Request) {
 	}
 	configureCtx, cancel := context.WithTimeout(r.Context(), 6*time.Minute)
 	defer cancel()
-	err = admin.EnsureApplicationClient(configureCtx, oidcCfg.ClientID, oidcCfg.ClientSecret, oidcCfg.RedirectURL)
 	var result keycloakadmin.Result
-	if err == nil {
-		result, err = admin.ConfigureDomain(configureCtx, domain)
+	if strings.TrimSpace(req.AdminClientID) == "" && strings.TrimSpace(req.AdminClientSecret) == "" {
+		if s.hostHelper == nil {
+			err = errors.New("для встроенного Keycloak недоступен host helper")
+		} else {
+			var helperResult hosthelper.DomainResponse
+			helperResult, err = s.hostHelper.ConfigureDomain(configureCtx, hosthelper.DomainRequest{
+				Issuer: oidcCfg.Issuer, Domain: domain, CACertificate: req.CACertificate,
+			})
+			result = helperResult.Result
+		}
+	} else if strings.TrimSpace(req.AdminClientID) == "" || strings.TrimSpace(req.AdminClientSecret) == "" {
+		err = errors.New("укажите одновременно ID и секрет административного клиента Keycloak")
+	} else {
+		var admin *keycloakadmin.Client
+		admin, err = keycloakadmin.NewWithBackchannel(oidcCfg.Issuer, oidcCfg.BackchannelURL,
+			req.AdminRealm, req.AdminClientID, req.AdminClientSecret)
+		if err == nil {
+			err = admin.EnsureApplicationClient(configureCtx, oidcCfg.ClientID, oidcCfg.ClientSecret, oidcCfg.RedirectURL)
+		}
+		if err == nil {
+			result, err = admin.ConfigureDomain(configureCtx, domain)
+		}
 	}
 	domain.BindPassword, req.Domain.BindPassword = "", ""
-	req.AdminClientSecret = ""
+	req.AdminClientSecret, req.CACertificate = "", ""
 	if err != nil {
 		s.audit(r, "identity.domain.configure", model.ScopeSettings, domain.Name, false, err.Error())
 		s.writeError(w, r, badRequest("настройка домена не завершена: %v", err))

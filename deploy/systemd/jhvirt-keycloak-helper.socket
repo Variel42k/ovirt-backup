@@ -1,0 +1,14 @@
+[Unit]
+Description=justhpc virt manager Keycloak lifecycle socket
+Documentation=file:@PREFIX@/docs/DEPLOY.md
+
+[Socket]
+ListenStream=/run/jhvirt/keycloak-helper.sock
+SocketUser=root
+SocketGroup=@USER_NAME@
+SocketMode=0660
+DirectoryMode=0755
+RemoveOnStop=true
+
+[Install]
+WantedBy=sockets.target

@@ -66,6 +66,7 @@ import type {
   GuardedActionInfo,
   IdentitySettings,
   IdentitySettingsWrite,
+  EmbeddedKeycloakWrite,
   DomainSettingsWrite,
   DomainConfigureResult,
   LogStatus,
@@ -531,6 +532,8 @@ export const api = {
   identitySettings: () => http.get<IdentitySettings>('/settings/identity').then((r) => r.data),
   setIdentitySettings: (payload: IdentitySettingsWrite) =>
     http.put<IdentitySettings>('/settings/identity', payload, { timeout: 45_000 }).then((r) => r.data),
+  bootstrapEmbeddedKeycloak: (payload: EmbeddedKeycloakWrite) =>
+    http.post<IdentitySettings>('/settings/identity/embedded-keycloak', payload, { timeout: 430_000 }).then((r) => r.data),
   configureIdentityDomain: (payload: DomainSettingsWrite) =>
     http.post<DomainConfigureResult>('/settings/identity/domain', payload, { timeout: 370_000 }).then((r) => r.data),
   setRuntimeCompression: (compression: string) =>

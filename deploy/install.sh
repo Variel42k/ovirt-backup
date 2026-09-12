@@ -87,6 +87,8 @@ USER_NAME="${USER_NAME:-jhvirt}"
 UNIT="/etc/systemd/system/jhvirt.service"
 DR_UNIT="/etc/systemd/system/jhvirt-dr-backup.service"
 DR_TIMER="/etc/systemd/system/jhvirt-dr-backup.timer"
+KEYCLOAK_HELPER_UNIT="/etc/systemd/system/jhvirt-keycloak-helper.service"
+KEYCLOAK_HELPER_SOCKET="/etc/systemd/system/jhvirt-keycloak-helper.socket"
 SERVER_BINARY="ovirt-backup-server"
 LEGACY_SERVER_BINARY="justhpc-virt-server"
 COMPOSE_SERVICE="ovirt-backup"
@@ -1007,14 +1009,20 @@ migration_export_docker() {
     migration_volume_file "$ME_DATA_VOLUME" bootstrap-admin.password "$ME_DIR/data/bootstrap-admin.password" 0
     migration_volume_file "$ME_DATA_VOLUME" tls/server.crt "$ME_DIR/tls/server.crt" 0
     migration_volume_file "$ME_DATA_VOLUME" tls/server.key "$ME_DIR/tls/server.key" 0
+    if [ -s "$PREFIX/keycloak-helper/keycloak.json" ] && [ ! -L "$PREFIX/keycloak-helper/keycloak.json" ]; then
+        cp "$PREFIX/keycloak-helper/keycloak.json" "$ME_DIR/data/keycloak-helper.json"
+        chmod 600 "$ME_DIR/data/keycloak-helper.json"
+    fi
 
     # Федерация AD хранит bind-пароль вне БД Keycloak. Без vault-файла и CA
     # восстановленная база выглядит исправной, но доменный вход не работает.
+    ME_KC_REALM="$(env_file_value "$ME_WORK/.env" KEYCLOAK_REALM)"
+    [ -n "$ME_KC_REALM" ] || ME_KC_REALM="$KEYCLOAK_REALM"
     ME_KC_VAULT_VALUE="$(env_file_value "$ME_WORK/.env" JHV_KEYCLOAK_VAULT_DIR)"
     if [ -n "$ME_KC_VAULT_VALUE" ]; then
         ME_KC_VAULT_PATH="$(docker_host_path "$ME_WORK" "$ME_KC_VAULT_VALUE")"
-        if [ -s "$ME_KC_VAULT_PATH/${KEYCLOAK_REALM}_ad-bind" ]; then
-            cp "$ME_KC_VAULT_PATH/${KEYCLOAK_REALM}_ad-bind" "$ME_DIR/data/keycloak-ad-bind"
+        if [ -s "$ME_KC_VAULT_PATH/${ME_KC_REALM}_ad-bind" ]; then
+            cp "$ME_KC_VAULT_PATH/${ME_KC_REALM}_ad-bind" "$ME_DIR/data/keycloak-ad-bind"
         fi
     fi
     ME_KC_TRUST_VALUE="$(env_file_value "$ME_WORK/.env" JHV_KEYCLOAK_TRUSTSTORE_DIR)"
@@ -1259,7 +1267,7 @@ migration_validate_archive() {
     while IFS= read -r MVA_ENTRY; do
         MVA_ENTRY="${MVA_ENTRY#./}"; MVA_ENTRY="${MVA_ENTRY%/}"
         case "$MVA_ENTRY" in
-            ""|manifest|checksums.sha256|systemd-write-paths|config|config/ovirt-backup.yaml|environment|environment/docker.env|environment/systemd.env|database|database/jhvirt.dump|database/keycloak.dump|data|data/secret.key|data/metrics.token|data/database.url|data/oidc-client.secret|data/bootstrap-admin.password|data/keycloak-ad-bind|tls|tls/server.crt|tls/server.key|truststores) ;;
+            ""|manifest|checksums.sha256|systemd-write-paths|config|config/ovirt-backup.yaml|environment|environment/docker.env|environment/systemd.env|database|database/jhvirt.dump|database/keycloak.dump|data|data/secret.key|data/metrics.token|data/database.url|data/oidc-client.secret|data/bootstrap-admin.password|data/keycloak-ad-bind|data/keycloak-helper.json|tls|tls/server.crt|tls/server.key|truststores) ;;
             truststores/*)
                 MVA_TRUST_NAME="${MVA_ENTRY#truststores/}"
                 case "$MVA_TRUST_NAME" in ""|*/*|.|..) die "недопустимое имя truststore в пакете: $MVA_ENTRY" ;; esac
@@ -1488,6 +1496,15 @@ uninstall_containers() {
     done
     [ "$UNINSTALL_DOCKER_FOUND" -eq 1 ] ||
         say "    контейнерная установка с .env не найдена"
+    if have systemctl; then
+        systemctl disable --now jhvirt-keycloak-helper.socket >/dev/null 2>&1 || true
+        systemctl stop jhvirt-keycloak-helper.service >/dev/null 2>&1 || true
+    fi
+    rm -f "$KEYCLOAK_HELPER_UNIT" "$KEYCLOAK_HELPER_SOCKET"
+    if have systemctl; then
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        systemctl reset-failed jhvirt-keycloak-helper.service >/dev/null 2>&1 || true
+    fi
 }
 
 uninstall_systemd() {
@@ -2436,6 +2453,8 @@ load_existing_oidc() {
     fi
     case "$EXISTING_OIDC_MODE" in
         keycloak)
+            OIDC_STORED="$(env_file_value "$WORK/.env" KEYCLOAK_REALM)"
+            [ -z "$OIDC_STORED" ] || KEYCLOAK_REALM="$OIDC_STORED"
             OIDC_STORED="$(env_file_value "$WORK/.env" JHV_KEYCLOAK_URL)"
             [ -n "$KEYCLOAK_URL" ] || KEYCLOAK_URL="$OIDC_STORED"
             KEYCLOAK_ADMIN_USER="$(env_file_value "$WORK/.env" KEYCLOAK_ADMIN_USER)"
@@ -3926,6 +3945,11 @@ migration_apply_docker_files() {
         MAD_CONFIG="$PREFIX/config/$CONFIG_NAME"
         cp "$MIGRATION_TMP/config/$CONFIG_NAME" "$MAD_CONFIG"
         set_plain_env JHV_CONFIG_FILE "../config/$CONFIG_NAME" "$MAD_WORK/.env"
+        if [ -s "$MIGRATION_TMP/data/keycloak-helper.json" ]; then
+            install -d -m 0700 -o root -g root "$PREFIX/keycloak-helper"
+            install -m 0600 -o root -g root "$MIGRATION_TMP/data/keycloak-helper.json" \
+                "$PREFIX/keycloak-helper/keycloak.json"
+        fi
     else
         MAD_CONFIG="$MAD_WORK/ovirt-backup.migrated.yaml"
         cp "$MIGRATION_TMP/config/$CONFIG_NAME" "$MAD_CONFIG"
@@ -4159,14 +4183,14 @@ prepare_docker_keycloak_truststore() {
             die "не удалось опубликовать CA в $PDKT_PATH"
         KEYCLOAK_AD_CA_TARGET="$PDKT_PATH/active-directory-ca.pem"
     fi
-    if ! docker run --rm --network none --user 1000:0 -v "$PDKT_PATH:/trust:ro" \
+    if ! docker run --rm --network none --user 1000:0 -v "$PDKT_PATH:/trust:ro,z" \
             "$POSTGRES_HELPER_IMAGE" sh -c 'test -r /trust && test -x /trust' >/dev/null 2>&1; then
         if [ -z "$(ls -A "$PDKT_PATH" 2>/dev/null)" ]; then
             docker run --rm --network none --user root -v "$PDKT_PATH:/trust" \
                 "$POSTGRES_HELPER_IMAGE" \
                 sh -c 'chown 1000:0 /trust && chmod 0750 /trust' >/dev/null 2>&1 || true
         fi
-        docker run --rm --network none --user 1000:0 -v "$PDKT_PATH:/trust:ro" \
+        docker run --rm --network none --user 1000:0 -v "$PDKT_PATH:/trust:ro,z" \
             "$POSTGRES_HELPER_IMAGE" sh -c 'test -r /trust && test -x /trust' >/dev/null 2>&1 ||
             die "Keycloak UID 1000 не может читать $PDKT_PATH
 Разрешите чтение каталога и CA-файлов либо задайте другой JHV_KEYCLOAK_TRUSTSTORE_DIR."
@@ -4227,7 +4251,7 @@ prepare_docker_keycloak_vault() {
     if [ -f "$PDKV_SECRET" ]; then
         chown root:root "$PDKV_SECRET" 2>/dev/null || true
         chmod 0440 "$PDKV_SECRET" || die "не удалось защитить $PDKV_SECRET"
-        docker run --rm --network none --user 1000:0 -v "$PDKV_PATH:/vault:ro" \
+        docker run --rm --network none --user 1000:0 -v "$PDKV_PATH:/vault:ro,z" \
             "$POSTGRES_HELPER_IMAGE" sh -c \
             "test -s '/vault/${KEYCLOAK_REALM}_ad-bind' && test -r '/vault/${KEYCLOAK_REALM}_ad-bind'" \
             >/dev/null 2>&1 || die "Keycloak UID 1000:GID 0 не может прочитать $PDKV_SECRET"
@@ -4448,8 +4472,75 @@ SQL
     say "    приложение и Keycloak используют разные непривилегированные роли"
 }
 
+install_keycloak_host_helper() {
+    [ "$BUNDLE" -eq 1 ] || return 0
+    [ -x "$PREFIX/bin/jhvirt-keycloak-helper" ] ||
+        die "в комплекте нет jhvirt-keycloak-helper"
+    [ -f "$HERE/systemd/jhvirt-keycloak-helper.service" ] ||
+        die "в комплекте нет unit Keycloak helper"
+    [ -f "$HERE/systemd/jhvirt-keycloak-helper.socket" ] ||
+        die "в комплекте нет socket unit Keycloak helper"
+
+    if ! has_systemd; then
+        say "    предупреждение: systemd недоступен; запуск встроенного Keycloak из web отключён"
+        set_plain_env JHV_HOST_HELPER_GID 65534 "$WORK/.env"
+        return 0
+    fi
+
+    step "установка host helper для встроенного Keycloak"
+    for HELPER_PATH in "$PREFIX/compose" "$PREFIX/keycloak-helper" \
+            "$PREFIX/keycloak-truststores" "$PREFIX/keycloak-vault"; do
+        [ ! -L "$HELPER_PATH" ] || die "путь host helper не должен быть symlink: $HELPER_PATH"
+        [ ! -e "$HELPER_PATH" ] || [ -d "$HELPER_PATH" ] ||
+            die "путь host helper должен быть каталогом: $HELPER_PATH"
+    done
+    if find "$PREFIX/compose" -type l -print | grep -q .; then
+        die "каталог Compose содержит symlink; root helper отказывается его использовать"
+    fi
+    install -d -m 0700 -o root -g root "$PREFIX/keycloak-helper"
+    chown root:root "$PREFIX/keycloak-helper" "$PREFIX/keycloak-truststores" "$PREFIX/keycloak-vault"
+    chmod 0700 "$PREFIX/keycloak-helper"
+    chmod 0750 "$PREFIX/keycloak-truststores" "$PREFIX/keycloak-vault"
+    chown -R root:root "$PREFIX/compose"
+    chmod 0750 "$PREFIX/compose"
+    chmod 0600 "$PREFIX/compose/.env"
+    if [ -e "$PREFIX/keycloak-helper/keycloak.json" ]; then
+        [ -f "$PREFIX/keycloak-helper/keycloak.json" ] && [ ! -L "$PREFIX/keycloak-helper/keycloak.json" ] ||
+            die "состояние host helper имеет недопустимый тип"
+        chown root:root "$PREFIX/keycloak-helper/keycloak.json"
+        chmod 0600 "$PREFIX/keycloak-helper/keycloak.json"
+    fi
+    chown root:root "$PREFIX/bin/jhvirt-keycloak-helper"
+    chmod 0755 "$PREFIX/bin/jhvirt-keycloak-helper"
+    sed -e "s|@PREFIX@|$PREFIX|g" -e "s|@USER_NAME@|$USER_NAME|g" \
+        "$HERE/systemd/jhvirt-keycloak-helper.service" > "$KEYCLOAK_HELPER_UNIT.tmp"
+    sed -e "s|@PREFIX@|$PREFIX|g" -e "s|@USER_NAME@|$USER_NAME|g" \
+        "$HERE/systemd/jhvirt-keycloak-helper.socket" > "$KEYCLOAK_HELPER_SOCKET.tmp"
+    install -m 0644 "$KEYCLOAK_HELPER_UNIT.tmp" "$KEYCLOAK_HELPER_UNIT"
+    install -m 0644 "$KEYCLOAK_HELPER_SOCKET.tmp" "$KEYCLOAK_HELPER_SOCKET"
+    rm -f "$KEYCLOAK_HELPER_UNIT.tmp" "$KEYCLOAK_HELPER_SOCKET.tmp"
+
+    HELPER_GID="$(id -g "$USER_NAME")"
+    case "$HELPER_GID" in ''|*[!0-9]*) die "не удалось определить GID группы $USER_NAME" ;; esac
+    set_plain_env JHV_HOST_HELPER_GID "$HELPER_GID" "$WORK/.env"
+    systemctl daemon-reload
+}
+
+start_keycloak_host_helper() {
+    [ "$BUNDLE" -eq 1 ] || return 0
+    has_systemd || return 0
+    systemctl enable --now jhvirt-keycloak-helper.socket >/dev/null
+    say "    Unix-сокет управления Keycloak доступен только root и группе $USER_NAME"
+}
+
 install_containers() {
     RUN="$(runner "$MODE")"
+	# Старый helper не должен работать, пока установщик заменяет его бинарник и
+	# временно меняет владельцев дерева bundle. При ошибке обновления сокет
+	# останется остановлен и не запустит root-процесс с частичной конфигурацией.
+	if [ "$BUNDLE" -eq 1 ] && has_systemd; then
+		systemctl stop jhvirt-keycloak-helper.socket jhvirt-keycloak-helper.service >/dev/null 2>&1 || true
+	fi
 
     if [ "$BUNDLE" -eq 1 ]; then
         WORK="$PREFIX/compose"
@@ -4480,7 +4571,7 @@ install_containers() {
         mkdir -p "$PREFIX/compose" "$PREFIX/config" "$PREFIX/data" "$PREFIX/logs" \
                  "$PREFIX/docs" "$PREFIX/backups" "$PREFIX/restores" \
                  "$PREFIX/file-sources" "$PREFIX/file-restores" \
-                 "$PREFIX/keycloak-truststores" "$PREFIX/keycloak-vault"
+                 "$PREFIX/keycloak-truststores" "$PREFIX/keycloak-vault" "$PREFIX/keycloak-helper"
         rm -rf "${PREFIX:?}/bin" "${PREFIX:?}/web"
         # Образ собирается из bin/ и web/dist рядом с Dockerfile, поэтому весь
         # комплект копируется целиком.
@@ -4659,6 +4750,7 @@ PostgreSQL хранит пароль внутри тома и новый не п
 		# 10001, который не обязан совпадать с системным пользователем хоста.
 		chmod 644 "$PREFIX/config/$CONFIG_NAME"
 	fi
+	install_keycloak_host_helper
 
 	if [ "$BUNDLE" -eq 1 ]; then
 		RECOVERY_TOKEN_FILE="$PREFIX/config/recovery.token"
@@ -4782,6 +4874,7 @@ PostgreSQL хранит пароль внутри тома и новый не п
 		wait_ready "$READY_SCHEME://127.0.0.1:$PORT/readyz" ||
 			die "приложение не стало готово после удаления bootstrap-секрета"
 	fi
+	start_keycloak_host_helper
 
     say ""
     say "════════════════════════════════════════════════════════════"

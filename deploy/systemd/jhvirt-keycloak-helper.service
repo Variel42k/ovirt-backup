@@ -1,0 +1,31 @@
+[Unit]
+Description=justhpc virt manager Keycloak lifecycle helper
+Documentation=file:@PREFIX@/docs/DEPLOY.md
+Requires=jhvirt-keycloak-helper.socket docker.service
+After=docker.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+Environment=HOME=@PREFIX@/keycloak-helper
+ExecStart=@PREFIX@/bin/jhvirt-keycloak-helper \
+  --compose-dir @PREFIX@/compose \
+  --state-dir @PREFIX@/keycloak-helper \
+  --truststore-dir @PREFIX@/keycloak-truststores \
+  --vault-dir @PREFIX@/keycloak-vault
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=@PREFIX@/compose @PREFIX@/keycloak-helper @PREFIX@/keycloak-truststores @PREFIX@/keycloak-vault
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

@@ -16,6 +16,7 @@ func TestConfigureDomainUsesTransientCredentialsAndChecksGroups(t *testing.T) {
 		mu              sync.Mutex
 		componentNumber int
 		createdClient   map[string]any
+		createdProvider component
 		seenLDAPTests   []string
 	)
 	mux := http.NewServeMux()
@@ -43,6 +44,9 @@ func TestConfigureDomainUsesTransientCredentialsAndChecksGroups(t *testing.T) {
 		var body component
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Errorf("component body: %v", err)
+		}
+		if body.ProviderID == "ldap" {
+			createdProvider = body
 		}
 		mu.Lock()
 		componentNumber++
@@ -79,7 +83,7 @@ func TestConfigureDomainUsesTransientCredentialsAndChecksGroups(t *testing.T) {
 	result, err := client.ConfigureDomain(t.Context(), Domain{
 		Name: "example.org", ProviderName: "active-directory", URL: "ldaps://dc01.example.org:636",
 		UsersDN: "DC=example,DC=org", GroupsDN: "OU=Groups,DC=example,DC=org",
-		BindDN: "svc@example.org", BindPassword: "bind-secret",
+		BindDN: "svc@example.org", BindPassword: "bind-secret", StoredBindCredential: "${vault.ad-bind}",
 		AdminGroup: "virt-admins", OperatorGroup: "virt-operators", ViewerGroup: "virt-viewers",
 		GroupMode: "read-only",
 	})
@@ -88,6 +92,10 @@ func TestConfigureDomainUsesTransientCredentialsAndChecksGroups(t *testing.T) {
 	}
 	if result.GroupsChecked != 3 || len(seenLDAPTests) != 2 {
 		t.Fatalf("incomplete verification: %+v tests=%v", result, seenLDAPTests)
+	}
+	providerRaw, _ := json.Marshal(createdProvider)
+	if strings.Contains(string(providerRaw), "bind-secret") || !strings.Contains(string(providerRaw), "${vault.ad-bind}") {
+		t.Fatalf("LDAP provider did not use vault reference: %s", providerRaw)
 	}
 	if err := client.EnsureApplicationClient(t.Context(), "jhvirt", "oidc-secret",
 		"https://backup.example.org/api/v1/auth/oidc/callback"); err != nil {

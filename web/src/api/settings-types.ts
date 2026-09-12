@@ -15,6 +15,7 @@ export interface IdentitySettings {
   revalidate_seconds: number
   source: 'config' | 'database'
   can_configure: boolean
+  embedded_keycloak: EmbeddedKeycloakStatus
   domain: {
     connected: boolean
     name?: string
@@ -25,6 +26,30 @@ export interface IdentitySettings {
     bind_dn?: string
     checked_at?: string
   }
+}
+
+export interface EmbeddedKeycloakStatus {
+  available: boolean
+  initialized: boolean
+  running: boolean
+  public_url?: string
+  realm?: string
+  port?: number
+  direct_tls: boolean
+}
+
+export interface EmbeddedKeycloakWrite {
+  local_password: string
+  public_url: string
+  port: number
+  direct_tls: boolean
+  realm: string
+  client_id: string
+  button_label: string
+  role_mapping: Record<string, string>
+  allow_local_login: boolean
+  session_ttl_minutes: number
+  revalidate_seconds: number
 }
 
 export interface IdentitySettingsWrite {
@@ -48,6 +73,7 @@ export interface DomainSettingsWrite {
   admin_realm: string
   admin_client_id: string
   admin_client_secret: string
+  ca_certificate: string
   domain: {
     name: string
     provider_name: string

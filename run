@@ -569,7 +569,7 @@ cmd_build() {
     # и работать в любом поддерживаемом дистрибутиве независимо от версии libc.
     step "бинари"
     LDFLAGS="-s -w -X main.version=$VERSION"
-    for c in ovirt-backup-server jvbackup; do
+    for c in ovirt-backup-server jvbackup jhvirt-keycloak-helper; do
         CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" \
             go build -trimpath -ldflags "$LDFLAGS" -o "$OUT/bin/$c$SUFFIX" "./cmd/$c"
         say "    $c$SUFFIX"
@@ -582,6 +582,7 @@ cmd_build() {
 	cp deploy/recover-keycloak.sh "$OUT/recover-keycloak.sh"
     cp deploy/systemd/jhvirt.service "$OUT/systemd/"
     cp deploy/systemd/jhvirt-dr-backup.service deploy/systemd/jhvirt-dr-backup.timer "$OUT/systemd/"
+    cp deploy/systemd/jhvirt-keycloak-helper.service deploy/systemd/jhvirt-keycloak-helper.socket "$OUT/systemd/"
     cp deploy/dr-backup.sh "$OUT/systemd/"
 
     # Всё для установки в контейнерах. Dockerfile отдельный: он не собирает

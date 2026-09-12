@@ -158,6 +158,9 @@ services:
       # спрашивает о нём явно; при ручной настройке безопасное умолчание false.
       # Без OIDC это значение не мешает обычному парольному входу.
       JHV_AUTH_OIDC_ALLOW_LOCAL_LOGIN: "${JHV_OIDC_ALLOW_LOCAL_LOGIN:-false}"
+      # Узкий root-helper управляет только встроенным Keycloak. Приложение
+      # видит его Unix-сокет, но не получает Docker socket и права на хосте.
+      JHV_HOST_HELPER_SOCKET: "/run/jhvirt-host/keycloak-helper.sock"
       JHV_METRICS_ENABLED: "${JHV_METRICS_ENABLED:-false}"
       JHV_METRICS_TOKEN_FILE: "/app/data/metrics.token"
       # Ежедневный dump и отдельную копию ключа создаёт dr-backup ниже.
@@ -198,6 +201,7 @@ services:
       # Локальный staging аварийного комплекта. В production этот путь должен
       # быть отдельным mount или регулярно копироваться на другой узел.
       - ${JHV_DR_BACKUP_DIR:-./dr-backups}/app:/app/dr:ro
+      - /run/jhvirt:/run/jhvirt-host:ro,z
     # Столько же, сколько в юните systemd: восстановление и проверка держат
     # много открытых объектов хранилища. На хостах, где предел по умолчанию
     # равен 1024, без этого проверка большой цепочки упирается в него.
@@ -234,6 +238,8 @@ services:
     # контейнера. Обычный первый шаг после захвата процесса.
     security_opt:
       - no-new-privileges:true
+    group_add:
+      - "${JHV_HOST_HELPER_GID:-65534}"
     networks:
       - frontend
       - database
@@ -396,8 +402,11 @@ services:
       KC_VAULT_DIR: "/opt/keycloak/conf/vault"
     volumes:
       - keycloak-data:/opt/keycloak/data
-      - ${JHV_KEYCLOAK_TRUSTSTORE_DIR:-./keycloak-truststores}:/opt/keycloak/conf/truststores:ro
-      - ${JHV_KEYCLOAK_VAULT_DIR:-./keycloak-vault}:/opt/keycloak/conf/vault:ro
+      # z создаёт общий SELinux label для bind mounts. Без него Keycloak на
+      # enforcing-хосте Rocky/RHEL не может даже открыть пустые каталоги и
+      # завершается до публикации порта.
+      - ${JHV_KEYCLOAK_TRUSTSTORE_DIR:-./keycloak-truststores}:/opt/keycloak/conf/truststores:ro,z
+      - ${JHV_KEYCLOAK_VAULT_DIR:-./keycloak-vault}:/opt/keycloak/conf/vault:ro,z
     ports:
       - "${KEYCLOAK_BIND_ADDRESS:-127.0.0.1}:${KEYCLOAK_PORT:-8081}:${KEYCLOAK_CONTAINER_PORT:-8080}"
     cap_drop:

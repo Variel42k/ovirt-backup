@@ -538,9 +538,10 @@ curl -b cookies.txt -X PUT http://localhost:8080/api/v1/api-tokens/<id> \
 |---|---|---|
 | `GET` | `/settings/identity` | состояние OIDC/домена без секретов |
 | `PUT` | `/settings/identity` | проверить discovery, сохранить и применить OIDC |
+| `POST` | `/settings/identity/embedded-keycloak` | запустить/принять встроенный Keycloak и применить созданный OIDC client |
 | `POST` | `/settings/identity/domain` | настроить LDAP federation и синхронизировать группы |
 
-Все три endpoint требуют `users.admin`. Изменяющие операции дополнительно
+Все четыре endpoint требуют `users.admin`. Изменяющие операции дополнительно
 принимаются только из локальной сессии и требуют `local_password` текущего
 администратора. OIDC-администратор не может переподключить провайдера, даже
 если его браузерная сессия имеет те же права.
@@ -554,9 +555,12 @@ redirect URL, claim групп или ролевого mapping сбрасыва�
 OIDC-сессии отзываются немедленно; локальные сессии не затрагиваются.
 
 Ответ GET содержит только `client_secret_stored`; секрет OIDC-клиента не
-возвращается. `admin_client_secret` Keycloak и `domain.bind_password`
-используются только в одном запросе подключения домена и приложением не
-сохраняются. Подробности и требования к service account приведены в
+возвращается. Для управляемого Keycloak ответ также содержит
+`embedded_keycloak` со статусом, публичным URL, realm, портом и признаком TLS,
+но без сертификатов и секретов. `admin_client_secret` внешнего Keycloak
+используется только в одном запросе. Bind-пароль управляемого Keycloak
+записывается helper в file vault, а приложение его не сохраняет. Подробности и
+требования к service account приведены в
 [KEYCLOAK-AD.md](KEYCLOAK-AD.md#5-подключение-из-web-интерфейса).
 
 ## Подключения

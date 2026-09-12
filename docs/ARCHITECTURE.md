@@ -72,10 +72,13 @@
 |---|---|
 | `cmd/ovirt-backup-server` | сборка зависимостей, запуск, штатное завершение |
 | `cmd/jvbackup` | автономный CLI: список, проверка, восстановление из хранилища |
+| `cmd/jhvirt-keycloak-helper` | socket-activated root helper с фиксированными операциями жизненного цикла встроенного Keycloak |
 | `internal/config` | YAML + переопределения `JHV_*`, проверка значений |
 | `internal/model` | доменные типы, общие для всех слоёв |
 | `internal/store` | репозитории поверх `database/sql`, миграции |
 | `internal/secret` | AES-256-GCM для паролей подключений и ключей хранилищ |
+| `internal/hosthelper` | узкий Unix-socket контракт между непривилегированным API и host helper |
+| `internal/embeddedkeycloak` | Compose, первичная настройка realm/client и file vault на стороне хоста |
 | `internal/ovirt` | REST-клиент движка: SSO, инвентарь, питание, снапшоты, Backup API |
 | `internal/proxmox` | API token, кластерный инвентарь Proxmox, питание и миграция QEMU/LXC |
 | `internal/imageio` | клиент `ovirt-imageio`: extents, диапазонное чтение и запись |

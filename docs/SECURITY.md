@@ -44,6 +44,30 @@ Docker daemon остаётся границей доверия: пользова
 добавляйте обычных операторов в группу `docker`; управление стеком должно быть
 доступно только администраторам ОС.
 
+Запуск встроенного Keycloak из web проходит через отдельный root-процесс
+`jhvirt-keycloak-helper`. Приложение получает Unix-сокет helper, но не Docker
+socket. API helper не выполняет переданную команду или произвольный путь: compose,
+state, truststore и vault заданы unit-файлом, а допустимые операции и имена
+проверяются кодом. Каталог Compose и состояние helper принадлежат `root` и не
+доступны сервисному пользователю для записи; установщик отклоняет symlink в
+Compose-каталоге. Сокет принадлежит `root:jhvirt` и имеет режим `0660`.
+
+Это сужает последствия захвата контейнера приложения, но не превращает helper в
+границу авторизации от самого контейнера: захваченный процесс сможет вызвать эти
+фиксированные операции, включить ещё не настроенный Keycloak или изменить его
+LDAP provider. Он не получает универсального выполнения команд и прямого чтения
+Docker API. Поэтому доступ к процессу приложения по-прежнему считается доступом
+к его рабочим секретам и настройкам. Обычный web-запрос дополнительно требует
+активную локальную административную сессию, право `users.admin`, пароль текущего
+локального администратора, корректный Origin и проходит rate limit повторной
+авторизации.
+
+Постоянный service account web-helper получает административные client roles
+только для настроенного `<realm>-realm`; глобальная роль `admin` в master после
+bootstrap отзывается. Одноразовые пользователи `kc-web-bootstrap-*` и recovery-
+клиенты удаляются после проверки realm-scoped доступа, включая записи от
+прерванных ранних попыток настройки.
+
 ## PostgreSQL
 
 Во встроенном кластере три роли:
@@ -123,6 +147,7 @@ Cookie сессии имеет `HttpOnly`, `SameSite=Lax` и `Secure` при HTT
 | metrics token | `jhvirt-data:/app/data/metrics.token` | `<PREFIX>/config/metrics.token` |
 | админ-пароль PostgreSQL | `postgres-secrets:/run/secrets/admin-password` | не нужен при peer |
 | конфигурация Keycloak | `keycloak-data:/opt/keycloak/data/ovirt-backup/keycloak.conf` | не применяется |
+| состояние web-helper Keycloak | `<PREFIX>/keycloak-helper/keycloak.json`, `root:root 0600`, в контейнер не монтируется | не применяется |
 | LDAP bind credential | `<PREFIX>/keycloak-vault/jhvirt_ad-bind`, bind mount только в Keycloak, `root:root 0440` | не применяется |
 | recovery token | `<PREFIX>/config/recovery.token` на хосте, не смонтирован | `<PREFIX>/config/recovery.token`, `root:root 0600` |
 

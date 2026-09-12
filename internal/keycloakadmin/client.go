@@ -40,17 +40,22 @@ type Client struct {
 
 // Domain describes an Active Directory federation. Only LDAPS is accepted.
 type Domain struct {
-	Name          string
-	ProviderName  string
-	URL           string
-	UsersDN       string
-	GroupsDN      string
-	BindDN        string
-	BindPassword  string
-	AdminGroup    string
-	OperatorGroup string
-	ViewerGroup   string
-	GroupMode     string
+	Name         string
+	ProviderName string
+	URL          string
+	UsersDN      string
+	GroupsDN     string
+	BindDN       string
+	BindPassword string
+	// StoredBindCredential is written to the LDAP component after the live
+	// connection checks have used BindPassword. The bundled Keycloak helper
+	// sets it to a file-vault reference, so the password itself never becomes
+	// durable Keycloak component data.
+	StoredBindCredential string
+	AdminGroup           string
+	OperatorGroup        string
+	ViewerGroup          string
+	GroupMode            string
 }
 
 type Result struct {
@@ -70,6 +75,13 @@ func New(issuer, adminRealm, clientID, secret string) (*Client, error) {
 // keeps the public realm and any Keycloak path prefix authoritative while
 // allowing the application to use its internal route to Keycloak.
 func NewWithBackchannel(issuer, backchannel, adminRealm, clientID, secret string) (*Client, error) {
+	return NewWithBackchannelTransport(issuer, backchannel, adminRealm, clientID, secret, nil)
+}
+
+// NewWithBackchannelTransport is the same client with a caller-supplied
+// transport. The embedded host helper uses it to trust the exact certificate
+// copied into Keycloak while connecting to its loopback-published TLS port.
+func NewWithBackchannelTransport(issuer, backchannel, adminRealm, clientID, secret string, transport http.RoundTripper) (*Client, error) {
 	base, realm, normalized, err := parseIssuer(issuer)
 	if err != nil {
 		return nil, err
@@ -94,7 +106,8 @@ func NewWithBackchannel(issuer, backchannel, adminRealm, clientID, secret string
 		baseURL: base, issuer: normalized, realm: realm, adminRealm: adminRealm,
 		clientID: strings.TrimSpace(clientID), secret: secret,
 		http: &http.Client{
-			Timeout: 5 * time.Minute,
+			Timeout:   5 * time.Minute,
+			Transport: transport,
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 				return errors.New("Keycloak неожиданно перенаправил административный запрос")
 			},
@@ -423,7 +436,7 @@ func (c *Client) configureDomain(ctx context.Context, d Domain) (Result, error) 
 		Config: map[string][]string{
 			"enabled": {"true"}, "priority": {"0"}, "vendor": {"ad"},
 			"connectionUrl": {d.URL}, "usersDn": {d.UsersDN}, "bindDn": {d.BindDN},
-			"bindCredential": {d.BindPassword}, "authType": {"simple"}, "editMode": {"READ_ONLY"},
+			"bindCredential": {storedBindCredential(d)}, "authType": {"simple"}, "editMode": {"READ_ONLY"},
 			"importEnabled": {"true"}, "syncRegistrations": {"false"},
 			"usernameLDAPAttribute": {"sAMAccountName"}, "rdnLDAPAttribute": {"cn"},
 			"uuidLDAPAttribute": {"objectGUID"}, "userObjectClasses": {"person, organizationalPerson, user"},
@@ -485,6 +498,13 @@ func (c *Client) configureDomain(ctx context.Context, d Domain) (Result, error) 
 		out.GroupsChecked++
 	}
 	return out, nil
+}
+
+func storedBindCredential(d Domain) string {
+	if strings.TrimSpace(d.StoredBindCredential) != "" {
+		return d.StoredBindCredential
+	}
+	return d.BindPassword
 }
 
 func validateDomain(d Domain) error {

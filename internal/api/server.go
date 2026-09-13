@@ -220,6 +220,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /servers/provision", s.perm(model.PermServersAdmin, s.handleProvisionServer))
 	mux.HandleFunc("POST /servers/ca-certificate", s.perm(model.PermServersAdmin, s.handleFetchCA))
 	mux.HandleFunc("POST /servers/host-key", s.perm(model.PermServersAdmin, s.handleScanHostKey))
+	mux.HandleFunc("POST /servers/proxmox-host-keys", s.perm(model.PermServersAdmin, s.handleScanProxmoxHostKeys))
 	mux.HandleFunc("POST /servers/{id}/refresh", s.perm(model.PermServersWrite, s.handleRefreshServer))
 	mux.HandleFunc("GET /servers/{id}/summary", s.perm(model.PermServersRead, s.handleServerSummary))
 

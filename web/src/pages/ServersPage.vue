@@ -16,11 +16,17 @@ const loading = ref(false)
 const dialog = ref(false)
 const editing = ref<Server | null>(null)
 const probing = ref(false)
+const saving = ref(false)
+const fetchingCA = ref(false)
+const provisionFetchingCA = ref(false)
 const probeResult = ref<Record<string, unknown> | null>(null)
 const caUpload = ref<File | null>(null)
 const fetchedCAFingerprint = ref('')
 const scannedHostFingerprint = ref('')
+const scannedNodeKeys = ref<Array<{ node: string; address: string; type: string; fingerprint: string }>>([])
 const formError = ref('')
+let connectionDialogGeneration = 0
+let provisionDialogGeneration = 0
 
 /**
  * Что учётная запись может сверх нужного. Определяет сервер фактической
@@ -46,7 +52,9 @@ const emptyForm = () => ({
   // Только для kind === 'kvm'.
   ssh_host: '',
   ssh_port: 22,
+  ssh_username: '',
   ssh_private_key: '',
+	clear_ssh_private_key: false,
   ssh_host_key: '',
   clear_ssh_host_key: false,
   ssh_trust_any_host_key: false,
@@ -55,8 +63,36 @@ const emptyForm = () => ({
 
 const form = ref(emptyForm())
 
+// A successful probe only describes the exact credentials and trust settings
+// that were sent. Clear the result as soon as a connection-relevant field
+// changes so the form never shows an old green status for new values.
+const connectionSignature = computed(() => JSON.stringify({
+  name: form.value.name,
+  kind: form.value.kind,
+  engine_url: form.value.engine_url,
+  username: form.value.username,
+  password: form.value.password,
+  ca_cert: form.value.ca_cert,
+  clear_ca_cert: form.value.clear_ca_cert,
+  insecure_tls: form.value.insecure_tls,
+  ssh_host: form.value.ssh_host,
+  ssh_port: form.value.ssh_port,
+  ssh_username: form.value.ssh_username,
+  ssh_private_key: form.value.ssh_private_key,
+  clear_ssh_private_key: form.value.clear_ssh_private_key,
+  ssh_host_key: form.value.ssh_host_key,
+  clear_ssh_host_key: form.value.clear_ssh_host_key,
+  ssh_trust_any_host_key: form.value.ssh_trust_any_host_key,
+  scratch_dir: form.value.scratch_dir,
+}))
+watch(connectionSignature, () => {
+  probeResult.value = null
+  formError.value = ''
+})
+
 watch(dialog, (open) => {
   if (open) return
+  connectionDialogGeneration += 1
   form.value.password = ''
   form.value.ssh_private_key = ''
   form.value.ca_cert = ''
@@ -64,6 +100,7 @@ watch(dialog, (open) => {
   caUpload.value = null
   fetchedCAFingerprint.value = ''
   scannedHostFingerprint.value = ''
+  scannedNodeKeys.value = []
   probeResult.value = null
 })
 
@@ -72,7 +109,7 @@ const fallbackKinds: VirtualizationKind[] = [
   { value: 'redvirt', title: 'РЕД Виртуализация', description: 'Весь контур РЕД Виртуализации.', family: 'ovirt-api', managed_scope: 'engine', connection_method: 'https', safe_provision: true, supports_backup: true, supports_restore: true, supports_engine_config: true, supports_vm_management: true, supports_host_management: true },
   { value: 'olvm', title: 'Oracle Linux Virtualization Manager', description: 'Все кластеры под управлением OLVM.', family: 'ovirt-api', managed_scope: 'engine', connection_method: 'https', safe_provision: true, supports_backup: true, supports_restore: true, supports_engine_config: true, supports_vm_management: true, supports_host_management: true },
   { value: 'rhv', title: 'Red Hat Virtualization', description: 'Все кластеры под управлением RHV Manager.', family: 'ovirt-api', managed_scope: 'engine', connection_method: 'https', safe_provision: true, supports_backup: true, supports_restore: true, supports_engine_config: true, supports_vm_management: true, supports_host_management: true },
-  { value: 'proxmox', title: 'Proxmox VE', description: 'Весь кластер через API любого узла.', family: 'proxmox-api', managed_scope: 'engine', connection_method: 'https', safe_provision: false, supports_backup: false, supports_restore: false, supports_engine_config: false, supports_vm_management: true, supports_host_management: false },
+  { value: 'proxmox', title: 'Proxmox VE', description: 'Весь кластер через API и защищённый поток vzdump с узлов.', family: 'proxmox-api', managed_scope: 'engine', connection_method: 'https', safe_provision: false, supports_backup: true, supports_restore: true, supports_engine_config: false, supports_vm_management: true, supports_host_management: false },
   { value: 'kvm', title: 'libvirt/KVM (без движка)', description: 'Один самостоятельный гипервизор по SSH.', family: 'libvirt', managed_scope: 'host', connection_method: 'ssh', safe_provision: false, supports_backup: true, supports_restore: true, supports_engine_config: false, supports_vm_management: true, supports_host_management: false },
 ]
 const virtualizationKinds = computed(() => app.meta?.virtualization_kinds?.length ? app.meta.virtualization_kinds : fallbackKinds)
@@ -100,12 +137,41 @@ const caStored = computed(
 const hostKeyStored = computed(
   () => Boolean(form.value.ssh_host_key) || Boolean(editing.value?.ssh_host_key_stored && !form.value.clear_ssh_host_key),
 )
+const sshKeyStored = computed(
+  () => Boolean(form.value.ssh_private_key) || Boolean(editing.value?.ssh_key_stored && !form.value.clear_ssh_private_key),
+)
+const proxmoxDataPlaneStarted = computed(
+  () => Boolean(form.value.ssh_username.trim()) || sshKeyStored.value || hostKeyStored.value || form.value.ssh_trust_any_host_key,
+)
+const proxmoxDataPlaneReady = computed(
+  () => Boolean(form.value.ssh_username.trim()) && sshKeyStored.value && (hostKeyStored.value || form.value.ssh_trust_any_host_key),
+)
+const proxmoxDataPlaneVerified = computed(() =>
+  proxmoxDataPlaneReady.value && probeResult.value?.ok === true && probeResult.value?.supports_backup === true,
+)
 
 /** Подсказка по умолчанию для имени пользователя меняется вместе с типом. */
 watch(
   () => form.value.kind,
   (kind, previous) => {
     if (kind === previous) return
+    const nextFamily = virtualizationKinds.value.find((item) => item.value === kind)?.family
+    const previousFamily = virtualizationKinds.value.find((item) => item.value === previous)?.family
+    if (!editing.value && previousFamily && nextFamily !== previousFamily) {
+      form.value.password = ''
+      form.value.ca_cert = ''
+      form.value.clear_ca_cert = false
+      form.value.insecure_tls = false
+      form.value.ssh_private_key = ''
+      form.value.clear_ssh_private_key = false
+      form.value.ssh_host_key = ''
+      form.value.clear_ssh_host_key = false
+      form.value.ssh_trust_any_host_key = false
+      caUpload.value = null
+      fetchedCAFingerprint.value = ''
+      scannedHostFingerprint.value = ''
+      scannedNodeKeys.value = []
+    }
     if (kind === 'proxmox' && (form.value.username === 'jhvirt-backup@internal' || form.value.username === 'root')) {
       form.value.username = 'backup@pve!jhvirt'
     }
@@ -161,8 +227,10 @@ function openProvision() {
 
 async function useProvisionCAFile(file: File | null) {
   if (!file) return
+  const generation = provisionDialogGeneration
   try {
     const body = await file.text()
+    if (!provisionOpen.value || generation !== provisionDialogGeneration || provisionCAUpload.value !== file) return
     if (!body.includes('BEGIN CERTIFICATE')) throw new Error('Файл не содержит PEM-сертификат')
     provisionForm.value.ca_cert = body
     provisionForm.value.insecure_tls = false
@@ -178,14 +246,27 @@ async function fetchProvisionCA() {
     notifyError('Сначала укажите адрес движка')
     return
   }
+  const endpoint = provisionForm.value.engine_url
+  const kind = provisionForm.value.kind
+  const generation = provisionDialogGeneration
+  const trustSignature = JSON.stringify({ ca: provisionForm.value.ca_cert, insecure: provisionForm.value.insecure_tls })
+  provisionFetchingCA.value = true
   try {
-    const result = await api.fetchCA(provisionForm.value.engine_url, provisionForm.value.kind)
+    const result = await api.fetchCA(endpoint, kind)
+    if (!provisionOpen.value || generation !== provisionDialogGeneration) return
+    if (endpoint !== provisionForm.value.engine_url || kind !== provisionForm.value.kind ||
+        trustSignature !== JSON.stringify({ ca: provisionForm.value.ca_cert, insecure: provisionForm.value.insecure_tls })) {
+      notify({ type: 'warning', message: 'Адрес или настройки TLS изменились во время получения сертификата. Повторите запрос.' })
+      return
+    }
     provisionForm.value.ca_cert = result.ca_cert
     provisionForm.value.insecure_tls = false
     provisionCAFingerprint.value = result.fingerprint
     notify({ type: 'warning', message: `SHA-256 ${result.fingerprint}. ${result.warning}`, timeout: 20000, multiLine: true })
   } catch (err) {
-    notifyError(err, 'Не удалось получить сертификат')
+    if (provisionOpen.value) notifyError(err, 'Не удалось получить сертификат')
+  } finally {
+    provisionFetchingCA.value = false
   }
 }
 
@@ -219,6 +300,7 @@ async function runProvision() {
 
 watch(provisionOpen, (open) => {
   if (open) return
+  provisionDialogGeneration += 1
   provisionForm.value.admin_password = ''
   provisionForm.value.service_password = ''
   provisionForm.value.ca_cert = ''
@@ -233,6 +315,7 @@ function openCreate() {
   caUpload.value = null
   fetchedCAFingerprint.value = ''
   scannedHostFingerprint.value = ''
+  scannedNodeKeys.value = []
   formError.value = ''
   dialog.value = true
 }
@@ -249,6 +332,7 @@ function openEdit(server: Server) {
     // Секреты с сервера не приходят; пустые поля означают «оставить прежние».
     password: '',
     ssh_private_key: '',
+		clear_ssh_private_key: false,
     ca_cert: '',
     clear_ca_cert: false,
     insecure_tls: server.insecure_tls,
@@ -257,6 +341,7 @@ function openEdit(server: Server) {
     notes: server.notes ?? '',
     ssh_host: server.ssh_host ?? '',
     ssh_port: server.ssh_port || 22,
+    ssh_username: server.ssh_username ?? '',
     ssh_host_key: '',
     clear_ssh_host_key: false,
     ssh_trust_any_host_key: server.ssh_trust_any_host_key ?? false,
@@ -265,14 +350,17 @@ function openEdit(server: Server) {
   caUpload.value = null
   fetchedCAFingerprint.value = ''
   scannedHostFingerprint.value = ''
+  scannedNodeKeys.value = []
   formError.value = ''
   dialog.value = true
 }
 
 async function useCAFile(file: File | null) {
   if (!file) return
+  const generation = connectionDialogGeneration
   try {
     const body = await file.text()
+    if (!dialog.value || generation !== connectionDialogGeneration || caUpload.value !== file) return
     if (!body.includes('BEGIN CERTIFICATE')) throw new Error('Файл не содержит PEM-сертификат')
     form.value.ca_cert = body
     form.value.clear_ca_cert = false
@@ -295,15 +383,73 @@ function clearHostKey() {
   form.value.ssh_host_key = ''
   form.value.clear_ssh_host_key = true
   scannedHostFingerprint.value = ''
+  scannedNodeKeys.value = []
+}
+
+function clearSSHPrivateKey() {
+  form.value.ssh_private_key = ''
+  form.value.clear_ssh_private_key = true
+}
+
+function disableProxmoxDataPlane() {
+  form.value.ssh_username = ''
+  clearSSHPrivateKey()
+  clearHostKey()
+  form.value.ssh_trust_any_host_key = false
+  probeResult.value = null
+}
+
+function changeTrustAnyHostKey(value: boolean) {
+  if (value) clearHostKey()
+}
+
+function validateConnectionForm(): string {
+  if (!form.value.name.trim()) return 'Укажите имя подключения.'
+  if (!form.value.username.trim()) {
+    return isProxmox.value ? 'Укажите API token ID.' : 'Укажите пользователя подключения.'
+  }
+  if (!Number.isInteger(form.value.ssh_port) || form.value.ssh_port < 1 || form.value.ssh_port > 65535) {
+    return 'Порт SSH должен быть от 1 до 65535.'
+  }
+
+  if (isLibvirt.value) {
+    if (!form.value.ssh_host.trim()) return 'Укажите адрес гипервизора.'
+    if (!editing.value && !sshKeyStored.value) {
+      return 'Для нового подключения нужен приватный ключ SSH.'
+    }
+    if (!editing.value && !hostKeyStored.value && !form.value.ssh_trust_any_host_key) {
+      return 'Получите и сверьте ключ SSH-хоста.'
+    }
+    return ''
+  }
+
+  if (!form.value.engine_url.trim()) return 'Укажите адрес платформы виртуализации.'
+  if (!editing.value && !form.value.password) {
+    return isProxmox.value ? 'Укажите secret API token.' : 'Укажите пароль сервисной учётной записи.'
+  }
+  if (isProxmox.value && proxmoxDataPlaneStarted.value && !proxmoxDataPlaneReady.value) {
+    if (!form.value.ssh_username.trim()) return 'Для канала данных укажите пользователя SSH.'
+    if (!sshKeyStored.value) return 'Для канала данных добавьте приватный ключ SSH.'
+    return 'Получите и сверьте ключи всех узлов Proxmox.'
+  }
+  return ''
 }
 
 async function probe() {
+  formError.value = validateConnectionForm()
+  if (formError.value) return
+  const signature = connectionSignature.value
   probing.value = true
   probeResult.value = null
   try {
     // id — чтобы проба взяла сохранённый секрет даже если в форме
     // одновременно поменяли имя подключения.
-    probeResult.value = await api.probeServer({ ...form.value, id: editing.value?.id })
+    const result = await api.probeServer({ ...form.value, id: editing.value?.id })
+    if (signature !== connectionSignature.value) {
+      notify({ type: 'warning', message: 'Параметры изменились во время проверки. Запустите её ещё раз.' })
+      return
+    }
+    probeResult.value = result
   } catch (err) {
     notifyError(err, 'Проверка не выполнена')
   } finally {
@@ -316,15 +462,28 @@ async function fetchCA() {
     notifyError('Сначала укажите адрес движка')
     return
   }
+  const endpoint = form.value.engine_url
+  const kind = form.value.kind
+  const generation = connectionDialogGeneration
+  const trustSignature = JSON.stringify({ ca: form.value.ca_cert, clear: form.value.clear_ca_cert, insecure: form.value.insecure_tls })
+  fetchingCA.value = true
   try {
-    const result = await api.fetchCA(form.value.engine_url, form.value.kind)
+    const result = await api.fetchCA(endpoint, kind)
+    if (!dialog.value || generation !== connectionDialogGeneration) return
+    if (endpoint !== form.value.engine_url || kind !== form.value.kind ||
+        trustSignature !== JSON.stringify({ ca: form.value.ca_cert, clear: form.value.clear_ca_cert, insecure: form.value.insecure_tls })) {
+      notify({ type: 'warning', message: 'Адрес или настройки TLS изменились во время получения сертификата. Повторите запрос.' })
+      return
+    }
     form.value.ca_cert = result.ca_cert
     form.value.clear_ca_cert = false
     form.value.insecure_tls = false
     fetchedCAFingerprint.value = result.fingerprint
     notify({ type: 'warning', message: `SHA-256 ${result.fingerprint}. ${result.warning}`, timeout: 20000, multiLine: true })
   } catch (err) {
-    notifyError(err, 'Не удалось получить сертификат')
+    if (dialog.value) notifyError(err, 'Не удалось получить сертификат')
+  } finally {
+    fetchingCA.value = false
   }
 }
 
@@ -349,9 +508,19 @@ async function scanHostKey() {
     notifyError('Сначала укажите адрес хоста')
     return
   }
+  const host = form.value.ssh_host
+  const port = form.value.ssh_port || 22
+  const generation = connectionDialogGeneration
+  const trustSignature = JSON.stringify({ key: form.value.ssh_host_key, clear: form.value.clear_ssh_host_key, any: form.value.ssh_trust_any_host_key })
   scanningKey.value = true
   try {
-    const result = await api.scanServerHostKey(form.value.ssh_host, form.value.ssh_port || 22)
+    const result = await api.scanServerHostKey(host, port)
+    if (!dialog.value || generation !== connectionDialogGeneration) return
+    if (host !== form.value.ssh_host || port !== (form.value.ssh_port || 22) ||
+        trustSignature !== JSON.stringify({ key: form.value.ssh_host_key, clear: form.value.clear_ssh_host_key, any: form.value.ssh_trust_any_host_key })) {
+      notify({ type: 'warning', message: 'Адрес SSH или настройки доверия изменились во время получения ключа. Повторите запрос.' })
+      return
+    }
     form.value.ssh_host_key = result.line
     form.value.clear_ssh_host_key = false
     scannedHostFingerprint.value = result.fingerprint
@@ -363,14 +532,49 @@ async function scanHostKey() {
       multiLine: true,
     })
   } catch (err) {
-    notifyError(err, 'Не удалось получить ключ хоста')
+    if (dialog.value) notifyError(err, 'Не удалось получить ключ хоста')
+  } finally {
+    scanningKey.value = false
+  }
+}
+
+async function scanProxmoxHostKeys() {
+  if (!form.value.engine_url || !form.value.username) {
+    notifyError('Сначала укажите адрес Proxmox и API token ID')
+    return
+  }
+  const signature = connectionSignature.value
+  const generation = connectionDialogGeneration
+  scanningKey.value = true
+  try {
+    const result = await api.scanProxmoxHostKeys({ ...form.value, id: editing.value?.id })
+    if (!dialog.value || generation !== connectionDialogGeneration) return
+    if (signature !== connectionSignature.value) {
+      notify({ type: 'warning', message: 'Параметры Proxmox изменились во время получения ключей. Повторите запрос.' })
+      return
+    }
+    form.value.ssh_host_key = result.bundle
+    form.value.clear_ssh_host_key = false
+    form.value.ssh_trust_any_host_key = false
+    scannedNodeKeys.value = result.keys
+    notify({
+      type: 'warning',
+      message: `Получены ключи ${result.keys.length} узлов. ${result.warning}`,
+      timeout: 20000,
+      multiLine: true,
+    })
+  } catch (err) {
+    if (dialog.value) notifyError(err, 'Не удалось получить ключи всех узлов Proxmox')
   } finally {
     scanningKey.value = false
   }
 }
 
 async function save() {
-  formError.value = ''
+  if (saving.value) return
+  formError.value = validateConnectionForm()
+  if (formError.value) return
+  saving.value = true
   try {
     if (editing.value) {
       await api.updateServer(editing.value.id, form.value)
@@ -384,6 +588,8 @@ async function save() {
   } catch (err) {
     formError.value = errorMessage(err)
     notifyError(err, 'Не удалось сохранить')
+  } finally {
+    saving.value = false
   }
 }
 
@@ -634,17 +840,19 @@ onMounted(load)
             <q-banner dense class="bg-blue-1">
               <template #avatar><q-icon name="info" color="primary" /></template>
               Укажите API-токен с разделением привилегий. Подключение к любому доступному
-              узлу импортирует весь кластер Proxmox VE. Доступны мониторинг и управление ВМ;
-              резервное копирование и восстановление будут добавлены отдельным драйвером.
+              узлу импортирует весь кластер Proxmox VE. Для резервного копирования добавьте
+              ниже отдельный ограниченный SSH-ключ: API управляет кластером, а нативный
+              vzdump-поток читается непосредственно с узла, на котором работает гость.
             </q-banner>
           </div>
           <div class="col-12 col-sm-6">
             <q-input v-model="form.name" label="Имя подключения" outlined dense />
           </div>
           <div class="col-12 col-sm-6">
-            <q-select v-model="form.kind" :options="kinds" emit-value map-options label="Продукт" outlined dense />
+            <q-select v-model="form.kind" :options="kinds" emit-value map-options label="Продукт" outlined dense :disable="!!editing" />
             <div v-if="selectedKind" class="text-caption text-grey-7 q-mt-xs">
               {{ selectedKind.description }}
+              <span v-if="editing">Тип сохранённого подключения не меняется; для другой платформы создайте новое.</span>
             </div>
           </div>
 
@@ -675,7 +883,7 @@ onMounted(load)
             </div>
           </template>
 
-          <div class="col-12 col-sm-6">
+          <div class="col-12" :class="{ 'col-sm-6': !isLibvirt || editing }">
             <q-input
               v-model="form.username"
               :label="isProxmox ? 'API token ID' : 'Пользователь'"
@@ -684,12 +892,12 @@ onMounted(load)
               dense
             />
           </div>
-          <div class="col-12 col-sm-6">
+          <div v-if="!isLibvirt || editing" class="col-12 col-sm-6">
             <q-input
               v-model="form.password"
-              :label="isProxmox ? 'Secret API token' : 'Пароль'"
+              :label="isProxmox ? 'Secret API token' : isLibvirt ? 'Пароль SSH (устаревший режим)' : 'Пароль'"
               type="password"
-              :hint="editing ? 'Пусто — оставить прежний' : isLibvirt ? 'Либо пароль, либо приватный ключ' : isProxmox ? 'Значение токена показывается Proxmox только при создании' : ''"
+              :hint="editing ? (isLibvirt ? 'Пусто — оставить прежний; добавьте ключ ниже и затем откажитесь от пароля' : 'Пусто — оставить прежний') : isProxmox ? 'Значение токена показывается Proxmox только при создании' : ''"
               outlined
               dense
             />
@@ -706,7 +914,16 @@ onMounted(load)
                 dense
                 autogrow
                 :input-style="{ maxHeight: '140px' }"
-              />
+              >
+				<template #append>
+				  <q-icon :name="sshKeyStored ? 'key' : 'key_off'" :color="sshKeyStored ? 'positive' : 'grey-6'" size="sm">
+					<q-tooltip>{{ sshKeyStored ? 'Приватный ключ сохранён' : 'Приватный ключ не сохранён' }}</q-tooltip>
+				  </q-icon>
+				  <q-btn v-if="sshKeyStored" flat dense round icon="delete_outline" color="negative" aria-label="Удалить приватный ключ" @click="clearSSHPrivateKey">
+					<q-tooltip>Удалить сохранённый приватный ключ при сохранении формы</q-tooltip>
+				  </q-btn>
+				</template>
+			  </q-input>
             </div>
             <div class="col-12">
               <q-card flat bordered>
@@ -721,7 +938,7 @@ onMounted(load)
                   </div>
                   <q-btn
                     outline dense no-caps icon="fingerprint" label="Получить ключ"
-                    :loading="scanningKey" :disable="form.ssh_trust_any_host_key" @click="scanHostKey"
+                    :loading="scanningKey" :disable="form.ssh_trust_any_host_key || fetchingCA || saving || probing" @click="scanHostKey"
                   />
                   <q-btn v-if="hostKeyStored" flat dense round icon="delete_outline" color="negative" aria-label="Удалить ключ хоста" @click="clearHostKey">
                     <q-tooltip>Удалить закреплённый ключ</q-tooltip>
@@ -738,6 +955,7 @@ onMounted(load)
               <q-checkbox
                 v-model="form.ssh_trust_any_host_key"
                 label="Подключаться без проверки подлинности хоста"
+                @update:model-value="changeTrustAnyHostKey"
               />
               <div class="text-caption text-negative q-ml-sm">
                 Годится для лаборатории. Тот, кто вклинится в такое подключение, получает доступ
@@ -788,11 +1006,12 @@ onMounted(load)
                     v-model="caUpload"
                     accept=".pem,.crt,.cer,application/x-pem-file"
                     outlined dense label="Выбрать файл" style="width: 190px"
+                    :disable="fetchingCA || saving || probing || scanningKey"
                     @update:model-value="useCAFile"
                   >
                     <template #prepend><q-icon name="upload_file" /></template>
                   </q-file>
-                  <q-btn outline dense no-caps icon="download" label="Получить" @click="fetchCA">
+                  <q-btn outline dense no-caps icon="download" label="Получить" :loading="fetchingCA" :disable="scanningKey || saving || probing" @click="fetchCA">
                     <q-tooltip>Получить сертификат по непроверенному соединению; затем сверить SHA-256 на стороне платформы</q-tooltip>
                   </q-btn>
                   <q-btn v-if="caStored" flat dense round icon="delete_outline" color="negative" aria-label="Удалить сертификат" @click="clearCA">
@@ -818,6 +1037,102 @@ onMounted(load)
             </div>
           </template>
 
+          <template v-if="isProxmox">
+            <div class="col-12">
+              <q-separator class="q-my-sm" />
+              <div class="text-subtitle1">Канал данных Proxmox по SSH</div>
+              <div class="text-caption text-grey-7">
+                Необязателен для мониторинга. Для бэкапа helper
+                <code>jhvirt-pve-data-plane</code> должен быть установлен на каждом узле,
+                а ключ рекомендуется ограничить forced command согласно документации развёртывания.
+              </div>
+			  <div class="row items-center q-gutter-sm q-mt-sm">
+				<q-badge :color="proxmoxDataPlaneVerified ? 'positive' : proxmoxDataPlaneReady ? 'primary' : proxmoxDataPlaneStarted ? 'warning' : 'grey-7'">
+				  {{ proxmoxDataPlaneVerified ? 'Проверено: backup/restore готовы' : proxmoxDataPlaneReady ? 'Заполнено — проверьте подключение' : proxmoxDataPlaneStarted ? 'Настройка не завершена' : 'Только управление через API' }}
+				</q-badge>
+				<q-btn
+				  v-if="proxmoxDataPlaneStarted"
+				  flat dense no-caps color="negative" icon="link_off" label="Отключить канал данных"
+				  @click="disableProxmoxDataPlane"
+				/>
+			  </div>
+            </div>
+            <div class="col-12 col-sm-8">
+              <q-input
+                v-model="form.ssh_username"
+                label="Пользователь SSH для потока данных"
+                hint="Оставьте пустым для подключения только к API; обычно root с ограниченным ключом"
+                outlined
+                dense
+              />
+            </div>
+            <div class="col-12 col-sm-4">
+              <q-input v-model.number="form.ssh_port" type="number" label="Порт SSH узлов" outlined dense />
+            </div>
+            <div class="col-12">
+              <q-input
+                v-model="form.ssh_private_key"
+                label="Приватный ключ SSH канала данных"
+                type="textarea"
+                :hint="editing ? 'Пусто — оставить прежний' : 'Ключ без парольной фразы; после сохранения браузеру не возвращается'"
+                outlined
+                dense
+                autogrow
+                :input-style="{ maxHeight: '140px' }"
+              >
+				<template #append>
+				  <q-icon :name="sshKeyStored ? 'key' : 'key_off'" :color="sshKeyStored ? 'positive' : 'grey-6'" size="sm">
+					<q-tooltip>{{ sshKeyStored ? 'Приватный ключ сохранён' : 'Приватный ключ не сохранён' }}</q-tooltip>
+				  </q-icon>
+				</template>
+			  </q-input>
+            </div>
+            <div class="col-12">
+              <q-card flat bordered>
+                <q-card-section class="row items-center q-gutter-sm">
+                  <q-icon :name="hostKeyStored ? 'verified' : 'gpp_bad'" :color="hostKeyStored ? 'positive' : 'negative'" size="sm" />
+                  <div class="col">
+                    <div class="text-subtitle2">Ключи всех узлов кластера</div>
+                    <div class="text-caption text-grey-7">
+                      {{ hostKeyStored ? 'Набор ключей сохранён' : 'Ключи узлов не заданы' }}
+                    </div>
+                  </div>
+                  <q-btn
+                    outline dense no-caps icon="fingerprint" label="Получить ключи узлов"
+                    :loading="scanningKey" :disable="form.ssh_trust_any_host_key || fetchingCA || saving || probing" @click="scanProxmoxHostKeys"
+                  />
+                  <q-btn v-if="hostKeyStored" flat dense round icon="delete_outline" color="negative" aria-label="Удалить ключи узлов" @click="clearHostKey">
+                    <q-tooltip>Удалить закреплённые ключи узлов</q-tooltip>
+                  </q-btn>
+                </q-card-section>
+                <q-card-section v-if="scannedNodeKeys.length" class="q-pt-none">
+                  <q-list dense separator bordered>
+                    <q-item v-for="key in scannedNodeKeys" :key="key.node">
+                      <q-item-section>
+                        <q-item-label>{{ key.node }} · {{ key.address }}</q-item-label>
+                        <q-item-label caption class="jhv-mono jhv-wrap">{{ key.type }} · {{ key.fingerprint }}</q-item-label>
+                      </q-item-section>
+                    </q-item>
+                  </q-list>
+                </q-card-section>
+                <q-card-section class="q-pt-none text-caption">
+                  Сверьте каждый SHA-256 с ключом на соответствующем узле. Полные публичные
+                  ключи используются сервером для проверки и после сохранения в браузер не возвращаются.
+                </q-card-section>
+              </q-card>
+            </div>
+            <div class="col-12">
+              <q-checkbox
+                v-model="form.ssh_trust_any_host_key"
+                label="Подключаться к узлам Proxmox без проверки их ключей"
+                @update:model-value="changeTrustAnyHostKey"
+              />
+              <div class="text-caption text-negative q-ml-sm">
+                Только для лаборатории. Этот режим позволяет подменить узел и перехватить архив ВМ.
+              </div>
+            </div>
+          </template>
+
           <div class="col-12">
             <q-toggle v-model="form.enabled" label="Опрашивать этот сервер" />
           </div>
@@ -835,10 +1150,10 @@ onMounted(load)
                 <template v-if="!isLibvirt">кластеров {{ probeResult.clusters }}, </template>
                 хостов {{ probeResult.hosts }}, ВМ {{ probeResult.vms }}, отклик {{ probeResult.latency }}.
                 <div v-if="probeResult.supports_backup === false" class="text-warning">
-                  Резервное копирование и восстановление для этого коннектора пока недоступны.
+                  {{ isProxmox ? 'API доступен, но канал резервного копирования ещё не готов.' : 'Резервное копирование и восстановление для этого коннектора пока недоступны.' }}
                 </div>
                 <div v-else-if="!probeResult.supports_cbt" class="text-warning">
-                  Движок не поддерживает инкрементальный бэкап — будут доступны только полные копии через снапшот.
+                  {{ isProxmox ? 'Proxmox сохраняется полным нативным vzdump-архивом в snapshot-mode.' : 'Движок не поддерживает инкрементальный бэкап — будут доступны только полные копии через снапшот.' }}
                 </div>
                 <div v-if="probeResult.hint" class="text-weight-medium q-mt-xs">{{ probeResult.hint }}</div>
               </template>
@@ -876,10 +1191,17 @@ onMounted(load)
 
         <q-separator />
         <q-card-actions align="right">
-          <q-btn flat label="Проверить подключение" icon="network_check" :loading="probing" @click="probe" />
+          <q-btn
+            flat
+            :label="isProxmox && proxmoxDataPlaneReady ? 'Проверить API и все узлы' : 'Проверить подключение'"
+            icon="network_check"
+            :loading="probing"
+            :disable="saving || scanningKey || fetchingCA"
+            @click="probe"
+          />
           <q-space />
-          <q-btn flat label="Отмена" v-close-popup />
-          <q-btn color="primary" unelevated label="Сохранить" @click="save" />
+          <q-btn flat label="Отмена" v-close-popup :disable="saving || probing || scanningKey || fetchingCA" />
+          <q-btn color="primary" unelevated label="Сохранить" :loading="saving" :disable="probing || scanningKey || fetchingCA" @click="save" />
         </q-card-actions>
       </q-card>
     </q-dialog>
@@ -937,11 +1259,12 @@ onMounted(load)
               <q-file
                 v-model="provisionCAUpload" accept=".pem,.crt,.cer,application/x-pem-file"
                 outlined dense label="Выбрать файл" style="width: 190px"
+                :disable="provisionFetchingCA || provisionBusy"
                 @update:model-value="useProvisionCAFile"
               >
                 <template #prepend><q-icon name="upload_file" /></template>
               </q-file>
-              <q-btn outline dense no-caps icon="download" label="Получить" @click="fetchProvisionCA" />
+              <q-btn outline dense no-caps icon="download" label="Получить" :loading="provisionFetchingCA" :disable="provisionBusy" @click="fetchProvisionCA" />
               <q-btn v-if="provisionForm.ca_cert" flat dense round icon="delete_outline" color="negative" aria-label="Удалить сертификат" @click="clearProvisionCA"><q-tooltip>Удалить сертификат</q-tooltip></q-btn>
             </q-card-section>
             <q-card-section class="q-pt-none text-caption">
@@ -1015,12 +1338,13 @@ onMounted(load)
 
         <q-separator />
         <q-card-actions align="right">
-          <q-btn flat label="Закрыть" v-close-popup />
+          <q-btn flat label="Закрыть" v-close-popup :disable="provisionBusy || provisionFetchingCA" />
           <q-btn
             color="primary"
             unelevated
             label="Настроить и подключить"
             :loading="provisionBusy"
+            :disable="provisionFetchingCA"
             @click="runProvision"
           />
         </q-card-actions>

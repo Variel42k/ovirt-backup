@@ -23,6 +23,7 @@ type restoreVMRequest struct {
 	Name            string                          `json:"name"`
 	ClusterID       string                          `json:"cluster_id"`
 	StorageDomainID string                          `json:"storage_domain_id"`
+	HostID          string                          `json:"host_id"`
 	Network         string                          `json:"network"`
 	NetworkMappings []model.RestoreVMNetworkMapping `json:"network_mappings"`
 	Start           bool                            `json:"start"`
@@ -37,6 +38,7 @@ func (r *restoreVMRequest) toModel(runID string) *model.RestoreVMRequest {
 		Name:            r.Name,
 		ClusterID:       r.ClusterID,
 		StorageDomainID: r.StorageDomainID,
+		HostID:          r.HostID,
 		Network:         model.RestoreVMNetwork(r.Network),
 		NetworkMappings: r.NetworkMappings,
 		Start:           r.Start,

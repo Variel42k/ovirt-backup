@@ -332,6 +332,7 @@ func run() error {
 	// cannot live inside the backup package because the KVM driver builds on
 	// that package's storage format.
 	dispatcher := dispatch.New(engine, st, libvirtPool, cfg.Backup, cipher, log)
+	dispatcher.SetProxmoxPool(proxmoxPool)
 	fileBackupEngine := filebackup.New(st, *cfg, cipher, log)
 
 	if backup.QemuImgAvailable(cfg.Backup.QemuImgPath) {

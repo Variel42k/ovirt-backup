@@ -11,6 +11,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -21,6 +22,7 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/kvm"
 	"github.com/Variel42k/ovirt-backup/internal/libvirtx"
 	"github.com/Variel42k/ovirt-backup/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/proxmox"
 	"github.com/Variel42k/ovirt-backup/internal/repo"
 	"github.com/Variel42k/ovirt-backup/internal/secret"
 	"github.com/Variel42k/ovirt-backup/internal/store"
@@ -32,12 +34,18 @@ import (
 type Dispatcher struct {
 	*backup.Engine
 
-	store   *store.Store
-	libvirt *libvirtx.Pool
-	cfg     config.BackupConfig
-	cipher  *secret.Cipher
-	log     zerolog.Logger
+	store          *store.Store
+	libvirt        *libvirtx.Pool
+	proxmox        *proxmox.Pool
+	cfg            config.BackupConfig
+	cipher         *secret.Cipher
+	log            zerolog.Logger
+	proxmoxRestore sync.Mutex
 }
+
+// SetProxmoxPool enables the native Proxmox data path while keeping New
+// source-compatible with tests and small embeddings that do not use it.
+func (d *Dispatcher) SetProxmoxPool(pool *proxmox.Pool) { d.proxmox = pool }
 
 // New builds a dispatcher over the existing engine.
 func New(engine *backup.Engine, st *store.Store, pool *libvirtx.Pool,
@@ -55,6 +63,9 @@ func (d *Dispatcher) Execute(ctx context.Context, req backup.RunRequest) (*model
 	}
 	if srv.Kind.UsesLibvirt() {
 		return d.executeLibvirt(ctx, srv, req)
+	}
+	if srv.Kind.UsesProxmoxAPI() {
+		return d.executeProxmox(ctx, srv, req)
 	}
 	if !srv.Kind.UsesOVirtAPI() {
 		return nil, fmt.Errorf("резервное копирование %s в этой версии не поддерживается", srv.Kind.Title())

@@ -2,14 +2,14 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useQuasar } from 'quasar'
 import { useRoute, useRouter } from 'vue-router'
-import { api, notify, notifyError, notifyOk } from '@/api/client'
+import { api, errorMessage, notify, notifyError, notifyOk } from '@/api/client'
 import DirectoryPicker from '@/components/DirectoryPicker.vue'
 import { bytes, dateTime, elapsed, runStatus, statusColor } from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import { useOperationsStore } from '@/stores/operations'
 import HelpButton from '@/components/HelpButton.vue'
-import type { BackupCopy, BackupDisk, BackupRun, BootReport, Cluster, ReplicationDetail, RepositoryArtifact, RestoreNetworkTarget, RestoreRun, RestoreVMPlan, StorageDomain, VerifyRun } from '@/api/types'
+import type { BackupCopy, BackupDisk, BackupRun, BootReport, Cluster, Host, ReplicationDetail, RepositoryArtifact, RestoreNetworkTarget, RestoreRun, RestoreVMPlan, StorageDomain, VerifyRun } from '@/api/types'
 
 const $q = useQuasar()
 const route = useRoute()
@@ -43,6 +43,7 @@ let fallbackPollTimer: number | undefined
 
 const restoreOpen = ref(false)
 const restoreStep = ref(1)
+const maxRestoreStep = ref(1)
 const restoreBusy = ref(false)
 const restoreFormError = ref('')
 const restoreForm = ref({
@@ -54,10 +55,15 @@ const restoreForm = ref({
   target_disk_id: '',
   attach_to_vm_id: '',
   disk_ids: [] as string[],
+  overwrite_confirm: false,
 })
 const domains = ref<StorageDomain[]>([])
 const clusters = ref<Cluster[]>([])
+const restoreHosts = ref<Host[]>([])
 const restoreNetworks = ref<RestoreNetworkTarget[]>([])
+const targetInventoryLoading = ref(false)
+const targetInventoryError = ref('')
+let targetInventorySequence = 0
 
 // План сборки машины целиком. Запрашивается отдельно и до запуска: он ничего
 // не создаёт, а показывает объём и последствия — сколько дисков, сколько
@@ -65,50 +71,81 @@ const restoreNetworks = ref<RestoreNetworkTarget[]>([])
 const vmPlan = ref<RestoreVMPlan | null>(null)
 const vmPlanLoading = ref(false)
 const vmPlanDirty = ref(false)
+let vmPlanSequence = 0
 const vmForm = ref({
-  server_id: '', name: '', cluster_id: '', network: 'detached', start: false, confirm: false,
+  server_id: '', name: '', cluster_id: '', host_id: '', network: 'detached', start: false, confirm: false,
   network_mappings: [] as Array<{ nic_id: string; target_id: string; target_kind: string; exclude: boolean; connected: boolean }>,
 })
 const vmTargetServer = computed(() => app.servers.find((server) => server.id === vmForm.value.server_id))
+const sourceServer = computed(() => app.servers.find((server) => server.id === detail.value?.server_id))
+const nativeProxmoxRestore = computed(() => sourceServer.value?.kind === 'proxmox')
+const restoreTargetOptions = computed(() => nativeProxmoxRestore.value
+  ? [{ label: 'Восстановить нативный архив целиком в Proxmox', value: 'new_vm' }]
+  : [
+      { label: 'Собрать машину целиком: создать ВМ, диски и подключить их', value: 'new_vm' },
+      { label: 'Собрать образ в файл на сервере бэкапов', value: 'file' },
+      { label: 'Создать новый диск в oVirt и залить в него', value: 'new_disk' },
+      { label: 'Записать поверх существующего диска', value: 'disk' },
+    ])
 const compatibleRestoreServers = computed(() => {
-  const source = app.servers.find((server) => server.id === detail.value?.server_id)
+  const source = sourceServer.value
   if (!source) return []
-  return app.servers.filter((server) => server.enabled && app.serverSupports(server, 'supports_restore') &&
-    ((server.kind === 'kvm') === (source.kind === 'kvm')))
+  return app.servers.filter((server) => {
+    if (!server.enabled || !app.serverSupports(server, 'supports_restore')) return false
+    if (source.kind === 'proxmox') return server.kind === 'proxmox'
+    if (source.kind === 'kvm') return server.kind === 'kvm'
+    return server.kind !== 'kvm' && server.kind !== 'proxmox'
+  })
 })
 
 async function loadVMTargetInventory(serverId: string) {
+  const sequence = ++targetInventorySequence
+  targetInventoryLoading.value = Boolean(serverId)
+  targetInventoryError.value = ''
   domains.value = []
   clusters.value = []
+  restoreHosts.value = []
   restoreNetworks.value = []
-  if (!serverId) return
+  if (!serverId) {
+    targetInventoryLoading.value = false
+    return
+  }
   const server = app.servers.find((item) => item.id === serverId)
   try {
-    const [targetDomains, targetNetworks, targetClusters] = await Promise.all([
+    const [targetDomains, targetNetworks, targetClusters, targetHosts] = await Promise.all([
       api.listStorageDomains(serverId),
-      api.listRestoreNetworks(serverId),
-      server?.kind === 'kvm' ? Promise.resolve([] as Cluster[]) : api.listClusters(serverId),
+      server?.kind === 'proxmox' ? Promise.resolve([] as RestoreNetworkTarget[]) : api.listRestoreNetworks(serverId),
+      server?.kind === 'kvm' || server?.kind === 'proxmox' ? Promise.resolve([] as Cluster[]) : api.listClusters(serverId),
+      server?.kind === 'proxmox' ? api.listHosts(serverId) : Promise.resolve([] as Host[]),
     ])
+    if (sequence !== targetInventorySequence) return
     domains.value = targetDomains
     restoreNetworks.value = targetNetworks
     clusters.value = targetClusters
+    restoreHosts.value = targetHosts
   } catch (err) {
+    if (sequence !== targetInventorySequence) return
+    targetInventoryError.value = errorMessage(err)
     notifyError(err, 'Не удалось загрузить ресурсы целевой платформы')
+  } finally {
+    if (sequence === targetInventorySequence) targetInventoryLoading.value = false
   }
 }
 
 async function changeVMTargetServer(serverId: string) {
   vmForm.value.server_id = serverId
   vmForm.value.cluster_id = ''
+  vmForm.value.host_id = ''
   vmForm.value.network_mappings = []
   restoreForm.value.target_domain_id = ''
-  vmPlan.value = null
-  vmPlanDirty.value = false
+  invalidateVMPlan()
   await loadVMTargetInventory(serverId)
 }
 
 async function changeRestoreTarget(target: string) {
-  vmPlan.value = null
+  restoreForm.value.overwrite_confirm = false
+  invalidateVMPlan()
+  maxRestoreStep.value = 1
   if (target === 'new_vm') {
     await loadVMTargetInventory(vmForm.value.server_id)
   } else if (detail.value) {
@@ -202,6 +239,12 @@ const verifyForm = ref({
 const verifyMode = computed(() =>
   (app.meta?.verify_modes ?? []).find((m) => m.value === verifyForm.value.mode),
 )
+const verifyModeOptions = computed(() => {
+  const server = app.servers.find((item) => item.id === verifyTarget.value?.server_id)
+  return (app.meta?.verify_modes ?? []).filter((mode) =>
+    server?.kind !== 'proxmox' || ['quick', 'manifest', 'chain'].includes(mode.value),
+  )
+})
 /** Пробный запуск — единственный режим, которому нужен гипервизор. */
 const needsHypervisor = computed(() => verifyMode.value?.needs_hypervisor === true)
 /** Поднять ВМ можно только на подключении типа kvm: движок oVirt чужой образ не запустит. */
@@ -313,44 +356,73 @@ async function openRestore(run: BackupRun) {
 	}
   restoreForm.value = {
 		copy_id: healthyCopies(detail.value)[0]?.id ?? '',
-    target: 'file',
+    target: app.servers.find((server) => server.id === run.server_id)?.kind === 'proxmox' ? 'new_vm' : 'file',
     output_format: 'raw',
     output_dir: '',
     target_domain_id: '',
     target_disk_id: '',
     attach_to_vm_id: '',
     disk_ids: [],
+    overwrite_confirm: false,
   }
   vmPlan.value = null
   vmPlanDirty.value = false
+  vmPlanSequence += 1
   restoreStep.value = 1
+  maxRestoreStep.value = 1
   restoreFormError.value = ''
-  vmForm.value = { server_id: run.server_id, name: '', cluster_id: '', network: 'detached', start: false, confirm: false, network_mappings: [] }
-  await loadVMTargetInventory(run.server_id)
+  vmForm.value = { server_id: run.server_id, name: '', cluster_id: '', host_id: '', network: 'detached', start: false, confirm: false, network_mappings: [] }
   restoreOpen.value = true
+  void loadVMTargetInventory(run.server_id)
+}
+
+function invalidateVMPlan() {
+  vmPlanSequence += 1
+  vmPlan.value = null
+  vmPlanDirty.value = false
+  maxRestoreStep.value = Math.min(maxRestoreStep.value, 2)
+}
+
+function markVMPlanDirty() {
+  vmPlanSequence += 1
+  vmPlanDirty.value = true
+  maxRestoreStep.value = Math.min(maxRestoreStep.value, 2)
+}
+
+function invalidateRestoreSource() {
+  invalidateVMPlan()
+  maxRestoreStep.value = 1
+}
+
+function invalidateRestoreDestination() {
+  maxRestoreStep.value = Math.min(maxRestoreStep.value, 2)
+}
+
+function validateRestoreStep(step: number): string {
+  if (step === 1 && !restoreForm.value.copy_id) return 'Выберите доступную физическую копию.'
+  if (step !== 2) return ''
+  if (restoreForm.value.target === 'new_vm') {
+    if (targetInventoryLoading.value) return 'Дождитесь загрузки ресурсов целевой платформы.'
+    if (targetInventoryError.value) return 'Повторите загрузку ресурсов целевой платформы.'
+    if (!vmPlan.value) return 'Сначала постройте план восстановления.'
+    if (vmPlanDirty.value) return 'Параметры изменились — обновите план.'
+    if (vmPlan.value.blockers?.length) return 'В плане остались блокирующие проблемы.'
+  }
+  if (restoreForm.value.target === 'new_disk' && !restoreForm.value.target_domain_id) {
+    return 'Выберите домен хранения для нового диска.'
+  }
+  if (restoreForm.value.target === 'disk') {
+    if (!restoreForm.value.target_disk_id.trim()) return 'Укажите ID существующего диска.'
+    if (!restoreForm.value.overwrite_confirm) return 'Подтвердите перезапись существующего диска.'
+  }
+  return ''
 }
 
 function nextRestoreStep() {
-	restoreFormError.value = ''
-	if (restoreStep.value === 1 && !restoreForm.value.copy_id) {
-		restoreFormError.value = 'Выберите доступную физическую копию.'
-		return
-	}
-	if (restoreStep.value === 2) {
-		if (restoreForm.value.target === 'new_vm' && (!vmPlan.value || vmPlanDirty.value || vmPlan.value.blockers?.length)) {
-			restoreFormError.value = !vmPlan.value ? 'Сначала постройте план восстановления.' : vmPlanDirty.value ? 'Параметры изменились — обновите план.' : 'В плане остались блокирующие проблемы.'
-			return
-		}
-		if (restoreForm.value.target === 'new_disk' && !restoreForm.value.target_domain_id) {
-			restoreFormError.value = 'Выберите домен хранения для нового диска.'
-			return
-		}
-		if (restoreForm.value.target === 'disk' && !restoreForm.value.target_disk_id.trim()) {
-			restoreFormError.value = 'Укажите ID существующего диска.'
-			return
-		}
-	}
-	restoreStep.value = Math.min(3, restoreStep.value + 1)
+  restoreFormError.value = validateRestoreStep(restoreStep.value)
+  if (restoreFormError.value) return
+  restoreStep.value = Math.min(3, restoreStep.value + 1)
+  maxRestoreStep.value = Math.max(maxRestoreStep.value, restoreStep.value)
 }
 
 function healthyCopies(run: BackupRun | null): BackupCopy[] {
@@ -442,11 +514,21 @@ function setRestoreNetwork(attached: boolean) {
   for (const mapping of vmForm.value.network_mappings) {
     mapping.connected = attached && !mapping.exclude && Boolean(mapping.target_id)
   }
-  vmPlan.value = null
+  invalidateVMPlan()
 }
 
 async function loadVMPlan() {
   if (!detail.value) return
+  if (targetInventoryLoading.value) {
+    restoreFormError.value = 'Дождитесь загрузки ресурсов целевой платформы.'
+    return
+  }
+  if (targetInventoryError.value) {
+    restoreFormError.value = 'Повторите загрузку ресурсов целевой платформы.'
+    return
+  }
+  restoreFormError.value = ''
+  const sequence = ++vmPlanSequence
   vmPlanLoading.value = true
   try {
     const plan = await api.planRestoreVM(detail.value.id, {
@@ -454,6 +536,7 @@ async function loadVMPlan() {
       storage_domain_id: restoreForm.value.target_domain_id,
       ...vmForm.value,
     })
+    if (sequence !== vmPlanSequence) return
     vmPlan.value = plan
     vmPlanDirty.value = false
     if (!vmForm.value.network_mappings.length && plan.nics?.length) {
@@ -475,11 +558,22 @@ const outputDirPicker = ref(false)
 function useOutputDir(value: { rootId: string; path: string; absolute?: string }) {
   // Каталог восстановления — настоящий путь на диске службы, поэтому берётся
   // полный: именно по нему потом искать восстановленный файл.
-  if (value.absolute) restoreForm.value.output_dir = value.absolute
+  if (value.absolute) {
+    restoreForm.value.output_dir = value.absolute
+    invalidateRestoreDestination()
+  }
 }
 
 async function submitRestoreVM() {
   if (!detail.value) return
+  for (const step of [1, 2]) {
+    const issue = validateRestoreStep(step)
+    if (issue) {
+      restoreStep.value = step
+      restoreFormError.value = issue
+      return
+    }
+  }
   restoreBusy.value = true
   try {
     await operations.track('Восстановление виртуальной машины', detail.value.vm_name, () => api.restoreVM(detail.value!.id, {
@@ -500,7 +594,16 @@ async function submitRestoreVM() {
 
 async function submitRestore() {
   if (!detail.value) return
+  for (const step of [1, 2]) {
+    const issue = validateRestoreStep(step)
+    if (issue) {
+      restoreStep.value = step
+      restoreFormError.value = issue
+      return
+    }
+  }
   const payload: Record<string, unknown> = { ...restoreForm.value }
+  delete payload.overwrite_confirm
   if (restoreForm.value.target === 'file') {
     delete payload.target_domain_id
     delete payload.target_disk_id
@@ -508,7 +611,7 @@ async function submitRestore() {
   }
   if (restoreForm.value.target === 'disk') {
     // Перезапись существующего диска необратима — бэкенд требует явного согласия.
-    payload.confirm = true
+    payload.confirm = restoreForm.value.overwrite_confirm
   }
   try {
     restoreBusy.value = true
@@ -1295,7 +1398,7 @@ const replicationColumns = [
         <q-card-section class="q-gutter-md">
           <q-select
             v-model="verifyForm.mode"
-            :options="(app.meta?.verify_modes ?? []).map((m) => ({ label: m.title, value: m.value }))"
+            :options="verifyModeOptions.map((m) => ({ label: m.title, value: m.value }))"
             emit-value
             map-options
             label="Глубина проверки"
@@ -1404,7 +1507,7 @@ const replicationColumns = [
     </q-dialog>
 
     <!-- Восстановление -->
-    <q-dialog v-model="restoreOpen">
+    <q-dialog v-model="restoreOpen" persistent :maximized="$q.screen.lt.sm">
       <q-card style="width: 760px; max-width: 95vw" class="jhv-dialog-page">
         <q-card-section class="text-h6">
           Восстановление: {{ detail?.vm_name }}
@@ -1414,8 +1517,8 @@ const replicationColumns = [
 
         <q-tabs v-model="restoreStep" dense align="justify" active-color="primary" indicator-color="primary">
           <q-tab :name="1" icon="backup" label="Источник" />
-          <q-tab :name="2" icon="tune" label="Назначение" />
-          <q-tab :name="3" icon="task_alt" label="Проверка" />
+          <q-tab :name="2" icon="tune" label="Назначение" :disable="maxRestoreStep < 2" />
+          <q-tab :name="3" icon="task_alt" label="Проверка" :disable="maxRestoreStep < 3" />
         </q-tabs>
         <q-separator />
 
@@ -1426,18 +1529,17 @@ const replicationColumns = [
 				:options="healthyCopies(detail).map((copy) => ({ label: `${copy.role === 'primary' ? 'Основное' : 'Реплика'} · ${copy.storage_target_name || app.storageName(copy.storage_target_id)}`, value: copy.id }))"
 				emit-value map-options label="Источник восстановления" outlined dense
 				hint="Можно выбрать реплику, даже если основное хранилище недоступно"
+				@update:model-value="invalidateRestoreSource"
 			/>
           <q-option-group
             v-model="restoreForm.target"
             type="radio"
-            :options="[
-              { label: 'Собрать машину целиком: создать ВМ, диски и подключить их', value: 'new_vm' },
-              { label: 'Собрать образ в файл на сервере бэкапов', value: 'file' },
-              { label: 'Создать новый диск в oVirt и залить в него', value: 'new_disk' },
-              { label: 'Записать поверх существующего диска', value: 'disk' },
-            ]"
+            :options="restoreTargetOptions"
             @update:model-value="changeRestoreTarget"
           />
+			<q-banner v-if="nativeProxmoxRestore" dense class="bg-blue-1">
+				Копия содержит единый нативный vzdump-архив. Его можно восстановить только целиком в Proxmox.
+			</q-banner>
 			<q-banner dense class="bg-blue-1">Физическая копия выбирается отдельно от точки восстановления. Это позволяет восстановиться с реплики при недоступности основного хранилища.</q-banner>
 			</template>
 
@@ -1456,6 +1558,23 @@ const replicationColumns = [
                 @update:model-value="changeVMTargetServer"
               />
             </div>
+            <div v-if="targetInventoryError" class="col-12">
+              <q-banner dense class="bg-red-1 text-negative">
+                <template #avatar><q-icon name="error" /></template>
+                <div>Не удалось загрузить ресурсы выбранной платформы.</div>
+                <div class="text-caption jhv-wrap">{{ targetInventoryError }}</div>
+                <template #action>
+                  <q-btn
+                    flat
+                    no-caps
+                    color="negative"
+                    label="Повторить"
+                    :loading="targetInventoryLoading"
+                    @click="loadVMTargetInventory(vmForm.server_id)"
+                  />
+                </template>
+              </q-banner>
+            </div>
             <div class="col-12 col-sm-7">
               <q-input
                 v-model="vmForm.name"
@@ -1463,10 +1582,10 @@ const replicationColumns = [
                 hint="Пусто — имя исходной с датой восстановления"
                 outlined
                 dense
-                @update:model-value="vmPlan = null"
+                @update:model-value="invalidateVMPlan"
               />
             </div>
-            <div v-if="vmTargetServer?.kind !== 'kvm'" class="col-12 col-sm-5">
+            <div v-if="vmTargetServer?.kind !== 'kvm' && vmTargetServer?.kind !== 'proxmox'" class="col-12 col-sm-5">
               <q-select
                 v-model="vmForm.cluster_id"
                 :options="clusters.map((cluster) => ({ label: cluster.name, value: cluster.id }))"
@@ -1475,7 +1594,25 @@ const replicationColumns = [
                 label="Кластер"
                 outlined
                 dense
-                @update:model-value="vmPlan = null"
+                :loading="targetInventoryLoading"
+                :disable="targetInventoryLoading || !!targetInventoryError"
+                @update:model-value="invalidateVMPlan"
+              />
+            </div>
+            <div v-if="vmTargetServer?.kind === 'proxmox'" class="col-12 col-sm-5">
+              <q-select
+                v-model="vmForm.host_id"
+                :options="restoreHosts.map((host) => ({ label: `${host.name} · ${host.status}`, value: host.id, disable: host.status !== 'up' }))"
+                emit-value
+                map-options
+                clearable
+                label="Целевой узел"
+                hint="Пусто — выбрать доступный узел автоматически; локальное storage выберет свой узел"
+                outlined
+                dense
+                :loading="targetInventoryLoading"
+                :disable="targetInventoryLoading || !!targetInventoryError"
+                @update:model-value="invalidateVMPlan"
               />
             </div>
             <div class="col-12">
@@ -1484,10 +1621,12 @@ const replicationColumns = [
                 :options="domains.filter((d) => d.type === 'data').map((d) => ({ label: d.name, value: d.id }))"
                 emit-value
                 map-options
-                :label="vmTargetServer?.kind === 'kvm' ? 'Storage pool для дисков' : 'Домен хранения для дисков'"
+                :label="vmTargetServer?.kind === 'kvm' ? 'Storage pool для дисков' : vmTargetServer?.kind === 'proxmox' ? 'Storage Proxmox' : 'Домен хранения для дисков'"
                 outlined
                 dense
-                @update:model-value="vmPlan = null"
+                :loading="targetInventoryLoading"
+                :disable="targetInventoryLoading || !!targetInventoryError"
+                @update:model-value="invalidateVMPlan"
               />
             </div>
 
@@ -1521,7 +1660,7 @@ const replicationColumns = [
               <q-toggle
                 v-model="vmForm.start"
                 label="Запустить сразу после сборки"
-                @update:model-value="vmPlan = null"
+                @update:model-value="invalidateVMPlan"
               />
             </div>
 
@@ -1530,7 +1669,7 @@ const replicationColumns = [
                 v-model="vmForm.confirm"
                 color="negative"
                 label="Копия неполная — согласен собрать машину с пустыми дисками"
-                @update:model-value="vmPlan = null"
+                @update:model-value="invalidateVMPlan"
               />
             </div>
 
@@ -1539,8 +1678,9 @@ const replicationColumns = [
                 outline
                 color="primary"
                 icon="fact_check"
-                label="Показать план"
+                :label="vmPlan ? 'Пересчитать план' : 'Показать план'"
                 :loading="vmPlanLoading"
+                :disable="targetInventoryLoading || !!targetInventoryError"
                 @click="loadVMPlan"
               />
               <span class="jhv-reason q-ml-sm">План ничего не создаёт: он показывает, что будет сделано.</span>
@@ -1548,12 +1688,17 @@ const replicationColumns = [
 
             <div v-if="vmPlan" class="col-12">
               <q-card flat bordered>
+                <q-banner v-if="vmPlanDirty" dense class="bg-orange-1">
+                  <template #avatar><q-icon name="update" color="warning" /></template>
+                  Параметры сети изменились. Пересчитайте план перед продолжением.
+                </q-banner>
                 <q-card-section class="q-pb-none">
                   <div class="text-subtitle2">{{ vmPlan.new_name }}</div>
                   <div class="jhv-reason">
                     из копии машины {{ vmPlan.vm_name }} · дисков {{ vmPlan.disks.length }} ·
                     потребуется {{ bytes(vmPlan.total_bytes) }}
                     <template v-if="vmPlan.free_bytes >= 0"> · свободно {{ bytes(vmPlan.free_bytes) }}</template>
+                    <template v-if="vmPlan.host_name"> · узел {{ vmPlan.host_name }}</template>
                   </div>
                 </q-card-section>
 
@@ -1603,7 +1748,7 @@ const replicationColumns = [
                         :label="vmForm.network_mappings[index].target_kind === 'bridge' ? 'Bridge' : (vmTargetServer?.kind === 'kvm' ? 'Сеть libvirt' : 'vNIC profile')"
                         outlined dense
                         :disable="vmForm.network_mappings[index].exclude"
-                        @update:model-value="vmPlanDirty = true"
+                        @update:model-value="markVMPlanDirty"
                       />
                     </div>
                     <div v-if="vmTargetServer?.kind === 'kvm'" class="col-12 col-sm-2">
@@ -1612,7 +1757,7 @@ const replicationColumns = [
                         :options="[{ label: 'Сеть', value: 'network' }, { label: 'Bridge', value: 'bridge' }]"
                         emit-value map-options label="Тип" outlined dense
                         :disable="vmForm.network_mappings[index].exclude"
-                        @update:model-value="vmPlanDirty = true"
+                        @update:model-value="markVMPlanDirty"
                       />
                     </div>
                     <div class="col-auto">
@@ -1620,14 +1765,14 @@ const replicationColumns = [
                         v-model="vmForm.network_mappings[index].connected"
                         label="Подключён"
                         :disable="vmForm.network_mappings[index].exclude"
-                        @update:model-value="vmPlanDirty = true"
+                        @update:model-value="markVMPlanDirty"
                       />
                     </div>
                     <div class="col-auto">
                       <q-toggle
                         v-model="vmForm.network_mappings[index].exclude"
                         label="Исключить"
-                        @update:model-value="vmPlanDirty = true"
+                        @update:model-value="markVMPlanDirty"
                       />
                     </div>
                   </div>
@@ -1657,7 +1802,7 @@ const replicationColumns = [
           </template>
 
           <template v-if="restoreForm.target === 'file'">
-            <q-input v-model="restoreForm.output_dir" label="Каталог" hint="Пусто — временный каталог сервиса. Список показывает только разрешённые области восстановления." outlined dense>
+            <q-input v-model="restoreForm.output_dir" label="Каталог" hint="Пусто — временный каталог сервиса. Список показывает только разрешённые области восстановления." outlined dense @update:model-value="invalidateRestoreDestination">
               <template #append>
                 <q-btn flat dense no-caps icon="folder_open" label="Выбрать" @click="outputDirPicker = true" />
               </template>
@@ -1674,6 +1819,7 @@ const replicationColumns = [
               outlined
               dense
               :disable="!app.meta?.capabilities.qemu_img && restoreForm.output_format === 'qcow2'"
+              @update:model-value="invalidateRestoreDestination"
             />
             <div v-if="!app.meta?.capabilities.qemu_img" class="jhv-reason">
               qemu-img не найден на сервере — доступен только формат raw.
@@ -1689,6 +1835,7 @@ const replicationColumns = [
               label="Домен хранения для нового диска"
               outlined
               dense
+              @update:model-value="invalidateRestoreDestination"
             />
             <q-input
               v-model="restoreForm.attach_to_vm_id"
@@ -1696,16 +1843,23 @@ const replicationColumns = [
               hint="Необязательно: диск можно подключить позже вручную"
               outlined
               dense
+              @update:model-value="invalidateRestoreDestination"
             />
           </template>
 
           <template v-if="restoreForm.target === 'disk'">
-            <q-input v-model="restoreForm.target_disk_id" label="ID существующего диска" outlined dense />
+            <q-input v-model="restoreForm.target_disk_id" label="ID существующего диска" outlined dense @update:model-value="invalidateRestoreDestination" />
             <q-banner dense class="bg-red-1 text-negative">
               <template #avatar><q-icon name="warning" /></template>
               Содержимое указанного диска будет полностью перезаписано. Убедитесь, что ВМ,
               использующая этот диск, остановлена.
             </q-banner>
+            <q-checkbox
+              v-model="restoreForm.overwrite_confirm"
+              color="negative"
+              label="Я понимаю, что текущие данные выбранного диска будут безвозвратно перезаписаны"
+              @update:model-value="invalidateRestoreDestination"
+            />
           </template>
           </template>
 
@@ -1728,7 +1882,7 @@ const replicationColumns = [
 
         <q-separator />
         <q-card-actions align="right">
-          <q-btn flat label="Отмена" v-close-popup />
+          <q-btn flat label="Отмена" v-close-popup :disable="restoreBusy || vmPlanLoading" />
           <q-space />
           <q-btn v-if="restoreStep > 1" flat label="Назад" icon="arrow_back" @click="restoreStep--" />
           <q-btn v-if="restoreStep < 3" color="primary" unelevated label="Продолжить" icon-right="arrow_forward" @click="nextRestoreStep" />

@@ -170,6 +170,44 @@ func TestLibvirtServerRoundTrip(t *testing.T) {
 	if again.ScratchDir != "/srv/other" {
 		t.Errorf("каталог scratch не обновился: %q", again.ScratchDir)
 	}
+
+	// Удаление ключа должно быть явным: обычное пустое поле означает keep.
+	again.SSHPrivateKey = ""
+	again.ClearSSHPrivateKey = true
+	if err := s.UpdateServer(ctx, again); err != nil {
+		t.Fatalf("clear private key: %v", err)
+	}
+	cleared, err := s.GetServer(ctx, srv.ID)
+	if err != nil {
+		t.Fatalf("get after clear: %v", err)
+	}
+	if cleared.SSHPrivateKey != "" || cleared.SSHKeyStored {
+		t.Error("приватный ключ остался после явного удаления")
+	}
+}
+
+func TestProxmoxServerKeepsSeparateAPIAndSSHIdentities(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	srv := &model.Server{
+		Name: "pve-cluster", Kind: model.KindProxmox, EngineURL: "https://pve.example.org:8006",
+		Username: "backup@pve!jhvirt", Password: "api-secret", SSHUsername: "backup-stream",
+		SSHPort: 22, SSHPrivateKey: "private-key", SSHHostKey: "pve01 ssh-ed25519 AAAA",
+		Enabled: true,
+	}
+	if err := s.CreateServer(ctx, srv); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	got, err := s.GetServer(ctx, srv.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Username != "backup@pve!jhvirt" || got.SSHUsername != "backup-stream" {
+		t.Fatalf("API and SSH identities were mixed: api=%q ssh=%q", got.Username, got.SSHUsername)
+	}
+	if got.Password != "api-secret" || got.SSHPrivateKey != "private-key" || !got.HasProxmoxDataPlane() {
+		t.Fatal("Proxmox data-plane credentials were not restored")
+	}
 }
 
 func TestServerValidationByKind(t *testing.T) {

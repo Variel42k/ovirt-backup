@@ -20,6 +20,9 @@ func TestRunObjectCountMatchesWhatIsWritten(t *testing.T) {
 		{"один диск без конфигурации", model.BackupRun{DiskCount: 1}, 3},
 		{"три диска с конфигурацией", model.BackupRun{DiskCount: 3, ConfigStored: true}, 8},
 		{"дисков нет — считать нечего", model.BackupRun{}, 0},
+		{"config-only", model.BackupRun{Type: model.BackupConfig, RepoPath: "jhvirt/run/", ConfigStored: true}, 2},
+		{"нативный артефакт до добавления объектов", model.BackupRun{Type: model.BackupFull, RepoPath: "jhvirt/run/"}, 1},
+		{"OVA хранится вне репозитория", model.BackupRun{Type: model.BackupOVA, RepoPath: "host/path"}, 0},
 	}
 	for _, c := range cases {
 		if got := runObjectCount(&c.run); got != c.объект {

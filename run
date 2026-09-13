@@ -551,7 +551,7 @@ cmd_build() {
     # готовые артефакты публикуются в dist только в самом конце.
     trap 'rm -rf "$BUILD_TMP"' 0
     trap 'exit 1' HUP INT TERM
-    mkdir -p "$OUT/bin" "$OUT/config" "$OUT/web" "$OUT/systemd" "$OUT/compose" "$OUT/docs"
+    mkdir -p "$OUT/bin" "$OUT/config" "$OUT/web" "$OUT/systemd" "$OUT/compose" "$OUT/docs" "$OUT/proxmox"
 
     if [ "$SKIP_WEB" -eq 0 ]; then
         step "веб-интерфейс"
@@ -584,6 +584,7 @@ cmd_build() {
     cp deploy/systemd/jhvirt-dr-backup.service deploy/systemd/jhvirt-dr-backup.timer "$OUT/systemd/"
     cp deploy/systemd/jhvirt-keycloak-helper.service deploy/systemd/jhvirt-keycloak-helper.socket "$OUT/systemd/"
     cp deploy/dr-backup.sh "$OUT/systemd/"
+    cp deploy/proxmox/jhvirt-pve-data-plane "$OUT/proxmox/"
 
     # Всё для установки в контейнерах. Dockerfile отдельный: он не собирает
     # проект, а берёт готовый бинарь и web/dist из этого же комплекта, поэтому
@@ -631,8 +632,9 @@ cmd_build() {
         cd "$BUILD_TMP"
         # Одной строкой намеренно: перенос строки здесь уже дважды не переживал
         # правку файла и превращался в аргумент tar с именем «n».
-        tar cf "$ARCHIVE" --exclude="$NAME/bin" --exclude="$NAME/install.sh" "$NAME"
-        tar rf "$ARCHIVE" --mode=0755 "$NAME/bin" "$NAME/install.sh"
+        tar cf "$ARCHIVE" --exclude="$NAME/bin" --exclude="$NAME/install.sh" \
+            --exclude="$NAME/proxmox" "$NAME"
+        tar rf "$ARCHIVE" --mode=0755 "$NAME/bin" "$NAME/install.sh" "$NAME/proxmox"
         gzip -9 "$ARCHIVE"
     )
     ARCHIVE="$ARCHIVE.gz"

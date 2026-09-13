@@ -220,6 +220,11 @@ func (e *Engine) verify(ctx context.Context, runID, copyID string, mode model.Ve
 	for _, r := range set.Runs {
 		report.ChainRuns = append(report.ChainRuns, r.ID)
 	}
+	nativeProxmox := set.RunManifest != nil && set.RunManifest.Provider != nil &&
+		set.RunManifest.Provider.Name == "proxmox"
+	if nativeProxmox && mode != model.VerifyQuick && mode != model.VerifyManifest && mode != model.VerifyChain {
+		return report, fmt.Errorf("режим проверки %q неприменим к нативному архиву Proxmox; доступны quick, manifest и chain", mode)
+	}
 
 	switch mode {
 	case model.VerifyQuick:
@@ -245,7 +250,11 @@ func (e *Engine) verify(ctx context.Context, runID, copyID string, mode model.Ve
 	if err != nil {
 		return report, err
 	}
-	if mode == model.VerifyQuick {
+	if set.RunManifest != nil && len(set.RunManifest.Artifacts) > 0 {
+		err = verifyPublishedArtifacts(ctx, runID, set.RunManifest.Artifacts, set.Backend, mode == model.VerifyQuick)
+	} else if mode == model.VerifyQuick {
+		// Compatibility with points written before artifacts were included in
+		// run.json. New points use the published manifest as the source of truth.
 		err = e.verifyArtifactsQuick(ctx, runID, set.Backend)
 	} else {
 		err = e.VerifyArtifacts(ctx, runID, set.Backend)

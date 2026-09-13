@@ -98,6 +98,12 @@ export interface HostKeyScan {
   warning: string
 }
 
+export interface ProxmoxNodeKeys {
+  bundle: string
+  keys: Array<{ node: string; address: string; type: string; fingerprint: string }>
+  warning: string
+}
+
 export interface Server {
   id: string
   name: string
@@ -109,15 +115,18 @@ export interface Server {
   insecure_tls: boolean
   /** Когда отключили проверку сертификата: режим временный, а не настройка. */
   insecure_tls_since?: string
-  /** Поля ниже заполняются только для kind === 'kvm'. */
+  /** SSH-канал данных KVM или Proxmox. */
   ssh_host?: string
   ssh_port?: number
+  ssh_username?: string
   /** Закреплён ли публичный ключ хоста; сам ключ API не возвращает. */
   ssh_host_key_stored?: boolean
   /** Явный отказ проверять подлинность гипервизора — виден в списке значком. */
   ssh_trust_any_host_key?: boolean
   /** Есть ли сохранённый приватный ключ. Сам ключ наружу не отдаётся. */
   ssh_key_stored?: boolean
+  /** Write-only command: удалить сохранённый приватный ключ SSH. */
+  clear_ssh_private_key?: boolean
   scratch_dir?: string
   enabled: boolean
   tags: string[]
@@ -1173,6 +1182,10 @@ export interface RestoreVMPlan {
   vm_name: string
   new_name: string
   server_id: string
+  host_id?: string
+  host_name?: string
+  provider?: string
+  guest_kind?: string
   created_at: string
   disks: RestoreVMPlanDisk[]
   nics?: RestoreVMPlanNIC[]

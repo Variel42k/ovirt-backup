@@ -223,6 +223,19 @@ type RunManifest struct {
 
 	Disks     []RunManifestDisk     `json:"disks"`
 	Artifacts []RunManifestArtifact `json:"artifacts,omitempty"`
+	Provider  *ProviderBackup       `json:"provider,omitempty"`
+}
+
+// ProviderBackup carries only the portable, non-secret facts a provider's
+// native restore needs. The complete Proxmox configuration stays inside the
+// encrypted vzdump archive rather than leaking into run.json.
+type ProviderBackup struct {
+	Name               string `json:"name"`
+	GuestKind          string `json:"guest_kind,omitempty"`
+	SourceNode         string `json:"source_node,omitempty"`
+	ProvisionedBytes   int64  `json:"provisioned_bytes,omitempty"`
+	RootFSSize         string `json:"rootfs_size,omitempty"`
+	NativeArtifactKind string `json:"native_artifact_kind,omitempty"`
 }
 
 // RunManifestDisk is the per-disk summary inside the run document.

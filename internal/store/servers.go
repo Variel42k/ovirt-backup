@@ -17,7 +17,7 @@ const serverColumns = `id, name, kind, engine_url, username, password_enc, ca_ce
 	enabled, tags, notes, state, state_message, engine_version, product_name, api_version,
 	supports_cbt, failure_count, last_seen_at, last_checked_at, created_at, updated_at,
 	ssh_host, ssh_port, ssh_private_key_enc, ssh_host_key, ssh_trust_any_host_key, scratch_dir,
-	insecure_tls_since`
+	insecure_tls_since, ssh_username`
 
 // CreateServer stores a new engine connection, encrypting the password.
 func (s *Store) CreateServer(ctx context.Context, srv *model.Server) error {
@@ -49,14 +49,14 @@ func (s *Store) CreateServer(ctx context.Context, srv *model.Server) error {
 	}
 
 	_, err = s.db.Exec(ctx, `INSERT INTO servers (`+serverColumns+`)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		srv.ID, srv.Name, string(srv.Kind), srv.EngineURL, srv.Username, enc, srv.CACert,
 		srv.InsecureTLS, srv.Enabled, encodeJSON(srv.Tags), srv.Notes, string(srv.State),
 		srv.StateMessage, srv.EngineVersion, srv.ProductName, srv.APIVersion, srv.SupportsCBT,
 		srv.FailureCount, srv.LastSeenAt, srv.LastCheckedAt,
 		srv.CreatedAt, srv.UpdatedAt,
 		srv.SSHHost, srv.SSHPort, sshKey, srv.SSHHostKey, srv.SSHTrustAnyHostKey, srv.ScratchDir,
-		srv.InsecureTLSSince)
+		srv.InsecureTLSSince, srv.SSHUsername)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return fmt.Errorf("%w: сервер %q", ErrConflict, srv.Name)
@@ -81,7 +81,7 @@ func (s *Store) UpdateServer(ctx context.Context, srv *model.Server) error {
 	}
 	// An empty key on update means "keep the stored one", matching how the
 	// password behaves, so the edit form never has to echo a secret back.
-	if srv.SSHPrivateKey == "" {
+	if srv.SSHPrivateKey == "" && !srv.ClearSSHPrivateKey {
 		srv.SSHPrivateKey = existing.SSHPrivateKey
 	}
 	if srv.SSHPort == 0 {
@@ -114,12 +114,12 @@ func (s *Store) UpdateServer(ctx context.Context, srv *model.Server) error {
 		name=?, kind=?, engine_url=?, username=?, password_enc=?, ca_cert=?, insecure_tls=?,
 		enabled=?, tags=?, notes=?, updated_at=?,
 		ssh_host=?, ssh_port=?, ssh_private_key_enc=?, ssh_host_key=?, ssh_trust_any_host_key=?,
-		scratch_dir=?, insecure_tls_since=?
+		scratch_dir=?, insecure_tls_since=?, ssh_username=?
 		WHERE id=?`,
 		srv.Name, string(srv.Kind), srv.EngineURL, srv.Username, enc, srv.CACert, srv.InsecureTLS,
 		srv.Enabled, encodeJSON(srv.Tags), srv.Notes, srv.UpdatedAt,
 		srv.SSHHost, srv.SSHPort, sshKey, srv.SSHHostKey, srv.SSHTrustAnyHostKey, srv.ScratchDir,
-		srv.InsecureTLSSince, srv.ID)
+		srv.InsecureTLSSince, srv.SSHUsername, srv.ID)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return fmt.Errorf("%w: сервер %q", ErrConflict, srv.Name)
@@ -129,6 +129,7 @@ func (s *Store) UpdateServer(ctx context.Context, srv *model.Server) error {
 	srv.CACertStored = strings.TrimSpace(srv.CACert) != ""
 	srv.SSHHostKeyStored = strings.TrimSpace(srv.SSHHostKey) != ""
 	srv.SSHKeyStored = strings.TrimSpace(srv.SSHPrivateKey) != ""
+	srv.ClearSSHPrivateKey = false
 	return nil
 }
 
@@ -227,7 +228,7 @@ func (s *Store) scanServer(row rowScanner) (*model.Server, error) {
 		&srv.EngineVersion, &srv.ProductName, &srv.APIVersion, &srv.SupportsCBT, &srv.FailureCount,
 		&lastSeen, &lastChecked, &createdAt, &updatedAt,
 		&srv.SSHHost, &srv.SSHPort, &sshKeyEnc, &srv.SSHHostKey, &srv.SSHTrustAnyHostKey,
-		&srv.ScratchDir, &insecureSince)
+		&srv.ScratchDir, &insecureSince, &srv.SSHUsername)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}

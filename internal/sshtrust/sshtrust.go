@@ -10,6 +10,7 @@
 package sshtrust
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 )
 
 // ErrNoHostKey means the connection has neither a pinned key nor a decision to
@@ -34,6 +36,18 @@ var ErrNoHostKey = errors.New("не задан ключ хоста: получи
 // the caller has to have stored a decision somewhere for this to be reachable,
 // and that decision is what the interface shows and the audit log records.
 func Callback(hostKey string, trustAny bool) (ssh.HostKeyCallback, error) {
+	return callback(hostKey, trustAny, false)
+}
+
+// AddressBoundCallback requires every pinned key to name the exact SSH
+// endpoint it belongs to. It is used for clusters, where accepting one bare
+// authorized_keys line for every node would allow a compromised member to
+// impersonate another member.
+func AddressBoundCallback(hostKey string, trustAny bool) (ssh.HostKeyCallback, error) {
+	return callback(hostKey, trustAny, true)
+}
+
+func callback(hostKey string, trustAny, requireAddress bool) (ssh.HostKeyCallback, error) {
 	pinned := strings.TrimSpace(hostKey)
 	if pinned == "" {
 		if trustAny {
@@ -42,11 +56,70 @@ func Callback(hostKey string, trustAny bool) (ssh.HostKeyCallback, error) {
 		return nil, ErrNoHostKey
 	}
 
-	parsed, _, _, _, err := ssh.ParseAuthorizedKey([]byte(pinned))
-	if err != nil {
-		return nil, fmt.Errorf("разбор ключа хоста: %w (ожидается формат authorized_keys)", err)
+	type entry struct {
+		hosts []string
+		key   ssh.PublicKey
 	}
-	return ssh.FixedHostKey(parsed), nil
+	var entries []entry
+	for lineNumber, line := range strings.Split(pinned, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			return nil, fmt.Errorf("разбор ключа хоста, строка %d: ожидается authorized_keys или known_hosts", lineNumber+1)
+		}
+		if strings.HasPrefix(fields[0], "ssh-") || strings.HasPrefix(fields[0], "ecdsa-") ||
+			strings.HasPrefix(fields[0], "sk-") {
+			if requireAddress {
+				return nil, fmt.Errorf("разбор ключа хоста, строка %d: для кластера нужна адресная строка known_hosts", lineNumber+1)
+			}
+			key, _, _, _, err := ssh.ParseAuthorizedKey([]byte(line))
+			if err != nil {
+				return nil, fmt.Errorf("разбор ключа хоста, строка %d: %w", lineNumber+1, err)
+			}
+			entries = append(entries, entry{key: key})
+			continue
+		}
+		if strings.HasPrefix(fields[0], "|") || strings.ContainsAny(fields[0], "*?!") {
+			return nil, fmt.Errorf("разбор ключа хоста, строка %d: хешированные ключи и шаблоны не поддерживаются", lineNumber+1)
+		}
+		key, _, _, _, err := ssh.ParseAuthorizedKey([]byte(strings.Join(fields[1:], " ")))
+		if err != nil {
+			return nil, fmt.Errorf("разбор ключа хоста, строка %d: %w", lineNumber+1, err)
+		}
+		entries = append(entries, entry{hosts: strings.Split(fields[0], ","), key: key})
+	}
+	if len(entries) == 0 {
+		return nil, ErrNoHostKey
+	}
+
+	return func(hostname string, _ net.Addr, presented ssh.PublicKey) error {
+		normalized := strings.ToLower(knownhosts.Normalize(hostname))
+		var expected []ssh.PublicKey
+		for _, candidate := range entries {
+			if len(candidate.hosts) == 0 {
+				expected = append(expected, candidate.key)
+				continue
+			}
+			for _, host := range candidate.hosts {
+				if strings.ToLower(knownhosts.Normalize(host)) == normalized {
+					expected = append(expected, candidate.key)
+					break
+				}
+			}
+		}
+		if len(expected) == 0 {
+			return fmt.Errorf("для SSH-узла %s нет закреплённого ключа", hostname)
+		}
+		for _, key := range expected {
+			if key.Type() == presented.Type() && bytes.Equal(key.Marshal(), presented.Marshal()) {
+				return nil
+			}
+		}
+		return fmt.Errorf("ключ SSH-узла %s не совпал: предъявлен %s", hostname, Fingerprint(presented))
+	}, nil
 }
 
 // Fingerprint renders the SHA256 form an operator can compare against

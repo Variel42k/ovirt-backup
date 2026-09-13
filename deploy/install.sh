@@ -4571,7 +4571,8 @@ install_containers() {
         mkdir -p "$PREFIX/compose" "$PREFIX/config" "$PREFIX/data" "$PREFIX/logs" \
                  "$PREFIX/docs" "$PREFIX/backups" "$PREFIX/restores" \
                  "$PREFIX/file-sources" "$PREFIX/file-restores" \
-                 "$PREFIX/keycloak-truststores" "$PREFIX/keycloak-vault" "$PREFIX/keycloak-helper"
+                 "$PREFIX/keycloak-truststores" "$PREFIX/keycloak-vault" "$PREFIX/keycloak-helper" \
+                 "$PREFIX/proxmox"
         rm -rf "${PREFIX:?}/bin" "${PREFIX:?}/web"
         # Образ собирается из bin/ и web/dist рядом с Dockerfile, поэтому весь
         # комплект копируется целиком.
@@ -4588,6 +4589,8 @@ install_containers() {
 			"$PREFIX/compose/Dockerfile.postgres" \
             "$PREFIX/compose/dr-backup.sh"
         [ -d "$HERE/docs" ] && cp -r "$HERE/docs/." "$PREFIX/docs/"
+        [ -f "$HERE/proxmox/jhvirt-pve-data-plane" ] && \
+            install -o root -g root -m 0755 "$HERE/proxmox/jhvirt-pve-data-plane" "$PREFIX/proxmox/"
         [ -f "$HERE/VERSION" ] && cp "$HERE/VERSION" "$PREFIX/"
         WORK="$PREFIX/compose"
         BACKUPS="$PREFIX/backups"; RESTORES="$PREFIX/restores"
@@ -4745,6 +4748,10 @@ PostgreSQL хранит пароль внутри тома и новый не п
 
 	if [ "$BUNDLE" -eq 1 ]; then
 		chown -R "$USER_NAME:$USER_NAME" "$PREFIX"
+		if [ -f "$PREFIX/proxmox/jhvirt-pve-data-plane" ]; then
+			chown root:root "$PREFIX/proxmox" "$PREFIX/proxmox/jhvirt-pve-data-plane"
+			chmod 0755 "$PREFIX/proxmox" "$PREFIX/proxmox/jhvirt-pve-data-plane"
+		fi
 		chmod 700 "$PREFIX/data"
 		# YAML не содержит паролей, а контейнер читает bind mount под UID
 		# 10001, который не обязан совпадать с системным пользователем хоста.
@@ -5291,7 +5298,7 @@ install_systemd() {
 
     ensure_service_user
     mkdir -p "$PREFIX/bin" "$PREFIX/web" "$PREFIX/config" "$PREFIX/data" "$PREFIX/logs" \
-        "$PREFIX/docs" "$PREFIX/file-sources" "$PREFIX/file-restores"
+        "$PREFIX/docs" "$PREFIX/file-sources" "$PREFIX/file-restores" "$PREFIX/proxmox"
 
     WAS_ACTIVE=0
     if [ "$UPGRADE" -eq 1 ] && systemctl is-active --quiet jhvirt 2>/dev/null; then
@@ -5307,6 +5314,8 @@ install_systemd() {
     rm -rf "$PREFIX/web/dist"
     cp -r "$HERE/web/dist" "$PREFIX/web/dist"
     [ -d "$HERE/docs" ] && cp -r "$HERE/docs/." "$PREFIX/docs/"
+    [ -f "$HERE/proxmox/jhvirt-pve-data-plane" ] && \
+        install -o root -g root -m 0755 "$HERE/proxmox/jhvirt-pve-data-plane" "$PREFIX/proxmox/"
     [ -f "$HERE/VERSION" ] && cp "$HERE/VERSION" "$PREFIX/"
 
     # Конфигурацию не трогаем: в ней уже могут быть правки оператора.
@@ -5314,6 +5323,10 @@ install_systemd() {
 	migration_apply_systemd_files
 
     chown -R "$USER_NAME:$USER_NAME" "$PREFIX"
+	if [ -f "$PREFIX/proxmox/jhvirt-pve-data-plane" ]; then
+		chown root:root "$PREFIX/proxmox" "$PREFIX/proxmox/jhvirt-pve-data-plane"
+		chmod 0755 "$PREFIX/proxmox" "$PREFIX/proxmox/jhvirt-pve-data-plane"
+	fi
     chmod 700 "$PREFIX/data"
     chmod 750 "$PREFIX/logs"
 	chmod 750 "$PREFIX/config"

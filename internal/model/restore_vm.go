@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // Восстановление виртуальной машины целиком: не образ диска, а работающая
@@ -49,6 +50,9 @@ type RestoreVMRequest struct {
 	// ClusterID и StorageDomainID нужны движку oVirt; для KVM не применяются.
 	ClusterID       string `json:"cluster_id,omitempty"`
 	StorageDomainID string `json:"storage_domain_id,omitempty"`
+	// HostID selects a concrete Proxmox node. For shared storage the service
+	// chooses the first healthy node when this field is empty.
+	HostID string `json:"host_id,omitempty"`
 
 	Network         RestoreVMNetwork          `json:"network,omitempty"`
 	NetworkMappings []RestoreVMNetworkMapping `json:"network_mappings,omitempty"`
@@ -92,11 +96,15 @@ type RestoreNetworkTarget struct {
 // терабайта, начатое по ошибке, занимает место и время, а прерванное на
 // середине оставляет полусобранную машину.
 type RestoreVMPlan struct {
-	RunID    string    `json:"run_id"`
-	VMName   string    `json:"vm_name"`
-	NewName  string    `json:"new_name"`
-	ServerID string    `json:"server_id"`
-	Created  time.Time `json:"created_at"`
+	RunID     string    `json:"run_id"`
+	VMName    string    `json:"vm_name"`
+	NewName   string    `json:"new_name"`
+	ServerID  string    `json:"server_id"`
+	HostID    string    `json:"host_id,omitempty"`
+	HostName  string    `json:"host_name,omitempty"`
+	Provider  string    `json:"provider,omitempty"`
+	GuestKind string    `json:"guest_kind,omitempty"`
+	Created   time.Time `json:"created_at"`
 
 	Disks []RestoreVMPlanDisk `json:"disks"`
 	NICs  []RestoreVMPlanNIC  `json:"nics,omitempty"`
@@ -188,7 +196,7 @@ func (r *RestoreVMRequest) Validate() error {
 		if len(name) > 255 {
 			return fmt.Errorf("имя машины длиннее 255 символов")
 		}
-		if strings.ContainsAny(name, "/\\?%*:|\"<>") {
+		if strings.ContainsAny(name, "/\\?%*:|\"<>") || strings.ContainsFunc(name, unicode.IsControl) {
 			return fmt.Errorf("имя машины содержит недопустимые символы")
 		}
 	}

@@ -237,9 +237,12 @@ func (s *Server) loadCatalogCandidate(ctx context.Context, backend repo.Backend,
 	for _, disk := range doc.Disks {
 		required = append(required, disk.ManifestKey, disk.DataKey)
 	}
+	for _, artifact := range doc.Artifacts {
+		required = append(required, artifact.ManifestKey, artifact.DataKey)
+	}
 	for _, objectKey := range required {
-		if objectKey == "" {
-			candidate.status, candidate.details = "missing_object", "манифест содержит пустой путь объекта"
+		if !catalogObjectInRun(candidate.prefix, objectKey) {
+			candidate.status, candidate.details = "corrupt", "манифест содержит путь объекта вне каталога запуска: "+objectKey
 			return
 		}
 		if _, ok := objects[objectKey]; !ok {
@@ -258,6 +261,14 @@ func (s *Server) loadCatalogCandidate(ctx context.Context, backend repo.Backend,
 			candidate.status, candidate.details = "corrupt", "повреждён манифест диска "+disk.ManifestKey
 			return
 		}
+		if diskManifest.RunID != doc.RunID || diskManifest.DiskID != disk.DiskID || diskManifest.DataKey != disk.DataKey {
+			candidate.status, candidate.details = "corrupt", "манифест диска не соответствует run.json: "+disk.ManifestKey
+			return
+		}
+		if disk.DataSHA256 != "" && diskManifest.DataSHA256 != "" && disk.DataSHA256 != diskManifest.DataSHA256 {
+			candidate.status, candidate.details = "corrupt", "SHA-256 диска не соответствует его манифесту"
+			return
+		}
 		if disk.DataSHA256 != "" {
 			hash, err := hashRepositoryObject(ctx, backend, disk.DataKey)
 			if err != nil || hash != disk.DataSHA256 {
@@ -266,6 +277,40 @@ func (s *Server) loadCatalogCandidate(ctx context.Context, backend repo.Backend,
 			}
 		}
 	}
+	for _, artifact := range doc.Artifacts {
+		body, err := readRepositoryObject(ctx, backend, artifact.ManifestKey)
+		if err != nil {
+			candidate.status, candidate.details = "corrupt", err.Error()
+			return
+		}
+		var artifactManifest backup.DiskManifest
+		if err := backup.DecodeManifest(strings.NewReader(string(body)), &artifactManifest); err != nil || artifactManifest.Validate() != nil {
+			candidate.status, candidate.details = "corrupt", "повреждён манифест артефакта "+artifact.ManifestKey
+			return
+		}
+		if err := backup.ValidateArtifactManifest(doc.RunID, artifact.DiskID, artifact.Kind, artifact.DataKey, &artifactManifest); err != nil {
+			candidate.status, candidate.details = "corrupt", "артефакт не соответствует run.json: "+err.Error()
+			return
+		}
+		if artifact.StoredSHA256 != "" && artifactManifest.DataSHA256 != "" && artifact.StoredSHA256 != artifactManifest.DataSHA256 {
+			candidate.status, candidate.details = "corrupt", "SHA-256 артефакта не соответствует его манифесту"
+			return
+		}
+		if artifact.StoredSHA256 != "" {
+			hash, err := hashRepositoryObject(ctx, backend, artifact.DataKey)
+			if err != nil || hash != artifact.StoredSHA256 {
+				candidate.status, candidate.details = "corrupt", "SHA-256 данных не совпал для "+artifact.DataKey
+				return
+			}
+		}
+	}
+}
+
+func catalogObjectInRun(prefix, key string) bool {
+	if key == "" || strings.Contains(key, `\`) || path.Clean(key) != key {
+		return false
+	}
+	return strings.HasPrefix(key, prefix) && len(key) > len(prefix)
 }
 
 func readRepositoryObject(ctx context.Context, backend repo.Backend, key string) ([]byte, error) {
@@ -406,29 +451,15 @@ func (s *Server) importCatalogEntry(ctx context.Context, scan *model.CatalogScan
 			ManifestKey: disk.ManifestKey, DataKey: disk.DataKey, LogicalBytes: disk.VirtualSize,
 			StoredBytes: disk.StoredBytes, ChunkCount: disk.ChunkCount, Status: model.RunSucceeded})
 	}
-	if err := s.store.ImportCatalogRun(ctx, entry.ID, run, disks); err != nil {
-		return err
-	}
-	existing, _ := s.store.ListRepositoryArtifacts(ctx, doc.RunID)
-	known := map[string]bool{}
-	for _, artifact := range existing {
-		known[artifact.StorageTargetID+":"+artifact.DiskID+":"+artifact.Kind] = true
-	}
+	artifacts := make([]model.RepositoryArtifact, 0, len(doc.Artifacts))
 	for _, item := range doc.Artifacts {
-		key := scan.StorageTargetID + ":" + item.DiskID + ":" + item.Kind
-		if known[key] {
-			continue
-		}
-		artifact := &model.RepositoryArtifact{
+		artifacts = append(artifacts, model.RepositoryArtifact{
 			RunID: doc.RunID, DiskID: item.DiskID, DiskAlias: item.DiskAlias, Kind: item.Kind,
 			StorageTargetID: scan.StorageTargetID, Status: model.RunSucceeded,
 			ManifestKey: item.ManifestKey, DataKey: item.DataKey, SizeBytes: item.SizeBytes,
 			StoredBytes: item.StoredBytes, SHA256: item.SHA256, StoredSHA256: item.StoredSHA256,
 			Encrypted: item.Encrypted, StartedAt: &started, EndedAt: &ended, CreatedAt: started,
-		}
-		if err := s.store.CreateRepositoryArtifact(ctx, artifact); err != nil {
-			return err
-		}
+		})
 	}
-	return nil
+	return s.store.ImportCatalogRun(ctx, entry.ID, run, disks, artifacts)
 }

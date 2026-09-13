@@ -5,6 +5,7 @@ import { ref } from 'vue'
 import type {
   DirectoryListing,
   HostKeyScan,
+  ProxmoxNodeKeys,
   Alert,
   BackupCopy,
   BackupJob,
@@ -307,6 +308,10 @@ export const api = {
   scanServerHostKey: (host: string, port: number) =>
     http
       .post<HostKeyScan>('/servers/host-key', { host, port }, { timeout: 30_000 })
+      .then((r) => r.data),
+  scanProxmoxHostKeys: (payload: Record<string, unknown>) =>
+    http
+      .post<ProxmoxNodeKeys>('/servers/proxmox-host-keys', payload, { timeout: 45_000 })
       .then((r) => r.data),
   scanStorageHostKey: (host: string, port: number) =>
     http

@@ -60,11 +60,11 @@ func (k ServerKind) UsesProxmoxAPI() bool { return k == KindProxmox }
 // than to an oVirt-style engine REST API.
 func (k ServerKind) UsesLibvirt() bool { return k == KindKVM }
 
-// SupportsBackup reports whether this build has a data-plane reader for the
-// connector. Proxmox inventory and power operations are intentionally useful
-// on their own, but must not be sent through an oVirt backup implementation.
+// SupportsBackup reports whether this build has a data-plane implementation
+// for the connector. A concrete Proxmox connection may still be management
+// only until its per-node SSH channel is configured.
 func (k ServerKind) SupportsBackup() bool {
-	return k.UsesOVirtAPI() || k.UsesLibvirt()
+	return k.UsesOVirtAPI() || k.UsesProxmoxAPI() || k.UsesLibvirt()
 }
 
 func (k ServerKind) SupportsRestore() bool { return k.SupportsBackup() }
@@ -140,21 +140,30 @@ type Server struct {
 	Tags             []string   `json:"tags"`
 	Notes            string     `json:"notes,omitempty"`
 
-	// Поля ниже используются только при Kind == KindKVM.
+	// Поля ниже образуют SSH-канал данных. Для KVM он несёт и управление
+	// libvirt, и диски. Для Proxmox REST API остаётся каналом управления, а SSH
+	// передаёт нативный поток vzdump с каждого узла кластера.
 	//
-	// Username и Password переиспользуются как учётные данные SSH: это те же
-	// «логин и пароль для входа», и заводить вторую пару полей ради разного
-	// протокола значило бы дублировать и форму, и шифрование.
 	SSHHost string `json:"ssh_host,omitempty"`
 	SSHPort int    `json:"ssh_port,omitempty"`
+	// SSHUsername отделён от Username для Proxmox: Username там занят API token
+	// ID вида user@realm!token, а на узел входит отдельная ограниченная SSH-запись.
+	// Для KVM пустое значение означает использовать Username, чтобы старые
+	// подключения продолжали работать без миграции данных.
+	SSHUsername string `json:"ssh_username,omitempty"`
 	// SSHPrivateKey хранится зашифрованным и наружу не отдаётся.
 	SSHPrivateKey string `json:"-"`
+	// ClearSSHPrivateKey distinguishes an intentional removal from the empty
+	// write-only field submitted by an edit form. It is an API/store command,
+	// never persisted or returned to a client.
+	ClearSSHPrivateKey bool `json:"-"`
 	// SSHKeyStored говорит интерфейсу, что ключ есть, не показывая самого
 	// ключа. Нужно, чтобы в списке было видно подключения, всё ещё входящие по
 	// паролю: их пароль лежит расшифровываемым и уходит на хост при каждом
 	// подключении. Заполняется чтением из базы, снаружи не задаётся.
 	SSHKeyStored bool `json:"ssh_key_stored"`
-	// SSHHostKey в формате authorized_keys. Пусто — ключ ещё не задан, и
+	// SSHHostKey в формате authorized_keys для одного KVM-хоста или адресных
+	// строк known_hosts для кластера Proxmox. Пусто — ключ ещё не задан, и
 	// подключения не будет: см. SSHTrustAnyHostKey.
 	SSHHostKey       string `json:"-"`
 	SSHHostKeyStored bool   `json:"ssh_host_key_stored"`
@@ -190,6 +199,15 @@ func (s *Server) HasPassword() bool { return s.Password != "" }
 // HasSSHKey reports whether a private key is stored, without exposing it.
 func (s *Server) HasSSHKey() bool { return s.SSHPrivateKey != "" }
 
+// HasProxmoxDataPlane reports whether the optional cluster data channel is
+// configured. Management-only Proxmox connections remain valid, but cannot be
+// selected for backup until this channel is complete.
+func (s *Server) HasProxmoxDataPlane() bool {
+	return s.Kind.UsesProxmoxAPI() && strings.TrimSpace(s.SSHUsername) != "" &&
+		strings.TrimSpace(s.SSHPrivateKey) != "" &&
+		(strings.TrimSpace(s.SSHHostKey) != "" || s.SSHTrustAnyHostKey)
+}
+
 // Target renders where this connection points, for logs and the UI.
 func (s *Server) Target() string {
 	if s.Kind.UsesLibvirt() {
@@ -213,6 +231,9 @@ func (s *Server) Validate() error {
 	if s.Username == "" {
 		return fmt.Errorf("не указано имя пользователя")
 	}
+	if s.SSHPort < 0 || s.SSHPort > 65535 {
+		return fmt.Errorf("порт SSH должен быть от 1 до 65535")
+	}
 
 	if s.Kind.UsesLibvirt() {
 		if s.SSHHost == "" {
@@ -229,6 +250,26 @@ func (s *Server) Validate() error {
 				"либо явно разрешите подключение без проверки")
 		}
 		return nil
+	}
+
+	if s.Kind.UsesProxmoxAPI() {
+		// The REST-only connection is deliberately allowed: inventory and power
+		// management are useful before the data plane is rolled out to every
+		// node. Once any SSH field is set, however, accepting a half-configured
+		// channel would only postpone the failure until the nightly job.
+		started := strings.TrimSpace(s.SSHUsername) != "" || strings.TrimSpace(s.SSHPrivateKey) != "" ||
+			strings.TrimSpace(s.SSHHostKey) != "" || s.SSHTrustAnyHostKey
+		if started {
+			if strings.TrimSpace(s.SSHUsername) == "" {
+				return fmt.Errorf("для канала данных Proxmox нужен пользователь SSH")
+			}
+			if strings.TrimSpace(s.SSHPrivateKey) == "" {
+				return fmt.Errorf("для канала данных Proxmox нужен приватный ключ SSH")
+			}
+			if strings.TrimSpace(s.SSHHostKey) == "" && !s.SSHTrustAnyHostKey {
+				return fmt.Errorf("не заданы ключи узлов Proxmox: получите и сверьте отпечатки всех узлов кластера")
+			}
+		}
 	}
 
 	if s.EngineURL == "" {

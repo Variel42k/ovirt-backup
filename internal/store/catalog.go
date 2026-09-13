@@ -172,9 +172,11 @@ func (s *Store) MarkCatalogEntryImported(ctx context.Context, id string) error {
 }
 
 // ImportCatalogRun registers repository metadata without rewriting any
-// object. The run, disks, physical copy and catalog marker commit together so
-// an interrupted import never leaves a half-visible restore point.
-func (s *Store) ImportCatalogRun(ctx context.Context, entryID string, run *model.BackupRun, disks []model.BackupDisk) error {
+// object. The run, disks, managed artifacts, physical copy and catalog marker
+// commit together so an interrupted import never leaves a half-visible
+// restore point.
+func (s *Store) ImportCatalogRun(ctx context.Context, entryID string, run *model.BackupRun,
+	disks []model.BackupDisk, artifacts []model.RepositoryArtifact) error {
 	return s.db.InTx(ctx, func(tx *sql.Tx) error {
 		var existingTarget, existingHash string
 		err := tx.QueryRowContext(ctx, s.db.Rebind(`SELECT storage_target_id, manifest_sha256
@@ -221,6 +223,32 @@ func (s *Store) ImportCatalogRun(ctx context.Context, entryID string, run *model
 			}
 		}
 
+		for i := range artifacts {
+			artifact := &artifacts[i]
+			if artifact.ID == "" {
+				artifact.ID = uuid.NewString()
+			}
+			if artifact.CreatedAt.IsZero() {
+				artifact.CreatedAt = time.Now().UTC()
+			}
+			_, err = tx.ExecContext(ctx, s.db.Rebind(`INSERT INTO repository_artifacts (`+artifactColumns+`)
+				VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+				ON CONFLICT (run_id, disk_id, kind, storage_target_id) DO UPDATE SET
+				 disk_alias=EXCLUDED.disk_alias, status=EXCLUDED.status,
+				 manifest_key=EXCLUDED.manifest_key, data_key=EXCLUDED.data_key,
+				 size_bytes=EXCLUDED.size_bytes, stored_bytes=EXCLUDED.stored_bytes,
+				 sha256=EXCLUDED.sha256, stored_sha256=EXCLUDED.stored_sha256,
+				 encrypted=EXCLUDED.encrypted, error=EXCLUDED.error,
+				 started_at=EXCLUDED.started_at, ended_at=EXCLUDED.ended_at`),
+				artifact.ID, run.ID, artifact.DiskID, artifact.DiskAlias, artifact.Kind,
+				run.StorageTargetID, string(artifact.Status), artifact.ManifestKey, artifact.DataKey,
+				artifact.SizeBytes, artifact.StoredBytes, artifact.SHA256, artifact.StoredSHA256,
+				artifact.Encrypted, artifact.Error, artifact.StartedAt, artifact.EndedAt, artifact.CreatedAt)
+			if err != nil {
+				return err
+			}
+		}
+
 		role, required := model.CopyReplica, false
 		if existingTarget == run.StorageTargetID {
 			role, required = model.CopyPrimary, true
@@ -235,7 +263,8 @@ func (s *Store) ImportCatalogRun(ctx context.Context, entryID string, run *model
 			 manifest_sha256=EXCLUDED.manifest_sha256, repo_path=EXCLUDED.repo_path,
 			 status='succeeded', updated_at=EXCLUDED.updated_at`), uuid.NewString(), run.ID,
 			run.StorageTargetID, string(role), required, run.RepoPath, run.ManifestSHA256,
-			runObjectCount(run), runObjectCount(run), run.StoredBytes, run.StoredBytes,
+			runObjectCount(run)+len(artifacts)*2, runObjectCount(run)+len(artifacts)*2,
+			run.StoredBytes, run.StoredBytes,
 			&now, run.StartedAt, run.EndedAt, run.CreatedAt, now)
 		if err != nil {
 			return err

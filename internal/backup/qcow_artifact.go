@@ -18,7 +18,10 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/secret"
 )
 
-const ArtifactQcow2 = "qcow2"
+const (
+	ArtifactQcow2         = "qcow2"
+	ArtifactProxmoxVZDUMP = "proxmox-vzdump"
+)
 
 // ExportQcow2Artifacts reconstructs each disk at this restore point, converts
 // it to qcow2, validates it with qemu-img, and stores it as a chunked managed
@@ -235,6 +238,9 @@ func (e *Engine) VerifyArtifacts(ctx context.Context, runID string, backend repo
 		if err != nil {
 			return err
 		}
+		if err := ValidateArtifactManifest(runID, artifact.DiskID, artifact.Kind, artifact.DataKey, manifest); err != nil {
+			return err
+		}
 		if err := VerifyDataObject(ctx, backend, manifest); err != nil {
 			return err
 		}
@@ -248,8 +254,14 @@ func (e *Engine) verifyArtifactsQuick(ctx context.Context, runID string, backend
 		return err
 	}
 	for _, artifact := range artifacts {
+		if artifact.Status != model.RunSucceeded {
+			return fmt.Errorf("artifact %s is not complete", artifact.ID)
+		}
 		manifest, err := loadDiskManifest(ctx, backend, artifact.ManifestKey)
 		if err != nil {
+			return err
+		}
+		if err := ValidateArtifactManifest(runID, artifact.DiskID, artifact.Kind, artifact.DataKey, manifest); err != nil {
 			return err
 		}
 		info, err := backend.Stat(ctx, artifact.DataKey)
@@ -259,6 +271,62 @@ func (e *Engine) verifyArtifactsQuick(ctx context.Context, runID string, backend
 		if info.Size != manifest.StoredBytes {
 			return fmt.Errorf("artifact %s data size is %d instead of %d", artifact.ID, info.Size, manifest.StoredBytes)
 		}
+	}
+	return nil
+}
+
+func verifyPublishedArtifacts(ctx context.Context, runID string, artifacts []RunManifestArtifact,
+	backend repo.Backend, quick bool) error {
+	for _, artifact := range artifacts {
+		if artifact.ManifestKey == "" || artifact.DataKey == "" {
+			return fmt.Errorf("published artifact %s has an empty object key", artifact.ID)
+		}
+		manifest, err := loadDiskManifest(ctx, backend, artifact.ManifestKey)
+		if err != nil {
+			return err
+		}
+		if err := ValidateArtifactManifest(runID, artifact.DiskID, artifact.Kind, artifact.DataKey, manifest); err != nil {
+			return err
+		}
+		if artifact.StoredSHA256 != "" && manifest.DataSHA256 != "" && artifact.StoredSHA256 != manifest.DataSHA256 {
+			return fmt.Errorf("published artifact %s does not match its data checksum", artifact.ID)
+		}
+		if !quick {
+			if err := VerifyDataObject(ctx, backend, manifest); err != nil {
+				return err
+			}
+			continue
+		}
+		info, err := backend.Stat(ctx, artifact.DataKey)
+		if err != nil {
+			return err
+		}
+		if info.Size != manifest.StoredBytes {
+			return fmt.Errorf("artifact %s data size is %d instead of %d", artifact.ID, info.Size, manifest.StoredBytes)
+		}
+	}
+	return nil
+}
+
+// ValidateArtifactManifest binds a managed artifact record to the manifest it
+// names. Without these checks a modified run.json could point at one manifest
+// while naming a different data object, making catalog verification inspect
+// bytes other than the ones restore would consume.
+func ValidateArtifactManifest(runID, diskID, kind, dataKey string, manifest *DiskManifest) error {
+	if manifest == nil {
+		return fmt.Errorf("artifact manifest is missing")
+	}
+	if manifest.RunID != runID {
+		return fmt.Errorf("artifact manifest belongs to run %q instead of %q", manifest.RunID, runID)
+	}
+	if manifest.DiskID != diskID {
+		return fmt.Errorf("artifact manifest belongs to disk %q instead of %q", manifest.DiskID, diskID)
+	}
+	if manifest.DiskFormat != kind {
+		return fmt.Errorf("artifact manifest has kind %q instead of %q", manifest.DiskFormat, kind)
+	}
+	if manifest.DataKey != dataKey {
+		return fmt.Errorf("artifact manifest points at %q instead of %q", manifest.DataKey, dataKey)
 	}
 	return nil
 }

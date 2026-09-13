@@ -19,8 +19,10 @@ const auth = useAuthStore()
 const jobs = ref<BackupJob[]>([])
 const selectedJobs = ref<BackupJob[]>([])
 const loading = ref(false)
+const saving = ref(false)
 const dialog = ref(false)
 const jobStep = ref(1)
+const maxJobStep = ref(1)
 const jobFormError = ref('')
 const editing = ref<BackupJob | null>(null)
 const vmsOfServer = ref<VM[]>([])
@@ -86,6 +88,11 @@ const needsFullEvery = computed(() => ['incremental', 'differential'].includes(f
 const usesCBT = computed(() => ['full', 'incremental', 'differential'].includes(form.value.type))
 const bootHosts = computed(() => app.servers.filter((s) => s.kind === 'kvm' && s.enabled))
 const backupServers = computed(() => app.servers.filter((s) => s.enabled && app.serverSupports(s, 'supports_backup')))
+const jobServer = computed(() => app.servers.find((server) => server.id === form.value.server_id))
+const isProxmoxJob = computed(() => jobServer.value?.kind === 'proxmox')
+const verifyModes = computed(() => (app.meta?.verify_modes ?? []).filter((mode) =>
+  !isProxmoxJob.value || ['quick', 'manifest', 'chain'].includes(mode.value),
+))
 const selectedVMs = computed(() => {
   const excluded = new Set(form.value.exclude_vm_ids)
   const selected = new Set(form.value.vm_ids)
@@ -261,8 +268,13 @@ function changeServer(serverID: string) {
   form.value.exclude_disk_ids = []
   form.value.ova_host_id = ''
   form.value.ova_directory = ''
+  maxJobStep.value = 1
   const source = app.servers.find((server) => server.id === serverID)
   form.value.verify_options.boot_host_id = source?.kind === 'kvm' ? source.id : ''
+  if (source?.kind === 'proxmox') {
+    form.value.export_qcow2 = false
+    form.value.verify_after = 'chain'
+  }
 }
 
 function openCreate(serverID = '', vmIDs: string[] = []) {
@@ -278,6 +290,7 @@ function openCreate(serverID = '', vmIDs: string[] = []) {
   form.value.storage_target_ids = app.enabledStorages[0] ? [app.enabledStorages[0].id] : []
   void loadVMs()
   jobStep.value = 1
+  maxJobStep.value = 1
   jobFormError.value = ''
   dialog.value = true
 }
@@ -299,41 +312,62 @@ function openEdit(job: BackupJob) {
   }
   void loadVMs()
   jobStep.value = 1
+  maxJobStep.value = 5
   jobFormError.value = ''
   dialog.value = true
 }
 
+function validateJobStep(step: number): string {
+  if (step === 1) {
+    if (!form.value.name.trim() || !form.value.server_id) return 'Укажите имя задания и платформу виртуализации.'
+    if (regexError.value) return 'Исправьте регулярное выражение имени ВМ.'
+  }
+  if (step === 2) {
+    if (backupOptionsLoading.value) return 'Дождитесь проверки доступных типов бэкапа.'
+    if (backupOptionsError.value) return 'Повторите проверку доступных типов бэкапа.'
+    if (!form.value.type || selectedBackupOption.value?.available === false) return 'Выберите доступный способ резервного копирования.'
+    if (form.value.type === 'ova') {
+      if (!form.value.ova_host_id) return 'Выберите хост, на котором будет создан OVA.'
+      if (!form.value.ova_directory.startsWith('/')) return 'Для OVA укажите абсолютный каталог на хосте.'
+    }
+  }
+  if (step === 3) {
+    if (form.value.type !== 'ova' && !form.value.storage_target_ids.length) return 'Выберите хотя бы одно хранилище.'
+    if (Object.values(form.value.retention).some((value) => !Number.isFinite(value) || value < 0)) {
+      return 'Значения retention должны быть неотрицательными числами.'
+    }
+  }
+  if (step === 4) {
+    if (form.value.verify_after === 'boot' && !form.value.verify_options.boot_host_id) {
+      return 'Выберите KVM-хост для пробного запуска.'
+    }
+    if (isProxmoxJob.value && form.value.verify_after && !['quick', 'manifest', 'chain'].includes(form.value.verify_after)) {
+      return 'Для Proxmox выберите quick, manifest или chain.'
+    }
+  }
+  return ''
+}
+
 function nextJobStep() {
-  jobFormError.value = ''
-  if (jobStep.value === 1 && (!form.value.name.trim() || !form.value.server_id)) {
-    jobFormError.value = 'Укажите имя задания и платформу виртуализации.'
-    return
-  }
-  if (jobStep.value === 2 && (!form.value.type || selectedBackupOption.value?.available === false)) {
-    jobFormError.value = 'Выберите доступный способ резервного копирования.'
-    return
-  }
-  if (jobStep.value === 3 && form.value.type !== 'ova' && !form.value.storage_target_ids.length) {
-    jobFormError.value = 'Выберите хотя бы одно хранилище.'
-    return
-  }
+  jobFormError.value = validateJobStep(jobStep.value)
+  if (jobFormError.value) return
   jobStep.value = Math.min(5, jobStep.value + 1)
+  maxJobStep.value = Math.max(maxJobStep.value, jobStep.value)
 }
 
 async function save() {
+  if (saving.value) return
   jobFormError.value = ''
-  if (backupOptionsLoading.value) {
-    jobFormError.value = 'Дождитесь проверки доступных типов бэкапа.'
-    return
+  for (let step = 1; step <= 4; step += 1) {
+    const issue = validateJobStep(step)
+    if (issue) {
+      jobStep.value = step
+      maxJobStep.value = Math.max(maxJobStep.value, step)
+      jobFormError.value = issue
+      return
+    }
   }
-  if (!form.value.type) {
-    jobFormError.value = 'Выберите доступный тип бэкапа.'
-    return
-  }
-  if (selectedBackupOption.value && !selectedBackupOption.value.available) {
-    jobFormError.value = `Тип «${selectedBackupOption.value.title}» недоступен для выбранных ВМ.`
-    return
-  }
+  saving.value = true
   try {
     if (editing.value) {
       await api.updateJob(editing.value.id, form.value)
@@ -347,6 +381,8 @@ async function save() {
   } catch (err) {
     jobFormError.value = `Не удалось сохранить задание: ${err instanceof Error ? err.message : String(err)}`
     notifyError(err, 'Не удалось сохранить задание')
+  } finally {
+    saving.value = false
   }
 }
 
@@ -682,10 +718,10 @@ const columns = [
 
         <q-tabs v-model="jobStep" dense align="justify" active-color="primary" indicator-color="primary" outside-arrows mobile-arrows>
           <q-tab :name="1" icon="filter_alt" label="Охват" />
-          <q-tab :name="2" icon="backup" label="Способ" />
-          <q-tab :name="3" icon="inventory_2" label="Хранение" />
-          <q-tab :name="4" icon="fact_check" label="Проверка" />
-          <q-tab :name="5" icon="task_alt" label="Итог" />
+          <q-tab :name="2" icon="backup" label="Способ" :disable="maxJobStep < 2" />
+          <q-tab :name="3" icon="inventory_2" label="Хранение" :disable="maxJobStep < 3" />
+          <q-tab :name="4" icon="fact_check" label="Проверка" :disable="maxJobStep < 4" />
+          <q-tab :name="5" icon="task_alt" label="Итог" :disable="maxJobStep < 5" />
         </q-tabs>
         <q-separator />
 
@@ -759,13 +795,18 @@ const columns = [
               label="Исключить VM" outlined dense
             />
           </div>
-          <div class="col-12 col-sm-6">
+          <div v-if="!isProxmoxJob" class="col-12 col-sm-6">
             <q-select
               v-model="form.exclude_disk_ids"
               :options="diskOptions"
               emit-value map-options multiple use-chips clearable
               label="Исключить диски" outlined dense
             />
+          </div>
+          <div v-else class="col-12 col-sm-6 self-center">
+            <q-banner dense class="bg-blue-1">
+              Proxmox создаёт единый самодостаточный vzdump-архив; отдельные диски не исключаются.
+            </q-banner>
           </div>
           <div class="col-12"><q-banner dense class="bg-blue-1">Под условия сейчас попадает ВМ: {{ selectedVMs.length }}. Перед сохранением отбор можно проверить из списка заданий.</q-banner></div>
           </template>
@@ -805,7 +846,7 @@ const columns = [
             />
           </div>
 
-          <template v-if="form.type">
+          <template v-if="form.type && !isProxmoxJob">
             <div class="col-12 col-sm-6">
               <q-input
                 v-model.number="form.full_every"
@@ -940,6 +981,7 @@ const columns = [
           </div>
           </template>
 
+          <template v-if="form.type !== 'ova'">
           <div class="col-12 row items-center">
             <div class="text-subtitle2">Хранение копий</div>
             <HelpButton article="retention" label="Как работают правила хранения" />
@@ -972,12 +1014,16 @@ const columns = [
             </div>
           </div>
           </template>
+          <q-banner v-else dense class="col-12 bg-blue-1">
+            OVA хранится на выбранном гипервизоре; правила retention и репликации хранилищ к нему не применяются.
+          </q-banner>
+          </template>
 
           <template v-if="jobStep === 4">
           <div class="col-12 col-sm-4">
             <q-select
               v-model="form.verify_after"
-              :options="[{ label: 'Не проверять', value: '' }, ...(app.meta?.verify_modes ?? []).map((m) => ({ label: m.title, value: m.value }))]"
+              :options="[{ label: 'Не проверять', value: '' }, ...verifyModes.map((m) => ({ label: m.title, value: m.value }))]"
               emit-value
               map-options
               label="Проверка после бэкапа"
@@ -990,13 +1036,13 @@ const columns = [
           <div class="col-12 col-sm-8 self-center">
             <div class="row items-center q-gutter-md">
               <q-toggle v-model="form.enabled" label="Задание включено" />
-              <span class="items-center inline-block">
+              <span v-if="!isProxmoxJob" class="items-center inline-block">
                 <q-toggle v-model="form.quiesce" label="Заморозка ФС гостя" />
                 <HelpButton article="quiesce" label="Что делает заморозка" />
               </span>
               <q-toggle v-model="form.encrypt" label="Шифрование" />
 							<q-toggle
-								v-if="form.type !== 'ova' && form.type !== 'config'"
+								v-if="!isProxmoxJob && form.type !== 'ova' && form.type !== 'config'"
 								v-model="form.export_qcow2"
 								label="Артефакты QCOW2"
 								:disable="!app.meta?.capabilities.qemu_img"
@@ -1005,7 +1051,12 @@ const columns = [
 							</q-toggle>
             </div>
           </div>
-					<div v-if="form.export_qcow2" class="col-12">
+			<div v-if="isProxmoxJob" class="col-12">
+				<q-banner dense class="bg-blue-1">
+					Согласованность и snapshot-mode обеспечивает vzdump. Для нативного архива доступны проверки структуры и целостности: quick, manifest и chain.
+				</q-banner>
+			</div>
+					<div v-if="!isProxmoxJob && form.export_qcow2" class="col-12">
 						<q-banner dense class="bg-blue-1">
 							Для каждого диска будет создан проверенный QCOW2-артефакт. Он входит в репликацию,
 							проверку и retention; при включённом шифровании хранится в зашифрованном чанковом потоке.
@@ -1080,7 +1131,7 @@ const columns = [
 
         <q-separator />
         <q-card-actions align="right">
-          <q-btn flat label="Отмена" v-close-popup />
+          <q-btn flat label="Отмена" v-close-popup :disable="saving" />
           <q-space />
           <q-btn v-if="jobStep > 1" flat label="Назад" icon="arrow_back" @click="jobStep--" />
           <q-btn
@@ -1097,6 +1148,7 @@ const columns = [
             unelevated
             label="Сохранить"
             :disable="form.verify_after === 'boot' && !form.verify_options.boot_host_id"
+            :loading="saving"
             @click="save"
           />
         </q-card-actions>

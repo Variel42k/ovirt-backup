@@ -199,7 +199,16 @@ func (e *Engine) loadChainCopy(ctx context.Context, runID, copyID string, allowV
 				diskID, root.RunID)
 		}
 	}
-	if len(set.DiskOrder) == 0 && !(allowConfig && leaf.Type == model.BackupConfig) {
+	nativeArtifact := false
+	if set.RunManifest != nil && set.RunManifest.Provider != nil && set.RunManifest.Provider.Name == "proxmox" {
+		for _, artifact := range set.RunManifest.Artifacts {
+			if artifact.Kind == ArtifactProxmoxVZDUMP && artifact.ManifestKey != "" && artifact.DataKey != "" {
+				nativeArtifact = true
+				break
+			}
+		}
+	}
+	if len(set.DiskOrder) == 0 && !(allowConfig && leaf.Type == model.BackupConfig) && !nativeArtifact {
 		backend.Close()
 		return nil, fmt.Errorf("в бэкапе %s нет успешно сохранённых дисков", runID)
 	}

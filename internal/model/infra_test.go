@@ -87,7 +87,7 @@ func TestServerKindFamiliesAreExplicit(t *testing.T) {
 		KindProxmox.UsesLibvirt() || KindProxmox.ManagedScope() != "engine" {
 		t.Fatalf("Proxmox kind classified incorrectly: %q", KindProxmox)
 	}
-	if KindProxmox.SupportsBackup() || KindProxmox.SupportsRestore() ||
+	if !KindProxmox.SupportsBackup() || !KindProxmox.SupportsRestore() ||
 		KindProxmox.SupportsEngineConfig() || !KindProxmox.SupportsVMManagement() ||
 		KindProxmox.SupportsHostManagement() {
 		t.Fatal("Proxmox capability flags do not match the implemented driver")
@@ -104,5 +104,39 @@ func TestServerRejectsUnknownVirtualizationConnector(t *testing.T) {
 	}
 	if err := srv.Validate(); err == nil || !strings.Contains(err.Error(), "неподдерживаемый") {
 		t.Fatalf("unknown connector accepted: %v", err)
+	}
+}
+
+func TestProxmoxAllowsManagementOnlyAndRequiresCompleteDataPlane(t *testing.T) {
+	srv := &Server{Name: "pve", Kind: KindProxmox, EngineURL: "https://pve.example.org:8006",
+		Username: "backup@pve!jhvirt", Password: "token-secret"}
+	if err := srv.Validate(); err != nil {
+		t.Fatalf("management-only подключение отклонено: %v", err)
+	}
+	if srv.HasProxmoxDataPlane() {
+		t.Fatal("неполный канал данных помечен готовым")
+	}
+	srv.SSHUsername = "root"
+	if err := srv.Validate(); err == nil {
+		t.Fatal("частично заполненный канал данных принят")
+	}
+	srv.SSHPrivateKey = "private-key"
+	srv.SSHHostKey = validHostKey
+	if err := srv.Validate(); err != nil {
+		t.Fatalf("полный канал данных отклонён: %v", err)
+	}
+	if !srv.HasProxmoxDataPlane() {
+		t.Fatal("полный канал данных не распознан")
+	}
+}
+
+func TestServerRejectsInvalidSSHPort(t *testing.T) {
+	for _, port := range []int{-1, 65536} {
+		srv := kvmServer()
+		srv.SSHHostKey = validHostKey
+		srv.SSHPort = port
+		if err := srv.Validate(); err == nil {
+			t.Errorf("invalid SSH port %d accepted", port)
+		}
 	}
 }

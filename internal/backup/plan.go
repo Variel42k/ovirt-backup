@@ -111,6 +111,40 @@ type Recommendation struct {
 	Presets    []SchedulePreset `json:"presets"`
 }
 
+// ProxmoxRecommendation describes the one data path Proxmox can expose
+// without staging an archive on its own backup storage: a complete native
+// vzdump stream. The dispatcher turns legacy full/snapshot jobs into this
+// format, while new jobs see only the honest supported choice here.
+func ProxmoxRecommendation(srv *model.Server, vm *model.VM) *Recommendation {
+	ready := srv != nil && srv.HasProxmoxDataPlane()
+	a := Assessment{ServerID: srv.ID, ServerName: srv.Name, VMID: vm.ID, VMName: vm.Name,
+		VMStatus: vm.Status, VMRunning: vm.Running(), EngineSupportsCBT: false, DiskCount: 1}
+	if !ready {
+		a.Warnings = append(a.Warnings, "SSH-канал данных не настроен: закрепите ключи всех узлов и установите helper")
+	}
+	unsupported := func(t model.BackupType, reason string) Option {
+		return Option{Type: t, Title: t.Title(), Available: false, Blocker: reason}
+	}
+	full := Option{Type: model.BackupFull, Title: "Нативный полный Proxmox (vzdump)", Available: ready,
+		Recommended: ready, Rationale: "самодостаточный архив с конфигурацией и всеми дисками гостя",
+		Impact:            "snapshot-mode; гость продолжает работать, Proxmox кратко фиксирует согласованную точку",
+		EstimatedDuration: "зависит от занятого объёма", SuggestedVerify: model.VerifyChain}
+	if !ready {
+		full.Blocker = "настройте SSH-канал данных Proxmox на всех узлах кластера"
+		full.Prerequisites = []string{"установить jhvirt-pve-data-plane", "закрепить SSH-ключ каждого узла"}
+	}
+	return &Recommendation{Assessment: a, Options: []Option{
+		full,
+		unsupported(model.BackupIncremental, "vzdump выдаёт только полный нативный архив; CBT-поток через API Proxmox отсутствует"),
+		unsupported(model.BackupDifferential, "vzdump выдаёт только полный нативный архив"),
+		unsupported(model.BackupSnapshot, "этот режим заменён нативным полным vzdump в snapshot-mode"),
+		unsupported(model.BackupConfig, "конфигурация без данных не является восстанавливаемой точкой Proxmox"),
+		unsupported(model.BackupOVA, "Proxmox использует нативный формат vzdump, а не OVA"),
+	}, Presets: []SchedulePreset{{Name: "Ежедневный нативный Proxmox", Description: "Полный vzdump каждую ночь",
+		Type: model.BackupFull, Schedule: "0 1 * * *", Retention: model.RetentionPolicy{KeepLast: 3, KeepDaily: 7, KeepWeekly: 4, KeepMonthly: 6},
+		VerifyAfter: model.VerifyChain, Recommended: ready}}}
+}
+
 // defaultThroughput is the fallback estimate before any run has happened.
 // Deliberately conservative: an estimate that turns out optimistic erodes
 // trust faster than one that turns out generous.

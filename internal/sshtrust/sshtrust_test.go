@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 )
 
 // The whole point of this package: no key and no explicit decision must not
@@ -50,6 +51,56 @@ func TestCallbackPinsTheConfiguredKey(t *testing.T) {
 	}
 	if err := cb("host:22", addr, other.PublicKey()); err == nil {
 		t.Error("чужой ключ принят — подмена хоста осталась бы незамеченной")
+	}
+}
+
+func TestCallbackPinsEachKnownHostSeparately(t *testing.T) {
+	first, _ := generateHostKey(t)
+	second, _ := generateHostKey(t)
+	bundle := strings.Join([]string{
+		knownhosts.Line([]string{"[10.0.0.11]:22"}, first.PublicKey()),
+		knownhosts.Line([]string{"[10.0.0.12]:22"}, second.PublicKey()),
+	}, "\n")
+	cb, err := Callback(bundle, false)
+	if err != nil {
+		t.Fatalf("построение проверки кластера: %v", err)
+	}
+	addr := &net.TCPAddr{IP: net.IPv4(10, 0, 0, 11), Port: 22}
+	if err := cb("10.0.0.11:22", addr, first.PublicKey()); err != nil {
+		t.Fatalf("ключ первого узла не принят: %v", err)
+	}
+	if err := cb("10.0.0.12:22", addr, second.PublicKey()); err != nil {
+		t.Fatalf("ключ второго узла не принят: %v", err)
+	}
+	if err := cb("10.0.0.11:22", addr, second.PublicKey()); err == nil {
+		t.Fatal("ключ второго узла принят от имени первого")
+	}
+	if err := cb("10.0.0.13:22", addr, first.PublicKey()); err == nil {
+		t.Fatal("узел без отдельной привязки принят")
+	}
+}
+
+func TestAddressBoundCallbackRejectsClusterWideBareKey(t *testing.T) {
+	key, line := generateHostKey(t)
+	if _, err := AddressBoundCallback(line, false); err == nil {
+		t.Fatal("общий authorized_keys ключ принят для всех узлов кластера")
+	}
+	bound := knownhosts.Line([]string{"[10.0.0.11]:22"}, key.PublicKey())
+	cb, err := AddressBoundCallback(bound, false)
+	if err != nil {
+		t.Fatalf("адресный ключ кластера отклонён: %v", err)
+	}
+	if err := cb("10.0.0.11:22", &net.TCPAddr{}, key.PublicKey()); err != nil {
+		t.Fatalf("адресный ключ не прошёл проверку: %v", err)
+	}
+}
+
+func TestCallbackRejectsKnownHostsPatterns(t *testing.T) {
+	_, line := generateHostKey(t)
+	for _, host := range []string{"*.example.org", "|1|hash|hash"} {
+		if _, err := Callback(host+" "+line, false); err == nil {
+			t.Errorf("неоднозначный шаблон known_hosts принят: %s", host)
+		}
 	}
 }
 

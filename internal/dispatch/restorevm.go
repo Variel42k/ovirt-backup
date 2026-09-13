@@ -28,6 +28,9 @@ func (d *Dispatcher) PlanRestoreVM(ctx context.Context, req *model.RestoreVMRequ
 	if !target.Kind.SupportsRestore() {
 		return nil, fmt.Errorf("восстановление в %s в этой версии не поддерживается", target.Kind.Title())
 	}
+	if target.Kind.UsesProxmoxAPI() {
+		return d.planProxmoxRestoreVM(ctx, req, target)
+	}
 	if !target.Kind.UsesLibvirt() {
 		return d.Engine.PlanRestoreVM(ctx, req)
 	}
@@ -116,6 +119,9 @@ func (d *Dispatcher) RestoreVM(ctx context.Context, req *model.RestoreVMRequest)
 	}
 	if !target.Kind.SupportsRestore() {
 		return nil, fmt.Errorf("восстановление в %s в этой версии не поддерживается", target.Kind.Title())
+	}
+	if target.Kind.UsesProxmoxAPI() {
+		return d.restoreProxmoxVM(ctx, req, target)
 	}
 	if !target.Kind.UsesLibvirt() {
 		return d.Engine.RestoreVM(ctx, req)

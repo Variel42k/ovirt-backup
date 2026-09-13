@@ -572,14 +572,18 @@ OIDC-сессии отзываются немедленно; локальные 
 | `GET/PUT/DELETE` | `/servers/{id}` | получить, изменить, удалить |
 | `POST` | `/servers/probe` | проверить подключение, ничего не сохраняя |
 | `POST` | `/servers/ca-certificate` | получить сертификат oVirt или Proxmox для последующей проверки |
+| `POST` | `/servers/host-key` | одноразово получить SSH host key одного KVM/SFTP-адреса |
+| `POST` | `/servers/proxmox-host-keys` | получить host key всех узлов из инвентаря Proxmox |
 | `POST` | `/servers/{id}/refresh` | опросить сейчас |
 | `GET` | `/servers/{id}/summary` | сводка по одному серверу |
 
 Пустые `password`, `ca_cert`, `ssh_private_key` и `ssh_host_key` при изменении
-оставляют сохранённые значения. CA и ключ SSH-хоста удаляются только явными
-`clear_ca_cert: true` и `clear_ssh_host_key: true`. Ответы списка, создания,
-чтения и изменения не содержат PEM или полный ключ хоста: вместо них приходят
-`ca_cert_stored` и `ssh_host_key_stored`.
+оставляют сохранённые значения. CA, приватный ключ и ключ SSH-хоста удаляются
+только явными `clear_ca_cert: true`, `clear_ssh_private_key: true` и
+`clear_ssh_host_key: true`. Ответы списка, создания,
+чтения и изменения не содержат PEM, приватный SSH-ключ или полный ключ хоста:
+вместо них приходят `ca_cert_stored`, `ssh_key_stored` и
+`ssh_host_key_stored`.
 
 `POST /servers/ca-certificate` возвращает PEM только как одноразовый материал
 для записи вместе с его `fingerprint`. Интерфейс PEM не показывает и после
@@ -591,9 +595,15 @@ OIDC-сессии отзываются немедленно; локальные 
 origin узла (обычно `https://pve01.example.org:8006`), `username` с API token ID
 вида `user@realm!token-name` и `password` с secret токена. Клиент добавляет
 `/api2/json`, не следует redirect и не использует пароль пользователя или
-ticket/CSRF-сессию. Любой узел отдаёт кластерный инвентарь. В этой версии для
-Proxmox доступны узлы, QEMU/LXC, хранилища, мониторинг и действия над ВМ;
-`supports_backup`, `supports_restore` и `supports_engine_config` равны `false`.
+ticket/CSRF-сессию. Любой узел отдаёт кластерный инвентарь.
+
+Для backup/restore дополнительно передаются `ssh_username`, `ssh_port`,
+`ssh_private_key` и набор адресных строк `known_hosts` в `ssh_host_key`.
+`POST /servers/proxmox-host-keys` получает состав кластера через API и возвращает
+одноразовые `bundle` и список SHA-256 для независимой сверки. Поддерживается
+полный нативный `vzdump`; `supports_backup` и `supports_restore` коннектора
+равны `true`, а готовность конкретного подключения проверяется по заполненному
+SSH data plane. `supports_engine_config` остаётся `false`.
 
 Удалённый `engine_url` принимается только по HTTPS; HTTP разрешён только для
 loopback-разработки. Клиент не следует HTTP redirect от движка, поэтому POST с
@@ -838,10 +848,11 @@ S3 endpoint не передаёт данные через сервис и пот
 { "target": "disk", "target_disk_id": "…", "confirm": true }   // затирает диск
 
 // POST /backups/{id}/restore-vm/plan и /restore-vm
-// storage_domain_id означает storage domain для oVirt и storage pool для KVM.
+// storage_domain_id означает storage domain для oVirt, storage pool для KVM
+// и storage ID для Proxmox; host_id выбирает узел Proxmox (пусто — автоматически).
 // Неуказанные NIC по умолчанию создаются отключёнными, MAC всегда новый.
 {
-  "server_id": "…", "name": "vm-restored", "cluster_id": "…",
+  "server_id": "…", "name": "vm-restored", "cluster_id": "…", "host_id": "…",
   "storage_domain_id": "…", "start": false,
   "network_mappings": [
     { "nic_id": "nic-1", "target_kind": "vnic_profile",

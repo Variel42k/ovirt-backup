@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { api, notifyError, notifyOk } from '@/api/client'
+import { api, errorMessage, notifyError, notifyOk } from '@/api/client'
 import type { DomainSettingsWrite, EmbeddedKeycloakWrite, IdentitySettings, IdentitySettingsWrite } from '@/api/settings-types'
 import { useOperationsStore } from '@/stores/operations'
 
@@ -13,6 +13,7 @@ const loading = ref(false)
 const saving = ref(false)
 const startingEmbedded = ref(false)
 const connectingDomain = ref(false)
+const identityFormError = ref('')
 const operations = useOperationsStore()
 const settings = ref<IdentitySettings | null>(null)
 const step = ref(1)
@@ -40,6 +41,18 @@ const domain = ref<DomainSettingsWrite>({
 
 const canConfigure = computed(() => settings.value?.can_configure ?? false)
 const identityReady = computed(() => Boolean(settings.value?.enabled && settings.value?.client_secret_stored))
+const oidcSecretReusable = computed(() => Boolean(
+  settings.value?.client_secret_stored &&
+  settings.value.client_id.trim() === oidc.value.client_id.trim() &&
+  settings.value.issuer.replace(/\/$/, '') === oidc.value.issuer.trim().replace(/\/$/, ''),
+))
+const identityBusy = computed(() => loading.value || saving.value || startingEmbedded.value || connectingDomain.value)
+const identityBusyLabel = computed(() => {
+  if (startingEmbedded.value) return 'Запускаем и проверяем Keycloak…'
+  if (saving.value) return 'Проверяем подключение к Keycloak…'
+  if (connectingDomain.value) return 'Проверяем LDAP и подключаем домен…'
+  return 'Загружаем настройки…'
+})
 const embeddedManaged = computed(() => {
   const status = settings.value?.embedded_keycloak
   if (!status?.initialized || !status.public_url || !status.realm) return false
@@ -52,6 +65,99 @@ function roleMapping(): Record<string, string> {
     [groups.value.operator.trim()]: 'operator',
     [groups.value.viewer.trim()]: 'viewer',
   }
+}
+
+function validateRoleGroups(): string {
+  const values = [groups.value.admin, groups.value.operator, groups.value.viewer].map((value) => value.trim())
+  if (values.some((value) => !value)) return 'Укажите группы для всех трёх ролей.'
+  if (new Set(values.map((value) => value.toLocaleLowerCase())).size !== values.length) {
+    return 'Группы администраторов, операторов и наблюдателей должны различаться.'
+  }
+  return ''
+}
+
+function parseURL(value: string): URL | null {
+  try { return new URL(value.trim()) }
+  catch { return null }
+}
+
+function validateEmbeddedForm(): string {
+  if (!embedded.value.local_password) return 'Введите пароль текущего локального администратора.'
+  const publicURL = parseURL(embedded.value.public_url)
+  if (!publicURL || publicURL.username || publicURL.password || publicURL.search || publicURL.hash || !['', '/'].includes(publicURL.pathname)) {
+    return 'Публичный URL Keycloak должен содержать только протокол, имя хоста и порт.'
+  }
+  const loopback = ['localhost', '127.0.0.1', '::1'].includes(publicURL.hostname)
+  if (publicURL.protocol !== 'https:' && !(publicURL.protocol === 'http:' && loopback)) {
+    return 'Публичный URL Keycloak должен использовать HTTPS.'
+  }
+  if (!Number.isInteger(embedded.value.port) || embedded.value.port < 1 || embedded.value.port > 65535) {
+    return 'Порт Keycloak должен быть целым числом от 1 до 65535.'
+  }
+  if (embedded.value.direct_tls) {
+    if (publicURL.protocol !== 'https:') return 'Для прямого TLS укажите публичный HTTPS URL.'
+    const publicPort = Number(publicURL.port || 443)
+    if (publicPort !== embedded.value.port) return 'Порт в публичном URL должен совпадать с портом Keycloak.'
+  }
+  if (!embedded.value.realm.trim()) return 'Укажите realm Keycloak.'
+  if (!embedded.value.client_id.trim()) return 'Укажите OIDC client ID.'
+  return validateRoleGroups()
+}
+
+function validateOIDCForm(): string {
+  if (!oidc.value.local_password) return 'Введите пароль текущего локального администратора.'
+  const issuer = parseURL(oidc.value.issuer)
+  if (!issuer || issuer.protocol !== 'https:' || issuer.username || issuer.password || issuer.search || issuer.hash ||
+      !/\/realms\/[^/]+\/?$/.test(issuer.pathname)) {
+    return 'Issuer должен быть HTTPS-адресом вида https://sso.example.org/realms/jhvirt.'
+  }
+  if (!oidc.value.client_id.trim()) return 'Укажите OIDC client ID.'
+  if (!oidcSecretReusable.value && !oidc.value.client_secret) {
+    return 'После изменения issuer или client ID нужно заново указать секрет OIDC-клиента.'
+  }
+  const redirect = parseURL(oidc.value.redirect_url)
+  if (!redirect || redirect.protocol !== 'https:' || redirect.username || redirect.password || redirect.search || redirect.hash ||
+      !redirect.pathname.endsWith('/api/v1/auth/oidc/callback')) {
+    return 'Redirect URL должен быть HTTPS-адресом callback приложения.'
+  }
+  if (oidc.value.backchannel_url.trim()) {
+    const backchannel = parseURL(oidc.value.backchannel_url)
+    if (!backchannel || !['http:', 'https:'].includes(backchannel.protocol) || backchannel.username || backchannel.password ||
+        backchannel.search || backchannel.hash || !['', '/'].includes(backchannel.pathname)) {
+      return 'Внутренний адрес Keycloak должен быть HTTP(S)-адресом без пути, учётных данных и параметров.'
+    }
+  }
+  if (!Number.isInteger(oidc.value.session_ttl_minutes) || oidc.value.session_ttl_minutes < 5 || oidc.value.session_ttl_minutes > 1440) {
+    return 'Срок сессии должен быть от 5 до 1440 минут.'
+  }
+  if (!Number.isInteger(oidc.value.revalidate_seconds) || oidc.value.revalidate_seconds < 30 || oidc.value.revalidate_seconds > 900) {
+    return 'Проверка групп должна выполняться каждые 30–900 секунд.'
+  }
+  return validateRoleGroups()
+}
+
+function validateDomainForm(): string {
+  if (!identityReady.value) return 'Сначала подключите Keycloak.'
+  if (!domain.value.local_password) return 'Введите пароль текущего локального администратора.'
+  if (!embeddedManaged.value) {
+    if (!domain.value.admin_realm.trim()) return 'Укажите realm служебной записи Keycloak.'
+    if (!domain.value.admin_client_id.trim()) return 'Укажите service client ID.'
+    if (!domain.value.admin_client_secret) return 'Укажите service client secret.'
+  }
+  if (!/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/i.test(domain.value.domain.name.trim())) {
+    return 'Укажите корректное DNS-имя домена, например example.org.'
+  }
+  if (!domain.value.domain.provider_name.trim()) return 'Укажите имя provider в Keycloak.'
+  const ldapURL = parseURL(domain.value.domain.ldap_url)
+  if (!ldapURL || ldapURL.protocol !== 'ldaps:' || !ldapURL.hostname || !ldapURL.port || ldapURL.pathname !== '' ||
+      ldapURL.username || ldapURL.password || ldapURL.search || ldapURL.hash) {
+    return 'LDAPS URL должен иметь вид ldaps://dc01.example.org:636.'
+  }
+  if (!domain.value.domain.users_dn.trim()) return 'Укажите Users DN.'
+  if (!domain.value.domain.groups_dn.trim()) return 'Укажите Groups DN.'
+  if (!domain.value.domain.bind_dn.trim()) return 'Укажите Bind DN или UPN.'
+  if (!domain.value.domain.bind_password) return 'Укажите bind-пароль.'
+  return validateRoleGroups()
 }
 
 function groupFor(role: string, mapping: Record<string, string>): string {
@@ -129,6 +235,9 @@ async function load() {
 }
 
 async function startEmbedded() {
+  if (identityBusy.value) return
+  identityFormError.value = validateEmbeddedForm()
+  if (identityFormError.value) return
   startingEmbedded.value = true
   try {
     const payload: EmbeddedKeycloakWrite = { ...embedded.value, role_mapping: roleMapping() }
@@ -143,11 +252,17 @@ async function startEmbedded() {
     applySettings(value)
     notifyOk('Встроенный Keycloak запущен и подключён к приложению')
     step.value = 2
-  } catch (err) { notifyError(err, 'Не удалось запустить встроенный Keycloak') }
+  } catch (err) {
+    identityFormError.value = errorMessage(err)
+    notifyError(err, 'Не удалось запустить встроенный Keycloak')
+  }
   finally { startingEmbedded.value = false }
 }
 
 async function saveOIDC() {
+  if (identityBusy.value) return
+  identityFormError.value = validateOIDCForm()
+  if (identityFormError.value) return
   saving.value = true
   try {
     const payload: IdentitySettingsWrite = { ...oidc.value, role_mapping: roleMapping() }
@@ -157,11 +272,17 @@ async function saveOIDC() {
     applySettings(value)
     notifyOk('Подключение к Keycloak проверено и применено без перезапуска')
     step.value = 2
-  } catch (err) { notifyError(err, 'Не удалось подключить Keycloak') }
+  } catch (err) {
+    identityFormError.value = errorMessage(err)
+    notifyError(err, 'Не удалось подключить Keycloak')
+  }
   finally { saving.value = false }
 }
 
 async function configureDomain() {
+  if (identityBusy.value) return
+  identityFormError.value = validateDomainForm()
+  if (identityFormError.value) return
   connectingDomain.value = true
   try {
     domain.value.domain.admin_group = groups.value.admin.trim()
@@ -186,7 +307,10 @@ async function configureDomain() {
     )
     applySettings(result.identity)
     notifyOk(`Домен подключён: проверено групп ${result.result.groups_checked}`)
-  } catch (err) { notifyError(err, 'Не удалось подключить домен') }
+  } catch (err) {
+    identityFormError.value = errorMessage(err)
+    notifyError(err, 'Не удалось подключить домен')
+  }
   finally { connectingDomain.value = false }
 }
 
@@ -202,11 +326,13 @@ watch(() => oidc.value.issuer, (issuer, previous) => {
   if (!domain.value.admin_realm || domain.value.admin_realm === previousRealm) domain.value.admin_realm = realmFromIssuer(issuer)
 })
 
+watch([embedded, oidc, domain, groups], () => { identityFormError.value = '' }, { deep: true })
+
 onMounted(load)
 </script>
 
 <template>
-  <div>
+  <div class="relative-position">
     <q-banner v-if="!canConfigure && !loading" dense class="bg-orange-1 q-mb-md">
       <template #avatar><q-icon name="lock" color="orange-9" /></template>
       Изменять Keycloak и домен можно только из сессии локального администратора с правом управления пользователями.
@@ -219,6 +345,11 @@ onMounted(load)
         Секрет клиента {{ settings.client_secret_stored ? 'сохранён в зашифрованном виде' : 'не задан' }} ·
         домен {{ settings.domain.connected ? `подключён (${settings.domain.name})` : 'не подключён' }}
       </div>
+    </q-banner>
+
+    <q-banner v-if="identityFormError" dense class="bg-red-1 text-negative q-mb-md">
+      <template #avatar><q-icon name="error" /></template>
+      {{ identityFormError }}
     </q-banner>
 
     <q-stepper v-model="step" flat bordered animated color="primary">
@@ -242,7 +373,7 @@ onMounted(load)
             <div class="col-12 col-md-4"><q-input v-model="groups.operator" outlined dense label="Группа операторов" :disable="!canConfigure" /></div>
             <div class="col-12 col-md-4"><q-input v-model="groups.viewer" outlined dense label="Группа наблюдателей" :disable="!canConfigure" /></div>
             <div class="col-12"><q-input v-model="embedded.local_password" type="password" outlined dense label="Пароль текущего локального администратора" :disable="!canConfigure" /></div>
-            <div class="col-12"><q-btn color="primary" unelevated icon="play_circle" :label="settings.embedded_keycloak.initialized ? 'Проверить и применить' : 'Запустить и подключить'" :loading="startingEmbedded" :disable="!canConfigure || !embedded.local_password" @click="startEmbedded" /></div>
+            <div class="col-12"><q-btn color="primary" unelevated icon="play_circle" :label="settings.embedded_keycloak.initialized ? 'Проверить и применить' : 'Запустить и подключить'" :loading="startingEmbedded" :disable="!canConfigure || identityBusy" @click="startEmbedded" /></div>
           </q-card-section>
         </q-card>
 
@@ -252,7 +383,7 @@ onMounted(load)
           <div class="row q-col-gutter-md q-pt-md">
             <div class="col-12"><q-input v-model="oidc.issuer" outlined dense label="Issuer Keycloak" hint="https://sso.example.org/realms/jhvirt" :disable="!canConfigure" /></div>
             <div class="col-12 col-md-6"><q-input v-model="oidc.client_id" outlined dense label="OIDC client ID" :disable="!canConfigure" /></div>
-            <div class="col-12 col-md-6"><q-input v-model="oidc.client_secret" outlined dense type="password" label="Секрет OIDC-клиента" :hint="settings?.client_secret_stored ? 'Пусто — оставить сохранённый' : 'Обязателен для первого подключения'" :disable="!canConfigure" /></div>
+            <div class="col-12 col-md-6"><q-input v-model="oidc.client_secret" outlined dense type="password" label="Секрет OIDC-клиента" :hint="oidcSecretReusable ? 'Пусто — оставить сохранённый' : 'Укажите секрет для этих issuer и client ID'" :disable="!canConfigure" /></div>
             <div class="col-12"><q-input v-model="oidc.redirect_url" outlined dense label="Redirect URL" :disable="!canConfigure" /></div>
             <div class="col-12"><q-input v-model="oidc.backchannel_url" outlined dense label="Внутренний адрес Keycloak" hint="Оставьте пустым, если issuer доступен приложению" :disable="!canConfigure" /></div>
             <div class="col-12 col-md-4"><q-input v-model="groups.admin" outlined dense label="Группа администраторов" :disable="!canConfigure" /></div>
@@ -264,14 +395,14 @@ onMounted(load)
             <div class="col-12 col-md-6"><q-input v-model="oidc.button_label" outlined dense label="Текст кнопки входа" :disable="!canConfigure" /></div>
             <div class="col-12 col-md-6"><q-input v-model="oidc.groups_claim" outlined dense label="Claim с группами" :disable="!canConfigure" /></div>
             <div class="col-12"><q-input v-model="oidc.local_password" type="password" outlined dense label="Пароль текущего локального администратора" :disable="!canConfigure" /></div>
-            <div class="col-12"><q-btn color="primary" unelevated label="Проверить и сохранить" icon="save" :loading="saving" :disable="!canConfigure || !oidc.local_password" @click="saveOIDC" /></div>
+            <div class="col-12"><q-btn color="primary" unelevated label="Проверить и сохранить" icon="save" :loading="saving" :disable="!canConfigure || identityBusy" @click="saveOIDC" /></div>
           </div>
         </q-expansion-item>
 
         <q-stepper-navigation v-if="identityReady"><q-btn flat color="primary" label="Перейти к домену" @click="step = 2" /></q-stepper-navigation>
       </q-step>
 
-      <q-step :name="2" title="Active Directory" icon="domain" :done="Boolean(settings?.domain.connected)">
+      <q-step :name="2" title="Active Directory" icon="domain" :done="Boolean(settings?.domain.connected)" :disable="!identityReady">
         <q-banner dense class="bg-blue-1 q-mb-md">
           <template #avatar><q-icon name="security" color="primary" /></template>
           <span v-if="embeddedManaged">Для встроенного Keycloak helper использует закрытую служебную учётную запись. Введите только параметры домена и bind-пароль.</span>
@@ -301,10 +432,16 @@ onMounted(load)
           <div class="col-12"><q-input v-model="domain.local_password" type="password" outlined dense label="Пароль текущего локального администратора" :disable="!canConfigure" /></div>
         </div>
         <q-stepper-navigation>
-          <q-btn color="primary" unelevated icon="domain_add" label="Проверить и подключить домен" :loading="connectingDomain" :disable="!canConfigure || !identityReady || !domain.local_password || (!embeddedManaged && !domain.admin_client_secret) || !domain.domain.bind_password" @click="configureDomain" />
+          <q-btn color="primary" unelevated icon="domain_add" label="Проверить и подключить домен" :loading="connectingDomain" :disable="!canConfigure || identityBusy" @click="configureDomain" />
           <q-btn flat label="Назад" class="q-ml-sm" @click="step = 1" />
         </q-stepper-navigation>
       </q-step>
     </q-stepper>
+
+    <q-inner-loading :showing="identityBusy" color="primary">
+      <q-spinner size="42px" />
+      <div class="text-weight-medium q-mt-sm">{{ identityBusyLabel }}</div>
+      <div v-if="connectingDomain" class="text-caption text-grey-7">Проверка может занять несколько минут.</div>
+    </q-inner-loading>
   </div>
 </template>

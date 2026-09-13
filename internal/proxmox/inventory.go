@@ -107,6 +107,30 @@ func (c *Client) Probe(ctx context.Context) (Info, int, int, error) {
 	return inv.Info, len(inv.Hosts), len(inv.VMs), nil
 }
 
+// GuestNode resolves the current owner immediately before a backup. Cached
+// inventory is useful for the UI, but a guest may migrate between a poll and
+// the scheduled run; sending vzdump to the old node would then fail.
+func (c *Client) GuestNode(ctx context.Context, vmID string) (string, error) {
+	kind, numericID, err := ParseVMID(vmID)
+	if err != nil {
+		return "", err
+	}
+	var list []resource
+	if err := c.do(ctx, http.MethodGet, "/cluster/resources", url.Values{"type": {"vm"}}, &list); err != nil {
+		return "", fmt.Errorf("поиск текущего узла гостя: %w", err)
+	}
+	for _, item := range list {
+		if item.Template.Bool() || item.Type != kind || strconv.Itoa(item.VMID.Int()) != numericID {
+			continue
+		}
+		if err := pathSegment("узел", item.Node); err != nil {
+			return "", err
+		}
+		return item.Node, nil
+	}
+	return "", fmt.Errorf("гость Proxmox %s не найден в актуальном инвентаре", vmID)
+}
+
 // FetchInventory uses Proxmox's cluster-wide resources endpoint. It works when
 // pointed at any healthy member of a PVE cluster.
 func (c *Client) FetchInventory(ctx context.Context, serverID string) (*Inventory, error) {
@@ -298,7 +322,7 @@ func max64(a, b int64) int64 {
 // VMAction submits one asynchronous power or migration operation. The caller
 // refreshes inventory afterward; Proxmox returns a UPID rather than waiting.
 func (c *Client) VMAction(ctx context.Context, vmID, node, action, targetHost string) error {
-	kind, numericID, err := parseVMID(vmID)
+	kind, numericID, err := ParseVMID(vmID)
 	if err != nil {
 		return err
 	}
@@ -329,12 +353,13 @@ func (c *Client) VMAction(ctx context.Context, vmID, node, action, targetHost st
 	return c.do(ctx, http.MethodPost, path, form, &upid)
 }
 
-func parseVMID(value string) (kind, id string, err error) {
+func ParseVMID(value string) (kind, id string, err error) {
 	parts := strings.Split(value, "/")
 	if len(parts) != 2 || (parts[0] != "qemu" && parts[0] != "lxc") {
 		return "", "", fmt.Errorf("неверный идентификатор гостя Proxmox %q", value)
 	}
-	if _, err := strconv.ParseUint(parts[1], 10, 32); err != nil {
+	n, err := strconv.ParseUint(parts[1], 10, 32)
+	if err != nil || n < 100 || n > 999999999 || strconv.FormatUint(n, 10) != parts[1] {
 		return "", "", fmt.Errorf("неверный VMID Proxmox %q", parts[1])
 	}
 	return parts[0], parts[1], nil

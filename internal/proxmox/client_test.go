@@ -52,6 +52,15 @@ func TestFetchInventoryAndPowerAction(t *testing.T) {
 				{"id": "storage/pve02/shared", "type": "storage", "storage": "shared", "node": "pve02", "status": "available", "shared": 1, "disk": 100, "maxdisk": 1000, "plugintype": "nfs"},
 				{"id": "storage/pve01/local", "type": "storage", "storage": "local", "node": "pve01", "status": "available", "disk": 200, "maxdisk": 500, "plugintype": "dir"},
 			}
+		case r.Method == http.MethodGet && r.URL.Path == "/api2/json/nodes/pve01/qemu/101/config":
+			data = map[string]any{
+				"scsi0":      "shared:vm-101-disk-0,size=64G",
+				"efidisk0":   "shared:vm-101-disk-1,size=4M,efitype=4m",
+				"ide2":       "none,media=cdrom",
+				"cipassword": "must-never-enter-the-manifest",
+			}
+		case r.Method == http.MethodGet && r.URL.Path == "/api2/json/cluster/nextid":
+			data = "107"
 		case r.Method == http.MethodPost && r.URL.Path == "/api2/json/nodes/pve01/qemu/101/migrate":
 			if err := r.ParseForm(); err != nil {
 				t.Fatal(err)
@@ -85,11 +94,27 @@ func TestFetchInventoryAndPowerAction(t *testing.T) {
 	if inv.Hosts[0].ActiveVMs != 1 || inv.Hosts[1].Status != "down" {
 		t.Fatalf("unexpected host mapping: %+v", inv.Hosts)
 	}
+	node, err := client.GuestNode(t.Context(), "qemu/101")
+	if err != nil || node != "pve01" {
+		t.Fatalf("unexpected current guest node %q: %v", node, err)
+	}
 	if err := client.VMAction(t.Context(), "qemu/101", "pve01", "migrate", "node/pve02"); err != nil {
 		t.Fatal(err)
 	}
 	if actionPath == "" || actionTarget != "pve02" {
 		t.Fatalf("migration not submitted: path=%q target=%q", actionPath, actionTarget)
+	}
+	metadata, err := client.BackupMetadata(t.Context(), "qemu/101", "pve01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metadata.GuestKind != "qemu" || metadata.SourceNode != "pve01" || metadata.RootFSSize != "" ||
+		metadata.ProvisionedSize != (64<<30)+(4<<20) {
+		t.Fatalf("unexpected native backup metadata: %+v", metadata)
+	}
+	vmID, err := client.NextVMID(t.Context())
+	if err != nil || vmID != "107" {
+		t.Fatalf("unexpected next VMID %q: %v", vmID, err)
 	}
 }
 
@@ -121,6 +146,19 @@ func TestNewRejectsUnsafeEndpointAndTokenID(t *testing.T) {
 	for _, tokenID := range []string{"", "user@pve", "token", "user@pve!", "user@pve!one!two", "user@pve!bad/token"} {
 		if _, err := New(Config{BaseURL: "https://pve.example.org:8006", TokenID: tokenID, TokenSecret: "secret"}); err == nil {
 			t.Errorf("invalid token ID accepted: %q", tokenID)
+		}
+	}
+}
+
+func TestParseVMIDUsesProxmoxRange(t *testing.T) {
+	for _, value := range []string{"qemu/100", "lxc/999999999"} {
+		if _, _, err := ParseVMID(value); err != nil {
+			t.Errorf("valid VMID %q rejected: %v", value, err)
+		}
+	}
+	for _, value := range []string{"qemu/0", "qemu/99", "qemu/0100", "lxc/1000000000", "qemu/-1", "vm/100"} {
+		if _, _, err := ParseVMID(value); err == nil {
+			t.Errorf("invalid VMID %q accepted", value)
 		}
 	}
 }

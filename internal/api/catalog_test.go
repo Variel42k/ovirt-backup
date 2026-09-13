@@ -28,6 +28,7 @@ func TestCatalogScanImportsRunTransactionallyAndIdempotently(t *testing.T) {
 	now := time.Now().UTC()
 	prefix := "jhvirt/server/vm/imported-run/"
 	dataKey, manifestKey := prefix+"disk-00.data", prefix+"disk-00.manifest"
+	artifactDataKey, artifactManifestKey := prefix+"artifact-00-vm.proxmox-vzdump.data", prefix+"artifact-00-vm.proxmox-vzdump.manifest"
 	diskManifest := &backup.DiskManifest{Format: backup.FormatName, Version: backup.FormatVersion,
 		RunID: "imported-run", ChainID: "imported-run", Type: model.BackupFull,
 		ServerID: "server", VMID: "vm", VMName: "vm", DiskID: "disk", Alias: "system",
@@ -42,12 +43,30 @@ func TestCatalogScanImportsRunTransactionallyAndIdempotently(t *testing.T) {
 	if _, err := backend.Put(ctx, dataKey, bytes.NewReader(nil), 0); err != nil {
 		t.Fatal(err)
 	}
+	artifactManifest := &backup.DiskManifest{Format: backup.FormatName, Version: backup.FormatVersion,
+		RunID: "imported-run", ChainID: "imported-run", Type: model.BackupFull,
+		ServerID: "server", VMID: "vm", VMName: "vm", DiskID: "vm", Alias: "vm.vzdump.zst",
+		VirtualSize: 0, ChunkSize: 4096, Compression: backup.CompressionNone, CreatedAt: now,
+		DataKey: artifactDataKey, DiskFormat: backup.ArtifactProxmoxVZDUMP}
+	encodedArtifact, err := backup.EncodeManifest(artifactManifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.Put(ctx, artifactManifestKey, bytes.NewReader(encodedArtifact), int64(len(encodedArtifact))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.Put(ctx, artifactDataKey, bytes.NewReader(nil), 0); err != nil {
+		t.Fatal(err)
+	}
 	doc := &backup.RunManifest{Format: backup.FormatName, Version: backup.FormatVersion,
 		RunID: "imported-run", ChainID: "imported-run", Type: model.BackupFull,
 		ServerID: "server", VMID: "vm", VMName: "vm", CreatedAt: now, EndedAt: now,
 		Compression: "none", LogicalBytes: 4096, Disks: []backup.RunManifestDisk{{
 			DiskID: "disk", Alias: "system", VirtualSize: 4096,
 			ManifestKey: manifestKey, DataKey: dataKey,
+		}}, Artifacts: []backup.RunManifestArtifact{{
+			ID: "source-artifact", DiskID: "vm", DiskAlias: "vm.vzdump.zst", Kind: backup.ArtifactProxmoxVZDUMP,
+			ManifestKey: artifactManifestKey, DataKey: artifactDataKey,
 		}}}
 	if err := backup.WriteRunManifest(ctx, backend, prefix, doc); err != nil {
 		t.Fatal(err)
@@ -89,5 +108,30 @@ func TestCatalogScanImportsRunTransactionallyAndIdempotently(t *testing.T) {
 	}
 	if len(copies) != 1 || copies[0].Role != model.CopyPrimary || copies[0].Status != model.CopySucceeded {
 		t.Fatalf("physical copy not imported: %+v", copies)
+	}
+	if copies[0].ObjectCount != 5 || copies[0].CopiedObjects != 5 {
+		t.Fatalf("managed artifact missing from copy counters: %+v", copies[0])
+	}
+	artifacts, err := st.ListRepositoryArtifacts(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(artifacts) != 1 || artifacts[0].Kind != backup.ArtifactProxmoxVZDUMP ||
+		artifacts[0].StorageTargetID != target.ID {
+		t.Fatalf("managed artifact not imported: %+v", artifacts)
+	}
+}
+
+func TestCatalogObjectMustBelongToItsRun(t *testing.T) {
+	prefix := "jhvirt/server/vm/run/"
+	for _, key := range []string{
+		"", "jhvirt/server/vm/other/data", prefix + "../other/data", prefix + `dir\data`,
+	} {
+		if catalogObjectInRun(prefix, key) {
+			t.Errorf("accepted unsafe catalog object key %q", key)
+		}
+	}
+	if !catalogObjectInRun(prefix, prefix+"artifact.data") {
+		t.Fatal("rejected object inside the run directory")
 	}
 }

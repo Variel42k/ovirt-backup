@@ -46,6 +46,7 @@ Go и Node на production-сервере не нужны. Они требуют
 | браузер → приложение/прокси | 8080 или 443 | веб-интерфейс и API |
 | приложение → oVirt/RHV/РЕД Виртуализация | 443 | API движка |
 | приложение → Proxmox VE | 8006 | кластерный HTTPS API `pveproxy` |
+| приложение → каждый узел Proxmox VE | 22 | нативный поток `vzdump` и restore через forced command |
 | приложение → гипервизоры oVirt | 54322 | прямой `ovirt-imageio` |
 | приложение → прокси движка | 54323 | `ovirt-imageio`, если включён `backup.transfer.prefer_proxy` |
 | приложение → KVM/libvirt | 22 | libvirt поверх SSH и передача NBD/образов |
@@ -705,11 +706,101 @@ server:
     key_file: "/opt/jhvirt/config/tls/server.key"
 ```
 
+## Proxmox VE: канал данных для backup/restore
+
+REST API Proxmox не отдаёт `vzdump --stdout`, поэтому для байтов архива служба
+использует SSH. Это отдельная учётная запись и отдельный ключ: API token
+продолжает отвечать только за инвентарь и управление. Helper входит в `.run` и
+после установки лежит в `/opt/jhvirt/proxmox/jhvirt-pve-data-plane`.
+
+Создайте отдельного пользователя, роль и API token на любом узле кластера.
+Роль ниже разрешает чтение инвентаря, питание и миграцию ВМ; backup/restore она
+не разрешает, потому что эти операции ограничены SSH helper. При
+`privsep=1` права токена остаются пересечением прав пользователя и самого
+токена:
+
+```bash
+pveum user add jhvirt@pve --comment 'JustHPC Virt Manager API'
+pveum role add JHVirtManager -privs \
+  'Datastore.Audit Pool.Audit Sys.Audit VM.Audit VM.Migrate VM.PowerMgmt'
+pveum acl modify / -user jhvirt@pve -role JHVirtManager
+pveum user token add jhvirt@pve manager -privsep 1
+pveum acl modify / -token 'jhvirt@pve!manager' -role JHVirtManager
+pveum user token permissions jhvirt@pve manager
+```
+
+Последняя команда проверки не должна показывать `VM.Allocate`,
+`Datastore.Allocate*`, `Permissions.Modify` или `Sys.Modify`. Secret из вывода
+`token add` показывается один раз; в форме `jhvirt@pve!manager` вводится как API
+token ID, secret — как его пароль.
+
+На **каждом** узле кластера установите один и тот же helper под root:
+
+```bash
+sudo install -o root -g root -m 0755 \
+  /opt/jhvirt/proxmox/jhvirt-pve-data-plane \
+  /usr/local/sbin/jhvirt-pve-data-plane
+sudo /usr/local/sbin/jhvirt-pve-data-plane probe
+```
+
+Если приложение установлено на отдельной машине, сначала передайте файл на
+узел по вашему административному каналу. Не загружайте его из случайного URL;
+используйте файл из того же подписанного комплекта, которым установлена служба.
+
+Создайте выделенную пару ключей на защищённой рабочей станции. Парольная фраза
+для автоматического ключа не поддерживается:
+
+```bash
+umask 077
+ssh-keygen -t ed25519 -f ./jhvirt-proxmox -N '' -C jhvirt-proxmox-data-plane
+```
+
+Строку из `jhvirt-proxmox.pub` добавьте в `/root/.ssh/authorized_keys` каждого
+узла с обязательными ограничениями перед типом ключа:
+
+```text
+restrict,command="/usr/local/sbin/jhvirt-pve-data-plane" ssh-ed25519 AAAA... jhvirt-proxmox-data-plane
+```
+
+`restrict` отключает PTY, forwarding и agent/X11 forwarding. Forced command
+не предоставляет shell: helper принимает только `probe`, чтение полного
+архива и восстановление в новый свободный VMID. Отдельной операции удаления
+гостей в протоколе нет. Helper запускается от root, потому что штатные
+`vzdump`, `qmrestore` и `pct restore` требуют привилегий; поэтому приватный ключ
+даёт доступ ко всем данным ВМ и должен храниться только в зашифрованной БД
+приложения и в отдельной резервной копии ключа приложения.
+
+В форме подключения Proxmox укажите пользователя `root`, вставьте приватный
+ключ и нажмите **Получить ключи узлов**. Служба сначала читает состав кластера
+через проверенный HTTPS API, затем собирает SSH host key каждого узла. Сверьте
+каждый SHA-256 непосредственно на соответствующем узле:
+
+```bash
+ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
+```
+
+Сканирование по той же сети не доказывает подлинность узла. Если хотя бы один
+узел недоступен, набор не принимается: после миграции ВМ на незакреплённый узел
+backup иначе потерял бы проверку подлинности. После сохранения web API сообщает
+только наличие ключей и приватного ключа, но не возвращает их содержимое.
+
+Проверка подключения запускает `probe` на всех узлах. Готовое подключение
+предлагает один способ: полный нативный `vzdump` QEMU или LXC в snapshot mode.
+При восстановлении выбираются целевой узел и storage, назначается новый VMID и
+новые MAC-адреса. Сеть по умолчанию остаётся отключённой; автоматический запуск
+разрешён только после явного подключения сети. Для LXC helper использует simple
+restore: Proxmox сам создаёт на выбранном storage `rootfs` и все сохранённые
+volume-backed `mp0…mpN`. Bind/device mount points штатно не содержат данные в
+`vzdump`, поэтому их внешние источники нужно защищать отдельно. Если SSH оборвался посередине
+`qmrestore`/`pct restore`, проверьте целевой VMID в Proxmox и удалите неполный
+гость вручную после сверки: служба намеренно не имеет общей команды удаления.
+
 ## 9. Первая настройка в интерфейсе
 
 1. В разделе **Серверы** добавьте oVirt, Proxmox VE или KVM/libvirt подключение.
 2. Нажмите **Проверить подключение** до сохранения.
-3. Для oVirt и Proxmox при загрузке сертификата сверьте отпечаток независимым путём.
+3. Для oVirt и Proxmox при загрузке сертификата сверьте отпечаток независимым
+   путём; для Proxmox так же сверьте SSH host key каждого узла.
 4. В разделе **Хранилища** добавьте целевое хранилище и выполните проверку
    записи, чтения и удаления тестового объекта.
 5. Откройте **Покрытие бэкапами** и устраните ВМ без заданий или без включённых дисков.

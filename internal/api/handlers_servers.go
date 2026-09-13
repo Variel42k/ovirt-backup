@@ -42,11 +42,15 @@ type serverPayload struct {
 	Notes       string   `json:"notes"`
 
 	// Поля для подключений типа kvm.
-	SSHHost         string `json:"ssh_host"`
-	SSHPort         int    `json:"ssh_port"`
-	SSHPrivateKey   string `json:"ssh_private_key"`
-	SSHHostKey      string `json:"ssh_host_key"`
-	ClearSSHHostKey bool   `json:"clear_ssh_host_key"`
+	SSHHost       string `json:"ssh_host"`
+	SSHPort       int    `json:"ssh_port"`
+	SSHUsername   string `json:"ssh_username"`
+	SSHPrivateKey string `json:"ssh_private_key"`
+	// ClearSSHPrivateKey is explicit because an empty write-only field means
+	// "keep the stored key" while editing an existing connection.
+	ClearSSHPrivateKey bool   `json:"clear_ssh_private_key"`
+	SSHHostKey         string `json:"ssh_host_key"`
+	ClearSSHHostKey    bool   `json:"clear_ssh_host_key"`
 	// SSHTrustAnyHostKey — явный отказ проверять подлинность гипервизора.
 	SSHTrustAnyHostKey bool   `json:"ssh_trust_any_host_key"`
 	ScratchDir         string `json:"scratch_dir"`
@@ -64,7 +68,9 @@ func (p serverPayload) apply(dst *model.Server) {
 	dst.Tags = p.Tags
 	dst.Notes = p.Notes
 	dst.SSHHost = p.SSHHost
+	dst.SSHUsername = p.SSHUsername
 	dst.SSHPrivateKey = p.SSHPrivateKey
+	dst.ClearSSHPrivateKey = p.ClearSSHPrivateKey
 	if p.SSHHostKey != "" || p.ClearSSHHostKey {
 		dst.SSHHostKey = p.SSHHostKey
 	}
@@ -101,6 +107,11 @@ func validateServer(srv *model.Server, isNew bool) error {
 			CACert: srv.CACert, InsecureTLS: srv.InsecureTLS,
 		}); err != nil {
 			return badRequest("%v", err)
+		}
+		if srv.HasProxmoxDataPlane() {
+			if _, err := proxmox.NewDataPlane(srv, 30*time.Second); err != nil {
+				return badRequest("%v", err)
+			}
 		}
 	}
 	if isNew && srv.Password == "" && srv.SSHPrivateKey == "" {
@@ -163,7 +174,7 @@ func (s *Server) handleCreateServer(w http.ResponseWriter, r *http.Request) {
 	}
 	s.audit(r, "server.create", model.ScopeServer, srv.ID, true, srv.Name)
 	s.auditHostKeyTrust(r, model.ScopeServer, srv.ID, srv.Name, srv.SSHTrustAnyHostKey,
-		srv.Kind.UsesLibvirt())
+		srv.Kind.UsesLibvirt() || srv.HasProxmoxDataPlane())
 
 	// Probe immediately so the operator sees whether the connection works
 	// instead of waiting for the next poll.
@@ -198,7 +209,7 @@ func (s *Server) handleUpdateServer(w http.ResponseWriter, r *http.Request) {
 	if existing.Password == "" {
 		existing.Password = storedPassword
 	}
-	if existing.SSHPrivateKey == "" {
+	if existing.SSHPrivateKey == "" && !payload.ClearSSHPrivateKey {
 		existing.SSHPrivateKey = storedKey
 	}
 
@@ -219,7 +230,7 @@ func (s *Server) handleUpdateServer(w http.ResponseWriter, r *http.Request) {
 	}
 	s.audit(r, "server.update", model.ScopeServer, id, true, existing.Name)
 	s.auditHostKeyTrust(r, model.ScopeServer, id, existing.Name, existing.SSHTrustAnyHostKey,
-		existing.Kind.UsesLibvirt())
+		existing.Kind.UsesLibvirt() || existing.HasProxmoxDataPlane())
 
 	go s.refreshServer(context.WithoutCancel(r.Context()), id)
 	writeJSON(w, http.StatusOK, existing)
@@ -278,7 +289,7 @@ func (s *Server) handleProbeServer(w http.ResponseWriter, r *http.Request) {
 	// the actual connection. The id is the reliable key; the name is the
 	// fallback for the create form, where there is no id yet but the operator
 	// may be re-checking a saved one.
-	if payload.Password == "" || payload.SSHPrivateKey == "" ||
+	if payload.Password == "" || (payload.SSHPrivateKey == "" && !payload.ClearSSHPrivateKey) ||
 		(payload.CACert == "" && !payload.ClearCACert) ||
 		(payload.SSHHostKey == "" && !payload.ClearSSHHostKey) {
 		var existing *model.Server
@@ -376,17 +387,45 @@ func (s *Server) probeProxmox(ctx context.Context, payload serverPayload) probeR
 		return probeResult{OK: false, Error: err.Error()}
 	}
 	started := time.Now()
-	info, hosts, vms, err := client.Probe(ctx)
+	inv, err := client.FetchInventory(ctx, "")
 	if err != nil {
 		return probeResult{OK: false, Error: err.Error(), Hint: proxmoxHint(err)}
 	}
-	hint := "Инвентарь и управление ВМ доступны. Резервное копирование и восстановление Proxmox в этой версии ещё не реализованы."
-	if info.Clustered && !info.Quorate {
+	hint := "Инвентарь и управление ВМ доступны. Для бэкапа настройте отдельный SSH-канал данных и закрепите ключи всех узлов."
+	backupReady := false
+	dataServer := &model.Server{Kind: model.KindProxmox, SSHUsername: payload.SSHUsername,
+		SSHPort: payload.SSHPort, SSHPrivateKey: payload.SSHPrivateKey, SSHHostKey: payload.SSHHostKey,
+		SSHTrustAnyHostKey: payload.SSHTrustAnyHostKey}
+	if dataServer.HasProxmoxDataPlane() {
+		plane, planeErr := proxmox.NewDataPlane(dataServer, 20*time.Second)
+		if len(inv.Hosts) == 0 {
+			hint = "API доступен, но Proxmox не вернул ни одного узла; канал данных проверить невозможно."
+		} else if planeErr == nil {
+			backupReady = true
+			for _, host := range inv.Hosts {
+				address := host.Address
+				if address == "" {
+					address = host.Name
+				}
+				if probeErr := plane.Probe(ctx, address); probeErr != nil {
+					backupReady = false
+					hint = fmt.Sprintf("API доступен, но канал данных узла %s не готов: %v", host.Name, probeErr)
+					break
+				}
+			}
+		} else {
+			hint = planeErr.Error()
+		}
+		if backupReady {
+			hint = "Нативный полный бэкап и восстановление QEMU/LXC доступны на всех узлах кластера."
+		}
+	}
+	if inv.Info.Clustered && !inv.Info.Quorate {
 		hint = "Кластер ответил, но не имеет кворума. " + hint
 	}
-	return probeResult{OK: true, ProductName: "Proxmox VE", Version: info.FullVersion(),
-		SupportsCBT: false, SupportsBackup: false, SupportsRestore: false,
-		Clusters: 1, Hosts: hosts, VMs: vms,
+	return probeResult{OK: true, ProductName: "Proxmox VE", Version: inv.Info.FullVersion(),
+		SupportsCBT: false, SupportsBackup: backupReady, SupportsRestore: backupReady,
+		Clusters: len(inv.Clusters), Hosts: len(inv.Hosts), VMs: len(inv.VMs),
 		Latency: time.Since(started).Round(time.Millisecond).String(), Hint: hint}
 }
 
@@ -410,7 +449,7 @@ func (p *serverPayload) fillHiddenFrom(existing *model.Server) {
 	if p.Password == "" {
 		p.Password = existing.Password
 	}
-	if p.SSHPrivateKey == "" {
+	if p.SSHPrivateKey == "" && !p.ClearSSHPrivateKey {
 		p.SSHPrivateKey = existing.SSHPrivateKey
 	}
 	if p.CACert == "" && !p.ClearCACert {

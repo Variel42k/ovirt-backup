@@ -24,8 +24,18 @@ import (
 // внешнем хранилище это лишний обход по сети на каждое обновление статуса,
 // причём ради числа, которое и так известно заранее.
 func runObjectCount(run *model.BackupRun) int {
-	if run.DiskCount <= 0 {
+	if run.Type == model.BackupOVA {
 		return 0
+	}
+	if run.DiskCount <= 0 {
+		if run.RepoPath == "" && !run.ConfigStored {
+			return 0
+		}
+		count := 1
+		if run.ConfigStored {
+			count++
+		}
+		return count
 	}
 	count := run.DiskCount*2 + 1
 	if run.ConfigStored {
@@ -87,7 +97,8 @@ func (s *Store) SyncPrimaryCopy(ctx context.Context, run *model.BackupRun) error
 	}
 	objects := runObjectCount(run)
 	var artifactCount int
-	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM repository_artifacts WHERE run_id=? AND status='succeeded'`, run.ID).Scan(&artifactCount); err == nil {
+	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM repository_artifacts
+		WHERE run_id=? AND storage_target_id=? AND status='succeeded'`, run.ID, run.StorageTargetID).Scan(&artifactCount); err == nil {
 		objects += artifactCount * 2
 	}
 	copied := 0

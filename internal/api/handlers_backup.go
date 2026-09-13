@@ -98,6 +98,21 @@ func (s *Server) validateJob(ctx context.Context, job *model.BackupJob) error {
 	if !srv.Kind.SupportsBackup() {
 		return badRequest("резервное копирование %s в этой версии не поддерживается", srv.Kind.Title())
 	}
+	if srv.Kind.UsesProxmoxAPI() {
+		if !srv.HasProxmoxDataPlane() {
+			return badRequest("для задания Proxmox сначала настройте SSH-канал данных и закрепите ключи всех узлов")
+		}
+		if job.Type != model.BackupFull {
+			return badRequest("Proxmox поддерживает только полный нативный бэкап vzdump")
+		}
+		if len(job.ExcludeDiskIDs) > 0 || job.ExportQcow2 {
+			return badRequest("нативный vzdump сохраняет гостя целиком; исключение дисков и экспорт qcow2 недоступны")
+		}
+		if job.VerifyAfter != "" && job.VerifyAfter != model.VerifyQuick &&
+			job.VerifyAfter != model.VerifyManifest && job.VerifyAfter != model.VerifyChain {
+			return badRequest("для нативного архива Proxmox доступны проверки quick, manifest и chain")
+		}
+	}
 	for _, id := range job.StorageTargetIDs {
 		target, err := s.store.GetStorageTarget(ctx, id)
 		if err != nil {
@@ -363,10 +378,25 @@ func (s *Server) handleAdHocBackup(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, badRequest("резервное копирование %s в этой версии не поддерживается", srv.Kind.Title()))
 		return
 	}
+	if srv.Kind.UsesProxmoxAPI() {
+		if !srv.HasProxmoxDataPlane() {
+			s.writeError(w, r, badRequest("для Proxmox сначала настройте SSH-канал данных и закрепите ключи всех узлов"))
+			return
+		}
+		if model.BackupType(req.Type) != model.BackupFull || len(req.ExcludeDisks) > 0 {
+			s.writeError(w, r, badRequest("Proxmox поддерживает полный нативный vzdump без исключения отдельных дисков"))
+			return
+		}
+	}
 	verifyMode := model.VerifyMode(req.VerifyAfter)
 	if verifyMode != "" {
 		if !knownVerifyMode(verifyMode) {
 			s.writeError(w, r, badRequest("неизвестный режим проверки: %q", verifyMode))
+			return
+		}
+		if srv.Kind.UsesProxmoxAPI() && verifyMode != model.VerifyQuick &&
+			verifyMode != model.VerifyManifest && verifyMode != model.VerifyChain {
+			s.writeError(w, r, badRequest("для нативного архива Proxmox доступны проверки quick, manifest и chain"))
 			return
 		}
 		if verifyMode.NeedsHypervisor() {
@@ -944,6 +974,15 @@ func (s *Server) handleBackupOptions(w http.ResponseWriter, r *http.Request) {
 	}
 	if !srv.Kind.SupportsBackup() {
 		s.writeError(w, r, badRequest("резервное копирование %s в этой версии не поддерживается", srv.Kind.Title()))
+		return
+	}
+	if srv.Kind.UsesProxmoxAPI() {
+		vm, getErr := s.store.GetVM(r.Context(), srv.ID, r.PathValue("vmID"))
+		if getErr != nil {
+			s.writeError(w, r, getErr)
+			return
+		}
+		writeJSON(w, http.StatusOK, backup.ProxmoxRecommendation(srv, vm))
 		return
 	}
 	rec, err := s.engine.Recommend(r.Context(), r.PathValue("id"), r.PathValue("vmID"),

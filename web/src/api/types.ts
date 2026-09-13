@@ -110,6 +110,10 @@ export interface Server {
   kind: string
   engine_url: string
   username: string
+  /** Есть ли сохранённый пароль или API secret. Само значение API не возвращает. */
+  password_stored?: boolean
+  /** Write-only command: удалить пароль старого KVM-подключения. */
+  clear_password?: boolean
   /** Сертификат хранится на сервере; его содержимое API не возвращает. */
   ca_cert_stored: boolean
   insecure_tls: boolean
@@ -251,11 +255,14 @@ export interface StorageTarget {
   host?: string
   port?: number
   username?: string
-  host_key?: string
   /** Явный отказ проверять подлинность SFTP-сервера — виден в списке значком. */
   trust_any_host_key?: boolean
   /** Есть ли сохранённый приватный ключ. Сам ключ наружу не отдаётся. */
   private_key_stored?: boolean
+  /** Есть ли сохранённый пароль. Значение наружу не отдаётся. */
+  password_stored?: boolean
+  /** Есть ли закреплённый ключ SFTP-сервера. Сам ключ наружу не отдаётся. */
+  host_key_stored?: boolean
   share?: string
   domain?: string
   insecure_tls?: boolean

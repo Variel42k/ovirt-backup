@@ -22,9 +22,9 @@ func TestServerPayloadKeepsHiddenTrustMaterialUntilExplicitlyCleared(t *testing.
 		t.Fatalf("empty edit did not preserve hidden connection material: %#v", payload)
 	}
 
-	payload = serverPayload{ClearCACert: true, ClearSSHHostKey: true}
+	payload = serverPayload{ClearPassword: true, ClearCACert: true, ClearSSHHostKey: true}
 	payload.fillHiddenFrom(existing)
-	if payload.CACert != "" || payload.SSHHostKey != "" {
+	if payload.Password != "" || payload.CACert != "" || payload.SSHHostKey != "" {
 		t.Fatalf("explicit clear restored trust material: %#v", payload)
 	}
 }
@@ -51,6 +51,27 @@ func TestValidateServerRejectsRemotePlaintextEngine(t *testing.T) {
 	}
 	if err := validateServer(srv, true); err == nil || !strings.Contains(err.Error(), "HTTPS") {
 		t.Fatalf("remote plaintext engine accepted: %v", err)
+	}
+}
+
+func TestValidateServerAllowsKVMPasswordRemovalOnlyWithKey(t *testing.T) {
+	srv := &model.Server{
+		Name: "kvm", Kind: model.KindKVM, Username: "backup", SSHHost: "kvm.example.org", SSHPort: 22,
+		SSHPrivateKey: "private-key", SSHHostKey: "ssh-ed25519 host-key",
+	}
+	if err := validateServer(srv, false); err != nil {
+		t.Fatalf("KVM с ключом и без старого пароля отвергнут: %v", err)
+	}
+	srv.SSHPrivateKey = ""
+	if err := validateServer(srv, false); err == nil || !strings.Contains(err.Error(), "пароль или приватный ключ") {
+		t.Fatalf("KVM без последнего способа авторизации принят: %v", err)
+	}
+
+	ovirtServer := &model.Server{
+		Name: "engine", Kind: model.KindOVirt, Username: "backup@internal", EngineURL: "https://engine.example.org",
+	}
+	if err := validateServer(ovirtServer, false); err == nil || !strings.Contains(err.Error(), "пароль") {
+		t.Fatalf("oVirt без обязательного API-пароля принят: %v", err)
 	}
 }
 

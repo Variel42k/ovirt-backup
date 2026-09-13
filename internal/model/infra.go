@@ -123,6 +123,10 @@ type Server struct {
 	EngineURL string     `json:"engine_url"` // https://engine.example.org — без /ovirt-engine/api
 	Username  string     `json:"username"`   // admin@internal / admin@ovirt@internalsso
 	Password  string     `json:"-"`          // хранится зашифрованным, наружу не отдаётся
+	// PasswordStored показывает только наличие write-only секрета. Для старых
+	// KVM-подключений по нему интерфейс предлагает удалить пароль после миграции.
+	PasswordStored bool `json:"password_stored"`
+	ClearPassword  bool `json:"-"`
 	// CACert is trust material used by the backend. Returning it from list/get
 	// made every browser session and browser extension able to read the full
 	// bundle even though the UI only needs to know whether it is configured.
@@ -274,6 +278,12 @@ func (s *Server) Validate() error {
 
 	if s.EngineURL == "" {
 		return fmt.Errorf("не указан адрес платформы виртуализации")
+	}
+	if s.Password == "" {
+		if s.Kind.UsesProxmoxAPI() {
+			return fmt.Errorf("не указан secret API token")
+		}
+		return fmt.Errorf("не указан пароль сервисной учётной записи")
 	}
 	return nil
 }

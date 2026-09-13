@@ -37,6 +37,9 @@ func (s *Server) validateEngineConfigJob(ctx context.Context, job *model.EngineC
 	if job.Name == "" || job.ServerID == "" || job.StorageTargetID == "" {
 		return badRequest("нужны name, server_id и storage_target_id")
 	}
+	if err := job.Retention.Validate(); err != nil {
+		return badRequest("%v", err)
+	}
 	srv, err := s.store.GetServer(ctx, job.ServerID)
 	if err != nil {
 		return badRequest("целевой Engine не найден")

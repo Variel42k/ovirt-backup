@@ -160,16 +160,25 @@ type StorageTarget struct {
 	ImmutabilityCheckedAt *time.Time `json:"immutability_checked_at,omitempty"`
 
 	// SFTP и SMB
-	Host       string `json:"host,omitempty"`
-	Port       int    `json:"port,omitempty"`
-	Username   string `json:"username,omitempty"`
-	Password   string `json:"-"`
-	PrivateKey string `json:"-"`
-	// PrivateKeyStored говорит интерфейсу, что ключ есть, не показывая ключа:
-	// так в списке видно хранилища, всё ещё входящие по паролю. Заполняется
-	// чтением из базы, снаружи не задаётся.
+	Host     string `json:"host,omitempty"`
+	Port     int    `json:"port,omitempty"`
+	Username string `json:"username,omitempty"`
+	Password string `json:"-"`
+	// PasswordStored помечает старые SFTP-цели с парольной авторизацией и
+	// позволяет удалить пароль, не возвращая его значение в браузер.
+	PasswordStored bool   `json:"password_stored"`
+	PrivateKey     string `json:"-"`
+	// Clear-флаги используются только на пути API -> store, чтобы отличить
+	// явное удаление от пустого write-only поля формы редактирования.
+	ClearPassword   bool `json:"-"`
+	ClearPrivateKey bool `json:"-"`
+	// PrivateKeyStored говорит интерфейсу, что ключ есть, не показывая ключа.
+	// Заполняется чтением из базы, снаружи не задаётся.
 	PrivateKeyStored bool   `json:"private_key_stored"`
-	HostKey          string `json:"host_key,omitempty"`
+	HostKey          string `json:"-"`
+	// HostKeyStored сообщает только о наличии закреплённого ключа сервера.
+	// Полный ключ нужен SSH-клиенту, но после сохранения не возвращается в браузер.
+	HostKeyStored bool `json:"host_key_stored"`
 
 	// TrustAnyHostKey — осознанный отказ проверять подлинность SFTP-сервера.
 	//
@@ -268,6 +277,30 @@ type RetentionPolicy struct {
 func (r RetentionPolicy) Empty() bool {
 	return r.KeepLast == 0 && r.KeepHourly == 0 && r.KeepDaily == 0 &&
 		r.KeepWeekly == 0 && r.KeepMonthly == 0 && r.KeepYearly == 0 && r.MaxAge == 0
+}
+
+// Validate rejects values that would make retention select points in an
+// undefined way. API clients are not limited to the web form, so this belongs
+// to the model as well as to the interactive validation.
+func (r RetentionPolicy) Validate() error {
+	values := []struct {
+		name  string
+		value int64
+	}{
+		{"keep_last", int64(r.KeepLast)},
+		{"keep_hourly", int64(r.KeepHourly)},
+		{"keep_daily", int64(r.KeepDaily)},
+		{"keep_weekly", int64(r.KeepWeekly)},
+		{"keep_monthly", int64(r.KeepMonthly)},
+		{"keep_yearly", int64(r.KeepYearly)},
+		{"max_age", int64(r.MaxAge)},
+	}
+	for _, item := range values {
+		if item.value < 0 {
+			return fmt.Errorf("правило хранения %s не может быть отрицательным", item.name)
+		}
+	}
+	return nil
 }
 
 // DefaultRetention is the policy offered to a user who does not want to think
@@ -507,6 +540,9 @@ func (j *BackupJob) Validate() error {
 	}
 	if j.Type.NeedsParent() && j.FullEvery <= 0 {
 		return fmt.Errorf("для типа %q нужно задать full_every > 0", j.Type)
+	}
+	if err := j.Retention.Validate(); err != nil {
+		return err
 	}
 	return nil
 }

@@ -92,6 +92,22 @@ func TestStorageTargetRoundTripKeepsEveryField(t *testing.T) {
 	if got.Share != "archive" || got.Domain != "" {
 		t.Errorf("правка не применилась: папка %q, домен %q", got.Share, got.Domain)
 	}
+
+	// Явный clear нужен при миграции SFTP с пароля на ключ. Store остаётся
+	// механическим и проверяет только различие keep/clear; допустимость набора
+	// учётных данных проверяет API до записи.
+	got.Password = ""
+	got.ClearPassword = true
+	if err := st.UpdateStorageTarget(ctx, got); err != nil {
+		t.Fatalf("явное удаление пароля: %v", err)
+	}
+	cleared, err := st.GetStorageTarget(ctx, "smb-1")
+	if err != nil {
+		t.Fatalf("чтение после удаления пароля: %v", err)
+	}
+	if cleared.Password != "" || cleared.PasswordStored {
+		t.Error("пароль остался после явного удаления")
+	}
 }
 
 // Deleting a repository that a job writes to turns that job into a scheduled

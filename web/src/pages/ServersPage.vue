@@ -43,6 +43,7 @@ const emptyForm = () => ({
   engine_url: '',
   username: 'jhvirt-backup@internal',
   password: '',
+  clear_password: false,
   ca_cert: '',
   clear_ca_cert: false,
   insecure_tls: false,
@@ -72,6 +73,7 @@ const connectionSignature = computed(() => JSON.stringify({
   engine_url: form.value.engine_url,
   username: form.value.username,
   password: form.value.password,
+  clear_password: form.value.clear_password,
   ca_cert: form.value.ca_cert,
   clear_ca_cert: form.value.clear_ca_cert,
   insecure_tls: form.value.insecure_tls,
@@ -94,6 +96,7 @@ watch(dialog, (open) => {
   if (open) return
   connectionDialogGeneration += 1
   form.value.password = ''
+  form.value.clear_password = false
   form.value.ssh_private_key = ''
   form.value.ca_cert = ''
   form.value.ssh_host_key = ''
@@ -140,6 +143,9 @@ const hostKeyStored = computed(
 const sshKeyStored = computed(
   () => Boolean(form.value.ssh_private_key) || Boolean(editing.value?.ssh_key_stored && !form.value.clear_ssh_private_key),
 )
+const passwordStored = computed(
+  () => Boolean(form.value.password) || Boolean(editing.value?.password_stored && !form.value.clear_password),
+)
 const proxmoxDataPlaneStarted = computed(
   () => Boolean(form.value.ssh_username.trim()) || sshKeyStored.value || hostKeyStored.value || form.value.ssh_trust_any_host_key,
 )
@@ -159,6 +165,7 @@ watch(
     const previousFamily = virtualizationKinds.value.find((item) => item.value === previous)?.family
     if (!editing.value && previousFamily && nextFamily !== previousFamily) {
       form.value.password = ''
+      form.value.clear_password = false
       form.value.ca_cert = ''
       form.value.clear_ca_cert = false
       form.value.insecure_tls = false
@@ -331,6 +338,7 @@ function openEdit(server: Server) {
     username: server.username,
     // Секреты с сервера не приходят; пустые поля означают «оставить прежние».
     password: '',
+    clear_password: false,
     ssh_private_key: '',
 		clear_ssh_private_key: false,
     ca_cert: '',
@@ -391,6 +399,11 @@ function clearSSHPrivateKey() {
   form.value.clear_ssh_private_key = true
 }
 
+function clearPassword() {
+  form.value.password = ''
+  form.value.clear_password = true
+}
+
 function disableProxmoxDataPlane() {
   form.value.ssh_username = ''
   clearSSHPrivateKey()
@@ -417,6 +430,9 @@ function validateConnectionForm(): string {
     if (!editing.value && !sshKeyStored.value) {
       return 'Для нового подключения нужен приватный ключ SSH.'
     }
+    if (!sshKeyStored.value && !passwordStored.value) {
+      return 'Добавьте приватный SSH-ключ перед удалением сохранённого пароля.'
+    }
     if (!editing.value && !hostKeyStored.value && !form.value.ssh_trust_any_host_key) {
       return 'Получите и сверьте ключ SSH-хоста.'
     }
@@ -424,7 +440,7 @@ function validateConnectionForm(): string {
   }
 
   if (!form.value.engine_url.trim()) return 'Укажите адрес платформы виртуализации.'
-  if (!editing.value && !form.value.password) {
+  if (!passwordStored.value) {
     return isProxmox.value ? 'Укажите secret API token.' : 'Укажите пароль сервисной учётной записи.'
   }
   if (isProxmox.value && proxmoxDataPlaneStarted.value && !proxmoxDataPlaneReady.value) {
@@ -713,12 +729,12 @@ onMounted(load)
           </q-badge>
           <q-badge v-if="!props.row.enabled" color="grey-7" class="q-ml-sm">отключён</q-badge>
           <q-badge
-            v-if="kindUsesLibvirt(props.row.kind) && !props.row.ssh_key_stored"
+            v-if="kindUsesLibvirt(props.row.kind) && props.row.password_stored"
             color="warning"
             text-color="dark"
             class="q-ml-sm"
           >
-            вход по паролю
+            {{ props.row.ssh_key_stored ? 'сохранён лишний пароль' : 'вход по паролю' }}
             <q-tooltip>
               Пароль хранится расшифровываемым и предъявляется хосту при каждом подключении.
               Заведите ключ и очистите пароль.
@@ -900,7 +916,22 @@ onMounted(load)
               :hint="editing ? (isLibvirt ? 'Пусто — оставить прежний; добавьте ключ ниже и затем откажитесь от пароля' : 'Пусто — оставить прежний') : isProxmox ? 'Значение токена показывается Proxmox только при создании' : ''"
               outlined
               dense
-            />
+            >
+              <template #append>
+                <q-icon :name="passwordStored ? 'password' : 'no_encryption'" :color="passwordStored ? (isLibvirt ? 'warning' : 'positive') : 'grey-6'" size="sm">
+                  <q-tooltip>{{ passwordStored ? (isLibvirt ? 'Пароль SSH сохранён' : 'Секрет подключения сохранён') : 'Секрет не сохранён' }}</q-tooltip>
+                </q-icon>
+                <q-btn
+                  v-if="isLibvirt && passwordStored"
+                  flat dense round icon="delete_outline" color="negative"
+                  aria-label="Удалить сохранённый пароль SSH"
+                  :disable="saving || probing"
+                  @click="clearPassword"
+                >
+                  <q-tooltip>Удалить пароль после перехода на SSH-ключ</q-tooltip>
+                </q-btn>
+              </template>
+            </q-input>
           </div>
 
           <template v-if="isLibvirt">

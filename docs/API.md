@@ -580,9 +580,12 @@ OIDC-сессии отзываются немедленно; локальные 
 Пустые `password`, `ca_cert`, `ssh_private_key` и `ssh_host_key` при изменении
 оставляют сохранённые значения. CA, приватный ключ и ключ SSH-хоста удаляются
 только явными `clear_ca_cert: true`, `clear_ssh_private_key: true` и
-`clear_ssh_host_key: true`. Ответы списка, создания,
+`clear_ssh_host_key: true`. После перевода KVM на ключ старый SSH-пароль можно
+удалить через `clear_password: true`; для API-подключений oVirt и Proxmox этот
+флаг будет отклонён, поскольку им по-прежнему нужен пароль или secret токена.
+Ответы списка, создания,
 чтения и изменения не содержат PEM, приватный SSH-ключ или полный ключ хоста:
-вместо них приходят `ca_cert_stored`, `ssh_key_stored` и
+вместо них приходят `password_stored`, `ca_cert_stored`, `ssh_key_stored` и
 `ssh_host_key_stored`.
 
 `POST /servers/ca-certificate` возвращает PEM только как одноразовый материал
@@ -733,8 +736,13 @@ ovirt-aaa-jdbc-tool user password-reset jhvirt-backup
 | `GET/PUT/DELETE` | `/storages/{id}` | получить, изменить, удалить |
 | `POST` | `/storages/{id}/check` | проверка записи и чтения |
 
-Секреты (`secret_key`, `password`, `private_key`) принимаются, но никогда не
-возвращаются. Удаление хранилища с живыми бэкапами требует `?force=true`.
+Секреты и материал доверия (`secret_key`, `password`, `private_key`, `host_key`)
+принимаются, но никогда не возвращаются. Ответ содержит только признаки
+`password_stored`, `private_key_stored` и `host_key_stored`. Пустое write-only
+поле при изменении сохраняет прежнее значение; явные `clear_password`,
+`clear_private_key` и `clear_host_key` удаляют его. У SFTP нельзя удалить
+последний способ авторизации или ключ хоста без одновременного явного
+`trust_any_host_key`. Удаление хранилища с живыми бэкапами требует `?force=true`.
 
 Поле `kind` принимает `local`, `s3`, `smb`, `webdav`, `sftp`. Обязательные поля
 каждого типа перечислены в разделе «Хранилища копий» документа по конфигурации;
@@ -743,7 +751,8 @@ ovirt-aaa-jdbc-tool user password-reset jhvirt-backup
 необязательные `domain`, `port`, `base_path`; для `webdav` — `endpoint`,
 `username`, `password` и необязательные `base_path`, `insecure_tls`. Флаг
 `insecure_tls` принимается только для `webdav`, `object_lock_enabled` — только
-для `s3`.
+для `s3`. Новая SFTP-цель требует приватный ключ без парольной фразы; парольный
+режим поддерживается только для миграции ранее созданных целей.
 
 Поле `rate_limit` задаёт общий предел потоковой записи в байтах в секунду для
 всех одновременных операций с экземпляром хранилища; `0` снимает ограничение.

@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useQuasar } from 'quasar'
-import { api, notifyError, notifyOk } from '@/api/client'
+import { api, errorMessage, notify, notifyError, notifyOk } from '@/api/client'
 import DirectoryPicker from '@/components/DirectoryPicker.vue'
 import { bytes, dateTime, runStatus, statusColor } from '@/api/format'
 import { useAppStore } from '@/stores/app'
@@ -12,7 +12,13 @@ const $q = useQuasar()
 const app = useAppStore()
 const auth = useAuthStore()
 const loading = ref(false)
-const busy = ref(false)
+const jobSaving = ref(false)
+const jobFormError = ref('')
+const treeLoading = ref('')
+const treeError = ref('')
+const restoreBusy = ref(false)
+const restoreError = ref('')
+const startingJobs = ref<string[]>([])
 const roots = ref<FileBackupRoot[]>([])
 const jobs = ref<FileBackupJob[]>([])
 const runs = ref<FileBackupRun[]>([])
@@ -25,6 +31,8 @@ const selectedRun = ref<FileBackupRun | null>(null)
 const selectedPaths = ref<string[]>([])
 const restoreForm = ref({ restore_root_index: 0, destination: '', overwrite: false, confirmOverwrite: false })
 let pollTimer: number | undefined
+let treeLoadSequence = 0
+let pageLoadSequence = 0
 
 const defaultRetention = () => ({
   keep_last: 3,
@@ -50,6 +58,52 @@ const emptyForm = () => ({
   retention: defaultRetention(),
 })
 const form = ref(emptyForm())
+
+const schedulePresets = [
+  { label: 'Каждый час', value: '0 * * * *' },
+  { label: 'Каждые 4 часа', value: '0 */4 * * *' },
+  { label: 'Ежедневно в 01:00', value: '0 1 * * *' },
+  { label: 'Ежедневно в 22:00', value: '0 22 * * *' },
+  { label: 'По будням в 23:00', value: '0 23 * * 1-5' },
+  { label: 'Еженедельно, вс 02:00', value: '0 2 * * 0' },
+]
+
+const storageModes = [
+  { label: 'Копирование из основного', value: 'copy' },
+  { label: 'Параллельная запись', value: 'parallel' },
+  { label: 'Отдельный бэкап на каждое', value: 'separate' },
+]
+
+const storageModeHint = computed(() => {
+  switch (form.value.storage_mode) {
+    case 'parallel':
+      return 'Файлы читаются один раз и одновременно пишутся во все хранилища. Скорость ограничит самое медленное из них.'
+    case 'separate':
+      return 'Для каждого хранилища создаётся отдельная точка: исходные файлы читаются повторно, зато копии не зависят друг от друга.'
+    default:
+      return 'Файлы читаются один раз в основное хранилище, затем служба доставляет копии в остальные с повторными попытками.'
+  }
+})
+
+watch(form, () => {
+  jobFormError.value = ''
+}, { deep: true })
+
+watch(jobDialog, (open) => {
+  if (!open) jobFormError.value = ''
+})
+
+watch(treeDialog, (open) => {
+  if (open) return
+  treeLoadSequence += 1
+  treeLoading.value = ''
+  treeError.value = ''
+})
+
+watch(restoreForm, () => {
+  restoreError.value = ''
+  if (!restoreForm.value.overwrite) restoreForm.value.confirmOverwrite = false
+}, { deep: true })
 
 const rootOptions = computed(() => roots.value.map((root) => ({ label: root.name, value: root.id })))
 const storageOptions = computed(() => app.enabledStorages.map((storage) => ({ label: storage.name, value: storage.id })))
@@ -119,18 +173,23 @@ function storageName(id: string) {
 }
 
 async function load(silent = false) {
+  if (silent && loading.value) return
+  const sequence = ++pageLoadSequence
   if (!silent) loading.value = true
   try {
-    const rootResponse = await api.listFileBackupRoots()
-    roots.value = rootResponse.items
-    ;[jobs.value, runs.value] = await Promise.all([
+    const [rootResponse, nextJobs, nextRuns] = await Promise.all([
+      api.listFileBackupRoots(),
       api.listFileBackupJobs(),
       api.listFileBackupRuns(),
     ])
+    if (sequence !== pageLoadSequence) return
+    roots.value = rootResponse.items
+    jobs.value = nextJobs
+    runs.value = nextRuns
   } catch (err) {
-    if (!silent) notifyError(err, 'Не удалось загрузить файловые бэкапы')
+    if (!silent && sequence === pageLoadSequence) notifyError(err, 'Не удалось загрузить файловые бэкапы')
   } finally {
-    if (!silent) loading.value = false
+    if (!silent && sequence === pageLoadSequence) loading.value = false
   }
 }
 
@@ -140,6 +199,7 @@ function createJob() {
   form.value.root_id = roots.value[0]?.id ?? ''
   form.value.storage_target_ids = app.enabledStorages[0]?.id ? [app.enabledStorages[0].id] : []
   form.value.encrypt = Boolean(app.meta?.capabilities.encryption)
+  jobFormError.value = ''
   jobDialog.value = true
 }
 
@@ -158,11 +218,62 @@ function editJob(job: FileBackupJob) {
     schedule: job.schedule ?? '',
     retention: { ...job.retention },
   }
+  jobFormError.value = ''
   jobDialog.value = true
 }
 
+function relativePathError(value: string, label: string, allowEmpty = false): string {
+  const normalized = value.trim().replace(/\\/g, '/')
+  if (!normalized) return allowEmpty ? '' : `${label}: путь не может быть пустым`
+  if (normalized.startsWith('/') || /^[A-Za-z]:\//.test(normalized)) {
+    return `${label}: используйте относительный путь внутри разрешённой области`
+  }
+  let depth = 0
+  for (const part of normalized.split('/')) {
+    if (!part || part === '.') continue
+    if (part === '..') {
+      if (depth === 0) return `${label}: путь выходит за разрешённую область`
+      depth -= 1
+    } else {
+      depth += 1
+    }
+  }
+  return ''
+}
+
+function validateJobForm(): string {
+  if (!form.value.name.trim()) return 'Укажите название задания'
+  if (!form.value.root_id) return 'Выберите разрешённый корень'
+  if (!form.value.storage_target_ids.length) return 'Выберите хотя бы одно хранилище'
+
+  for (const path of form.value.include_paths) {
+    if (!path.trim()) continue
+    const issue = relativePathError(path, `Путь «${path}»`)
+    if (issue) return issue
+  }
+  for (const glob of form.value.exclude_globs) {
+    if (!glob.trim()) continue
+    const issue = relativePathError(glob.replaceAll('**', 'placeholder'), `Исключение «${glob}»`)
+    if (issue) return issue
+  }
+
+  const invalidRetention = Object.values(form.value.retention).some((value) =>
+    !Number.isFinite(Number(value)) || Number(value) < 0 || !Number.isInteger(Number(value)),
+  )
+  if (invalidRetention) return 'Все значения хранения должны быть целыми неотрицательными числами'
+
+  const schedule = form.value.schedule.trim()
+  if (schedule && !schedule.startsWith('@') && schedule.split(/\s+/).length !== 5) {
+    return 'Cron-расписание должно содержать пять полей'
+  }
+  return ''
+}
+
 async function saveJob() {
-  busy.value = true
+  if (jobSaving.value) return
+  jobFormError.value = validateJobForm()
+  if (jobFormError.value) return
+  jobSaving.value = true
   try {
     if (editingID.value) await api.updateFileBackupJob(editingID.value, form.value)
     else await api.createFileBackupJob(form.value)
@@ -170,9 +281,10 @@ async function saveJob() {
     jobDialog.value = false
     await load()
   } catch (err) {
+    jobFormError.value = errorMessage(err)
     notifyError(err, 'Не удалось сохранить файловое задание')
   } finally {
-    busy.value = false
+    jobSaving.value = false
   }
 }
 
@@ -194,26 +306,38 @@ function deleteJob(job: FileBackupJob) {
 }
 
 async function runJob(job: FileBackupJob) {
+  if (startingJobs.value.includes(job.id)) return
+  startingJobs.value = [...startingJobs.value, job.id]
   try {
     await api.runFileBackupJob(job.id)
     notifyOk('Файловый бэкап поставлен на выполнение')
     await load()
   } catch (err) {
     notifyError(err, 'Не удалось запустить файловый бэкап')
+  } finally {
+    startingJobs.value = startingJobs.value.filter((id) => id !== job.id)
   }
 }
 
 async function openTree(run: FileBackupRun) {
-  busy.value = true
+  const sequence = ++treeLoadSequence
+  selectedRun.value = run
+  manifest.value = null
+  selectedPaths.value = []
+  treeError.value = ''
+  treeLoading.value = run.id
+  treeDialog.value = true
   try {
-    selectedRun.value = run
-    manifest.value = await api.getFileBackupManifest(run.id)
-    selectedPaths.value = []
-    treeDialog.value = true
+    const result = await api.getFileBackupManifest(run.id)
+    if (sequence !== treeLoadSequence || !treeDialog.value || selectedRun.value?.id !== run.id) return
+    manifest.value = result
   } catch (err) {
-    notifyError(err, 'Не удалось прочитать дерево файлов')
+    if (sequence === treeLoadSequence && treeDialog.value) {
+      treeError.value = errorMessage(err)
+      notifyError(err, 'Не удалось прочитать дерево файлов')
+    }
   } finally {
-    busy.value = false
+    if (sequence === treeLoadSequence) treeLoading.value = ''
   }
 }
 
@@ -235,14 +359,28 @@ function deleteRun(run: FileBackupRun) {
 }
 
 function openRestore() {
-  if (!selectedRun.value) return
+  if (!selectedRun.value || !manifest.value || restoreRootOptions.value.length === 0) return
   restoreForm.value = { restore_root_index: 0, destination: '', overwrite: false, confirmOverwrite: false }
+  restoreError.value = ''
   restoreDialog.value = true
 }
 
 async function restoreFiles() {
-  if (!selectedRun.value) return
-  busy.value = true
+  if (!selectedRun.value || restoreBusy.value) return
+  if (restoreRootOptions.value.length === 0) {
+    restoreError.value = 'Для этого корня не настроена разрешённая область восстановления'
+    return
+  }
+  const pathIssue = relativePathError(restoreForm.value.destination, 'Каталог назначения', true)
+  if (pathIssue) {
+    restoreError.value = pathIssue
+    return
+  }
+  if (restoreForm.value.overwrite && !restoreForm.value.confirmOverwrite) {
+    restoreError.value = 'Подтвердите перезапись существующих файлов'
+    return
+  }
+  restoreBusy.value = true
   try {
     const result = await api.restoreFiles(selectedRun.value.id, {
       restore_root_index: restoreForm.value.restore_root_index,
@@ -251,11 +389,15 @@ async function restoreFiles() {
       overwrite: restoreForm.value.overwrite,
     })
     notifyOk(`Восстановлено объектов: ${result.restored}`)
+    if (result.warnings?.length) {
+      notify({ type: 'warning', message: result.warnings.join('; '), timeout: 15000, multiLine: true })
+    }
     restoreDialog.value = false
   } catch (err) {
+    restoreError.value = errorMessage(err)
     notifyError(err, 'Не удалось восстановить файлы')
   } finally {
-    busy.value = false
+    restoreBusy.value = false
   }
 }
 
@@ -281,7 +423,15 @@ onBeforeUnmount(() => {
       </div>
       <q-space />
       <q-btn flat round dense icon="refresh" :loading="loading" @click="load()" />
-      <q-btn v-if="auth.canAdmin()" color="primary" icon="add" label="Новое задание" class="q-ml-sm" @click="createJob" />
+      <q-btn
+        v-if="auth.canAdmin()"
+        color="primary"
+        icon="add"
+        label="Новое задание"
+        class="q-ml-sm"
+        :disable="roots.length === 0 || storageOptions.length === 0"
+        @click="createJob"
+      />
     </div>
 
     <q-banner v-if="roots.length === 0" rounded class="bg-warning text-dark q-mb-md">
@@ -300,10 +450,21 @@ onBeforeUnmount(() => {
         <template #body-cell-paths="props">
           <q-td :props="props"><span class="ellipsis">{{ props.row.include_paths?.join(', ') || '/' }}</span></q-td>
         </template>
-        <template #body-cell-delivery="props"><q-td :props="props">{{ props.row.storage_mode }} · {{ props.row.storage_target_ids.length }}</q-td></template>
+        <template #body-cell-delivery="props">
+          <q-td :props="props">
+            {{ storageModes.find((mode) => mode.value === props.row.storage_mode)?.label ?? props.row.storage_mode }}
+            · {{ props.row.storage_target_ids.length }}
+          </q-td>
+        </template>
         <template #body-cell-actions="props">
           <q-td :props="props">
-            <q-btn flat round dense icon="play_arrow" color="primary" :disable="!props.row.enabled" @click="runJob(props.row)"><q-tooltip>Запустить сейчас</q-tooltip></q-btn>
+            <q-btn
+              flat round dense icon="play_arrow" color="primary"
+              aria-label="Запустить файловый бэкап"
+              :loading="startingJobs.includes(props.row.id)"
+              :disable="!props.row.enabled || startingJobs.includes(props.row.id)"
+              @click="runJob(props.row)"
+            ><q-tooltip>Запустить сейчас</q-tooltip></q-btn>
             <q-btn v-if="auth.canAdmin()" flat round dense icon="edit" @click="editJob(props.row)" />
             <q-btn v-if="auth.canAdmin()" flat round dense icon="delete" color="negative" @click="deleteJob(props.row)" />
           </q-td>
@@ -325,7 +486,7 @@ onBeforeUnmount(() => {
         <template #body-cell-size="props"><q-td :props="props">{{ bytes(props.row.logical_bytes) }} / {{ bytes(props.row.stored_bytes) }}</q-td></template>
         <template #body-cell-actions="props">
           <q-td :props="props">
-            <q-btn flat round dense icon="account_tree" :loading="busy && selectedRun?.id === props.row.id" :disable="!['succeeded', 'partial'].includes(props.row.status)" @click="openTree(props.row)">
+            <q-btn flat round dense icon="account_tree" :loading="treeLoading === props.row.id" :disable="!['succeeded', 'partial'].includes(props.row.status)" @click="openTree(props.row)">
               <q-tooltip>Просмотреть и восстановить</q-tooltip>
             </q-btn>
             <q-btn v-if="auth.canAdmin()" flat round dense icon="delete" color="negative" :disable="['pending', 'running', 'waiting_copies'].includes(props.row.status)" @click="deleteRun(props.row)" />
@@ -333,15 +494,36 @@ onBeforeUnmount(() => {
         </template>
       </q-table>
 
-    <q-dialog v-model="jobDialog" persistent>
-      <q-card style="width: 760px; max-width: 96vw">
+    <q-dialog v-model="jobDialog" persistent :maximized="$q.screen.lt.sm">
+      <q-card class="jhv-dialog-page" style="width: 760px; max-width: 96vw">
         <q-card-section class="text-h6">{{ editingID ? 'Изменить файловое задание' : 'Новое файловое задание' }}</q-card-section>
-        <q-card-section class="q-pt-none">
+        <q-banner v-if="jobFormError" dense class="bg-red-1 text-negative q-mx-md q-mb-md">
+          <template #avatar><q-icon name="error" /></template>{{ jobFormError }}
+        </q-banner>
+        <q-card-section class="q-pt-none scroll" style="max-height: 72vh">
           <div class="row q-col-gutter-md">
             <div class="col-12 col-md-8"><q-input v-model="form.name" outlined dense label="Название" /></div>
             <div class="col-12 col-md-4"><q-toggle v-model="form.enabled" label="Включено" /></div>
             <div class="col-12 col-md-6"><q-select v-model="form.root_id" :options="rootOptions" emit-value map-options outlined dense label="Разрешённый корень" /></div>
-            <div class="col-12 col-md-6"><q-input v-model="form.schedule" outlined dense label="Cron-расписание" hint="Пусто — только ручной запуск" /></div>
+            <div class="col-12 col-md-6">
+              <q-input v-model="form.schedule" outlined dense label="Cron-расписание" class="jhv-mono">
+                <template #append>
+                  <q-btn-dropdown flat dense icon="event" auto-close>
+                    <q-list dense>
+                      <q-item v-for="preset in schedulePresets" :key="preset.value" clickable @click="form.schedule = preset.value">
+                        <q-item-section>
+                          <q-item-label>{{ preset.label }}</q-item-label>
+                          <q-item-label caption class="jhv-mono">{{ preset.value }}</q-item-label>
+                        </q-item-section>
+                      </q-item>
+                    </q-list>
+                  </q-btn-dropdown>
+                </template>
+              </q-input>
+              <div class="jhv-reason">
+                Пусто — только ручной запуск. Часовой пояс: {{ app.meta?.capabilities.timezone || app.meta?.capabilities.scheduler_timezone }}.
+              </div>
+            </div>
             <div class="col-12">
               <q-select v-model="form.include_paths" multiple use-input use-chips new-value-mode="add-unique" hide-dropdown-icon outlined dense label="Относительные пути" hint="Пустой список означает весь корень. Папку можно выбрать, а не набирать по памяти.">
                 <template #append>
@@ -351,37 +533,68 @@ onBeforeUnmount(() => {
             </div>
             <div class="col-12"><q-select v-model="form.exclude_globs" multiple use-input use-chips new-value-mode="add-unique" hide-dropdown-icon outlined dense label="Исключающие glob-шаблоны" hint="Например: **/*.tmp или cache/**" /></div>
             <div class="col-12 col-md-8"><q-select v-model="form.storage_target_ids" :options="storageOptions" multiple emit-value map-options use-chips outlined dense label="Хранилища" /></div>
-            <div class="col-12 col-md-4"><q-select v-model="form.storage_mode" :options="[{label:'Копирование',value:'copy'},{label:'Параллельно',value:'parallel'},{label:'Раздельно',value:'separate'}]" emit-value map-options outlined dense label="Режим доставки" /></div>
+            <div class="col-12 col-md-4"><q-select v-model="form.storage_mode" :options="storageModes" emit-value map-options outlined dense label="Режим доставки" /></div>
+            <div v-if="form.storage_target_ids.length > 1" class="col-12 jhv-reason">{{ storageModeHint }}</div>
             <div class="col-12 col-sm-4"><q-toggle v-model="form.incremental" label="Инкрементальный" /></div>
-            <div class="col-12 col-sm-4"><q-toggle v-model="form.encrypt" label="Шифровать" /></div>
-            <div class="col-12 col-sm-4"><q-input v-model.number="form.retention.keep_last" type="number" min="1" outlined dense label="Хранить последних" /></div>
+            <div class="col-12 col-sm-4">
+              <q-toggle v-model="form.encrypt" label="Шифровать" :disable="!app.meta?.capabilities.encryption" />
+              <div v-if="!app.meta?.capabilities.encryption" class="jhv-reason">Ключ шифрования не настроен.</div>
+            </div>
+            <div class="col-12 text-subtitle2">Хранение точек</div>
+            <div class="col-12">
+              <div class="row q-col-gutter-sm">
+                <div class="col-6 col-sm-2"><q-input v-model.number="form.retention.keep_last" type="number" min="0" label="Последних" outlined dense /></div>
+                <div class="col-6 col-sm-2"><q-input v-model.number="form.retention.keep_hourly" type="number" min="0" label="Часовых" outlined dense /></div>
+                <div class="col-6 col-sm-2"><q-input v-model.number="form.retention.keep_daily" type="number" min="0" label="Суточных" outlined dense /></div>
+                <div class="col-6 col-sm-2"><q-input v-model.number="form.retention.keep_weekly" type="number" min="0" label="Недельных" outlined dense /></div>
+                <div class="col-6 col-sm-2"><q-input v-model.number="form.retention.keep_monthly" type="number" min="0" label="Месячных" outlined dense /></div>
+                <div class="col-6 col-sm-2"><q-input v-model.number="form.retention.keep_yearly" type="number" min="0" label="Годовых" outlined dense /></div>
+              </div>
+              <div class="jhv-reason q-mt-sm">
+                Точка сохраняется, если её удерживает хотя бы одно правило. Нужные последующим инкрементам родительские точки не удаляются.
+              </div>
+            </div>
           </div>
         </q-card-section>
-        <q-card-actions align="right"><q-btn flat label="Отмена" v-close-popup /><q-btn color="primary" label="Сохранить" :loading="busy" :disable="!form.name || !form.root_id || !form.storage_target_ids.length" @click="saveJob" /></q-card-actions>
+        <q-card-actions align="right">
+          <q-btn flat label="Отмена" :disable="jobSaving" v-close-popup />
+          <q-btn color="primary" label="Сохранить" :loading="jobSaving" @click="saveJob" />
+        </q-card-actions>
       </q-card>
     </q-dialog>
 
-    <q-dialog v-model="treeDialog">
-      <q-card style="width: 820px; max-width: 96vw">
+    <q-dialog v-model="treeDialog" :maximized="$q.screen.lt.sm">
+      <q-card class="jhv-dialog-page" style="width: 820px; max-width: 96vw">
         <q-card-section class="row items-center"><div class="text-h6">Состав точки восстановления</div><q-space /><q-btn flat round dense icon="close" v-close-popup /></q-card-section>
-        <q-card-section class="q-pt-none">
+        <q-linear-progress v-if="treeLoading" indeterminate />
+        <q-card-section class="q-pt-none scroll" style="max-height: 72vh">
+          <q-banner v-if="treeError" dense class="bg-red-1 text-negative q-mb-md">
+            <template #avatar><q-icon name="error" /></template>
+            {{ treeError }}
+            <template #action><q-btn flat label="Повторить" @click="selectedRun && openTree(selectedRun)" /></template>
+          </q-banner>
+          <template v-if="manifest">
           <q-select v-model="selectedPaths" :options="pathOptions" multiple emit-value map-options use-chips outlined label="Выберите файлы или каталоги" hint="Пустой список — восстановить всё" />
-          <q-list bordered separator class="q-mt-md" style="max-height: 45vh; overflow: auto">
+          <q-list bordered separator class="q-mt-md">
             <q-item v-for="entry in manifest?.entries ?? []" :key="`${entry.type}:${entry.path}`">
               <q-item-section avatar><q-icon :name="entry.type === 'directory' ? 'folder' : entry.type === 'symlink' ? 'link' : 'description'" /></q-item-section>
               <q-item-section><q-item-label>{{ entry.path || '/' }}</q-item-label><q-item-label caption>{{ entry.type }}<span v-if="entry.link_target"> → {{ entry.link_target }}</span></q-item-label></q-item-section>
               <q-item-section side>{{ entry.size ? bytes(entry.size) : '' }}</q-item-section>
             </q-item>
           </q-list>
+          </template>
         </q-card-section>
-        <q-card-actions align="right"><q-btn flat label="Закрыть" v-close-popup /><q-btn color="primary" icon="restore" label="Восстановить" :disable="restoreRootOptions.length === 0" @click="openRestore" /></q-card-actions>
+        <q-card-actions align="right"><q-btn flat label="Закрыть" v-close-popup /><q-btn color="primary" icon="restore" label="Восстановить" :disable="!manifest || treeLoading !== '' || restoreRootOptions.length === 0" @click="openRestore" /></q-card-actions>
       </q-card>
     </q-dialog>
 
-    <q-dialog v-model="restoreDialog" persistent>
-      <q-card style="width: 560px; max-width: 96vw">
+    <q-dialog v-model="restoreDialog" persistent :maximized="$q.screen.lt.sm">
+      <q-card class="jhv-dialog-page" style="width: 560px; max-width: 96vw">
         <q-card-section class="text-h6">Восстановление файлов</q-card-section>
         <q-card-section class="q-pt-none">
+          <q-banner v-if="restoreError" dense class="bg-red-1 text-negative q-mb-md">
+            <template #avatar><q-icon name="error" /></template>{{ restoreError }}
+          </q-banner>
           <q-select v-model="restoreForm.restore_root_index" :options="restoreRootOptions" emit-value map-options outlined dense label="Разрешённая область назначения" />
           <q-input v-model="restoreForm.destination" outlined dense class="q-mt-md" label="Относительный каталог назначения" hint="Абсолютные пути и выход через .. запрещены">
             <template #append>
@@ -392,7 +605,10 @@ onBeforeUnmount(() => {
           <q-checkbox v-if="restoreForm.overwrite" v-model="restoreForm.confirmOverwrite" label="Я подтверждаю перезапись" color="negative" />
           <q-banner rounded class="bg-info text-white q-mt-md">Символические ссылки сохраняются как ссылки и никогда не обходятся при сканировании.</q-banner>
         </q-card-section>
-        <q-card-actions align="right"><q-btn flat label="Отмена" v-close-popup /><q-btn color="primary" label="Восстановить" :loading="busy" :disable="restoreForm.overwrite && !restoreForm.confirmOverwrite" @click="restoreFiles" /></q-card-actions>
+        <q-card-actions align="right">
+          <q-btn flat label="Отмена" :disable="restoreBusy" v-close-popup />
+          <q-btn color="primary" label="Восстановить" :loading="restoreBusy" :disable="restoreForm.overwrite && !restoreForm.confirmOverwrite" @click="restoreFiles" />
+        </q-card-actions>
       </q-card>
     </q-dialog>
 

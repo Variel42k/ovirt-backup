@@ -71,6 +71,9 @@ func (j *FileBackupJob) Validate() error {
 			return fmt.Errorf("exclude glob %q: %w", glob, err)
 		}
 	}
+	if err := j.Retention.Validate(); err != nil {
+		return err
+	}
 	return nil
 }
 

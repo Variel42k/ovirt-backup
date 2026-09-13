@@ -64,19 +64,21 @@ func (s *Store) CreateServer(ctx context.Context, srv *model.Server) error {
 		return fmt.Errorf("insert server: %w", err)
 	}
 	srv.CACertStored = strings.TrimSpace(srv.CACert) != ""
+	srv.PasswordStored = srv.Password != ""
 	srv.SSHHostKeyStored = strings.TrimSpace(srv.SSHHostKey) != ""
 	srv.SSHKeyStored = strings.TrimSpace(srv.SSHPrivateKey) != ""
 	return nil
 }
 
 // UpdateServer rewrites the editable fields. An empty Password keeps the
-// currently stored one, so the UI can submit a form without echoing secrets.
+// currently stored one unless ClearPassword is explicit, so the UI can submit
+// a form without echoing secrets and can still remove a migrated KVM password.
 func (s *Store) UpdateServer(ctx context.Context, srv *model.Server) error {
 	existing, err := s.GetServer(ctx, srv.ID)
 	if err != nil {
 		return err
 	}
-	if srv.Password == "" {
+	if srv.Password == "" && !srv.ClearPassword {
 		srv.Password = existing.Password
 	}
 	// An empty key on update means "keep the stored one", matching how the
@@ -127,9 +129,11 @@ func (s *Store) UpdateServer(ctx context.Context, srv *model.Server) error {
 		return fmt.Errorf("update server: %w", err)
 	}
 	srv.CACertStored = strings.TrimSpace(srv.CACert) != ""
+	srv.PasswordStored = srv.Password != ""
 	srv.SSHHostKeyStored = strings.TrimSpace(srv.SSHHostKey) != ""
 	srv.SSHKeyStored = strings.TrimSpace(srv.SSHPrivateKey) != ""
 	srv.ClearSSHPrivateKey = false
+	srv.ClearPassword = false
 	return nil
 }
 
@@ -249,6 +253,7 @@ func (s *Store) scanServer(row rowScanner) (*model.Server, error) {
 	}
 
 	srv.SSHKeyStored = srv.SSHPrivateKey != ""
+	srv.PasswordStored = password != ""
 	srv.SSHHostKeyStored = strings.TrimSpace(srv.SSHHostKey) != ""
 	srv.CACertStored = strings.TrimSpace(srv.CACert) != ""
 	srv.InsecureTLSSince = nullTime(insecureSince)

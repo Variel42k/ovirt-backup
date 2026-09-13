@@ -119,8 +119,60 @@ func TestStorageUpdateKeepsSecretsOptional(t *testing.T) {
 		payload := storagePayload{Name: "хранилище", Kind: string(kind),
 			Host: "nas.example.org", Share: "backups", Endpoint: "https://nas.example.org/dav",
 			Username: "svc"}
+		payload.inheritWriteOnly(&model.StorageTarget{Password: "сохранённый пароль"})
 		if err := payload.validate(false); err != nil {
 			t.Errorf("тип %q: правка без пароля отвергнута: %v", kind, err)
 		}
+	}
+}
+
+func TestStorageWriteOnlyInheritanceHonoursExplicitClear(t *testing.T) {
+	existing := &model.StorageTarget{
+		SecretKey: "secret", Password: "password", PrivateKey: "private", HostKey: "host",
+	}
+	payload := storagePayload{ClearPassword: true, ClearPrivateKey: true, ClearHostKey: true}
+	payload.inheritWriteOnly(existing)
+	if payload.SecretKey != "secret" {
+		t.Fatal("secret key не унаследован")
+	}
+	if payload.Password != "" || payload.PrivateKey != "" || payload.HostKey != "" {
+		t.Fatal("явно удалённые write-only значения были унаследованы снова")
+	}
+}
+
+func TestSFTPPasswordCanBeRemovedOnlyAfterAddingKey(t *testing.T) {
+	existing := &model.StorageTarget{
+		Kind: model.StorageSFTP, Password: "legacy", HostKey: "ssh-ed25519 host-key",
+	}
+	payload := storagePayload{
+		Name: "sftp", Kind: string(model.StorageSFTP), Host: "backup.example.org", Username: "backup",
+		PrivateKey: "private-key", ClearPassword: true,
+	}
+	payload.inheritWriteOnly(existing)
+	if err := payload.validate(false); err != nil {
+		t.Fatalf("миграция с пароля на ключ отвергнута: %v", err)
+	}
+
+	payload.PrivateKey = ""
+	payload.ClearPrivateKey = true
+	if err := payload.validate(false); err == nil || !strings.Contains(err.Error(), "приватный ключ или пароль") {
+		t.Fatalf("удаление последнего способа авторизации принято: %v", err)
+	}
+}
+
+func TestStoragePayloadHostKeyWriteOnlySemantics(t *testing.T) {
+	target := &model.StorageTarget{
+		HostKey: "ssh-ed25519 stored", Password: "stored password", PrivateKey: "stored key",
+	}
+	storagePayload{}.apply(target)
+	if target.HostKey != "ssh-ed25519 stored" {
+		t.Fatal("пустая write-only форма удалила сохранённый ключ хоста")
+	}
+	if target.Password != "stored password" || target.PrivateKey != "stored key" {
+		t.Fatal("пустая write-only форма удалила сохранённые учётные данные")
+	}
+	storagePayload{ClearHostKey: true, ClearPassword: true, ClearPrivateKey: true}.apply(target)
+	if target.HostKey != "" || target.Password != "" || target.PrivateKey != "" {
+		t.Fatal("явное удаление write-only значений не применилось")
 	}
 }

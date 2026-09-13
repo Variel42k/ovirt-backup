@@ -31,7 +31,10 @@ type serverPayload struct {
 	EngineURL string `json:"engine_url"`
 	Username  string `json:"username"`
 	Password  string `json:"password"`
-	CACert    string `json:"ca_cert"`
+	// ClearPassword is only useful for a migrated KVM connection. API-backed
+	// connectors still require their password or token secret during validation.
+	ClearPassword bool   `json:"clear_password"`
+	CACert        string `json:"ca_cert"`
 	// ClearCACert is deliberately separate from an empty CACert. The API never
 	// echoes a stored certificate, so an edit form submits an empty value when
 	// the operator wants to keep the existing trust anchor.
@@ -60,7 +63,10 @@ func (p serverPayload) apply(dst *model.Server) {
 	dst.Name = p.Name
 	dst.EngineURL = p.EngineURL
 	dst.Username = p.Username
-	dst.Password = p.Password
+	if p.Password != "" || p.ClearPassword {
+		dst.Password = p.Password
+	}
+	dst.ClearPassword = p.ClearPassword
 	if p.CACert != "" || p.ClearCACert {
 		dst.CACert = p.CACert
 	}
@@ -113,9 +119,6 @@ func validateServer(srv *model.Server, isNew bool) error {
 				return badRequest("%v", err)
 			}
 		}
-	}
-	if isNew && srv.Password == "" && srv.SSHPrivateKey == "" {
-		return badRequest("не указан пароль")
 	}
 	// Новое подключение к гипервизору заводится только по ключу.
 	//
@@ -196,19 +199,15 @@ func (s *Server) handleUpdateServer(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
-	// An empty password means "keep the stored one", which is what lets the UI
-	// render an edit form without ever holding the secret.
-	//
-	// The substitution has to happen here and not only in the store, because
-	// validation runs in between and looks at the secret: for a libvirt
-	// connection it requires a password or a key, so a blanked field turned
-	// "change the scratch directory" into "не указан пароль" and made editing a
-	// KVM connection impossible without retyping the credentials.
-	storedPassword, storedKey := existing.Password, existing.SSHPrivateKey
-	payload.apply(existing)
-	if existing.Password == "" {
-		existing.Password = storedPassword
+	if payload.Kind != "" && model.ServerKind(payload.Kind) != existing.Kind {
+		s.writeError(w, r, badRequest("тип существующего подключения менять нельзя; создайте новое подключение"))
+		return
 	}
+	// apply keeps the write-only password unless the payload explicitly replaces
+	// or clears it. SSHPrivateKey still uses the legacy empty-is-keep contract, so
+	// restore it here before validation when the edit form leaves it blank.
+	storedKey := existing.SSHPrivateKey
+	payload.apply(existing)
 	if existing.SSHPrivateKey == "" && !payload.ClearSSHPrivateKey {
 		existing.SSHPrivateKey = storedKey
 	}
@@ -289,7 +288,8 @@ func (s *Server) handleProbeServer(w http.ResponseWriter, r *http.Request) {
 	// the actual connection. The id is the reliable key; the name is the
 	// fallback for the create form, where there is no id yet but the operator
 	// may be re-checking a saved one.
-	if payload.Password == "" || (payload.SSHPrivateKey == "" && !payload.ClearSSHPrivateKey) ||
+	if (payload.Password == "" && !payload.ClearPassword) ||
+		(payload.SSHPrivateKey == "" && !payload.ClearSSHPrivateKey) ||
 		(payload.CACert == "" && !payload.ClearCACert) ||
 		(payload.SSHHostKey == "" && !payload.ClearSSHHostKey) {
 		var existing *model.Server
@@ -446,7 +446,7 @@ func proxmoxHint(err error) string {
 }
 
 func (p *serverPayload) fillHiddenFrom(existing *model.Server) {
-	if p.Password == "" {
+	if p.Password == "" && !p.ClearPassword {
 		p.Password = existing.Password
 	}
 	if p.SSHPrivateKey == "" && !p.ClearSSHPrivateKey {

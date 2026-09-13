@@ -39,6 +39,13 @@ type storagePayload struct {
 	Password   string `json:"password"`
 	PrivateKey string `json:"private_key"`
 	HostKey    string `json:"host_key"`
+	// ClearPassword и ClearPrivateKey нужны для безопасной миграции старого
+	// SFTP-хранилища с пароля на ключ. Сами сохранённые значения write-only.
+	ClearPassword   bool `json:"clear_password"`
+	ClearPrivateKey bool `json:"clear_private_key"`
+	// ClearHostKey отличает явное удаление write-only ключа от пустого поля
+	// формы редактирования, которое означает «оставить сохранённый».
+	ClearHostKey bool `json:"clear_host_key"`
 
 	// TrustAnyHostKey — явный отказ проверять подлинность SFTP-сервера.
 	TrustAnyHostKey bool `json:"trust_any_host_key"`
@@ -67,9 +74,17 @@ func (p storagePayload) apply(dst *model.StorageTarget) {
 	dst.Host = p.Host
 	dst.Port = p.Port
 	dst.Username = p.Username
-	dst.Password = p.Password
-	dst.PrivateKey = p.PrivateKey
-	dst.HostKey = p.HostKey
+	if p.Password != "" || p.ClearPassword {
+		dst.Password = p.Password
+	}
+	dst.ClearPassword = p.ClearPassword
+	if p.PrivateKey != "" || p.ClearPrivateKey {
+		dst.PrivateKey = p.PrivateKey
+	}
+	dst.ClearPrivateKey = p.ClearPrivateKey
+	if p.HostKey != "" || p.ClearHostKey {
+		dst.HostKey = p.HostKey
+	}
 	dst.TrustAnyHostKey = p.TrustAnyHostKey
 	dst.Share = p.Share
 	dst.Domain = p.Domain
@@ -80,6 +95,23 @@ func (p storagePayload) apply(dst *model.StorageTarget) {
 	}
 	if p.UseSSL != nil {
 		dst.UseSSL = *p.UseSSL
+	}
+}
+
+// inheritWriteOnly supplies stored values that an edit form cannot read back.
+// Explicit clear flags win over inheritance.
+func (p *storagePayload) inheritWriteOnly(existing *model.StorageTarget) {
+	if p.SecretKey == "" {
+		p.SecretKey = existing.SecretKey
+	}
+	if p.Password == "" && !p.ClearPassword {
+		p.Password = existing.Password
+	}
+	if p.PrivateKey == "" && !p.ClearPrivateKey {
+		p.PrivateKey = existing.PrivateKey
+	}
+	if p.HostKey == "" && !p.ClearHostKey {
+		p.HostKey = existing.HostKey
 	}
 }
 
@@ -99,7 +131,7 @@ func (p storagePayload) validate(isNew bool) error {
 		if p.Endpoint == "" || p.Bucket == "" {
 			return badRequest("для S3 нужны endpoint и bucket")
 		}
-		if isNew && (p.AccessKey == "" || p.SecretKey == "") {
+		if p.AccessKey == "" || p.SecretKey == "" {
 			return badRequest("для S3 нужны ключи доступа")
 		}
 		if p.ObjectLockEnabled && (p.ObjectLockDays < 1 || p.ObjectLockDays > 36500) {
@@ -117,6 +149,9 @@ func (p storagePayload) validate(isNew bool) error {
 			return badRequest("для SFTP нужен приватный ключ: " +
 				"пароль в автоматических заданиях хранится расшифровываемым и " +
 				"предъявляется серверу при каждом подключении")
+		}
+		if p.PrivateKey == "" && p.Password == "" {
+			return badRequest("для SFTP нужен приватный ключ или пароль старого подключения")
 		}
 		// Отказ здесь, а не при первой записи копии: запись случается ночью в
 		// фоновом задании, и ошибку там увидит не тот, кто заводил хранилище.
@@ -141,7 +176,7 @@ func (p storagePayload) validate(isNew bool) error {
 		if p.Username == "" {
 			return badRequest("для SMB нужен пользователь: анонимный доступ к шаре не поддерживается")
 		}
-		if isNew && p.Password == "" {
+		if p.Password == "" {
 			return badRequest("для SMB нужен пароль")
 		}
 	case model.StorageWebDAV:
@@ -151,7 +186,7 @@ func (p storagePayload) validate(isNew bool) error {
 		if p.Username == "" {
 			return badRequest("для WebDAV нужен пользователь")
 		}
-		if isNew && p.Password == "" {
+		if p.Password == "" {
 			return badRequest("для WebDAV нужен пароль")
 		}
 	default:
@@ -257,25 +292,23 @@ func (s *Server) handleUpdateStorage(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
+	if model.StorageKind(payload.Kind) != existing.Kind {
+		s.writeError(w, r, badRequest("тип существующего хранилища менять нельзя; создайте новое хранилище"))
+		return
+	}
+	// Все секреты и материал доверия write-only. Пустые значения формы
+	// редактирования означают «оставить прежние» и должны быть восстановлены до
+	// валидации, иначе безопасное SFTP-хранилище нельзя было бы переименовать.
+	payload.inheritWriteOnly(existing)
 	if err := payload.validate(false); err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	secretKey, password, privateKey := existing.SecretKey, existing.Password, existing.PrivateKey
 	objectLockWasEnabled := existing.ObjectLockEnabled
 	// Копия до правки: по ней решается, менялась ли сама цель — куда пишутся
 	// копии и под какими учётными данными.
 	before := *existing
 	payload.apply(existing)
-	if payload.SecretKey == "" {
-		existing.SecretKey = secretKey
-	}
-	if payload.Password == "" {
-		existing.Password = password
-	}
-	if payload.PrivateKey == "" {
-		existing.PrivateKey = privateKey
-	}
 	if existing.Kind == model.StorageLocal &&
 		(before.Kind != model.StorageLocal || filepath.Clean(before.BasePath) != filepath.Clean(existing.BasePath)) {
 		resolved, err := s.resolveBrowsable(r, scopeStorage, existing.BasePath)

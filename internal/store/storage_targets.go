@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -67,11 +68,14 @@ func (s *Store) CreateStorageTarget(ctx context.Context, t *model.StorageTarget)
 		}
 		return fmt.Errorf("insert storage target: %w", err)
 	}
+	t.PrivateKeyStored = t.PrivateKey != ""
+	t.PasswordStored = t.Password != ""
+	t.HostKeyStored = strings.TrimSpace(t.HostKey) != ""
 	return nil
 }
 
 // UpdateStorageTarget rewrites a repository definition. Empty secret fields
-// keep the stored values.
+// keep the stored values unless their explicit clear flag is set.
 func (s *Store) UpdateStorageTarget(ctx context.Context, t *model.StorageTarget) error {
 	existing, err := s.GetStorageTarget(ctx, t.ID)
 	if err != nil {
@@ -80,10 +84,10 @@ func (s *Store) UpdateStorageTarget(ctx context.Context, t *model.StorageTarget)
 	if t.SecretKey == "" {
 		t.SecretKey = existing.SecretKey
 	}
-	if t.Password == "" {
+	if t.Password == "" && !t.ClearPassword {
 		t.Password = existing.Password
 	}
-	if t.PrivateKey == "" {
+	if t.PrivateKey == "" && !t.ClearPrivateKey {
 		t.PrivateKey = existing.PrivateKey
 	}
 	secretKey, err := s.cipher.Encrypt(t.SecretKey)
@@ -129,6 +133,9 @@ func (s *Store) UpdateStorageTarget(ctx context.Context, t *model.StorageTarget)
 		}
 		return fmt.Errorf("update storage target: %w", err)
 	}
+	t.PrivateKeyStored = t.PrivateKey != ""
+	t.PasswordStored = t.Password != ""
+	t.HostKeyStored = strings.TrimSpace(t.HostKey) != ""
 	return nil
 }
 
@@ -265,6 +272,8 @@ func (s *Store) scanStorageTarget(row rowScanner) (*model.StorageTarget, error) 
 	}
 
 	t.PrivateKeyStored = t.PrivateKey != ""
+	t.PasswordStored = t.Password != ""
+	t.HostKeyStored = strings.TrimSpace(t.HostKey) != ""
 	t.InsecureTLSSince = nullTime(insecureSince)
 	t.Kind = model.StorageKind(kind)
 	t.LastCheckAt = nullTime(lastCheck)

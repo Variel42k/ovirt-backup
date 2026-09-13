@@ -116,6 +116,7 @@ func TestLibvirtServerRoundTrip(t *testing.T) {
 		Name:          "kvm-1",
 		Kind:          model.KindKVM,
 		Username:      "root",
+		Password:      "legacy-password",
 		SSHHost:       "kvm1.example.org",
 		SSHPort:       2222,
 		SSHPrivateKey: key,
@@ -152,6 +153,9 @@ func TestLibvirtServerRoundTrip(t *testing.T) {
 	if !got.Kind.UsesLibvirt() {
 		t.Error("тип подключения потерян")
 	}
+	if !got.PasswordStored {
+		t.Error("наличие старого SSH-пароля не отмечено")
+	}
 
 	// Пустой ключ при обновлении означает «оставить прежний» — форма не
 	// должна возвращать секрет обратно, чтобы его сохранить.
@@ -169,6 +173,20 @@ func TestLibvirtServerRoundTrip(t *testing.T) {
 	}
 	if again.ScratchDir != "/srv/other" {
 		t.Errorf("каталог scratch не обновился: %q", again.ScratchDir)
+	}
+
+	// После перехода на ключ пароль можно удалить явно, не раскрывая его форме.
+	again.Password = ""
+	again.ClearPassword = true
+	if err := s.UpdateServer(ctx, again); err != nil {
+		t.Fatalf("clear password: %v", err)
+	}
+	again, err = s.GetServer(ctx, srv.ID)
+	if err != nil {
+		t.Fatalf("get after password clear: %v", err)
+	}
+	if again.Password != "" || again.PasswordStored {
+		t.Error("пароль остался после явного удаления")
 	}
 
 	// Удаление ключа должно быть явным: обычное пустое поле означает keep.

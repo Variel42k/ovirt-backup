@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useQuasar } from 'quasar'
-import { api, notify, notifyError, notifyOk } from '@/api/client'
+import { api, errorMessage, notify, notifyError, notifyOk } from '@/api/client'
 import { ago, bytes, dateTime, storageKindIcon } from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
@@ -15,11 +15,17 @@ const auth = useAuthStore()
 const loading = ref(false)
 const dialog = ref(false)
 const editing = ref<StorageTarget | null>(null)
+const saving = ref(false)
+const formError = ref('')
+const scannedHostFingerprint = ref('')
 const checking = ref<string | null>(null)
 const catalogOpen = ref(false)
 const catalogLoading = ref(false)
+const catalogImporting = ref(false)
+const catalogError = ref('')
 const catalogDetail = ref<CatalogScanDetail | null>(null)
 const selectedCatalogEntries = ref<string[]>([])
+let catalogSequence = 0
 
 const emptyForm = () => ({
   name: '',
@@ -41,8 +47,11 @@ const emptyForm = () => ({
   port: 22,
   username: '',
   password: '',
+  clear_password: false,
   private_key: '',
+  clear_private_key: false,
   host_key: '',
+  clear_host_key: false,
   trust_any_host_key: false,
   share: '',
   domain: '',
@@ -51,6 +60,46 @@ const emptyForm = () => ({
 })
 
 const form = ref(emptyForm())
+let storageDialogGeneration = 0
+let hostKeyScanRequest = 0
+
+// Материал доверия write-only: сервер возвращает только факт его наличия.
+// Новый полученный ключ живёт только в памяти формы до сохранения или закрытия.
+const privateKeyStored = computed(
+  () => Boolean(form.value.private_key.trim()) || Boolean(editing.value?.private_key_stored && !form.value.clear_private_key),
+)
+const passwordStored = computed(
+  () => Boolean(form.value.password) || Boolean(editing.value?.password_stored && !form.value.clear_password),
+)
+const hostKeyStored = computed(
+  () => Boolean(form.value.host_key.trim()) || Boolean(editing.value?.host_key_stored && !form.value.clear_host_key),
+)
+
+watch(form, () => {
+  formError.value = ''
+}, { deep: true })
+
+watch(dialog, (open) => {
+  if (open) return
+  storageDialogGeneration += 1
+  hostKeyScanRequest += 1
+  form.value.secret_key = ''
+  form.value.password = ''
+  form.value.clear_password = false
+  form.value.private_key = ''
+  form.value.clear_private_key = false
+  form.value.host_key = ''
+  scannedHostFingerprint.value = ''
+  formError.value = ''
+})
+
+watch(catalogOpen, (open) => {
+  if (open) return
+  catalogSequence += 1
+  catalogLoading.value = false
+  catalogImporting.value = false
+  catalogError.value = ''
+})
 
 // Порт по умолчанию зависит от протокола: 22 у SFTP, 445 у SMB. Оставить чужой
 // порт молча — значит отправить оператора разбираться с отказом подключения,
@@ -58,6 +107,24 @@ const form = ref(emptyForm())
 const defaultPorts: Partial<Record<StorageKind, number>> = { sftp: 22, smb: 445 }
 
 function onKindChange(kind: StorageKind) {
+  // Секреты от скрытых полей другого протокола не должны случайно попасть в
+  // запрос после переключения типа нового хранилища.
+  if (!editing.value) {
+    form.value.secret_key = ''
+    form.value.password = ''
+    form.value.clear_password = false
+    form.value.private_key = ''
+    form.value.clear_private_key = false
+    form.value.host_key = ''
+    form.value.clear_host_key = false
+    form.value.trust_any_host_key = false
+    scannedHostFingerprint.value = ''
+  }
+  if (kind !== 'webdav') form.value.insecure_tls = false
+  if (kind !== 's3') {
+    form.value.object_lock_enabled = false
+    form.value.object_lock_days = 0
+  }
   const next = defaultPorts[kind]
   if (!next) return
   // Свой порт оператора не трогаем — только тот, что подставили мы сами.
@@ -83,14 +150,30 @@ async function load() {
 }
 
 function openCreate() {
+  storageDialogGeneration += 1
   editing.value = null
   form.value = emptyForm()
+  formError.value = ''
+  scannedHostFingerprint.value = ''
   dialog.value = true
 }
 
 function openEdit(target: StorageTarget) {
+  storageDialogGeneration += 1
   editing.value = target
-  form.value = { ...emptyForm(), ...target, secret_key: '', password: '', private_key: '' }
+  form.value = {
+    ...emptyForm(),
+    ...target,
+    secret_key: '',
+    password: '',
+    clear_password: false,
+    private_key: '',
+    clear_private_key: false,
+    host_key: '',
+    clear_host_key: false,
+  }
+  formError.value = ''
+  scannedHostFingerprint.value = ''
   dialog.value = true
 }
 
@@ -104,6 +187,26 @@ function usePickedPath(value: { rootId: string; path: string; absolute?: string 
 
 const scanningKey = ref(false)
 
+function clearPassword() {
+  form.value.password = ''
+  form.value.clear_password = true
+}
+
+function clearPrivateKey() {
+  form.value.private_key = ''
+  form.value.clear_private_key = true
+}
+
+function clearHostKey() {
+  form.value.host_key = ''
+  form.value.clear_host_key = true
+  scannedHostFingerprint.value = ''
+}
+
+function changeTrustAnyHostKey(value: boolean) {
+  if (value) clearHostKey()
+}
+
 /**
  * Забирает ключ, который SFTP-сервер предъявляет прямо сейчас.
  *
@@ -112,15 +215,40 @@ const scanningKey = ref(false)
  * раз — сверять отпечаток нужно со снятым на самом сервере.
  */
 async function scanHostKey() {
-  if (!form.value.host) {
-    notifyError('Сначала укажите адрес сервера')
+  const host = form.value.host.trim()
+  const port = Number(form.value.port || 22)
+  if (!host) {
+    formError.value = 'Сначала укажите адрес SFTP-сервера'
     return
   }
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    formError.value = 'Порт SFTP должен быть целым числом от 1 до 65535'
+    return
+  }
+  const dialogGeneration = storageDialogGeneration
+  const request = ++hostKeyScanRequest
+  const trustSignature = JSON.stringify({
+    hostKey: form.value.host_key,
+    clear: form.value.clear_host_key,
+    trustAny: form.value.trust_any_host_key,
+  })
   scanningKey.value = true
   try {
-    const result = await api.scanStorageHostKey(form.value.host, form.value.port || 22)
+    const result = await api.scanStorageHostKey(host, port)
+    if (!dialog.value || dialogGeneration !== storageDialogGeneration || request !== hostKeyScanRequest ||
+        host !== form.value.host.trim() || port !== Number(form.value.port || 22) ||
+        trustSignature !== JSON.stringify({
+          hostKey: form.value.host_key,
+          clear: form.value.clear_host_key,
+          trustAny: form.value.trust_any_host_key,
+        })) {
+      notify({ type: 'warning', message: 'Адрес или настройки доверия изменились. Получите ключ хоста ещё раз.' })
+      return
+    }
     form.value.host_key = result.line
+    form.value.clear_host_key = false
     form.value.trust_any_host_key = false
+    scannedHostFingerprint.value = result.fingerprint
     notify({
       type: 'warning',
       message: `Отпечаток ${result.fingerprint}. ${result.warning}`,
@@ -128,15 +256,72 @@ async function scanHostKey() {
       multiLine: true,
     })
   } catch (err) {
-    notifyError(err, 'Не удалось получить ключ сервера')
+    if (dialog.value && dialogGeneration === storageDialogGeneration && request === hostKeyScanRequest) {
+      formError.value = errorMessage(err)
+      notifyError(err, 'Не удалось получить ключ сервера')
+    }
   } finally {
-    scanningKey.value = false
+    if (request === hostKeyScanRequest) scanningKey.value = false
   }
 }
 
+function validateStorageForm(): string {
+  if (!form.value.name.trim()) return 'Укажите имя хранилища'
+  if (!Number.isFinite(form.value.rate_limit) || form.value.rate_limit < 0) {
+    return 'Ограничение скорости не может быть отрицательным'
+  }
+
+  if (form.value.kind === 'local') {
+    if (!form.value.base_path.trim()) return 'Выберите каталог для локального хранилища'
+  } else if (form.value.kind === 's3') {
+    if (!form.value.endpoint.trim()) return 'Укажите endpoint S3'
+    if (!form.value.bucket.trim()) return 'Укажите bucket S3'
+    if (!editing.value && (!form.value.access_key.trim() || !form.value.secret_key)) {
+      return 'Укажите access key и secret key для S3'
+    }
+    if (form.value.object_lock_enabled &&
+        (!Number.isInteger(Number(form.value.object_lock_days)) || form.value.object_lock_days < 1 || form.value.object_lock_days > 36500)) {
+      return 'Срок Object Lock должен быть целым числом от 1 до 36500 дней'
+    }
+  } else if (form.value.kind === 'sftp') {
+    if (!form.value.host.trim()) return 'Укажите адрес SFTP-сервера'
+    if (!Number.isInteger(Number(form.value.port)) || form.value.port < 1 || form.value.port > 65535) {
+      return 'Порт SFTP должен быть целым числом от 1 до 65535'
+    }
+    if (!form.value.username.trim()) return 'Укажите пользователя SFTP'
+    if (!editing.value && !privateKeyStored.value) return 'Добавьте приватный SSH-ключ без парольной фразы'
+    if (!privateKeyStored.value && !passwordStored.value) return 'Добавьте приватный SSH-ключ для авторизации SFTP'
+    if (!hostKeyStored.value && !form.value.trust_any_host_key) {
+      return 'Получите и сверьте ключ SFTP-сервера либо явно отключите проверку подлинности'
+    }
+  } else if (form.value.kind === 'smb') {
+    if (!form.value.host.trim()) return 'Укажите адрес SMB-сервера'
+    if (!Number.isInteger(Number(form.value.port)) || form.value.port < 1 || form.value.port > 65535) {
+      return 'Порт SMB должен быть целым числом от 1 до 65535'
+    }
+    const share = form.value.share.trim().replace(/^[/\\]+|[/\\]+$/g, '')
+    if (!share) return 'Укажите имя сетевой папки SMB'
+    if (/[/\\]/.test(share)) return 'В поле сетевой папки укажите только имя без сервера и разделителей'
+    if (!form.value.username.trim()) return 'Укажите пользователя SMB'
+    if (!editing.value && !form.value.password) return 'Укажите пароль SMB'
+  } else if (form.value.kind === 'webdav') {
+    if (!form.value.endpoint.trim()) return 'Укажите адрес коллекции WebDAV'
+    if (!form.value.username.trim()) return 'Укажите пользователя WebDAV'
+    if (!editing.value && !form.value.password) return 'Укажите пароль WebDAV'
+  }
+  return ''
+}
+
 async function save() {
+  if (saving.value) return
+  formError.value = validateStorageForm()
+  if (formError.value) return
+  saving.value = true
   try {
-	const payload = { ...form.value, object_lock_days: form.value.object_lock_enabled ? form.value.object_lock_days : 0 }
+	const payload = {
+      ...form.value,
+      object_lock_days: form.value.object_lock_enabled ? form.value.object_lock_days : 0,
+    }
     if (editing.value) {
 		await api.updateStorage(editing.value.id, payload)
       notifyOk('Хранилище обновлено')
@@ -147,7 +332,10 @@ async function save() {
     dialog.value = false
     await load()
   } catch (err) {
+    formError.value = errorMessage(err)
     notifyError(err, 'Не удалось сохранить')
+  } finally {
+    saving.value = false
   }
 }
 
@@ -238,17 +426,27 @@ function immutabilityBadge(target: StorageTarget): { label: string; color: strin
 }
 
 async function scanCatalog(target: StorageTarget) {
+	const sequence = ++catalogSequence
 	catalogOpen.value = true
 	catalogLoading.value = true
+	catalogImporting.value = false
+	catalogError.value = ''
 	catalogDetail.value = null
 	selectedCatalogEntries.value = []
 	try {
 		const scan = await api.startCatalogScan(target.id)
+		if (!catalogOpen.value || sequence !== catalogSequence) return
 		for (let attempt = 0; attempt < 360; attempt++) {
 			const detail = await api.getCatalogScan(scan.id)
+			if (!catalogOpen.value || sequence !== catalogSequence) return
 			catalogDetail.value = detail
 			if (detail.scan.status === 'succeeded' || detail.scan.status === 'failed') break
 			await new Promise((resolve) => window.setTimeout(resolve, 2000))
+		}
+		if (!catalogOpen.value || sequence !== catalogSequence) return
+		if (!catalogDetail.value || !['succeeded', 'failed'].includes(catalogDetail.value.scan.status)) {
+			catalogError.value = 'Сканирование не завершилось за 12 минут. Закройте окно и запустите его повторно.'
+			return
 		}
 		if (catalogDetail.value?.scan.status === 'succeeded') {
 			selectedCatalogEntries.value = catalogDetail.value.entries
@@ -256,21 +454,45 @@ async function scanCatalog(target: StorageTarget) {
 				.map((entry) => entry.id)
 		}
 	} catch (err) {
-		notifyError(err, 'Сканирование каталога не выполнено')
+		if (catalogOpen.value && sequence === catalogSequence) {
+			catalogError.value = errorMessage(err)
+			notifyError(err, 'Сканирование каталога не выполнено')
+		}
 	} finally {
-		catalogLoading.value = false
+		if (sequence === catalogSequence) catalogLoading.value = false
 	}
 }
 
 async function importCatalog() {
-	if (!catalogDetail.value || !selectedCatalogEntries.value.length) return
+	if (!catalogDetail.value || !selectedCatalogEntries.value.length || catalogImporting.value) return
+	const sequence = catalogSequence
+	const scanID = catalogDetail.value.scan.id
+	const selected = [...selectedCatalogEntries.value]
+	catalogImporting.value = true
+	catalogError.value = ''
 	try {
-		const result = await api.importCatalogEntries(catalogDetail.value.scan.id, selectedCatalogEntries.value)
-		notifyOk(`Импортировано точек: ${result.count ?? selectedCatalogEntries.value.length}`)
-		catalogDetail.value = await api.getCatalogScan(catalogDetail.value.scan.id)
+		const result = await api.importCatalogEntries(scanID, selected)
+		if (!catalogOpen.value || sequence !== catalogSequence) return
+		notifyOk(`Импортировано точек: ${result.count ?? selected.length}`)
 		selectedCatalogEntries.value = []
 	} catch (err) {
-		notifyError(err, 'Импорт каталога не выполнен')
+		if (catalogOpen.value && sequence === catalogSequence) {
+			catalogError.value = errorMessage(err)
+			catalogImporting.value = false
+			notifyError(err, 'Импорт каталога не выполнен')
+		}
+		return
+	}
+	try {
+		const detail = await api.getCatalogScan(scanID)
+		if (catalogOpen.value && sequence === catalogSequence) catalogDetail.value = detail
+	} catch (err) {
+		if (catalogOpen.value && sequence === catalogSequence) {
+			catalogError.value = 'Точки импортированы, но список не обновился. Закройте окно и откройте каталог снова.'
+			notifyError(err, 'Импорт завершён, список не обновлён')
+		}
+	} finally {
+		if (sequence === catalogSequence) catalogImporting.value = false
 	}
 }
 
@@ -410,16 +632,24 @@ function location(target: StorageTarget): string {
           {{ props.row.name }}
           <q-badge v-if="!props.row.enabled" color="grey-7" class="q-ml-sm">выключено</q-badge>
           <q-badge
-            v-if="props.row.kind === 'sftp' && !props.row.private_key_stored"
+            v-if="props.row.kind === 'sftp' && props.row.password_stored"
             color="warning"
             text-color="dark"
             class="q-ml-sm"
           >
-            вход по паролю
+            {{ props.row.private_key_stored ? 'сохранён лишний пароль' : 'вход по паролю' }}
             <q-tooltip>
               Пароль хранится расшифровываемым и предъявляется серверу при каждой записи копии.
               Заведите ключ и очистите пароль.
             </q-tooltip>
+          </q-badge>
+          <q-badge
+            v-if="props.row.kind === 'sftp' && !props.row.host_key_stored && !props.row.trust_any_host_key"
+            color="negative"
+            class="q-ml-sm"
+          >
+            ключ хоста не задан
+            <q-tooltip>До закрепления ключа сервера безопасное подключение невозможно.</q-tooltip>
           </q-badge>
           <q-badge v-if="props.row.insecure_tls_since" color="negative" class="q-ml-sm">
             без проверки сертификата, {{ ago(props.row.insecure_tls_since) }}
@@ -516,12 +746,16 @@ function location(target: StorageTarget): string {
       </template>
     </q-table>
 
-    <q-dialog v-model="dialog" persistent>
-      <q-card style="width: 700px; max-width: 95vw">
+    <q-dialog v-model="dialog" persistent :maximized="$q.screen.lt.sm">
+      <q-card class="jhv-dialog-page" style="width: 700px; max-width: 95vw">
         <q-card-section class="text-h6">
           {{ editing ? `Хранилище «${editing.name}»` : 'Новое хранилище' }}
         </q-card-section>
         <q-separator />
+
+        <q-banner v-if="formError" dense class="bg-red-1 text-negative q-ma-md q-mb-none">
+          <template #avatar><q-icon name="error" /></template>{{ formError }}
+        </q-banner>
 
         <!-- Одна сетка на всю форму; почему не .row внутри .q-gutter-* — см. ServersPage.vue. -->
         <q-card-section style="max-height: 70vh" class="scroll row q-col-gutter-md">
@@ -731,15 +965,30 @@ function location(target: StorageTarget): string {
             <div class="col-12">
               <q-input v-model="form.username" label="Пользователь" outlined dense />
             </div>
-            <div class="col-12">
+            <div v-if="editing" class="col-12">
               <q-input
                 v-model="form.password"
-                label="Пароль"
+                label="Пароль (устаревший режим)"
                 type="password"
-                :hint="editing ? 'Пусто — оставить прежний' : 'Либо пароль, либо приватный ключ'"
+                hint="Пусто — оставить прежний. Добавьте ключ ниже, чтобы перевести хранилище на безопасную автоматическую авторизацию."
                 outlined
                 dense
-              />
+              >
+                <template #append>
+                  <q-icon :name="passwordStored ? 'password' : 'no_encryption'" :color="passwordStored ? 'warning' : 'grey-6'" size="sm">
+                    <q-tooltip>{{ passwordStored ? 'Пароль сохранён' : 'Пароль не сохранён' }}</q-tooltip>
+                  </q-icon>
+                  <q-btn
+                    v-if="passwordStored"
+                    flat dense round icon="delete_outline" color="negative"
+                    aria-label="Удалить сохранённый пароль SFTP"
+                    :disable="saving"
+                    @click="clearPassword"
+                  >
+                    <q-tooltip>Удалить пароль при сохранении формы</q-tooltip>
+                  </q-btn>
+                </template>
+              </q-input>
             </div>
             <div class="col-12">
               <q-input
@@ -751,35 +1000,63 @@ function location(target: StorageTarget): string {
                 dense
                 autogrow
                 :input-style="{ maxHeight: '120px' }"
-              />
-            </div>
-            <div class="col-12">
-              <q-input
-                v-model="form.host_key"
-                label="Ключ хоста (формат authorized_keys)"
-                hint="Без ключа подключения не будет. Получите отпечаток и сверьте его на самом сервере."
-                outlined
-                dense
-                :disable="form.trust_any_host_key"
               >
                 <template #append>
+                  <q-icon :name="privateKeyStored ? 'key' : 'key_off'" :color="privateKeyStored ? 'positive' : 'negative'" size="sm">
+                    <q-tooltip>{{ privateKeyStored ? 'Приватный ключ сохранён' : 'Приватный ключ не сохранён' }}</q-tooltip>
+                  </q-icon>
                   <q-btn
-                    flat
-                    dense
-                    no-caps
-                    icon="fingerprint"
-                    label="Получить"
-                    :loading="scanningKey"
-                    :disable="form.trust_any_host_key"
-                    @click="scanHostKey"
-                  />
+                    v-if="privateKeyStored"
+                    flat dense round icon="delete_outline" color="negative"
+                    aria-label="Удалить приватный ключ SFTP"
+                    :disable="saving"
+                    @click="clearPrivateKey"
+                  >
+                    <q-tooltip>Удалить приватный ключ при сохранении формы</q-tooltip>
+                  </q-btn>
                 </template>
               </q-input>
+            </div>
+            <div class="col-12">
+              <q-card flat bordered>
+                <q-card-section class="row items-center q-gutter-sm">
+                  <q-icon :name="hostKeyStored ? 'verified' : 'gpp_bad'" :color="hostKeyStored ? 'positive' : 'negative'" size="sm" />
+                  <div class="col">
+                    <div class="text-subtitle2">Проверка ключа SFTP-сервера</div>
+                    <div class="text-caption text-grey-7">
+                      {{ hostKeyStored ? 'Ключ хоста сохранён' : 'Ключ хоста не задан' }}
+                      <span v-if="scannedHostFingerprint"> · {{ scannedHostFingerprint }}</span>
+                    </div>
+                  </div>
+                  <q-btn
+                    outline dense no-caps icon="fingerprint" label="Получить ключ"
+                    :loading="scanningKey"
+                    :disable="form.trust_any_host_key || saving"
+                    @click="scanHostKey"
+                  />
+                  <q-btn
+                    v-if="hostKeyStored"
+                    flat dense round icon="delete_outline" color="negative"
+                    aria-label="Удалить ключ SFTP-сервера"
+                    :disable="saving || scanningKey"
+                    @click="clearHostKey"
+                  >
+                    <q-tooltip>Удалить закреплённый ключ при сохранении формы</q-tooltip>
+                  </q-btn>
+                </q-card-section>
+                <q-card-section class="q-pt-none text-caption">
+                  Сверьте SHA-256 отпечаток с результатом
+                  <code>ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub</code> на самом сервере.
+                  Полный ключ после сохранения в браузер не возвращается.
+                </q-card-section>
+              </q-card>
             </div>
             <div class="col-12">
               <q-checkbox
                 v-model="form.trust_any_host_key"
                 label="Подключаться без проверки подлинности сервера"
+                :disable="saving || scanningKey"
+                @update:model-value="changeTrustAnyHostKey"
               />
               <div class="text-caption text-negative q-ml-sm">
                 Годится для лаборатории. Копии уйдут туда, куда их направит вклинившийся в
@@ -810,18 +1087,28 @@ function location(target: StorageTarget): string {
 
         <q-separator />
         <q-card-actions align="right">
-          <q-btn flat label="Отмена" v-close-popup />
-          <q-btn color="primary" unelevated label="Сохранить" @click="save" />
+          <q-btn flat label="Отмена" :disable="saving || scanningKey" v-close-popup />
+          <q-btn
+            color="primary"
+            unelevated
+            label="Сохранить"
+            :loading="saving"
+            :disable="scanningKey"
+            @click="save"
+          />
         </q-card-actions>
       </q-card>
     </q-dialog>
 
-	<q-dialog v-model="catalogOpen">
-		<q-card style="width: 900px; max-width: 96vw">
+	<q-dialog v-model="catalogOpen" persistent :maximized="$q.screen.lt.sm">
+		<q-card class="jhv-dialog-page" style="width: 900px; max-width: 96vw">
 			<q-card-section class="text-h6">Каталог хранилища</q-card-section>
 			<q-separator />
 			<q-card-section style="max-height: 70vh" class="scroll">
 				<q-linear-progress v-if="catalogLoading" indeterminate class="q-mb-md" />
+				<q-banner v-if="catalogError" dense class="bg-red-1 text-negative q-mb-md">
+					<template #avatar><q-icon name="error" /></template>{{ catalogError }}
+				</q-banner>
 				<q-banner v-if="catalogDetail?.scan.error" dense class="bg-red-1 text-negative q-mb-md">{{ catalogDetail.scan.error }}</q-banner>
 				<q-list dense bordered separator>
 					<q-item v-for="entry in catalogDetail?.entries ?? []" :key="entry.id">
@@ -841,8 +1128,8 @@ function location(target: StorageTarget): string {
 			</q-card-section>
 			<q-separator />
 			<q-card-actions align="right">
-				<q-btn flat label="Закрыть" v-close-popup />
-				<q-btn color="primary" unelevated icon="download" label="Импортировать" :disable="!selectedCatalogEntries.length" @click="importCatalog" />
+				<q-btn flat label="Закрыть" :disable="catalogImporting" v-close-popup />
+				<q-btn color="primary" unelevated icon="download" label="Импортировать" :loading="catalogImporting" :disable="catalogLoading || !selectedCatalogEntries.length" @click="importCatalog" />
 			</q-card-actions>
 		</q-card>
 	</q-dialog>

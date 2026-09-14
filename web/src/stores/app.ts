@@ -1,7 +1,8 @@
 import { defineStore } from 'pinia'
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { api } from '@/api/client'
 import { setSystemTimezone } from '@/api/format'
+import { useAuthStore } from '@/stores/auth'
 import type { BackupTypeHelp, Help, HelpArticle, Meta, Server, StorageTarget } from '@/api/types'
 
 /**
@@ -10,6 +11,7 @@ import type { BackupTypeHelp, Help, HelpArticle, Meta, Server, StorageTarget } f
  * обновляются точечно, а не запрашиваются на каждом переходе.
  */
 export const useAppStore = defineStore('app', () => {
+  const auth = useAuthStore()
   const meta = ref<Meta | null>(null)
   const servers = ref<Server[]>([])
   const storages = ref<StorageTarget[]>([])
@@ -17,6 +19,22 @@ export const useAppStore = defineStore('app', () => {
   // Справка нужна не каждому экрану, поэтому подгружается по первому обращению
   // к ней, а не вместе с остальными справочниками.
   const help = ref<Help | null>(null)
+  let bootstrapPromise: Promise<void> | null = null
+  let serversLoadSequence = 0
+  let storagesLoadSequence = 0
+
+  function clearUnauthorizedData() {
+    if (!auth.can('servers.read')) servers.value = []
+    if (!auth.can('storages.read')) storages.value = []
+  }
+
+  // Один браузер может последовательно использовать администратор и узкая
+  // роль. Не оставляем справочники первой сессии в памяти второй.
+  watch(
+    () => [auth.authenticated, ...auth.permissions],
+    clearUnauthorizedData,
+    { flush: 'sync' },
+  )
 
   const enabledStorages = computed(() => storages.value.filter((s) => s.enabled))
   const onlineServers = computed(() => servers.value.filter((s) => s.state === 'online'))
@@ -91,18 +109,39 @@ export const useAppStore = defineStore('app', () => {
   }
 
   async function loadServers(): Promise<void> {
-    servers.value = await api.listServers()
+    const sequence = ++serversLoadSequence
+    if (!auth.can('servers.read')) {
+      servers.value = []
+      return
+    }
+    const value = await api.listServers()
+    if (sequence === serversLoadSequence && auth.can('servers.read')) servers.value = value
   }
 
   async function loadStorages(): Promise<void> {
-    storages.value = await api.listStorages()
+    const sequence = ++storagesLoadSequence
+    if (!auth.can('storages.read')) {
+      storages.value = []
+      return
+    }
+    const value = await api.listStorages()
+    if (sequence === storagesLoadSequence && auth.can('storages.read')) storages.value = value
   }
 
   async function bootstrap(): Promise<void> {
+    if (bootstrapPromise) return bootstrapPromise
+    clearUnauthorizedData()
     loading.value = true
+    bootstrapPromise = (async () => {
+      const tasks: Promise<void>[] = [loadMeta()]
+      if (auth.can('servers.read')) tasks.push(loadServers())
+      if (auth.can('storages.read')) tasks.push(loadStorages())
+      await Promise.all(tasks)
+    })()
     try {
-      await Promise.all([loadMeta(), loadServers(), loadStorages()])
+      await bootstrapPromise
     } finally {
+      bootstrapPromise = null
       loading.value = false
     }
   }

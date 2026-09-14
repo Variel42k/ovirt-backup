@@ -26,6 +26,7 @@ const catalogError = ref('')
 const catalogDetail = ref<CatalogScanDetail | null>(null)
 const selectedCatalogEntries = ref<string[]>([])
 let catalogSequence = 0
+let storagesLoadSequence = 0
 
 const emptyForm = () => ({
   name: '',
@@ -139,13 +140,14 @@ const rateLimitMiB = computed({
 })
 
 async function load() {
+  const sequence = ++storagesLoadSequence
   loading.value = true
   try {
     await app.loadStorages()
   } catch (err) {
-    notifyError(err, 'Не удалось загрузить хранилища')
+    if (sequence === storagesLoadSequence) notifyError(err, 'Не удалось загрузить хранилища')
   } finally {
-    loading.value = false
+    if (sequence === storagesLoadSequence) loading.value = false
   }
 }
 
@@ -340,6 +342,7 @@ async function save() {
 }
 
 async function check(target: StorageTarget) {
+  if (checking.value || checkingImmutability.value) return
   checking.value = target.id
   try {
     const result = await api.checkStorage(target.id)
@@ -367,6 +370,7 @@ const checkingImmutability = ref<string | null>(null)
  * найдёт непонятный объект и будет гадать, откуда он.
  */
 function checkImmutability(target: StorageTarget) {
+  if (checking.value || checkingImmutability.value) return
   $q.dialog({
     title: 'Проверить защиту от удаления',
     message:
@@ -607,7 +611,7 @@ function location(target: StorageTarget): string {
       <q-space />
       <q-btn flat dense round icon="refresh" :loading="loading" @click="load" />
       <q-btn
-        v-if="auth.canAdmin()"
+        v-if="auth.can('storages.admin')"
         color="primary"
         icon="add"
         label="Добавить хранилище"
@@ -718,30 +722,34 @@ function location(target: StorageTarget): string {
       <template #body-cell-actions="props">
         <q-td :props="props">
           <q-btn
+            v-if="auth.can('storages.write')"
             flat
             dense
             round
             icon="network_check"
             :loading="checking === props.row.id"
+            :disable="Boolean(checking) || Boolean(checkingImmutability)"
             @click="check(props.row)"
           >
             <q-tooltip>Проверить доступность и запись</q-tooltip>
           </q-btn>
           <q-btn
+            v-if="auth.can('storages.write')"
             flat
             dense
             round
             icon="lock_clock"
             :loading="checkingImmutability === props.row.id"
+            :disable="Boolean(checking) || Boolean(checkingImmutability)"
             @click="checkImmutability(props.row)"
           >
             <q-tooltip>Проверить защиту от удаления и перезаписи</q-tooltip>
           </q-btn>
-			<q-btn v-if="auth.canAdmin()" flat dense round icon="manage_search" @click="scanCatalog(props.row)">
+			<q-btn v-if="auth.can('storages.admin')" flat dense round icon="manage_search" @click="scanCatalog(props.row)">
 				<q-tooltip>Просмотреть каталог и импортировать найденные точки</q-tooltip>
 			</q-btn>
-          <q-btn v-if="auth.canAdmin()" flat dense round icon="edit" @click="openEdit(props.row)" />
-          <q-btn v-if="auth.canAdmin()" flat dense round icon="delete" color="negative" @click="confirmDelete(props.row)" />
+          <q-btn v-if="auth.can('storages.admin')" flat dense round icon="edit" @click="openEdit(props.row)" />
+          <q-btn v-if="auth.can('storages.admin')" flat dense round icon="delete" color="negative" @click="confirmDelete(props.row)" />
         </q-td>
       </template>
     </q-table>

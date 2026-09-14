@@ -146,11 +146,13 @@ onMounted(async () => {
   } catch (err) {
     notifyError(err, 'Не удалось загрузить справочники')
   }
-  await refreshAlertCount()
-  // Поток событий может молчать, пока ничего не происходит; периодический
-  // пересчёт страхует счётчик от рассинхронизации.
-  alertTimer = window.setInterval(refreshAlertCount, 60_000)
-  connectLive()
+  if (auth.can('alerts.read')) {
+    await refreshAlertCount()
+    // Поток событий может молчать, пока ничего не происходит; периодический
+    // пересчёт страхует счётчик от рассинхронизации.
+    alertTimer = window.setInterval(refreshAlertCount, 60_000)
+  }
+  if (auth.can('monitoring.read')) connectLive()
 })
 
 onBeforeUnmount(() => {

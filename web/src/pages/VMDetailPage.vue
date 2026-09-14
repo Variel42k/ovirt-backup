@@ -20,7 +20,12 @@ const loading = ref(false)
 const vm = ref<VM | null>(null)
 const disks = ref<Disk[]>([])
 const recommendation = ref<Recommendation | null>(null)
+const recommendationLoading = ref(false)
+const recommendationError = ref('')
 const runs = ref<BackupRun[]>([])
+const busyDisks = ref<string[]>([])
+let recommendationSequence = 0
+let pageLoadSequence = 0
 
 const selectedStorage = ref<string | null>(null)
 const selectedType = ref<string>('')
@@ -47,51 +52,71 @@ const assessment = computed(() => recommendation.value?.assessment)
 const bootHosts = computed(() => app.servers.filter((s) => s.kind === 'kvm' && s.enabled))
 const sourceServer = computed(() => app.servers.find((s) => s.id === props.serverId))
 const backupSupported = computed(() => Boolean(sourceServer.value && app.serverSupports(sourceServer.value, 'supports_backup')))
+const backupPlanningAvailable = computed(() => backupSupported.value && auth.can('jobs.read'))
 
 async function load() {
+  const sequence = ++pageLoadSequence
+  const serverID = props.serverId
+  const vmID = props.vmId
   loading.value = true
   try {
-    if (!app.storages.length) await app.loadStorages()
+    if (auth.can('storages.read') && !app.storages.length) await app.loadStorages()
     if (!selectedStorage.value) {
       selectedStorage.value = app.enabledStorages[0]?.id ?? null
     }
 
     const [vmData, diskData, runData] = await Promise.all([
-      api.getVM(props.serverId, props.vmId),
-      api.listVMDisks(props.serverId, props.vmId),
-      api.listRuns({ server_id: props.serverId, vm_id: props.vmId, limit: 30 }),
+      api.getVM(serverID, vmID),
+      api.listVMDisks(serverID, vmID),
+      auth.can('backups.read')
+        ? api.listRuns({ server_id: serverID, vm_id: vmID, limit: 30 })
+        : Promise.resolve([]),
     ])
+    if (sequence !== pageLoadSequence) return
     vm.value = vmData
     disks.value = diskData
     runs.value = runData
 
-    await loadRecommendation()
+    if (auth.can('jobs.read')) await loadRecommendation()
   } catch (err) {
-    notifyError(err, 'Не удалось загрузить данные ВМ')
+    if (sequence === pageLoadSequence) notifyError(err, 'Не удалось загрузить данные ВМ')
   } finally {
-    loading.value = false
+    if (sequence === pageLoadSequence) loading.value = false
   }
 }
 
 async function loadRecommendation() {
-  if (!backupSupported.value) {
+  const sequence = ++recommendationSequence
+  if (!backupPlanningAvailable.value) {
     recommendation.value = null
+    recommendationError.value = ''
     return
   }
+  recommendationLoading.value = true
+  recommendationError.value = ''
   try {
-    recommendation.value = await api.backupOptions(props.serverId, props.vmId, selectedStorage.value ?? undefined)
-    const recommended = recommendation.value.options.find((o) => o.recommended)
-    if (recommended && !selectedType.value) {
-      selectedType.value = recommended.type
-      verifyAfter.value = recommended.suggested_verify
+    const result = await api.backupOptions(props.serverId, props.vmId, selectedStorage.value ?? undefined)
+    if (sequence !== recommendationSequence) return
+    recommendation.value = result
+    const current = result.options.find((option) => option.type === selectedType.value && option.available)
+    const recommended = result.options.find((option) => option.recommended && option.available)
+    if (!current) {
+      selectedType.value = recommended?.type ?? ''
+      verifyAfter.value = recommended?.suggested_verify ?? ''
     }
-    quiesce.value = recommendation.value.assessment.guest_agent
+    quiesce.value = result.assessment.guest_agent
     if (!verifyOptions.value.boot_host_id) {
       const source = app.servers.find((s) => s.id === props.serverId)
       verifyOptions.value.boot_host_id = source?.kind === 'kvm' ? source.id : ''
     }
   } catch (err) {
-    notifyError(err, 'Не удалось получить варианты бэкапа')
+    if (sequence === recommendationSequence) {
+      recommendation.value = null
+      recommendationError.value = 'Не удалось получить варианты бэкапа для выбранного хранилища.'
+      notifyError(err, 'Не удалось получить варианты бэкапа')
+    }
+  } finally {
+    if (sequence === recommendationSequence) recommendationLoading.value = false
   }
 }
 
@@ -128,12 +153,16 @@ async function startBackup() {
 }
 
 async function enableCBT(diskId: string) {
+  if (busyDisks.value.includes(diskId)) return
+  busyDisks.value = [...busyDisks.value, diskId]
   try {
     await api.setDiskBackupMode(props.serverId, diskId, true)
     notifyOk('Отслеживание изменённых блоков включено')
     window.setTimeout(load, 2000)
   } catch (err) {
     notifyError(err, 'Не удалось включить режим')
+  } finally {
+    busyDisks.value = busyDisks.value.filter((id) => id !== diskId)
   }
 }
 
@@ -172,7 +201,9 @@ function applyPreset(preset: SchedulePreset) {
 }
 
 watch(() => [props.serverId, props.vmId], load)
-watch(selectedStorage, () => void loadRecommendation())
+watch(selectedStorage, () => {
+  if (!loading.value) void loadRecommendation()
+})
 onMounted(load)
 </script>
 
@@ -212,7 +243,10 @@ onMounted(load)
             Для Proxmox VE сейчас доступны инвентарь, мониторинг и управление ВМ.
             Резервное копирование этой платформы ещё не реализовано.
           </q-banner>
-          <template v-if="backupSupported">
+          <q-banner v-else-if="!auth.can('jobs.read')" dense class="bg-grey-2">
+            Варианты резервного копирования недоступны для вашей роли.
+          </q-banner>
+          <template v-if="backupPlanningAvailable">
           <q-card-section>
             <div class="text-subtitle1">Варианты бэкапа</div>
             <div class="text-caption text-grey-7">
@@ -235,6 +269,10 @@ onMounted(load)
                 <HelpButton article="raw-disks" variant="link" label="Подробнее про raw" />
               </template>
             </q-banner>
+            <q-banner v-if="recommendationError" dense class="bg-red-1 text-negative q-mt-sm">
+              <template #avatar><q-icon name="error" color="negative" /></template>
+              {{ recommendationError }}
+            </q-banner>
           </q-card-section>
           <q-separator />
 
@@ -242,7 +280,7 @@ onMounted(load)
             <BackupOptionsPicker
               v-model="selectedType"
               :options="recommendation?.options ?? []"
-              :loading="loading && !recommendation"
+              :loading="recommendationLoading"
               @select="pick"
             />
           </q-card-section>
@@ -333,20 +371,20 @@ onMounted(load)
 
           <q-card-actions align="right">
             <q-btn
-              v-if="auth.canWrite()"
+              v-if="auth.can('backups.write')"
               color="primary"
               unelevated
               icon="play_arrow"
               label="Запустить бэкап сейчас"
               :loading="starting"
-              :disable="!selectedType || !selectedStorage || (verifyAfter === 'boot' && !verifyOptions.boot_host_id)"
+              :disable="recommendationLoading || !selectedType || !selectedStorage || (verifyAfter === 'boot' && !verifyOptions.boot_host_id)"
               @click="startBackup"
             />
           </q-card-actions>
           </template>
         </q-card>
 
-        <q-card flat bordered class="q-mt-md">
+        <q-card v-if="auth.can('backups.read')" flat bordered class="q-mt-md">
           <q-card-section class="text-subtitle1">История бэкапов</q-card-section>
           <q-separator />
           <q-list separator dense>
@@ -414,12 +452,14 @@ onMounted(load)
                   <q-tooltip>Инкрементальный режим включён</q-tooltip>
                 </q-icon>
                 <q-btn
-                  v-else-if="disk.can_enable_cbt && auth.canWrite()"
+                  v-else-if="disk.can_enable_cbt && auth.can('servers.write')"
                   flat
                   dense
                   size="sm"
                   color="primary"
                   label="Включить отслеживание изменений"
+                  :loading="busyDisks.includes(disk.id)"
+                  :disable="busyDisks.includes(disk.id)"
                   @click="enableCBT(disk.id)"
                 />
               </q-item-section>
@@ -448,7 +488,7 @@ onMounted(load)
               </q-item-section>
               <q-item-section side>
                 <q-btn
-                  v-if="auth.canWrite()"
+                  v-if="auth.can('jobs.write')"
                   flat
                   dense
                   size="sm"

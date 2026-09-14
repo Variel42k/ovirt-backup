@@ -230,7 +230,7 @@ func TestProxmoxServerKeepsSeparateAPIAndSSHIdentities(t *testing.T) {
 
 func TestServerValidationByKind(t *testing.T) {
 	// У oVirt обязателен адрес движка, у libvirt — адрес хоста и способ входа.
-	ovirtSrv := &model.Server{Name: "e", Kind: model.KindOVirt, Username: "admin@internal"}
+	ovirtSrv := &model.Server{Name: "e", Kind: model.KindOVirt, Username: "admin@internal", Password: "service-secret"}
 	if err := ovirtSrv.Validate(); err == nil {
 		t.Error("подключение к oVirt без адреса движка должно отклоняться")
 	}

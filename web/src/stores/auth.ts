@@ -21,15 +21,6 @@ export const useAuthStore = defineStore('auth', () => {
    */
   const can = (perm: string) => permissions.value.includes(perm)
 
-  /** Есть ли хоть одно право с этим действием, например 'write'. */
-  const canAny = (action: string) => permissions.value.some((p) => p.endsWith('.' + action))
-
-  // canWrite и canAdmin сохранены: на них опирается разметка во всех разделах.
-  // Считаются они теперь от прав, а не от имени роли, поэтому настраиваемая
-  // роль ведёт себя как положено без правки каждой кнопки.
-  const canWrite = () => canAny('write')
-  const canAdmin = () => can('users.admin')
-
   /** Проверяет текущую сессию. Вызывается один раз при старте приложения. */
   async function check(): Promise<boolean> {
     try {
@@ -90,6 +81,6 @@ export const useAuthStore = defineStore('auth', () => {
 
   return {
     username, role, provider, permissions, authenticated, authRequired, checked,
-    can, canAny, canWrite, canAdmin, check, login, logout, invalidate,
+    can, check, login, logout, invalidate,
   }
 })

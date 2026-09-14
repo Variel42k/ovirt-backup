@@ -21,12 +21,33 @@ const operations = useOperationsStore()
 const runs = ref<BackupRun[]>([])
 const selectedRuns = ref<BackupRun[]>([])
 const loading = ref(false)
+const busyCopies = ref<string[]>([])
+const busyRuns = ref<string[]>([])
+const bulkVerifyBusy = ref(false)
+let runsLoadSequence = 0
+let detailLoadSequence = 0
+let routeSequence = 0
+let restoresLoadSequence = 0
+let replicationsLoadSequence = 0
+let replicationDetailSequence = 0
 const filters = ref({
   server_id: String(route.query.server ?? ''),
   status: String(route.query.status ?? ''),
   days: Number(route.query.days ?? 30) || 30,
 })
 const tab = ref('runs')
+
+function setCopyBusy(id: string, busy: boolean) {
+  busyCopies.value = busy
+    ? [...new Set([...busyCopies.value, id])]
+    : busyCopies.value.filter((candidate) => candidate !== id)
+}
+
+function setRunBusy(id: string, busy: boolean) {
+  busyRuns.value = busy
+    ? [...new Set([...busyRuns.value, id])]
+    : busyRuns.value.filter((candidate) => candidate !== id)
+}
 
 const detail = ref<BackupRun | null>(null)
 const detailOpen = ref(false)
@@ -37,6 +58,7 @@ const replications = ref<BackupCopy[]>([])
 const replicationsLoading = ref(false)
 const replicationOpen = ref(false)
 const replicationDetail = ref<ReplicationDetail | null>(null)
+const replicationDetailLoading = ref('')
 let liveSource: EventSource | null = null
 let liveRefreshTimer: number | undefined
 let fallbackPollTimer: number | undefined
@@ -154,20 +176,24 @@ async function changeRestoreTarget(target: string) {
 }
 
 async function load(silent = false) {
+  if (silent && loading.value) return
+  const sequence = ++runsLoadSequence
   if (!silent) loading.value = true
   try {
     const params: Record<string, string | number> = { limit: 200, days: filters.value.days }
     if (filters.value.server_id) params.server_id = filters.value.server_id
     if (filters.value.status) params.status = filters.value.status
-    runs.value = await api.listRuns(params)
+    const value = await api.listRuns(params)
+    if (sequence === runsLoadSequence) runs.value = value
   } catch (err) {
-    notifyError(err, 'Не удалось загрузить список бэкапов')
+    if (sequence === runsLoadSequence) notifyError(err, 'Не удалось загрузить список бэкапов')
   } finally {
-    if (!silent) loading.value = false
+    if (!silent && sequence === runsLoadSequence) loading.value = false
   }
 }
 
 async function openDetail(run: BackupRun) {
+  const sequence = ++detailLoadSequence
   detailOpen.value = true
   detail.value = run
   chain.value = []
@@ -182,13 +208,14 @@ async function openDetail(run: BackupRun) {
       api.listRestores(run.id),
 			api.listRepositoryArtifacts(run.id),
     ])
+    if (sequence !== detailLoadSequence || !detailOpen.value || detail.value?.id !== run.id) return
     detail.value = full
     chain.value = chainRuns
     verifications.value = verifyRuns
     runRestores.value = restoreRuns
 		artifacts.value = artifactRuns
   } catch (err) {
-    notifyError(err, 'Не удалось загрузить подробности')
+    if (sequence === detailLoadSequence && detailOpen.value) notifyError(err, 'Не удалось загрузить подробности')
   }
 }
 
@@ -198,13 +225,16 @@ const restoresLoading = ref(false)
 
 /** Восстановление идёт в фоне и нигде больше не видно — этот список и есть его окно. */
 async function loadRestores(silent = false) {
+  if (silent && restoresLoading.value) return
+  const sequence = ++restoresLoadSequence
   if (!silent) restoresLoading.value = true
   try {
-    restores.value = await api.listRestores()
+    const value = await api.listRestores()
+    if (sequence === restoresLoadSequence) restores.value = value
   } catch (err) {
-    notifyError(err, 'Не удалось загрузить историю восстановлений')
+    if (sequence === restoresLoadSequence) notifyError(err, 'Не удалось загрузить историю восстановлений')
   } finally {
-    if (!silent) restoresLoading.value = false
+    if (!silent && sequence === restoresLoadSequence) restoresLoading.value = false
   }
 }
 
@@ -310,11 +340,13 @@ async function submitVerify() {
 }
 
 async function verifySelected() {
+  if (bulkVerifyBusy.value) return
   const chosen = selectedRuns.value.filter((run) => !run.deleted && ['succeeded', 'partial'].includes(run.status))
   if (!chosen.length) {
     notify({ type: 'warning', message: 'Среди выбранных строк нет завершённых доступных копий' })
     return
   }
+  bulkVerifyBusy.value = true
   try {
     const results = await operations.track(
       'Проверка выбранных бэкапов',
@@ -335,11 +367,20 @@ async function verifySelected() {
       'bulk-verify',
     )
     const failed = results.filter((result) => result.status === 'rejected' || (result.status === 'fulfilled' && result.value.status !== 'succeeded')).length
-    notifyOk(`Проверено копий: ${results.length - failed}${failed ? `, ошибок: ${failed}` : ''}`)
+    if (failed) {
+      notify({
+        type: failed === results.length ? 'negative' : 'warning',
+        message: `Проверено копий: ${results.length - failed}, ошибок: ${failed}`,
+      })
+    } else {
+      notifyOk(`Проверено копий: ${results.length}`)
+    }
     if (!failed) selectedRuns.value = []
     await load()
   } catch (err) {
     notifyError(err, 'Не удалось проверить выбранные бэкапы')
+  } finally {
+    bulkVerifyBusy.value = false
   }
 }
 
@@ -445,14 +486,17 @@ function copyColor(status: string): string {
 }
 
 async function loadReplications(silent = false) {
-	if (!silent) replicationsLoading.value = true
-	try {
-		replications.value = await api.listReplications({ limit: 200 })
-	} catch (err) {
-		notifyError(err, 'Не удалось загрузить очередь репликации')
-	} finally {
-		if (!silent) replicationsLoading.value = false
-	}
+  if (silent && replicationsLoading.value) return
+  const sequence = ++replicationsLoadSequence
+  if (!silent) replicationsLoading.value = true
+  try {
+    const value = await api.listReplications({ limit: 200 })
+    if (sequence === replicationsLoadSequence) replications.value = value
+  } catch (err) {
+    if (sequence === replicationsLoadSequence) notifyError(err, 'Не удалось загрузить очередь репликации')
+  } finally {
+    if (!silent && sequence === replicationsLoadSequence) replicationsLoading.value = false
+  }
 }
 
 async function refreshLiveState() {
@@ -468,9 +512,11 @@ function queueLiveRefresh() {
 }
 
 function connectLiveUpdates() {
-	liveSource = new EventSource('/api/v1/events', { withCredentials: true })
-	for (const kind of ['backup_run', 'verify_run', 'restore_run', 'replication', 'job']) {
-		liveSource.addEventListener(kind, queueLiveRefresh)
+	if (auth.can('monitoring.read')) {
+		liveSource = new EventSource('/api/v1/events', { withCredentials: true })
+		for (const kind of ['backup_run', 'verify_run', 'restore_run', 'replication', 'job']) {
+			liveSource.addEventListener(kind, queueLiveRefresh)
+		}
 	}
 	// Polling remains active as a fallback for a proxy which buffers SSE and
 	// for intermediate phase updates that are deliberately not broadcast.
@@ -478,15 +524,23 @@ function connectLiveUpdates() {
 }
 
 async function showReplication(copy: BackupCopy) {
-	try {
-		replicationDetail.value = await api.getReplication(copy.id)
-		replicationOpen.value = true
-	} catch (err) {
-		notifyError(err, 'Не удалось загрузить историю репликации')
-	}
+  const sequence = ++replicationDetailSequence
+  replicationDetailLoading.value = copy.id
+  try {
+    const value = await api.getReplication(copy.id)
+    if (sequence !== replicationDetailSequence) return
+    replicationDetail.value = value
+    replicationOpen.value = true
+  } catch (err) {
+    if (sequence === replicationDetailSequence) notifyError(err, 'Не удалось загрузить историю репликации')
+  } finally {
+    if (sequence === replicationDetailSequence) replicationDetailLoading.value = ''
+  }
 }
 
 async function retryCopy(copy: BackupCopy) {
+	if (busyCopies.value.includes(copy.id)) return
+	setCopyBusy(copy.id, true)
 	try {
 		await api.retryBackupCopy(copy.id)
 		notifyOk('Повтор поставлен в очередь')
@@ -494,10 +548,14 @@ async function retryCopy(copy: BackupCopy) {
 		if (tab.value === 'replications') await loadReplications()
 	} catch (err) {
 		notifyError(err, 'Не удалось повторить репликацию')
+	} finally {
+		setCopyBusy(copy.id, false)
 	}
 }
 
 async function cancelCopy(copy: BackupCopy) {
+	if (busyCopies.value.includes(copy.id)) return
+	setCopyBusy(copy.id, true)
 	try {
 		await api.cancelBackupCopy(copy.id)
 		notifyOk('Репликация отменена')
@@ -505,6 +563,8 @@ async function cancelCopy(copy: BackupCopy) {
 		if (tab.value === 'replications') await loadReplications()
 	} catch (err) {
 		notifyError(err, 'Не удалось отменить репликацию')
+	} finally {
+		setCopyBusy(copy.id, false)
 	}
 }
 
@@ -636,6 +696,8 @@ function confirmDelete(run: BackupRun) {
     cancel: { label: 'Отмена', flat: true },
     ok: { label: 'Удалить', color: 'negative' },
   }).onOk(async () => {
+    if (busyRuns.value.includes(run.id)) return
+    setRunBusy(run.id, true)
     try {
       const result = await api.deleteRun(run.id)
       // Карантин и стирание — разные исходы, и путать их нельзя: «данные
@@ -655,28 +717,38 @@ function confirmDelete(run: BackupRun) {
       await load()
     } catch (err) {
       notifyError(err, 'Не удалось удалить')
+    } finally {
+      setRunBusy(run.id, false)
     }
   })
 }
 
 /** Возвращает копию из карантина, пока её данные ещё целы. */
 async function undelete(run: BackupRun) {
+  if (busyRuns.value.includes(run.id)) return
+  setRunBusy(run.id, true)
   try {
     await api.undeleteRun(run.id)
     notifyOk('Копия возвращена из карантина')
     await load()
   } catch (err) {
     notifyError(err, 'Не удалось вернуть копию')
+  } finally {
+    setRunBusy(run.id, false)
   }
 }
 
 async function cancel(run: BackupRun) {
+  if (busyRuns.value.includes(run.id)) return
+  setRunBusy(run.id, true)
   try {
     await api.cancelRun(run.id)
     notifyOk('Отмена запрошена')
     await load()
   } catch (err) {
     notifyError(err, 'Не удалось отменить')
+  } finally {
+    setRunBusy(run.id, false)
   }
 }
 
@@ -706,15 +778,17 @@ function syncRoute(extra: Record<string, string | number | undefined> = {}) {
 }
 
 async function applyRoute() {
+	const sequence = ++routeSequence
 	const wantedTab = String(route.query.tab ?? 'runs')
 	if (['runs', 'replications', 'restores'].includes(wantedTab)) tab.value = wantedTab
 	const runID = String(route.query.run ?? '')
 	if (runID && (!detailOpen.value || detail.value?.id !== runID)) {
 		try {
 			const run = runs.value.find((item) => item.id === runID) ?? await api.getRun(runID)
+			if (sequence !== routeSequence) return
 			await openDetail(run)
 		} catch (err) {
-			notifyError(err, 'Не удалось открыть бэкап по ссылке')
+			if (sequence === routeSequence) notifyError(err, 'Не удалось открыть бэкап по ссылке')
 		}
 	}
 }
@@ -727,6 +801,9 @@ onMounted(async () => {
 })
 
 watch(() => route.query, () => void applyRoute())
+watch(detailOpen, (open) => {
+  if (!open) detailLoadSequence += 1
+})
 
 onBeforeUnmount(() => {
 	liveSource?.close()
@@ -867,9 +944,9 @@ const replicationColumns = [
 			<template #body-cell-retry="props"><q-td :props="props">{{ dateTime(props.row.next_retry_at) }}</q-td></template>
 			<template #body-cell-actions="props">
 				<q-td :props="props">
-					<q-btn flat dense round icon="history" aria-label="История попыток репликации" @click="showReplication(props.row)"><q-tooltip>История попыток</q-tooltip></q-btn>
-					<q-btn v-if="auth.canWrite() && ['failed','canceled'].includes(props.row.status)" flat dense round icon="refresh" color="primary" aria-label="Повторить репликацию" @click="retryCopy(props.row)"><q-tooltip>Повторить сейчас</q-tooltip></q-btn>
-					<q-btn v-if="auth.canWrite() && ['pending','copying','verifying'].includes(props.row.status)" flat dense round icon="stop" color="negative" aria-label="Отменить репликацию" @click="cancelCopy(props.row)"><q-tooltip>Отменить</q-tooltip></q-btn>
+					<q-btn flat dense round icon="history" aria-label="История попыток репликации" :loading="replicationDetailLoading === props.row.id" :disable="Boolean(replicationDetailLoading)" @click="showReplication(props.row)"><q-tooltip>История попыток</q-tooltip></q-btn>
+					<q-btn v-if="auth.can('backups.write') && ['failed','canceled'].includes(props.row.status)" flat dense round icon="refresh" color="primary" aria-label="Повторить репликацию" :loading="busyCopies.includes(props.row.id)" :disable="busyCopies.includes(props.row.id)" @click="retryCopy(props.row)"><q-tooltip>Повторить сейчас</q-tooltip></q-btn>
+					<q-btn v-if="auth.can('backups.write') && ['pending','copying','verifying'].includes(props.row.status)" flat dense round icon="stop" color="negative" aria-label="Отменить репликацию" :loading="busyCopies.includes(props.row.id)" :disable="busyCopies.includes(props.row.id)" @click="cancelCopy(props.row)"><q-tooltip>Отменить</q-tooltip></q-btn>
 				</q-td>
 			</template>
 		</q-table>
@@ -932,7 +1009,7 @@ const replicationColumns = [
       <div class="row items-center q-gutter-sm">
         <div>Выбрано копий: {{ selectedRuns.length }}</div>
         <q-space />
-        <q-btn v-if="auth.canWrite()" color="primary" unelevated icon="fact_check" label="Проверить выбранные" @click="verifySelected" />
+        <q-btn v-if="auth.can('backups.write')" color="primary" unelevated icon="fact_check" label="Проверить выбранные" :loading="bulkVerifyBusy" :disable="bulkVerifyBusy" @click="verifySelected" />
         <q-btn flat label="Снять выбор" @click="selectedRuns = []" />
       </div>
     </q-banner>
@@ -941,7 +1018,7 @@ const replicationColumns = [
       :rows="runs"
       :columns="columns"
       row-key="id"
-      selection="multiple"
+      :selection="auth.can('backups.write') ? 'multiple' : 'none'"
       v-model:selected="selectedRuns"
       :grid="$q.screen.lt.md"
       flat
@@ -955,7 +1032,7 @@ const replicationColumns = [
         <div class="q-pa-xs col-12">
           <q-card flat bordered>
             <q-card-section class="row items-start no-wrap">
-              <q-checkbox v-model="props.selected" class="q-mr-sm" :aria-label="`Выбрать копию ${props.row.vm_name}`" />
+              <q-checkbox v-if="auth.can('backups.write')" v-model="props.selected" class="q-mr-sm" :aria-label="`Выбрать копию ${props.row.vm_name}`" />
               <div class="col" @click="openDetail(props.row)">
                 <div class="text-subtitle1 text-weight-medium text-primary">{{ props.row.vm_name }}</div>
                 <div class="text-caption text-grey-7">{{ props.row.job_name || 'разовый запуск' }} · {{ app.backupTypeTitle(props.row.type) }}</div>
@@ -964,12 +1041,12 @@ const replicationColumns = [
                 <div class="text-caption text-grey-7">{{ app.storageName(props.row.storage_target_id) }}</div>
                 <div v-if="props.row.error" class="text-caption text-negative jhv-wrap">{{ props.row.error }}</div>
               </div>
-              <q-btn-dropdown v-if="auth.canWrite()" flat round dense dropdown-icon="more_vert" aria-label="Действия с копией" @click.stop>
+              <q-btn-dropdown v-if="auth.can('backups.write')" flat round dense dropdown-icon="more_vert" aria-label="Действия с копией" :loading="busyRuns.includes(props.row.id)" :disable="busyRuns.includes(props.row.id)" @click.stop>
                 <q-list dense>
                   <q-item clickable v-close-popup @click="openDetail(props.row)"><q-item-section avatar><q-icon name="visibility" /></q-item-section><q-item-section>Подробности</q-item-section></q-item>
                   <q-item v-if="!props.row.deleted && ['succeeded', 'partial'].includes(props.row.status)" clickable v-close-popup @click="verify(props.row)"><q-item-section avatar><q-icon name="fact_check" /></q-item-section><q-item-section>Проверить</q-item-section></q-item>
                   <q-item v-if="!props.row.deleted && ['succeeded', 'partial'].includes(props.row.status)" clickable v-close-popup @click="openRestore(props.row)"><q-item-section avatar><q-icon name="restore" color="primary" /></q-item-section><q-item-section>Восстановить</q-item-section></q-item>
-                  <q-item v-if="!props.row.deleted" clickable v-close-popup @click="confirmDelete(props.row)"><q-item-section avatar><q-icon name="delete" color="negative" /></q-item-section><q-item-section class="text-negative">Удалить</q-item-section></q-item>
+                  <q-item v-if="!props.row.deleted && !['pending', 'running'].includes(props.row.status)" clickable v-close-popup @click="confirmDelete(props.row)"><q-item-section avatar><q-icon name="delete" color="negative" /></q-item-section><q-item-section class="text-negative">Удалить</q-item-section></q-item>
                 </q-list>
               </q-btn-dropdown>
             </q-card-section>
@@ -1057,41 +1134,47 @@ const replicationColumns = [
       <template #body-cell-actions="props">
         <q-td :props="props">
           <q-btn
-            v-if="auth.canWrite() && props.row.status === 'running'"
+            v-if="auth.can('backups.write') && props.row.status === 'running'"
             flat
             dense
             round
             icon="stop"
             color="negative"
+            :loading="busyRuns.includes(props.row.id)"
+            :disable="busyRuns.includes(props.row.id)"
             @click="cancel(props.row)"
           >
             <q-tooltip>Отменить</q-tooltip>
           </q-btn>
           <template v-if="!props.row.deleted && ['succeeded', 'partial'].includes(props.row.status)">
-            <q-btn v-if="auth.canWrite()" flat dense round icon="fact_check" aria-label="Проверить копию" @click="verify(props.row)">
+            <q-btn v-if="auth.can('backups.write')" flat dense round icon="fact_check" aria-label="Проверить копию" :disable="busyRuns.includes(props.row.id)" @click="verify(props.row)">
               <q-tooltip>Проверить</q-tooltip>
             </q-btn>
-            <q-btn v-if="auth.canWrite()" flat dense round icon="restore" color="primary" aria-label="Восстановить копию" @click="openRestore(props.row)">
+            <q-btn v-if="auth.can('backups.write')" flat dense round icon="restore" color="primary" aria-label="Восстановить копию" :disable="busyRuns.includes(props.row.id)" @click="openRestore(props.row)">
               <q-tooltip>Восстановить</q-tooltip>
             </q-btn>
           </template>
           <!-- Возврат из карантина. Кнопка появляется, только пока данные целы:
                после стирания возвращать нечего. -->
           <q-btn
-            v-if="auth.canWrite() && props.row.purge_after"
+            v-if="auth.can('backups.write') && props.row.purge_after"
             flat dense round icon="undo" color="warning"
+            :loading="busyRuns.includes(props.row.id)"
+            :disable="busyRuns.includes(props.row.id)"
             @click="undelete(props.row)"
           >
             <q-tooltip>Вернуть копию из карантина</q-tooltip>
           </q-btn>
           <q-btn
-            v-if="auth.canWrite() && !props.row.deleted"
+            v-if="auth.can('backups.write') && !props.row.deleted && !['pending', 'running'].includes(props.row.status)"
             flat
             dense
             round
             icon="delete"
             color="negative"
             aria-label="Удалить копию"
+            :loading="busyRuns.includes(props.row.id)"
+            :disable="busyRuns.includes(props.row.id)"
             @click="confirmDelete(props.row)"
           ><q-tooltip>Удалить</q-tooltip></q-btn>
         </q-td>
@@ -1150,8 +1233,8 @@ const replicationColumns = [
 					<q-item-section side>
 						<div class="row no-wrap">
 							<q-btn v-if="copy.role === 'replica'" flat dense round icon="history" @click="showReplication(copy)"><q-tooltip>История репликации</q-tooltip></q-btn>
-							<q-btn v-if="auth.canWrite() && copy.role === 'replica' && ['failed','canceled'].includes(copy.status)" flat dense round icon="refresh" color="primary" @click="retryCopy(copy)"><q-tooltip>Повторить</q-tooltip></q-btn>
-							<q-btn v-if="auth.canWrite() && copy.role === 'replica' && ['pending','copying','verifying'].includes(copy.status)" flat dense round icon="stop" color="negative" @click="cancelCopy(copy)"><q-tooltip>Отменить</q-tooltip></q-btn>
+							<q-btn v-if="auth.can('backups.write') && copy.role === 'replica' && ['failed','canceled'].includes(copy.status)" flat dense round icon="refresh" color="primary" :loading="busyCopies.includes(copy.id)" :disable="busyCopies.includes(copy.id)" @click="retryCopy(copy)"><q-tooltip>Повторить</q-tooltip></q-btn>
+							<q-btn v-if="auth.can('backups.write') && copy.role === 'replica' && ['pending','copying','verifying'].includes(copy.status)" flat dense round icon="stop" color="negative" :loading="busyCopies.includes(copy.id)" :disable="busyCopies.includes(copy.id)" @click="cancelCopy(copy)"><q-tooltip>Отменить</q-tooltip></q-btn>
 						</div>
 					</q-item-section>
 				</q-item>
@@ -1347,9 +1430,9 @@ const replicationColumns = [
 
         <q-separator />
         <q-card-actions align="right">
-          <q-btn v-if="detail && auth.canWrite()" flat label="Проверить" icon="fact_check" @click="verify(detail)" />
+          <q-btn v-if="detail && auth.can('backups.write')" flat label="Проверить" icon="fact_check" @click="verify(detail)" />
           <q-btn
-            v-if="detail && auth.canWrite() && !detail.deleted"
+            v-if="detail && auth.can('backups.write') && !detail.deleted"
             color="primary"
             unelevated
             label="Восстановить"

@@ -12,33 +12,35 @@ const routes = [
     path: '/',
     component: () => import('@/layouts/MainLayout.vue'),
     children: [
-      { path: '', name: 'dashboard', component: () => import('@/pages/DashboardPage.vue') },
-      { path: 'servers', name: 'servers', component: () => import('@/pages/ServersPage.vue') },
+      { path: '', name: 'dashboard', component: () => import('@/pages/DashboardPage.vue'), meta: { perm: 'monitoring.read' } },
+      { path: 'servers', name: 'servers', component: () => import('@/pages/ServersPage.vue'), meta: { perm: 'servers.read' } },
       {
         path: 'servers/:serverId',
         name: 'server',
         component: () => import('@/pages/ServerDetailPage.vue'),
         props: true,
+        meta: { perm: 'servers.read' },
       },
       {
         path: 'servers/:serverId/vms/:vmId',
         name: 'vm',
         component: () => import('@/pages/VMDetailPage.vue'),
         props: true,
+        meta: { perm: 'servers.read' },
       },
-      { path: 'jobs', name: 'jobs', component: () => import('@/pages/JobsPage.vue') },
-      { path: 'backups', name: 'backups', component: () => import('@/pages/BackupsPage.vue') },
-      { path: 'engine-config', name: 'engine-config', component: () => import('@/pages/EngineConfigPage.vue') },
-			{ path: 'file-backups', name: 'file-backups', component: () => import('@/pages/FileBackupsPage.vue') },
-      { path: 'coverage', name: 'coverage', component: () => import('@/pages/CoveragePage.vue') },
-      { path: 'retention', name: 'retention', component: () => import('@/pages/RetentionPage.vue') },
-      { path: 'storages', name: 'storages', component: () => import('@/pages/StoragesPage.vue') },
-      { path: 'alerts', name: 'alerts', component: () => import('@/pages/AlertsPage.vue') },
+      { path: 'jobs', name: 'jobs', component: () => import('@/pages/JobsPage.vue'), meta: { perm: 'jobs.read' } },
+      { path: 'backups', name: 'backups', component: () => import('@/pages/BackupsPage.vue'), meta: { perm: 'backups.read' } },
+      { path: 'engine-config', name: 'engine-config', component: () => import('@/pages/EngineConfigPage.vue'), meta: { perm: 'engine_config.read' } },
+			{ path: 'file-backups', name: 'file-backups', component: () => import('@/pages/FileBackupsPage.vue'), meta: { perm: 'file_backups.read' } },
+      { path: 'coverage', name: 'coverage', component: () => import('@/pages/CoveragePage.vue'), meta: { perm: 'monitoring.read' } },
+      { path: 'retention', name: 'retention', component: () => import('@/pages/RetentionPage.vue'), meta: { perm: 'backups.read' } },
+      { path: 'storages', name: 'storages', component: () => import('@/pages/StoragesPage.vue'), meta: { perm: 'storages.read' } },
+      { path: 'alerts', name: 'alerts', component: () => import('@/pages/AlertsPage.vue'), meta: { perm: 'alerts.read' } },
       { path: 'documentation', name: 'documentation', component: () => import('@/pages/DocumentationPage.vue') },
       { path: 'settings', name: 'settings', component: () => import('@/pages/SettingsPage.vue') },
       {
         path: 'administration/access', name: 'access-settings',
-        component: () => import('@/pages/SettingsPage.vue'), meta: { settingsTab: 'identity' },
+        component: () => import('@/pages/SettingsPage.vue'), meta: { settingsTab: 'identity', perm: 'users.admin' },
       },
       {
         path: 'operations/approvals', name: 'approvals',
@@ -54,6 +56,17 @@ export const router = createRouter({
   routes,
 })
 
+const landingRoutes = [
+  { name: 'dashboard', perm: 'monitoring.read' },
+  { name: 'servers', perm: 'servers.read' },
+  { name: 'jobs', perm: 'jobs.read' },
+  { name: 'backups', perm: 'backups.read' },
+  { name: 'file-backups', perm: 'file_backups.read' },
+  { name: 'storages', perm: 'storages.read' },
+  { name: 'alerts', perm: 'alerts.read' },
+  { name: 'settings', perm: '' },
+]
+
 router.beforeEach(async (to) => {
   const auth = useAuthStore()
 
@@ -67,6 +80,10 @@ router.beforeEach(async (to) => {
   }
   if (!auth.authenticated) {
     return { name: 'login', query: { redirect: to.fullPath } }
+  }
+  const requiredPermission = String(to.meta.perm ?? '')
+  if (requiredPermission && !auth.can(requiredPermission)) {
+    return { name: landingRoutes.find((candidate) => !candidate.perm || auth.can(candidate.perm))?.name ?? 'settings' }
   }
   return true
 })

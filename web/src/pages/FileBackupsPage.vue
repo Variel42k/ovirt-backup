@@ -19,6 +19,8 @@ const treeError = ref('')
 const restoreBusy = ref(false)
 const restoreError = ref('')
 const startingJobs = ref<string[]>([])
+const deletingJobs = ref<string[]>([])
+const deletingRuns = ref<string[]>([])
 const roots = ref<FileBackupRoot[]>([])
 const jobs = ref<FileBackupJob[]>([])
 const runs = ref<FileBackupRun[]>([])
@@ -295,12 +297,16 @@ function deleteJob(job: FileBackupJob) {
     cancel: true,
     persistent: true,
   }).onOk(async () => {
+    if (deletingJobs.value.includes(job.id)) return
+    deletingJobs.value = [...deletingJobs.value, job.id]
     try {
       await api.deleteFileBackupJob(job.id)
       notifyOk('Файловое задание удалено')
       await load()
     } catch (err) {
       notifyError(err, 'Не удалось удалить файловое задание')
+    } finally {
+      deletingJobs.value = deletingJobs.value.filter((id) => id !== job.id)
     }
   })
 }
@@ -348,12 +354,16 @@ function deleteRun(run: FileBackupRun) {
     cancel: true,
     persistent: true,
   }).onOk(async () => {
+    if (deletingRuns.value.includes(run.id)) return
+    deletingRuns.value = [...deletingRuns.value, run.id]
     try {
       await api.deleteFileBackupRun(run.id)
       notifyOk('Точка файлового бэкапа удалена')
       await load()
     } catch (err) {
       notifyError(err, 'Не удалось удалить точку файлового бэкапа')
+    } finally {
+      deletingRuns.value = deletingRuns.value.filter((id) => id !== run.id)
     }
   })
 }
@@ -424,7 +434,7 @@ onBeforeUnmount(() => {
       <q-space />
       <q-btn flat round dense icon="refresh" :loading="loading" @click="load()" />
       <q-btn
-        v-if="auth.canAdmin()"
+        v-if="auth.can('file_backups.admin')"
         color="primary"
         icon="add"
         label="Новое задание"
@@ -459,14 +469,15 @@ onBeforeUnmount(() => {
         <template #body-cell-actions="props">
           <q-td :props="props">
             <q-btn
+              v-if="auth.can('file_backups.write')"
               flat round dense icon="play_arrow" color="primary"
               aria-label="Запустить файловый бэкап"
               :loading="startingJobs.includes(props.row.id)"
-              :disable="!props.row.enabled || startingJobs.includes(props.row.id)"
+              :disable="!props.row.enabled || startingJobs.includes(props.row.id) || deletingJobs.includes(props.row.id)"
               @click="runJob(props.row)"
             ><q-tooltip>Запустить сейчас</q-tooltip></q-btn>
-            <q-btn v-if="auth.canAdmin()" flat round dense icon="edit" @click="editJob(props.row)" />
-            <q-btn v-if="auth.canAdmin()" flat round dense icon="delete" color="negative" @click="deleteJob(props.row)" />
+            <q-btn v-if="auth.can('file_backups.admin')" flat round dense icon="edit" :disable="startingJobs.includes(props.row.id) || deletingJobs.includes(props.row.id)" @click="editJob(props.row)" />
+            <q-btn v-if="auth.can('file_backups.admin')" flat round dense icon="delete" color="negative" :loading="deletingJobs.includes(props.row.id)" :disable="startingJobs.includes(props.row.id) || deletingJobs.includes(props.row.id)" @click="deleteJob(props.row)" />
           </q-td>
         </template>
       </q-table>
@@ -487,9 +498,9 @@ onBeforeUnmount(() => {
         <template #body-cell-actions="props">
           <q-td :props="props">
             <q-btn flat round dense icon="account_tree" :loading="treeLoading === props.row.id" :disable="!['succeeded', 'partial'].includes(props.row.status)" @click="openTree(props.row)">
-              <q-tooltip>Просмотреть и восстановить</q-tooltip>
+              <q-tooltip>{{ auth.can('file_backups.write') ? 'Просмотреть и восстановить' : 'Просмотреть содержимое' }}</q-tooltip>
             </q-btn>
-            <q-btn v-if="auth.canAdmin()" flat round dense icon="delete" color="negative" :disable="['pending', 'running', 'waiting_copies'].includes(props.row.status)" @click="deleteRun(props.row)" />
+            <q-btn v-if="auth.can('file_backups.admin')" flat round dense icon="delete" color="negative" :loading="deletingRuns.includes(props.row.id)" :disable="deletingRuns.includes(props.row.id) || ['pending', 'running', 'waiting_copies'].includes(props.row.status)" @click="deleteRun(props.row)" />
           </q-td>
         </template>
       </q-table>
@@ -584,7 +595,7 @@ onBeforeUnmount(() => {
           </q-list>
           </template>
         </q-card-section>
-        <q-card-actions align="right"><q-btn flat label="Закрыть" v-close-popup /><q-btn color="primary" icon="restore" label="Восстановить" :disable="!manifest || treeLoading !== '' || restoreRootOptions.length === 0" @click="openRestore" /></q-card-actions>
+        <q-card-actions align="right"><q-btn flat label="Закрыть" v-close-popup /><q-btn v-if="auth.can('file_backups.write')" color="primary" icon="restore" label="Восстановить" :disable="!manifest || treeLoading !== '' || restoreRootOptions.length === 0" @click="openRestore" /></q-card-actions>
       </q-card>
     </q-dialog>
 

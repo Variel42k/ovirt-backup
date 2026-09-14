@@ -194,7 +194,7 @@ onMounted(async () => {
       <div class="text-h5">Снимки конфигурации Engine</div>
       <q-space />
       <q-btn
-        v-if="auth.canAdmin()"
+        v-if="auth.can('engine_config.admin')"
         color="primary"
         icon="add"
         label="Новое задание"
@@ -216,14 +216,14 @@ onMounted(async () => {
         <template #body-cell-actions="p">
           <q-td :props="p" class="q-gutter-xs">
             <q-btn
-              v-if="auth.canAdmin()"
+              v-if="auth.can('engine_config.admin')"
               flat round dense icon="play_arrow"
               :loading="runningJob === p.row.id"
               :disable="Boolean(runningJob) || !p.row.enabled"
               @click="runJob(p.row)"
             ><q-tooltip>Запустить сейчас</q-tooltip></q-btn>
-            <q-btn v-if="auth.canAdmin()" flat round dense icon="edit" @click="editJob(p.row)" />
-            <q-btn v-if="auth.canAdmin()" flat round dense icon="delete" color="negative" @click="removeJob(p.row)" />
+            <q-btn v-if="auth.can('engine_config.admin')" flat round dense icon="edit" @click="editJob(p.row)" />
+            <q-btn v-if="auth.can('engine_config.admin')" flat round dense icon="delete" color="negative" @click="removeJob(p.row)" />
           </q-td>
         </template>
       </q-table>

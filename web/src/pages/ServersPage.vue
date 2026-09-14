@@ -13,6 +13,7 @@ const app = useAppStore()
 const auth = useAuthStore()
 
 const loading = ref(false)
+const busyServers = ref<string[]>([])
 const dialog = ref(false)
 const editing = ref<Server | null>(null)
 const probing = ref(false)
@@ -27,6 +28,13 @@ const scannedNodeKeys = ref<Array<{ node: string; address: string; type: string;
 const formError = ref('')
 let connectionDialogGeneration = 0
 let provisionDialogGeneration = 0
+let serversLoadSequence = 0
+
+function setServerBusy(id: string, busy: boolean) {
+  busyServers.value = busy
+    ? [...new Set([...busyServers.value, id])]
+    : busyServers.value.filter((candidate) => candidate !== id)
+}
 
 /**
  * Что учётная запись может сверх нужного. Определяет сервер фактической
@@ -192,13 +200,14 @@ watch(
 )
 
 async function load() {
+  const sequence = ++serversLoadSequence
   loading.value = true
   try {
     await app.loadServers()
   } catch (err) {
-    notifyError(err, 'Не удалось загрузить список серверов')
+    if (sequence === serversLoadSequence) notifyError(err, 'Не удалось загрузить список серверов')
   } finally {
-    loading.value = false
+    if (sequence === serversLoadSequence) loading.value = false
   }
 }
 
@@ -616,23 +625,31 @@ function confirmDelete(server: Server) {
     cancel: { label: 'Отмена', flat: true },
     ok: { label: 'Удалить', color: 'negative' },
   }).onOk(async () => {
+    if (busyServers.value.includes(server.id)) return
+    setServerBusy(server.id, true)
     try {
       await api.deleteServer(server.id)
       notifyOk('Подключение удалено')
       await load()
     } catch (err) {
       notifyError(err, 'Не удалось удалить')
+    } finally {
+      setServerBusy(server.id, false)
     }
   })
 }
 
 async function refresh(server: Server) {
+  if (busyServers.value.includes(server.id)) return
+  setServerBusy(server.id, true)
   try {
     await api.refreshServer(server.id)
     notifyOk(`Инвентарь ${server.name} обновлён`)
     await load()
   } catch (err) {
     notifyError(err, 'Опрос не удался')
+  } finally {
+    setServerBusy(server.id, false)
   }
 }
 
@@ -656,7 +673,7 @@ onMounted(load)
       <q-space />
       <q-btn flat dense round icon="refresh" aria-label="Обновить платформы" :loading="loading" @click="load"><q-tooltip>Обновить</q-tooltip></q-btn>
       <q-btn
-        v-if="auth.canAdmin()"
+        v-if="auth.can('servers.admin')"
         color="primary"
         icon="verified_user"
         label="Подключить oVirt-контур"
@@ -670,7 +687,7 @@ onMounted(load)
         </q-tooltip>
       </q-btn>
       <q-btn
-        v-if="auth.canAdmin()"
+        v-if="auth.can('servers.admin')"
         outline
         color="primary"
         icon="add"
@@ -708,11 +725,11 @@ onMounted(load)
                 <div class="text-caption text-grey-7">Сертификат: {{ props.row.ca_cert_stored ? 'сохранён' : 'не задан' }} · последний ответ: {{ ago(props.row.last_seen_at) }}</div>
                 <div v-if="props.row.state_message" class="text-caption text-negative jhv-wrap q-mt-xs">{{ props.row.state_message }}</div>
               </div>
-              <q-btn-dropdown flat round dense dropdown-icon="more_vert" aria-label="Действия с подключением">
+              <q-btn-dropdown v-if="auth.can('servers.write') || auth.can('servers.admin')" flat round dense dropdown-icon="more_vert" aria-label="Действия с подключением" :loading="busyServers.includes(props.row.id)" :disable="busyServers.includes(props.row.id)">
                 <q-list dense>
-                  <q-item clickable v-close-popup @click="refresh(props.row)"><q-item-section avatar><q-icon name="sync" /></q-item-section><q-item-section>Опросить сейчас</q-item-section></q-item>
-                  <q-item v-if="auth.canAdmin()" clickable v-close-popup @click="openEdit(props.row)"><q-item-section avatar><q-icon name="edit" /></q-item-section><q-item-section>Изменить</q-item-section></q-item>
-                  <q-item v-if="auth.canAdmin()" clickable v-close-popup @click="confirmDelete(props.row)"><q-item-section avatar><q-icon name="delete" color="negative" /></q-item-section><q-item-section class="text-negative">Удалить</q-item-section></q-item>
+                  <q-item v-if="auth.can('servers.write')" clickable v-close-popup @click="refresh(props.row)"><q-item-section avatar><q-icon name="sync" /></q-item-section><q-item-section>Опросить сейчас</q-item-section></q-item>
+                  <q-item v-if="auth.can('servers.admin')" clickable v-close-popup @click="openEdit(props.row)"><q-item-section avatar><q-icon name="edit" /></q-item-section><q-item-section>Изменить</q-item-section></q-item>
+                  <q-item v-if="auth.can('servers.admin')" clickable v-close-popup @click="confirmDelete(props.row)"><q-item-section avatar><q-icon name="delete" color="negative" /></q-item-section><q-item-section class="text-negative">Удалить</q-item-section></q-item>
                 </q-list>
               </q-btn-dropdown>
             </q-card-section>
@@ -816,11 +833,11 @@ onMounted(load)
 
       <template #body-cell-actions="props">
         <q-td :props="props">
-          <q-btn flat dense round icon="sync" aria-label="Опросить подключение" @click="refresh(props.row)">
+          <q-btn v-if="auth.can('servers.write')" flat dense round icon="sync" aria-label="Опросить подключение" :loading="busyServers.includes(props.row.id)" :disable="busyServers.includes(props.row.id)" @click="refresh(props.row)">
             <q-tooltip>Опросить сейчас</q-tooltip>
           </q-btn>
-          <q-btn v-if="auth.canAdmin()" flat dense round icon="edit" aria-label="Изменить подключение" @click="openEdit(props.row)"><q-tooltip>Изменить</q-tooltip></q-btn>
-          <q-btn v-if="auth.canAdmin()" flat dense round icon="delete" color="negative" aria-label="Удалить подключение" @click="confirmDelete(props.row)"><q-tooltip>Удалить</q-tooltip></q-btn>
+          <q-btn v-if="auth.can('servers.admin')" flat dense round icon="edit" aria-label="Изменить подключение" :disable="busyServers.includes(props.row.id)" @click="openEdit(props.row)"><q-tooltip>Изменить</q-tooltip></q-btn>
+          <q-btn v-if="auth.can('servers.admin')" flat dense round icon="delete" color="negative" aria-label="Удалить подключение" :loading="busyServers.includes(props.row.id)" :disable="busyServers.includes(props.row.id)" @click="confirmDelete(props.row)"><q-tooltip>Удалить</q-tooltip></q-btn>
         </q-td>
       </template>
     </q-table>

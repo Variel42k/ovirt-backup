@@ -66,7 +66,7 @@ func TestLibvirtServerTreatsBlankKeyAsMissing(t *testing.T) {
 func TestEngineServerDoesNotNeedHostKey(t *testing.T) {
 	srv := &Server{
 		Name: "движок", Kind: KindOVirt, Username: "admin@internal",
-		EngineURL: "https://engine.example.org",
+		Password: "service-secret", EngineURL: "https://engine.example.org",
 	}
 
 	if err := srv.Validate(); err != nil {

@@ -18,13 +18,25 @@ const router = useRouter()
 const auth = useAuthStore()
 const app = useAppStore()
 const server = ref<Server | null>(null)
+const busyResources = ref<string[]>([])
+
+function resourceBusy(kind: 'vm' | 'host' | 'disk', id: string): boolean {
+  return busyResources.value.includes(`${kind}:${id}`)
+}
+
+function setResourceBusy(kind: 'vm' | 'host' | 'disk', id: string, busy: boolean) {
+  const key = `${kind}:${id}`
+  busyResources.value = busy
+    ? [...new Set([...busyResources.value, key])]
+    : busyResources.value.filter((candidate) => candidate !== key)
+}
 
 // canManage — можно ли вообще управлять ВМ и хостами в этой установке.
 // Управление выключается настройкой на сервере: там, где нужен только бэкап,
 // служба не должна давать рычаг для остановки production. Кнопка, которая
 // гарантированно вернёт 403, хуже отсутствующей.
 const canManage = computed(
-  () => auth.canWrite() && app.meta?.capabilities.management_enabled !== false &&
+  () => auth.can('servers.write') && app.meta?.capabilities.management_enabled !== false &&
     Boolean(server.value && app.serverSupports(server.value, 'supports_vm_management')),
 )
 
@@ -32,7 +44,10 @@ const canManage = computed(
 // гостевой ОС: аппаратный сброс ВМ и перезагрузка хоста по питанию.
 const canDisrupt = computed(() => canManage.value && auth.can('servers.disruptive'))
 
-const knownTabs = new Set(['vms', 'hosts', 'disks', 'domains', 'health', 'io'])
+const knownTabs = new Set([
+  'vms', 'hosts', 'disks', 'domains',
+  ...(auth.can('monitoring.read') ? ['health', 'io'] : []),
+])
 const tab = ref(knownTabs.has(String(route.query.tab)) ? String(route.query.tab) : 'vms')
 const health = ref<HealthSample[]>([])
 const healthHours = ref(24)
@@ -45,6 +60,9 @@ const ioHours = ref(6)
 const ioLoading = ref(false)
 const ioDisk = ref('')
 const ioPath = ref('')
+let serverLoadSequence = 0
+let healthLoadSequence = 0
+let ioLoadSequence = 0
 
 /** Ключ «ВМ / диск» — с ним оператор выбирает, чью нагрузку смотреть. */
 const diskKeys = computed(() => {
@@ -103,21 +121,25 @@ const totalTimeouts = computed(() =>
 )
 
 async function loadIO() {
+  if (!auth.can('monitoring.read')) return
+  const sequence = ++ioLoadSequence
+  const serverID = props.serverId
   ioLoading.value = true
   try {
-    const params = { server_id: props.serverId, hours: ioHours.value, limit: 5000 }
+    const params = { server_id: serverID, hours: ioHours.value, limit: 5000 }
     const [disks, mounts, current] = await Promise.all([
       api.diskSamples(params),
       api.mountSamples(params),
-      api.storagePaths(props.serverId),
+      api.storagePaths(serverID),
     ])
+    if (sequence !== ioLoadSequence) return
     diskSamples.value = disks
     mountSamples.value = mounts
     paths.value = current
   } catch (err) {
-    notifyError(err, 'Не удалось загрузить метрики ввода-вывода')
+    if (sequence === ioLoadSequence) notifyError(err, 'Не удалось загрузить метрики ввода-вывода')
   } finally {
-    ioLoading.value = false
+    if (sequence === ioLoadSequence) ioLoading.value = false
   }
 }
 const loading = ref(false)
@@ -154,44 +176,52 @@ function createPolicyForSelected() {
 }
 
 async function load() {
+  const sequence = ++serverLoadSequence
+  const serverID = props.serverId
   loading.value = true
   try {
     const [srv, vmList, hostList, diskList, domainList] = await Promise.all([
-      api.getServer(props.serverId),
-      api.listVMs(props.serverId),
-      api.listHosts(props.serverId),
-      api.listDisks(props.serverId),
-      api.listStorageDomains(props.serverId),
+      api.getServer(serverID),
+      api.listVMs(serverID),
+      api.listHosts(serverID),
+      api.listDisks(serverID),
+      api.listStorageDomains(serverID),
     ])
+    if (sequence !== serverLoadSequence) return
     server.value = srv
     vms.value = vmList
     hosts.value = hostList
     disks.value = diskList
     domains.value = domainList
   } catch (err) {
-    notifyError(err, 'Не удалось загрузить данные сервера')
+    if (sequence === serverLoadSequence) notifyError(err, 'Не удалось загрузить данные сервера')
   } finally {
-    loading.value = false
+    if (sequence === serverLoadSequence) loading.value = false
   }
 }
 
 async function loadHealth() {
+  if (!auth.can('monitoring.read')) return
+  const sequence = ++healthLoadSequence
+  const serverID = props.serverId
   healthLoading.value = true
   try {
-    health.value = await api.healthSamples({
-      server_id: props.serverId,
+    const value = await api.healthSamples({
+      server_id: serverID,
       scope: 'server',
       hours: healthHours.value,
       limit: 2000,
     })
+    if (sequence === healthLoadSequence) health.value = value
   } catch (err) {
-    notifyError(err, 'Не удалось загрузить историю опросов')
+    if (sequence === healthLoadSequence) notifyError(err, 'Не удалось загрузить историю опросов')
   } finally {
-    healthLoading.value = false
+    if (sequence === healthLoadSequence) healthLoading.value = false
   }
 }
 
 async function refreshInventory() {
+  if (loading.value) return
   loading.value = true
   try {
     await api.refreshServer(props.serverId)
@@ -209,12 +239,16 @@ const DISRUPTIVE = new Set(['stop', 'reset'])
 
 async function vmAction(vm: VM, action: string) {
   const run = async (confirm: boolean, hostID = '') => {
+    if (resourceBusy('vm', vm.id)) return
+    setResourceBusy('vm', vm.id, true)
     try {
       await api.vmAction(props.serverId, vm.id, action, { ...(confirm ? { confirm: true } : {}), ...(hostID ? { host_id: hostID } : {}) })
       notifyOk(`Команда «${action}» отправлена для ${vm.name}`)
       window.setTimeout(load, 2500)
     } catch (err) {
       notifyError(err, 'Команда не выполнена')
+    } finally {
+      setResourceBusy('vm', vm.id, false)
     }
   }
   if (action === 'migrate') {
@@ -249,33 +283,45 @@ async function vmAction(vm: VM, action: string) {
 }
 
 async function setPolicy(vm: VM, desired: string) {
+  if (resourceBusy('vm', vm.id)) return
+  setResourceBusy('vm', vm.id, true)
   try {
     await api.setVMPolicy(props.serverId, vm.id, desired, vm.remediation_opt_out)
     notifyOk(`Требуемое состояние ВМ «${vm.name}» изменено`)
     await load()
   } catch (err) {
     notifyError(err, 'Не удалось изменить политику')
+  } finally {
+    setResourceBusy('vm', vm.id, false)
   }
 }
 
 async function toggleOptOut(vm: VM) {
+  if (resourceBusy('vm', vm.id)) return
+  setResourceBusy('vm', vm.id, true)
   try {
     await api.setVMPolicy(props.serverId, vm.id, vm.desired_state, !vm.remediation_opt_out)
     await load()
   } catch (err) {
     notifyError(err, 'Не удалось изменить политику')
+  } finally {
+    setResourceBusy('vm', vm.id, false)
   }
 }
 
 function hostAction(host: Host, action: string) {
   const isFence = action === 'fence'
   const run = async () => {
+    if (resourceBusy('host', host.id)) return
+    setResourceBusy('host', host.id, true)
     try {
       await api.hostAction(props.serverId, host.id, action, isFence ? { confirm: true, fence_type: 'restart' } : {})
       notifyOk(`Команда «${action}» отправлена для ${host.name}`)
       window.setTimeout(load, 3000)
     } catch (err) {
       notifyError(err, 'Команда не выполнена')
+    } finally {
+      setResourceBusy('host', host.id, false)
     }
   }
   if (!isFence) {
@@ -291,18 +337,27 @@ function hostAction(host: Host, action: string) {
 }
 
 async function toggleCBT(disk: Disk) {
+  if (resourceBusy('disk', disk.id)) return
+  setResourceBusy('disk', disk.id, true)
   try {
     await api.setDiskBackupMode(props.serverId, disk.id, disk.backup_mode !== 'incremental')
     notifyOk('Режим отслеживания изменённых блоков изменён')
     window.setTimeout(load, 2000)
   } catch (err) {
     notifyError(err, 'Не удалось изменить режим')
+  } finally {
+    setResourceBusy('disk', disk.id, false)
   }
 }
 
 watch(() => props.serverId, () => {
+  health.value = []
+  diskSamples.value = []
+  mountSamples.value = []
+  paths.value = []
   void load()
-  void loadHealth()
+  if (tab.value === 'health' && auth.can('monitoring.read')) void loadHealth()
+  if (tab.value === 'io' && auth.can('monitoring.read')) void loadIO()
 })
 // График подтягивается при первом открытии вкладки, чтобы не тратить запрос
 // на тех, кто пришёл за списком ВМ.
@@ -363,7 +418,7 @@ const domainColumns = [
         </div>
       </div>
       <q-space />
-      <q-btn flat dense icon="sync" label="Опросить" :loading="loading" @click="refreshInventory" />
+      <q-btn v-if="auth.can('servers.write')" flat dense icon="sync" label="Опросить" :loading="loading" :disable="loading" @click="refreshInventory" />
     </div>
 
     <q-banner v-if="server?.state_message" dense class="bg-red-1 q-mb-md">
@@ -377,8 +432,8 @@ const domainColumns = [
         <q-tab name="hosts" :label="`Хосты (${hosts.length})`" />
         <q-tab name="disks" :label="`Диски (${dataDisks.length})`" />
         <q-tab name="domains" :label="`Домены хранения (${domains.length})`" />
-        <q-tab name="health" label="Доступность" />
-        <q-tab name="io" label="Ввод-вывод" />
+        <q-tab v-if="auth.can('monitoring.read')" name="health" label="Доступность" />
+        <q-tab v-if="auth.can('monitoring.read')" name="io" label="Ввод-вывод" />
       </q-tabs>
       <q-separator />
 
@@ -388,7 +443,7 @@ const domainColumns = [
             <div class="row items-center q-gutter-sm">
               <div>Выбрано ВМ: {{ selectedVMs.length }}</div>
               <q-space />
-              <q-btn v-if="auth.canWrite()" color="primary" unelevated icon="add_task" label="Создать задание бэкапа" @click="createPolicyForSelected" />
+              <q-btn v-if="auth.can('jobs.write')" color="primary" unelevated icon="add_task" label="Создать задание бэкапа" @click="createPolicyForSelected" />
               <q-btn flat label="Снять выбор" @click="selectedVMs = []" />
             </div>
           </q-banner>
@@ -396,7 +451,7 @@ const domainColumns = [
             :rows="vms"
             :columns="vmColumns"
             row-key="id"
-            selection="multiple"
+            :selection="auth.can('jobs.write') ? 'multiple' : 'none'"
             v-model:selected="selectedVMs"
             :grid="$q.screen.lt.md"
             flat
@@ -465,7 +520,8 @@ const domainColumns = [
                         ? 'должна быть выключена'
                         : 'не вмешиваться'
                   "
-                  :disable="!auth.canWrite()"
+                  :loading="resourceBusy('vm', props.row.id)"
+                  :disable="!auth.can('servers.write') || resourceBusy('vm', props.row.id)"
                 >
                   <q-list dense>
                     <q-item clickable v-close-popup @click="setPolicy(props.row, 'as_is')">
@@ -502,12 +558,13 @@ const domainColumns = [
                   round
                   icon="play_arrow"
                   color="positive"
-                  :disable="props.row.status === 'up'"
+                  :loading="resourceBusy('vm', props.row.id)"
+                  :disable="props.row.status === 'up' || resourceBusy('vm', props.row.id)"
                   @click="vmAction(props.row, 'start')"
                 >
                   <q-tooltip>Запустить / снять с паузы</q-tooltip>
                 </q-btn>
-                <q-btn-dropdown v-if="auth.canWrite()" flat dense round dropdown-icon="more_vert">
+                <q-btn-dropdown v-if="auth.can('servers.write')" flat dense round dropdown-icon="more_vert" :loading="resourceBusy('vm', props.row.id)" :disable="resourceBusy('vm', props.row.id)">
                   <q-list dense style="min-width: 220px">
                     <q-item v-if="canManage" clickable v-close-popup @click="vmAction(props.row, 'shutdown')">
                       <q-item-section avatar><q-icon name="power_settings_new" /></q-item-section>
@@ -594,7 +651,8 @@ const domainColumns = [
                     dense
                     round
                     icon="play_circle"
-                    :disable="props.row.status === 'up'"
+                    :loading="resourceBusy('host', props.row.id)"
+                    :disable="props.row.status === 'up' || resourceBusy('host', props.row.id)"
                     @click="hostAction(props.row, 'activate')"
                   >
                     <q-tooltip>Активировать</q-tooltip>
@@ -604,7 +662,8 @@ const domainColumns = [
                     dense
                     round
                     icon="build"
-                    :disable="props.row.status !== 'up'"
+                    :loading="resourceBusy('host', props.row.id)"
+                    :disable="props.row.status !== 'up' || resourceBusy('host', props.row.id)"
                     @click="hostAction(props.row, 'deactivate')"
                   >
                     <q-tooltip>Перевести в обслуживание</q-tooltip>
@@ -616,7 +675,8 @@ const domainColumns = [
                     round
                     icon="bolt"
                     color="negative"
-                    :disable="!props.row.power_mgmt_enabled"
+                    :loading="resourceBusy('host', props.row.id)"
+                    :disable="!props.row.power_mgmt_enabled || resourceBusy('host', props.row.id)"
                     @click="hostAction(props.row, 'fence')"
                   >
                     <q-tooltip>
@@ -653,7 +713,7 @@ const domainColumns = [
               <q-td :props="props">
                 <q-toggle
                   :model-value="props.row.backup_mode === 'incremental'"
-                  :disable="!auth.canWrite() || (props.row.format !== 'cow' && props.row.backup_mode !== 'incremental')"
+                  :disable="!auth.can('servers.write') || resourceBusy('disk', props.row.id) || (props.row.format !== 'cow' && props.row.backup_mode !== 'incremental')"
                   color="positive"
                   @update:model-value="toggleCBT(props.row)"
                 >

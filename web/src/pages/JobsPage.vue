@@ -2,7 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useQuasar } from 'quasar'
 import { useRoute, useRouter } from 'vue-router'
-import { api, notifyError, notifyOk } from '@/api/client'
+import { api, notify, notifyError, notifyOk } from '@/api/client'
 import { dateTime, runStatus, statusColor } from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
@@ -20,6 +20,8 @@ const jobs = ref<BackupJob[]>([])
 const selectedJobs = ref<BackupJob[]>([])
 const loading = ref(false)
 const saving = ref(false)
+const busyJobs = ref<string[]>([])
+const bulkRunning = ref(false)
 const dialog = ref(false)
 const jobStep = ref(1)
 const maxJobStep = ref(1)
@@ -33,7 +35,14 @@ const backupOptionsLoading = ref(false)
 const backupOptionsError = ref('')
 let vmLoadSequence = 0
 let optionLoadSequence = 0
+let jobsLoadSequence = 0
 let preserveUnavailableType = false
+
+function setJobBusy(id: string, busy: boolean) {
+  busyJobs.value = busy
+    ? [...new Set([...busyJobs.value, id])]
+    : busyJobs.value.filter((candidate) => candidate !== id)
+}
 
 const emptyForm = () => ({
   name: '',
@@ -164,13 +173,15 @@ function aggregateOptions(entries: Array<{ vm: VM; recommendation: Recommendatio
 }
 
 async function load() {
+  const sequence = ++jobsLoadSequence
   loading.value = true
   try {
-    jobs.value = await api.listJobs()
+    const value = await api.listJobs()
+    if (sequence === jobsLoadSequence) jobs.value = value
   } catch (err) {
-    notifyError(err, 'Не удалось загрузить задания')
+    if (sequence === jobsLoadSequence) notifyError(err, 'Не удалось загрузить задания')
   } finally {
-    loading.value = false
+    if (sequence === jobsLoadSequence) loading.value = false
   }
 }
 
@@ -387,22 +398,38 @@ async function save() {
 }
 
 async function runNow(job: BackupJob) {
+  if (busyJobs.value.includes(job.id)) return
+  setJobBusy(job.id, true)
   try {
     const result = await api.runJob(job.id)
     notifyOk(`Задание запущено, ВМ в очереди: ${result.vms ?? 0}`)
   } catch (err) {
     notifyError(err, 'Не удалось запустить задание')
+  } finally {
+    setJobBusy(job.id, false)
   }
 }
 
 async function runSelected() {
-  const chosen = [...selectedJobs.value]
+  if (bulkRunning.value) return
+  const chosen = selectedJobs.value.filter((job) => !busyJobs.value.includes(job.id))
   if (!chosen.length) return
-  const results = await Promise.allSettled(chosen.map((job) => api.runJob(job.id)))
-  const succeeded = results.filter((result) => result.status === 'fulfilled').length
-  const failed = results.length - succeeded
-  notifyOk(`Задания поставлены в очередь: ${succeeded}${failed ? `, ошибок: ${failed}` : ''}`)
-  if (!failed) selectedJobs.value = []
+  bulkRunning.value = true
+  chosen.forEach((job) => setJobBusy(job.id, true))
+  try {
+    const results = await Promise.allSettled(chosen.map((job) => api.runJob(job.id)))
+    const succeeded = results.filter((result) => result.status === 'fulfilled').length
+    const failed = results.length - succeeded
+    if (failed) {
+      notify({ type: succeeded ? 'warning' : 'negative', message: `Задания поставлены в очередь: ${succeeded}, ошибок: ${failed}` })
+    } else {
+      notifyOk(`Задания поставлены в очередь: ${succeeded}`)
+    }
+    if (!failed) selectedJobs.value = []
+  } finally {
+    chosen.forEach((job) => setJobBusy(job.id, false))
+    bulkRunning.value = false
+  }
 }
 
 function enableReplication(job: BackupJob) {
@@ -412,12 +439,16 @@ function enableReplication(job: BackupJob) {
 		cancel: { label: 'Отмена', flat: true },
 		ok: { label: 'Включить', color: 'primary' },
 	}).onOk(async () => {
+		if (busyJobs.value.includes(job.id)) return
+		setJobBusy(job.id, true)
 		try {
 			await api.enableJobReplication(job.id)
 			notifyOk('Репликация включена; следующий запуск будет полным')
 			await load()
 		} catch (err) {
 			notifyError(err, 'Не удалось включить репликацию')
+		} finally {
+			setJobBusy(job.id, false)
 		}
 	})
 }
@@ -429,12 +460,16 @@ function changePrimary(job: BackupJob, storageTargetID: string) {
 		cancel: { label: 'Отмена', flat: true },
 		ok: { label: 'Сменить', color: 'primary' },
 	}).onOk(async () => {
+		if (busyJobs.value.includes(job.id)) return
+		setJobBusy(job.id, true)
 		try {
 			await api.changeJobPrimary(job.id, storageTargetID)
 			notifyOk('Основное хранилище изменено')
 			await load()
 		} catch (err) {
 			notifyError(err, 'Не удалось сменить основное хранилище')
+		} finally {
+			setJobBusy(job.id, false)
 		}
 	})
 }
@@ -446,12 +481,16 @@ function confirmDelete(job: BackupJob) {
     cancel: { label: 'Отмена', flat: true },
     ok: { label: 'Удалить', color: 'negative' },
   }).onOk(async () => {
+    if (busyJobs.value.includes(job.id)) return
+    setJobBusy(job.id, true)
     try {
       await api.deleteJob(job.id)
       notifyOk('Задание удалено')
       await load()
     } catch (err) {
       notifyError(err, 'Не удалось удалить')
+    } finally {
+      setJobBusy(job.id, false)
     }
   })
 }
@@ -495,7 +534,7 @@ watch(() => [...form.value.exclude_vm_ids], () => void loadBackupOptions())
 watch(() => form.value.storage_target_ids[0] ?? '', () => void loadBackupOptions())
 
 async function applyRouteIntent() {
-	if (route.query.create === '1' && auth.canWrite()) {
+	if (route.query.create === '1' && auth.can('jobs.write')) {
 		const serverID = String(route.query.server ?? '')
 		const vmIDs = String(route.query.vms ?? '').split(',').filter(Boolean)
 		openCreate(serverID, vmIDs)
@@ -503,7 +542,7 @@ async function applyRouteIntent() {
 		return
 	}
 	const jobID = String(route.query.job ?? '')
-	if (jobID && auth.canWrite()) {
+	if (jobID && auth.can('jobs.write')) {
 		try {
 			const job = jobs.value.find((item) => item.id === jobID) ?? await api.getJob(jobID)
 			openEdit(job)
@@ -565,7 +604,7 @@ const columns = [
       <q-space />
       <q-btn flat dense round icon="refresh" aria-label="Обновить задания" :loading="loading" @click="load"><q-tooltip>Обновить</q-tooltip></q-btn>
       <q-btn
-        v-if="auth.canWrite()"
+        v-if="auth.can('jobs.write')"
         color="primary"
         icon="add"
         label="Новое задание"
@@ -579,7 +618,7 @@ const columns = [
       <div class="row items-center q-gutter-sm">
         <div>Выбрано заданий: {{ selectedJobs.length }}</div>
         <q-space />
-        <q-btn v-if="auth.canWrite()" color="primary" unelevated icon="play_arrow" label="Запустить выбранные" @click="runSelected" />
+        <q-btn v-if="auth.can('jobs.write')" color="primary" unelevated icon="play_arrow" label="Запустить выбранные" :loading="bulkRunning" :disable="bulkRunning" @click="runSelected" />
         <q-btn flat label="Снять выбор" @click="selectedJobs = []" />
       </div>
     </q-banner>
@@ -588,7 +627,7 @@ const columns = [
       :rows="jobs"
       :columns="columns"
       row-key="id"
-      selection="multiple"
+      :selection="auth.can('jobs.write') ? 'multiple' : 'none'"
       v-model:selected="selectedJobs"
       :grid="$q.screen.lt.md"
       flat
@@ -601,16 +640,16 @@ const columns = [
         <div class="q-pa-xs col-12">
           <q-card flat bordered>
             <q-card-section class="row items-start no-wrap">
-              <q-checkbox v-model="props.selected" class="q-mr-sm" :aria-label="`Выбрать задание ${props.row.name}`" />
+              <q-checkbox v-if="auth.can('jobs.write')" v-model="props.selected" class="q-mr-sm" :aria-label="`Выбрать задание ${props.row.name}`" />
               <div class="col">
                 <div class="text-subtitle1 text-weight-medium">{{ props.row.name }}</div>
                 <div class="text-caption text-grey-7">{{ app.serverName(props.row.server_id) }} · {{ app.backupTypeTitle(props.row.type) }}</div>
                 <div class="q-mt-xs"><q-chip dense :color="props.row.last_status ? statusColor(props.row.last_status) : 'grey-5'" text-color="white">{{ props.row.last_status ? runStatus(props.row.last_status) : 'ещё не запускалось' }}</q-chip></div>
                 <div class="text-caption">Следующий запуск: {{ dateTime(props.row.next_run_at) }}</div>
               </div>
-              <q-btn-dropdown v-if="auth.canWrite()" flat round dense dropdown-icon="more_vert" aria-label="Действия с заданием">
+              <q-btn flat round dense icon="visibility" aria-label="Показать охват задания" @click="preview(props.row)"><q-tooltip>Показать охват</q-tooltip></q-btn>
+              <q-btn-dropdown v-if="auth.can('jobs.write')" flat round dense dropdown-icon="more_vert" aria-label="Действия с заданием" :loading="busyJobs.includes(props.row.id)" :disable="busyJobs.includes(props.row.id)">
                 <q-list dense>
-                  <q-item clickable v-close-popup @click="preview(props.row)"><q-item-section avatar><q-icon name="visibility" /></q-item-section><q-item-section>Показать охват</q-item-section></q-item>
                   <q-item clickable v-close-popup @click="runNow(props.row)"><q-item-section avatar><q-icon name="play_arrow" color="positive" /></q-item-section><q-item-section>Запустить сейчас</q-item-section></q-item>
                   <q-item clickable v-close-popup @click="openEdit(props.row)"><q-item-section avatar><q-icon name="edit" /></q-item-section><q-item-section>Изменить</q-item-section></q-item>
                   <q-item clickable v-close-popup @click="confirmDelete(props.row)"><q-item-section avatar><q-icon name="delete" color="negative" /></q-item-section><q-item-section class="text-negative">Удалить</q-item-section></q-item>
@@ -691,13 +730,13 @@ const columns = [
           <q-btn flat dense round icon="visibility" aria-label="Показать охват задания" @click="preview(props.row)">
             <q-tooltip>Показать, какие ВМ попадают под отбор</q-tooltip>
           </q-btn>
-          <q-btn v-if="auth.canWrite()" flat dense round icon="play_arrow" color="positive" aria-label="Запустить задание" @click="runNow(props.row)">
+          <q-btn v-if="auth.can('jobs.write')" flat dense round icon="play_arrow" color="positive" aria-label="Запустить задание" :loading="busyJobs.includes(props.row.id)" :disable="busyJobs.includes(props.row.id)" @click="runNow(props.row)">
             <q-tooltip>Запустить сейчас</q-tooltip>
           </q-btn>
-			<q-btn v-if="auth.canAdmin() && !props.row.replication_enabled && props.row.type !== 'ova'" flat dense round icon="sync_alt" color="primary" aria-label="Включить репликацию" @click="enableReplication(props.row)">
+			<q-btn v-if="auth.can('jobs.admin') && !props.row.replication_enabled && props.row.type !== 'ova'" flat dense round icon="sync_alt" color="primary" aria-label="Включить репликацию" :disable="busyJobs.includes(props.row.id)" @click="enableReplication(props.row)">
 				<q-tooltip>Перевести задание на основное хранилище и реплики</q-tooltip>
 			</q-btn>
-			<q-btn-dropdown v-if="auth.canAdmin() && props.row.replication_enabled && props.row.storage_target_ids.length > 1" flat dense round dropdown-icon="swap_horiz" aria-label="Сменить основное хранилище">
+			<q-btn-dropdown v-if="auth.can('jobs.admin') && props.row.replication_enabled && props.row.storage_target_ids.length > 1" flat dense round dropdown-icon="swap_horiz" aria-label="Сменить основное хранилище" :disable="busyJobs.includes(props.row.id)">
 				<q-list dense>
 					<q-item v-for="id in props.row.storage_target_ids.slice(1)" :key="id" clickable v-close-popup @click="changePrimary(props.row, id)">
 						<q-item-section avatar><q-icon name="storage" /></q-item-section>
@@ -705,8 +744,8 @@ const columns = [
 					</q-item>
 				</q-list>
 			</q-btn-dropdown>
-          <q-btn v-if="auth.canWrite()" flat dense round icon="edit" aria-label="Изменить задание" @click="openEdit(props.row)"><q-tooltip>Изменить</q-tooltip></q-btn>
-          <q-btn v-if="auth.canWrite()" flat dense round icon="delete" color="negative" aria-label="Удалить задание" @click="confirmDelete(props.row)"><q-tooltip>Удалить</q-tooltip></q-btn>
+          <q-btn v-if="auth.can('jobs.write')" flat dense round icon="edit" aria-label="Изменить задание" :disable="busyJobs.includes(props.row.id)" @click="openEdit(props.row)"><q-tooltip>Изменить</q-tooltip></q-btn>
+          <q-btn v-if="auth.can('jobs.write')" flat dense round icon="delete" color="negative" aria-label="Удалить задание" :disable="busyJobs.includes(props.row.id)" @click="confirmDelete(props.row)"><q-tooltip>Удалить</q-tooltip></q-btn>
         </q-td>
       </template>
     </q-table>

@@ -61,7 +61,7 @@ async function submit() {
       <q-page class="flex flex-center bg-grey-2">
         <q-card style="width: 420px; max-width: 92vw" class="q-pa-sm">
           <q-card-section>
-            <div class="text-h6">JustHPC Virt Manager</div>
+            <div class="text-h6">Backup Virt Manager</div>
             <div class="text-caption text-grey-7">
               Защита и управление oVirt, РЕД Виртуализацией, Proxmox VE и KVM
             </div>

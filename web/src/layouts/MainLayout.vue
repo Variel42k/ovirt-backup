@@ -167,7 +167,7 @@ onBeforeUnmount(() => {
       <q-toolbar>
         <q-btn dense flat round icon="menu" aria-label="Меню" @click="drawer = !drawer" />
         <q-toolbar-title class="text-weight-medium jhv-brand-title">
-          JustHPC Virt Manager
+          Backup Virt Manager
           <span class="text-caption q-ml-sm opacity-70 gt-xs">защита виртуальной инфраструктуры</span>
         </q-toolbar-title>
 

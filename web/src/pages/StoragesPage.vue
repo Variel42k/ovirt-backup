@@ -6,6 +6,7 @@ import { ago, bytes, dateTime, storageKindIcon } from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import DirectoryPicker from '@/components/DirectoryPicker.vue'
+import { useUnsavedChanges } from '@/composables/unsavedChanges'
 import type { CatalogScanDetail, StorageKind, StorageTarget } from '@/api/types'
 
 const $q = useQuasar()
@@ -61,6 +62,11 @@ const emptyForm = () => ({
 })
 
 const form = ref(emptyForm())
+const storageFormBaseline = ref('')
+const storageFormSignature = computed(() => JSON.stringify(form.value))
+const { confirmDiscard: confirmStorageDiscard } = useUnsavedChanges(
+  computed(() => dialog.value && storageFormSignature.value !== storageFormBaseline.value),
+)
 let storageDialogGeneration = 0
 let hostKeyScanRequest = 0
 
@@ -157,6 +163,7 @@ function openCreate() {
   form.value = emptyForm()
   formError.value = ''
   scannedHostFingerprint.value = ''
+  storageFormBaseline.value = storageFormSignature.value
   dialog.value = true
 }
 
@@ -176,7 +183,12 @@ function openEdit(target: StorageTarget) {
   }
   formError.value = ''
   scannedHostFingerprint.value = ''
+  storageFormBaseline.value = storageFormSignature.value
   dialog.value = true
+}
+
+async function closeStorageDialog() {
+  if (await confirmStorageDiscard()) dialog.value = false
 }
 
 const pathPicker = ref(false)
@@ -1095,7 +1107,7 @@ function location(target: StorageTarget): string {
 
         <q-separator />
         <q-card-actions align="right">
-          <q-btn flat label="Отмена" :disable="saving || scanningKey" v-close-popup />
+          <q-btn flat label="Отмена" :disable="saving || scanningKey" @click="closeStorageDialog" />
           <q-btn
             color="primary"
             unelevated

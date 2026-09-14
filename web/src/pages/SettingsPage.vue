@@ -13,6 +13,7 @@ import { bytes, dateTime } from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import IdentitySettingsPanel from '@/components/IdentitySettingsPanel.vue'
+import { confirmDiscardChanges, useUnsavedChanges } from '@/composables/unsavedChanges'
 import type {
   ApiToken,
   ApprovalDelegation,
@@ -133,6 +134,59 @@ const qualityForm = ref<BackupQualitySettings>({
 const dialog = ref(false)
 const editing = ref<User | null>(null)
 const form = ref({ username: '', password: '', role: 'operator', disabled: false })
+const userBusy = ref(false)
+const identitySettingsDirty = ref(false)
+const userFormBaseline = ref('')
+const roleFormBaseline = ref('')
+const delegationFormBaseline = ref('')
+const voteDelegationFormBaseline = ref('')
+const tokenFormBaseline = ref('')
+const userFormSignature = computed(() => JSON.stringify(form.value))
+const roleFormSignature = computed(() => JSON.stringify(roleForm.value))
+const delegationFormSignature = computed(() => JSON.stringify(delegationForm.value))
+const voteDelegationFormSignature = computed(() => JSON.stringify(voteDelegationForm.value))
+const tokenFormSignature = computed(() => JSON.stringify(tokenForm.value))
+const userFormDirty = computed(() => dialog.value && userFormSignature.value !== userFormBaseline.value)
+const roleFormDirty = computed(() => roleDialog.value && roleFormSignature.value !== roleFormBaseline.value)
+const delegationFormDirty = computed(() => delegationDialog.value && (
+  Boolean(issuedDelegationToken.value) || delegationFormSignature.value !== delegationFormBaseline.value
+))
+const voteDelegationFormDirty = computed(() => (
+  voteDelegationDialog.value && voteDelegationFormSignature.value !== voteDelegationFormBaseline.value
+))
+const tokenFormDirty = computed(() => tokenDialog.value && (
+  Boolean(issuedToken.value) || tokenFormSignature.value !== tokenFormBaseline.value
+))
+const accessFormsDirty = computed(() => (
+  identitySettingsDirty.value ||
+  userFormDirty.value || roleFormDirty.value || delegationFormDirty.value ||
+  voteDelegationFormDirty.value || tokenFormDirty.value
+))
+useUnsavedChanges(
+  accessFormsDirty,
+  'Незаполненная форма или показанный один раз секрет будут потеряны.',
+)
+
+async function confirmFormDiscard(dirty: boolean): Promise<boolean> {
+  return !dirty || confirmDiscardChanges('Изменения этой формы ещё не сохранены и будут потеряны.')
+}
+
+watch(dialog, (open) => {
+  if (!open) form.value.password = ''
+})
+watch(delegationDialog, (open) => {
+  if (open) return
+  delegationForm.value.password = ''
+  issuedDelegationToken.value = ''
+})
+watch(voteDelegationDialog, (open) => {
+  if (open) return
+  voteDelegationForm.value.token = ''
+  voteDelegationForm.value.password = ''
+})
+watch(tokenDialog, (open) => {
+  if (!open) issuedToken.value = ''
+})
 
 function loadTimezoneOptions(): string[] {
   const fallback = [
@@ -452,16 +506,24 @@ const editingExternal = computed(() => !!editing.value && isExternal(editing.val
 function openCreate() {
   editing.value = null
   form.value = { username: '', password: '', role: 'operator', disabled: false }
+  userFormBaseline.value = userFormSignature.value
   dialog.value = true
 }
 
 function openEdit(user: User) {
   editing.value = user
   form.value = { username: user.username, password: '', role: user.role, disabled: user.disabled }
+  userFormBaseline.value = userFormSignature.value
   dialog.value = true
 }
 
+async function closeUserDialog() {
+  if (await confirmFormDiscard(userFormDirty.value)) dialog.value = false
+}
+
 async function save() {
+  if (userBusy.value) return
+  userBusy.value = true
   try {
     if (editing.value) {
       await api.updateUser(editing.value.id, {
@@ -479,6 +541,8 @@ async function save() {
     await load()
   } catch (err) {
     notifyError(err, 'Не удалось сохранить')
+  } finally {
+    userBusy.value = false
   }
 }
 
@@ -537,13 +601,21 @@ function delegationExpired(d: ApprovalDelegation): boolean {
 function openDelegationCreate() {
   delegationForm.value = { delegate: '', group_name: '', reason: '', ttl_hours: 168, password: '' }
   issuedDelegationToken.value = ''
+  delegationFormBaseline.value = delegationFormSignature.value
   delegationDialog.value = true
 }
 
+async function closeDelegationDialog() {
+  if (await confirmFormDiscard(delegationFormDirty.value)) delegationDialog.value = false
+}
+
 async function submitDelegation() {
+  if (delegationBusy.value) return
+  const payload = { ...delegationForm.value }
+  delegationForm.value.password = ''
   delegationBusy.value = true
   try {
-    const result = await api.createApprovalDelegation({ ...delegationForm.value })
+    const result = await api.createApprovalDelegation(payload)
     issuedDelegationToken.value = result.token
     await loadApprovals()
   } catch (err) {
@@ -572,16 +644,24 @@ function confirmRevokeDelegation(d: ApprovalDelegation) {
 
 function openVoteByDelegation(request: ApprovalRequest, approve: boolean) {
   voteDelegationForm.value = { token: '', password: '', approve, request: request.id }
+  voteDelegationFormBaseline.value = voteDelegationFormSignature.value
   voteDelegationDialog.value = true
 }
 
+async function closeVoteDelegationDialog() {
+  if (await confirmFormDiscard(voteDelegationFormDirty.value)) voteDelegationDialog.value = false
+}
+
 async function submitVoteByDelegation() {
-  const form = voteDelegationForm.value
-  approvalBusy.value = form.request
+  if (approvalBusy.value) return
+  const payload = { ...voteDelegationForm.value }
+  voteDelegationForm.value.token = ''
+  voteDelegationForm.value.password = ''
+  approvalBusy.value = payload.request
   try {
-    const updated = await api.voteApproval(form.request, form.approve, '', {
-      delegation_token: form.token,
-      delegation_password: form.password,
+    const updated = await api.voteApproval(payload.request, payload.approve, '', {
+      delegation_token: payload.token,
+      delegation_password: payload.password,
     })
     notifyOk(`Голос подан по делегированию: ${updated.state}`)
     voteDelegationDialog.value = false
@@ -642,6 +722,7 @@ function approvalProgress(request: ApprovalRequest): string {
 function openRoleCreate() {
   editingRole.value = null
   roleForm.value = { name: '', title: '', description: '', permissions: [] }
+  roleFormBaseline.value = roleFormSignature.value
   roleDialog.value = true
 }
 
@@ -653,10 +734,16 @@ function openRoleEdit(role: RoleDefinition) {
     description: role.description ?? '',
     permissions: [...role.permissions],
   }
+  roleFormBaseline.value = roleFormSignature.value
   roleDialog.value = true
 }
 
+async function closeRoleDialog() {
+  if (await confirmFormDiscard(roleFormDirty.value)) roleDialog.value = false
+}
+
 async function saveRole() {
+  if (roleBusy.value) return
   roleBusy.value = true
   try {
     if (editingRole.value) {
@@ -676,7 +763,11 @@ async function saveRole() {
     await load()
     // Список ролей в форме пользователя приходит из /meta — обновляем и его,
     // иначе новую роль нельзя будет назначить до перезагрузки страницы.
-    await app.reloadMeta()
+    try {
+      await app.reloadMeta()
+    } catch (refreshError) {
+      notifyError(refreshError, 'Роль сохранена, но список доступных ролей не обновился')
+    }
   } catch (err) {
     notifyError(err, 'Не удалось сохранить роль')
   } finally {
@@ -725,10 +816,16 @@ function roleSummary(role: RoleDefinition): string {
 function openTokenDialog() {
   tokenForm.value = { name: '', role: 'viewer', expires_in_days: 90 }
   issuedToken.value = ''
+  tokenFormBaseline.value = tokenFormSignature.value
   tokenDialog.value = true
 }
 
+async function closeTokenDialog() {
+  if (await confirmFormDiscard(tokenFormDirty.value)) tokenDialog.value = false
+}
+
 async function issueToken() {
+  if (tokenBusy.value) return
   if (!tokenForm.value.name.trim()) {
     notifyError(null, 'Укажите имя токена: по нему он опознаётся в журнале аудита')
     return
@@ -999,9 +1096,9 @@ watch(() => [route.query, route.meta.settingsTab], applyDeepLink)
       </q-tabs>
       <q-separator />
 
-      <q-tab-panels v-model="tab">
+      <q-tab-panels v-model="tab" keep-alive>
         <q-tab-panel v-if="auth.can('users.admin')" name="identity">
-          <IdentitySettingsPanel />
+          <IdentitySettingsPanel @dirty-change="identitySettingsDirty = $event" />
         </q-tab-panel>
         <q-tab-panel name="system">
           <div class="row q-col-gutter-md">
@@ -1976,8 +2073,8 @@ watch(() => [route.query, route.meta.settingsTab], applyDeepLink)
         </q-card-section>
         <q-separator />
         <q-card-actions align="right">
-          <q-btn flat label="Отмена" v-close-popup />
-          <q-btn color="primary" unelevated label="Сохранить" @click="save" />
+          <q-btn flat label="Отмена" :disable="userBusy" @click="closeUserDialog" />
+          <q-btn color="primary" unelevated label="Сохранить" :loading="userBusy" @click="save" />
         </q-card-actions>
       </q-card>
     </q-dialog>
@@ -2053,7 +2150,7 @@ watch(() => [route.query, route.meta.settingsTab], applyDeepLink)
 
         <q-separator />
         <q-card-actions align="right">
-          <q-btn flat :label="editingRole?.builtin ? 'Закрыть' : 'Отмена'" v-close-popup />
+          <q-btn flat :label="editingRole?.builtin ? 'Закрыть' : 'Отмена'" :disable="roleBusy" @click="closeRoleDialog" />
           <q-btn
             v-if="!editingRole?.builtin"
             color="primary"
@@ -2130,13 +2227,13 @@ watch(() => [route.query, route.meta.settingsTab], applyDeepLink)
         <q-separator />
         <q-card-actions align="right">
           <template v-if="!issuedDelegationToken">
-            <q-btn flat label="Отмена" v-close-popup />
+            <q-btn flat label="Отмена" :disable="delegationBusy" @click="closeDelegationDialog" />
             <q-btn
               color="primary" unelevated label="Передать"
               :loading="delegationBusy" @click="submitDelegation"
             />
           </template>
-          <q-btn v-else color="primary" unelevated label="Готово" v-close-popup />
+          <q-btn v-else color="primary" unelevated label="Готово" @click="delegationDialog = false" />
         </q-card-actions>
       </q-card>
     </q-dialog>
@@ -2171,9 +2268,10 @@ watch(() => [route.query, route.meta.settingsTab], applyDeepLink)
         </q-card-section>
         <q-separator />
         <q-card-actions align="right">
-          <q-btn flat label="Отмена" v-close-popup />
+          <q-btn flat label="Отмена" :disable="Boolean(approvalBusy)" @click="closeVoteDelegationDialog" />
           <q-btn
             color="primary" unelevated label="Проголосовать"
+            :loading="Boolean(approvalBusy)"
             :disable="!voteDelegationForm.token || !voteDelegationForm.password"
             @click="submitVoteByDelegation"
           />
@@ -2241,10 +2339,10 @@ watch(() => [route.query, route.meta.settingsTab], applyDeepLink)
         <q-separator />
         <q-card-actions align="right">
           <template v-if="!issuedToken">
-            <q-btn flat label="Отмена" v-close-popup />
+            <q-btn flat label="Отмена" :disable="tokenBusy" @click="closeTokenDialog" />
             <q-btn color="primary" unelevated label="Выпустить" :loading="tokenBusy" @click="issueToken" />
           </template>
-          <q-btn v-else color="primary" unelevated label="Готово, токен сохранён" v-close-popup />
+          <q-btn v-else color="primary" unelevated label="Готово, токен сохранён" @click="tokenDialog = false" />
         </q-card-actions>
       </q-card>
     </q-dialog>

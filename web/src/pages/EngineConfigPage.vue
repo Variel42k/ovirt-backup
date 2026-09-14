@@ -5,6 +5,7 @@ import { api, errorMessage, notifyError, notifyOk } from '@/api/client'
 import { bytes, dateTime, runStatus, statusColor } from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
+import { useUnsavedChanges } from '@/composables/unsavedChanges'
 import type { EngineConfigJob, EngineConfigRun } from '@/api/types'
 
 const $q = useQuasar()
@@ -34,6 +35,11 @@ const emptyForm = () => ({
   schedule: '30 2 * * *', retention: defaultRetention(),
 })
 const form = ref(emptyForm())
+const formBaseline = ref('')
+const formSignature = computed(() => JSON.stringify(form.value))
+const { confirmDiscard } = useUnsavedChanges(
+  computed(() => dialog.value && formSignature.value !== formBaseline.value),
+)
 
 const schedulePresets = [
   { label: 'Ежедневно в 02:30', value: '30 2 * * *' },
@@ -86,6 +92,7 @@ function createJob() {
   form.value.storage_target_id = app.enabledStorages[0]?.id ?? ''
   form.value.encrypt = Boolean(app.meta?.capabilities.encryption)
   formError.value = ''
+  formBaseline.value = formSignature.value
   dialog.value = true
 }
 
@@ -97,7 +104,12 @@ function editJob(job: EngineConfigJob) {
     schedule: job.schedule ?? '', retention: { ...job.retention },
   }
   formError.value = ''
+  formBaseline.value = formSignature.value
   dialog.value = true
+}
+
+async function closeDialog() {
+  if (await confirmDiscard()) dialog.value = false
 }
 
 function validateForm(): string {
@@ -287,7 +299,7 @@ onMounted(async () => {
           <div class="col-12 jhv-reason">Снимок сохраняется, если его удерживает хотя бы одно правило.</div>
         </q-card-section>
         <q-separator />
-        <q-card-actions align="right"><q-btn flat label="Отмена" :disable="saving" v-close-popup /><q-btn color="primary" label="Сохранить" :loading="saving" @click="saveJob" /></q-card-actions>
+        <q-card-actions align="right"><q-btn flat label="Отмена" :disable="saving" @click="closeDialog" /><q-btn color="primary" label="Сохранить" :loading="saving" @click="saveJob" /></q-card-actions>
       </q-card>
     </q-dialog>
   </q-page>

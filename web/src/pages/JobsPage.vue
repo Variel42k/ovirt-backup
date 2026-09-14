@@ -8,6 +8,7 @@ import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import BackupOptionsPicker from '@/components/BackupOptionsPicker.vue'
 import HelpButton from '@/components/HelpButton.vue'
+import { useUnsavedChanges } from '@/composables/unsavedChanges'
 import type { BackupJob, BackupOption, Disk, Host, Recommendation, VM } from '@/api/types'
 
 const $q = useQuasar()
@@ -81,6 +82,11 @@ const emptyForm = () => ({
 })
 
 const form = ref(emptyForm())
+const jobFormBaseline = ref('')
+const jobFormSignature = computed(() => JSON.stringify(form.value))
+const { confirmDiscard: confirmJobDiscard } = useUnsavedChanges(
+  computed(() => dialog.value && jobFormSignature.value !== jobFormBaseline.value),
+)
 
 // Частые расписания — чтобы не заставлять оператора вспоминать синтаксис cron.
 const schedulePresets = [
@@ -247,10 +253,14 @@ async function loadBackupOptions() {
     backupOptions.value = aggregateOptions(entries)
     const current = backupOptions.value.find((option) => option.type === form.value.type)
     if (!form.value.type || (!current?.available && !preserveUnavailableType)) {
+      const wasPristine = dialog.value && jobFormSignature.value === jobFormBaseline.value
       const replacement = backupOptions.value.find((option) => option.recommended) ??
         backupOptions.value.find((option) => option.available)
       form.value.type = replacement?.type ?? ''
       if (replacement?.suggested_verify) form.value.verify_after = replacement.suggested_verify
+      // Автоподбор при первом открытии — часть исходного состояния формы.
+      // Если оператор уже что-то изменил, его правки остаются «грязными».
+      if (wasPristine) jobFormBaseline.value = jobFormSignature.value
     }
     preserveUnavailableType = false
   } catch {
@@ -303,6 +313,7 @@ function openCreate(serverID = '', vmIDs: string[] = []) {
   jobStep.value = 1
   maxJobStep.value = 1
   jobFormError.value = ''
+  jobFormBaseline.value = jobFormSignature.value
   dialog.value = true
 }
 
@@ -325,7 +336,12 @@ function openEdit(job: BackupJob) {
   jobStep.value = 1
   maxJobStep.value = 5
   jobFormError.value = ''
+  jobFormBaseline.value = jobFormSignature.value
   dialog.value = true
+}
+
+async function closeJobDialog() {
+  if (await confirmJobDiscard()) dialog.value = false
 }
 
 function validateJobStep(step: number): string {
@@ -1170,7 +1186,7 @@ const columns = [
 
         <q-separator />
         <q-card-actions align="right">
-          <q-btn flat label="Отмена" v-close-popup :disable="saving" />
+          <q-btn flat label="Отмена" :disable="saving" @click="closeJobDialog" />
           <q-space />
           <q-btn v-if="jobStep > 1" flat label="Назад" icon="arrow_back" @click="jobStep--" />
           <q-btn

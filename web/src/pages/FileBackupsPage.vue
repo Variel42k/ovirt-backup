@@ -6,6 +6,7 @@ import DirectoryPicker from '@/components/DirectoryPicker.vue'
 import { bytes, dateTime, runStatus, statusColor } from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
+import { useUnsavedChanges } from '@/composables/unsavedChanges'
 import type { FileBackupJob, FileBackupManifest, FileBackupRoot, FileBackupRun } from '@/api/types'
 
 const $q = useQuasar()
@@ -32,6 +33,11 @@ const manifest = ref<FileBackupManifest | null>(null)
 const selectedRun = ref<FileBackupRun | null>(null)
 const selectedPaths = ref<string[]>([])
 const restoreForm = ref({ restore_root_index: 0, destination: '', overwrite: false, confirmOverwrite: false })
+const restoreFormBaseline = ref('')
+const restoreFormSignature = computed(() => JSON.stringify(restoreForm.value))
+const { confirmDiscard: confirmRestoreDiscard } = useUnsavedChanges(
+  computed(() => restoreDialog.value && restoreFormSignature.value !== restoreFormBaseline.value),
+)
 let pollTimer: number | undefined
 let treeLoadSequence = 0
 let pageLoadSequence = 0
@@ -60,6 +66,11 @@ const emptyForm = () => ({
   retention: defaultRetention(),
 })
 const form = ref(emptyForm())
+const jobFormBaseline = ref('')
+const jobFormSignature = computed(() => JSON.stringify(form.value))
+const { confirmDiscard: confirmJobDiscard } = useUnsavedChanges(
+  computed(() => jobDialog.value && jobFormSignature.value !== jobFormBaseline.value),
+)
 
 const schedulePresets = [
   { label: 'Каждый час', value: '0 * * * *' },
@@ -202,6 +213,7 @@ function createJob() {
   form.value.storage_target_ids = app.enabledStorages[0]?.id ? [app.enabledStorages[0].id] : []
   form.value.encrypt = Boolean(app.meta?.capabilities.encryption)
   jobFormError.value = ''
+  jobFormBaseline.value = jobFormSignature.value
   jobDialog.value = true
 }
 
@@ -221,7 +233,12 @@ function editJob(job: FileBackupJob) {
     retention: { ...job.retention },
   }
   jobFormError.value = ''
+  jobFormBaseline.value = jobFormSignature.value
   jobDialog.value = true
+}
+
+async function closeJobDialog() {
+  if (await confirmJobDiscard()) jobDialog.value = false
 }
 
 function relativePathError(value: string, label: string, allowEmpty = false): string {
@@ -372,7 +389,12 @@ function openRestore() {
   if (!selectedRun.value || !manifest.value || restoreRootOptions.value.length === 0) return
   restoreForm.value = { restore_root_index: 0, destination: '', overwrite: false, confirmOverwrite: false }
   restoreError.value = ''
+  restoreFormBaseline.value = restoreFormSignature.value
   restoreDialog.value = true
+}
+
+async function closeRestoreDialog() {
+  if (await confirmRestoreDiscard()) restoreDialog.value = false
 }
 
 async function restoreFiles() {
@@ -568,7 +590,7 @@ onBeforeUnmount(() => {
           </div>
         </q-card-section>
         <q-card-actions align="right">
-          <q-btn flat label="Отмена" :disable="jobSaving" v-close-popup />
+          <q-btn flat label="Отмена" :disable="jobSaving" @click="closeJobDialog" />
           <q-btn color="primary" label="Сохранить" :loading="jobSaving" @click="saveJob" />
         </q-card-actions>
       </q-card>
@@ -617,7 +639,7 @@ onBeforeUnmount(() => {
           <q-banner rounded class="bg-info text-white q-mt-md">Символические ссылки сохраняются как ссылки и никогда не обходятся при сканировании.</q-banner>
         </q-card-section>
         <q-card-actions align="right">
-          <q-btn flat label="Отмена" :disable="restoreBusy" v-close-popup />
+          <q-btn flat label="Отмена" :disable="restoreBusy" @click="closeRestoreDialog" />
           <q-btn color="primary" label="Восстановить" :loading="restoreBusy" :disable="restoreForm.overwrite && !restoreForm.confirmOverwrite" @click="restoreFiles" />
         </q-card-actions>
       </q-card>

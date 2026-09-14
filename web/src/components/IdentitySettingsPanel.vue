@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { api, errorMessage, notifyError, notifyOk } from '@/api/client'
 import type { DomainSettingsWrite, EmbeddedKeycloakWrite, IdentitySettings, IdentitySettingsWrite } from '@/api/settings-types'
 import { useOperationsStore } from '@/stores/operations'
+
+const emit = defineEmits<{ dirtyChange: [dirty: boolean] }>()
 
 function defaultKeycloakURL(): string {
   const hostname = window.location.hostname.includes(':') ? `[${window.location.hostname}]` : window.location.hostname
@@ -38,8 +40,22 @@ const domain = ref<DomainSettingsWrite>({
     viewer_group: 'virt-readers', group_mode: 'read-only',
   },
 })
-
+const identityFormBaseline = ref('')
+const identityFormSignature = computed(() => JSON.stringify({
+  groups: groups.value,
+  oidc: oidc.value,
+  embedded: embedded.value,
+  domain: domain.value,
+  caFile: domainCAFile.value ? {
+    name: domainCAFile.value.name,
+    size: domainCAFile.value.size,
+    modified: domainCAFile.value.lastModified,
+  } : null,
+}))
 const canConfigure = computed(() => settings.value?.can_configure ?? false)
+const identityFormDirty = computed(() => Boolean(
+  canConfigure.value && identityFormBaseline.value && identityFormSignature.value !== identityFormBaseline.value,
+))
 const identityReady = computed(() => Boolean(settings.value?.enabled && settings.value?.client_secret_stored))
 const oidcSecretReusable = computed(() => Boolean(
   settings.value?.client_secret_stored &&
@@ -225,6 +241,12 @@ function applySettings(value: IdentitySettings) {
   domain.value.domain.admin_group = groups.value.admin
   domain.value.domain.operator_group = groups.value.operator
   domain.value.domain.viewer_group = groups.value.viewer
+  // Наблюдатели зависимых полей выполняются в следующий tick. Снимаем
+  // признак изменений после них, чтобы загруженные значения не считались
+  // ручным редактированием.
+  void nextTick(() => {
+    identityFormBaseline.value = identityFormSignature.value
+  })
 }
 
 async function load() {
@@ -327,12 +349,17 @@ watch(() => oidc.value.issuer, (issuer, previous) => {
 })
 
 watch([embedded, oidc, domain, groups], () => { identityFormError.value = '' }, { deep: true })
+watch(identityFormDirty, (dirty) => emit('dirtyChange', dirty), { immediate: true })
 
 onMounted(load)
 </script>
 
 <template>
   <div class="relative-position">
+    <q-banner v-if="identityFormDirty" dense class="bg-blue-1 text-primary q-mb-md">
+      <template #avatar><q-icon name="edit_note" /></template>
+      Есть несохранённые изменения. Примените их перед переходом в другой раздел.
+    </q-banner>
     <q-banner v-if="!canConfigure && !loading" dense class="bg-orange-1 q-mb-md">
       <template #avatar><q-icon name="lock" color="orange-9" /></template>
       Изменять Keycloak и домен можно только из сессии локального администратора с правом управления пользователями.

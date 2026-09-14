@@ -9,6 +9,7 @@ import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import { useOperationsStore } from '@/stores/operations'
 import HelpButton from '@/components/HelpButton.vue'
+import { useUnsavedChanges } from '@/composables/unsavedChanges'
 import type { BackupCopy, BackupDisk, BackupRun, BootReport, Cluster, Host, ReplicationDetail, RepositoryArtifact, RestoreNetworkTarget, RestoreRun, RestoreVMPlan, StorageDomain, VerifyRun } from '@/api/types'
 
 const $q = useQuasar()
@@ -98,6 +99,12 @@ const vmForm = ref({
   server_id: '', name: '', cluster_id: '', host_id: '', network: 'detached', start: false, confirm: false,
   network_mappings: [] as Array<{ nic_id: string; target_id: string; target_kind: string; exclude: boolean; connected: boolean }>,
 })
+const restoreFormBaseline = ref('')
+const restoreFormSignature = computed(() => JSON.stringify({ restore: restoreForm.value, vm: vmForm.value }))
+const { confirmDiscard: confirmRestoreDiscard } = useUnsavedChanges(
+  computed(() => restoreOpen.value && restoreFormSignature.value !== restoreFormBaseline.value),
+  'Настройки восстановления ещё не применены и будут потеряны.',
+)
 const vmTargetServer = computed(() => app.servers.find((server) => server.id === vmForm.value.server_id))
 const sourceServer = computed(() => app.servers.find((server) => server.id === detail.value?.server_id))
 const nativeProxmoxRestore = computed(() => sourceServer.value?.kind === 'proxmox')
@@ -413,8 +420,13 @@ async function openRestore(run: BackupRun) {
   maxRestoreStep.value = 1
   restoreFormError.value = ''
   vmForm.value = { server_id: run.server_id, name: '', cluster_id: '', host_id: '', network: 'detached', start: false, confirm: false, network_mappings: [] }
+  restoreFormBaseline.value = restoreFormSignature.value
   restoreOpen.value = true
   void loadVMTargetInventory(run.server_id)
+}
+
+async function closeRestoreDialog() {
+  if (await confirmRestoreDiscard()) restoreOpen.value = false
 }
 
 function invalidateVMPlan() {
@@ -1965,7 +1977,7 @@ const replicationColumns = [
 
         <q-separator />
         <q-card-actions align="right">
-          <q-btn flat label="Отмена" v-close-popup :disable="restoreBusy || vmPlanLoading" />
+          <q-btn flat label="Отмена" :disable="restoreBusy || vmPlanLoading" @click="closeRestoreDialog" />
           <q-space />
           <q-btn v-if="restoreStep > 1" flat label="Назад" icon="arrow_back" @click="restoreStep--" />
           <q-btn v-if="restoreStep < 3" color="primary" unelevated label="Продолжить" icon-right="arrow_forward" @click="nextRestoreStep" />

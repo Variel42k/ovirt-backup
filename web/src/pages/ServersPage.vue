@@ -3,6 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useQuasar } from 'quasar'
 import { api, errorMessage, notify, notifyError, notifyOk } from '@/api/client'
 import DirectoryPicker from '@/components/DirectoryPicker.vue'
+import { useUnsavedChanges } from '@/composables/unsavedChanges'
 import { ago, connState } from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
@@ -71,6 +72,11 @@ const emptyForm = () => ({
 })
 
 const form = ref(emptyForm())
+const connectionFormBaseline = ref('')
+const connectionFormSignature = computed(() => JSON.stringify(form.value))
+const { confirmDiscard: confirmConnectionDiscard } = useUnsavedChanges(
+  computed(() => dialog.value && connectionFormSignature.value !== connectionFormBaseline.value),
+)
 
 // A successful probe only describes the exact credentials and trust settings
 // that were sent. Clear the result as soon as a connection-relevant field
@@ -228,6 +234,11 @@ const provisionForm = ref({
   service_username: '',
   service_password: '',
 })
+const provisionFormBaseline = ref('')
+const provisionFormSignature = computed(() => JSON.stringify(provisionForm.value))
+const { confirmDiscard: confirmProvisionDiscard } = useUnsavedChanges(
+  computed(() => provisionOpen.value && provisionFormSignature.value !== provisionFormBaseline.value),
+)
 
 function openProvision() {
   provisionResult.value = null
@@ -238,7 +249,12 @@ function openProvision() {
   provisionCAUpload.value = null
   provisionCAFingerprint.value = ''
   provisionFormError.value = ''
+  provisionFormBaseline.value = provisionFormSignature.value
   provisionOpen.value = true
+}
+
+async function closeProvision() {
+  if (await confirmProvisionDiscard()) provisionOpen.value = false
 }
 
 async function useProvisionCAFile(file: File | null) {
@@ -303,8 +319,13 @@ async function runProvision() {
     const result = await api.provisionServer(payload)
     provisionResult.value = result
     if (result.ok) {
+      provisionFormBaseline.value = provisionFormSignature.value
       notifyOk('Подключение настроено: сохранена только сервисная учётная запись')
-      await app.loadServers()
+      try {
+        await app.loadServers()
+      } catch (refreshError) {
+        notifyError(refreshError, 'Подключение создано, но список не обновился')
+      }
     }
   } catch (err) {
     provisionFormError.value = errorMessage(err)
@@ -333,6 +354,7 @@ function openCreate() {
   scannedHostFingerprint.value = ''
   scannedNodeKeys.value = []
   formError.value = ''
+  connectionFormBaseline.value = connectionFormSignature.value
   dialog.value = true
 }
 
@@ -369,7 +391,12 @@ function openEdit(server: Server) {
   scannedHostFingerprint.value = ''
   scannedNodeKeys.value = []
   formError.value = ''
+  connectionFormBaseline.value = connectionFormSignature.value
   dialog.value = true
+}
+
+async function closeConnectionDialog() {
+  if (await confirmConnectionDiscard()) dialog.value = false
 }
 
 async function useCAFile(file: File | null) {
@@ -1248,7 +1275,7 @@ onMounted(load)
             @click="probe"
           />
           <q-space />
-          <q-btn flat label="Отмена" v-close-popup :disable="saving || probing || scanningKey || fetchingCA" />
+          <q-btn flat label="Отмена" :disable="saving || probing || scanningKey || fetchingCA" @click="closeConnectionDialog" />
           <q-btn color="primary" unelevated label="Сохранить" :loading="saving" :disable="probing || scanningKey || fetchingCA" @click="save" />
         </q-card-actions>
       </q-card>
@@ -1386,7 +1413,7 @@ onMounted(load)
 
         <q-separator />
         <q-card-actions align="right">
-          <q-btn flat label="Закрыть" v-close-popup :disable="provisionBusy || provisionFetchingCA" />
+          <q-btn flat label="Закрыть" :disable="provisionBusy || provisionFetchingCA" @click="closeProvision" />
           <q-btn
             color="primary"
             unelevated

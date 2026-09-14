@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useQuasar } from 'quasar'
 import {
   api,
+  errorMessage,
   notifyError,
   notifyOk,
   popupNotificationsEnabled,
@@ -13,6 +14,7 @@ import { bytes, dateTime } from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import IdentitySettingsPanel from '@/components/IdentitySettingsPanel.vue'
+import PageLoadError from '@/components/PageLoadError.vue'
 import { confirmDiscardChanges, useUnsavedChanges } from '@/composables/unsavedChanges'
 import type {
   ApiToken,
@@ -80,6 +82,11 @@ const approvals = ref<ApprovalRequest[]>([])
 const approvalGroups = ref<ApprovalGroup[]>([])
 const breakGlass = ref<BreakGlassEvent[]>([])
 const approvalBusy = ref<string | null>(null)
+const approvalsLoading = ref(false)
+const approvalsError = ref('')
+const approvalRequestsAvailable = ref(false)
+const delegationsAvailable = ref(false)
+const approvalGroupsAvailable = ref(false)
 const delegations = ref<ApprovalDelegation[]>([])
 const delegationDialog = ref(false)
 const delegationBusy = ref(false)
@@ -102,7 +109,23 @@ const tokenForm = ref({ name: '', role: 'viewer', expires_in_days: 90 })
 // Выпущенный токен показывается ровно один раз: в базе лежит только его хеш.
 // Пока эта строка не пуста, диалог показывает её вместо формы.
 const issuedToken = ref('')
+type SettingsSection = 'access' | 'audit' | 'runtime' | 'dr' | 'notifications'
+const sectionErrors = ref<Record<SettingsSection, string>>({
+  access: '',
+  audit: '',
+  runtime: '',
+  dr: '',
+  notifications: '',
+})
+const sectionLoading = ref<Record<SettingsSection, boolean>>({
+  access: false,
+  audit: false,
+  runtime: false,
+  dr: false,
+  notifications: false,
+})
 const loading = ref(false)
+const runtimeUnavailable = computed(() => sectionLoading.value.runtime || Boolean(sectionErrors.value.runtime))
 const runtimeSettings = ref<RuntimeSettings | null>(null)
 const compressionBusy = ref(false)
 const timezoneBusy = ref(false)
@@ -223,41 +246,71 @@ const timezoneDirty = computed(
   () => timezoneForm.value.trim() !== (runtimeSettings.value?.timezone.value ?? ''),
 )
 
+async function loadSection(section: SettingsSection, action: () => Promise<void>) {
+  if (sectionLoading.value[section]) return
+  sectionLoading.value[section] = true
+  sectionErrors.value[section] = ''
+  try {
+    await action()
+  } catch (err) {
+    sectionErrors.value[section] = errorMessage(err)
+  } finally {
+    sectionLoading.value[section] = false
+  }
+}
+
+function loadAccessSettings() {
+  return loadSection('access', async () => {
+    const [userList, tokens, roleList, sections] = await Promise.all([
+      api.listUsers(), api.listApiTokens(), api.listRoles(), api.permissionCatalog(),
+    ])
+    users.value = userList
+    apiTokens.value = tokens
+    roles.value = roleList
+    permissionSections.value = sections
+  })
+}
+
+function loadAudit() {
+  return loadSection('audit', async () => {
+    audit.value = await api.audit(300)
+  })
+}
+
+function loadRuntimeSettings() {
+  return loadSection('runtime', async () => {
+    applyRuntimeSettings(await api.runtimeSettings())
+  })
+}
+
+function loadDRReadiness() {
+  return loadSection('dr', async () => {
+    drReadiness.value = await api.drReadiness()
+  })
+}
+
+function loadNotificationSettings() {
+  return loadSection('notifications', async () => {
+    const [notifications, deliveries] = await Promise.all([
+      api.notificationSettings(), api.notificationDeliveries(50),
+    ])
+    notificationConfig.value = notifications
+    notificationDeliveries.value = deliveries
+  })
+}
+
 async function load() {
+  if (loading.value) return
   loading.value = true
   try {
     const tasks: Promise<void>[] = [loadApprovals()]
-
-    if (auth.can('users.admin')) tasks.push((async () => {
-      const [userList, tokens, roleList, sections] = await Promise.all([
-        api.listUsers(), api.listApiTokens(), api.listRoles(), api.permissionCatalog(),
-      ])
-      users.value = userList
-      apiTokens.value = tokens
-      roles.value = roleList
-      permissionSections.value = sections
-    })())
-    if (auth.can('audit.read')) tasks.push((async () => {
-      audit.value = await api.audit(300)
-    })())
-    if (auth.can('settings.read')) tasks.push((async () => {
-      applyRuntimeSettings(await api.runtimeSettings())
-    })())
-    if (auth.can('dr.read')) tasks.push((async () => {
-      drReadiness.value = await api.drReadiness()
-    })())
-    if (auth.can('alerts.admin')) tasks.push((async () => {
-      const [notifications, deliveries] = await Promise.all([
-        api.notificationSettings(), api.notificationDeliveries(50),
-      ])
-      notificationConfig.value = notifications
-      notificationDeliveries.value = deliveries
-    })())
+    if (auth.can('users.admin')) tasks.push(loadAccessSettings())
+    if (auth.can('audit.read')) tasks.push(loadAudit())
+    if (auth.can('settings.read')) tasks.push(loadRuntimeSettings())
+    if (auth.can('dr.read')) tasks.push(loadDRReadiness())
+    if (auth.can('alerts.admin')) tasks.push(loadNotificationSettings())
     if (auth.can('alerts.read')) tasks.push(loadMode())
-
     await Promise.all(tasks)
-  } catch (err) {
-    notifyError(err, 'Не удалось загрузить настройки')
   } finally {
     loading.value = false
   }
@@ -267,8 +320,10 @@ async function checkDR() {
 	drBusy.value = true
 	try {
 		drReadiness.value = await api.checkDRReadiness()
+		sectionErrors.value.dr = ''
 		notifyOk(drReadiness.value.ok ? 'Аварийная готовность подтверждена' : 'Проверка завершена: есть проблемы')
 	} catch (err) {
+		sectionErrors.value.dr = errorMessage(err)
 		notifyError(err, 'Не удалось проверить аварийную готовность')
 	} finally {
 		drBusy.value = false
@@ -547,24 +602,42 @@ async function save() {
 }
 
 async function loadApprovals() {
+  if (approvalsLoading.value) return
+  approvalsLoading.value = true
+  approvalsError.value = ''
   try {
     // Вкладка открыта всем: согласующий администратором быть не обязан.
     // Дополнительные данные запрашиваем только при наличии их точного права.
-    const [requests, mine] = await Promise.all([
+    const [requests, mine, groups, events] = await Promise.allSettled([
       api.listApprovals(true),
       api.listApprovalDelegations(),
+      auth.can('users.admin') ? api.listApprovalGroups() : Promise.resolve(null),
+      auth.can('audit.read') ? api.listBreakGlass(50) : Promise.resolve(null),
     ])
-    approvals.value = requests
-    delegations.value = mine
+    approvalRequestsAvailable.value = requests.status === 'fulfilled'
+    delegationsAvailable.value = mine.status === 'fulfilled'
+    approvalGroupsAvailable.value = groups.status === 'fulfilled'
+    if (requests.status === 'fulfilled') approvals.value = requests.value
+    if (mine.status === 'fulfilled') delegations.value = mine.value
+    if (groups.status === 'fulfilled' && groups.value) approvalGroups.value = groups.value
+    if (events.status === 'fulfilled' && events.value) breakGlass.value = events.value
 
-    if (auth.can('users.admin')) {
-      approvalGroups.value = await api.listApprovalGroups()
-    }
-    if (auth.can('audit.read')) {
-      breakGlass.value = await api.listBreakGlass(50)
-    }
+    const failures = [
+      { label: 'заявки', result: requests },
+      { label: 'делегирования', result: mine },
+      { label: 'группы', result: groups },
+      { label: 'события обхода', result: events },
+    ].filter(({ result }) => result.status === 'rejected')
+    approvalsError.value = failures
+      .map(({ label, result }) => `${label}: ${errorMessage((result as PromiseRejectedResult).reason)}`)
+      .join('; ')
   } catch (err) {
-    notifyError(err, 'Не удалось загрузить согласования')
+    approvalRequestsAvailable.value = false
+    delegationsAvailable.value = false
+    approvalGroupsAvailable.value = false
+    approvalsError.value = errorMessage(err)
+  } finally {
+    approvalsLoading.value = false
   }
 }
 
@@ -914,15 +987,22 @@ function confirmDelete(user: User) {
 
 const mode = ref<RemediationMode | null>(null)
 const modeBusy = ref(false)
+const modeLoading = ref(false)
+const modeError = ref('')
 const modePeriods = computed(() => mode.value?.history ?? [])
 const archive = ref<RemediationArchive | null>(null)
 const archiveOpen = ref(false)
 
 async function loadMode() {
+  if (modeLoading.value) return
+  modeLoading.value = true
+  modeError.value = ''
   try {
     mode.value = await api.remediationMode()
   } catch (err) {
-    notifyError(err, 'Не удалось получить режим авто-восстановления')
+    modeError.value = errorMessage(err)
+  } finally {
+    modeLoading.value = false
   }
 }
 
@@ -961,7 +1041,9 @@ const logLevels = ref<string[]>([])
 const logLines = ref<string[]>([])
 const logTailSize = ref(200)
 const logLoading = ref(false)
+const logsError = ref('')
 const logFilter = ref('')
+let logLoadSequence = 0
 
 /** Строки журнала — JSON; показываем разобранными, но с исходником под рукой. */
 const parsedLog = computed(() =>
@@ -995,16 +1077,20 @@ function levelColor(level: string): string {
 }
 
 async function loadLogs() {
+  const sequence = ++logLoadSequence
   logLoading.value = true
+  logsError.value = ''
   try {
     const [status, tail] = await Promise.all([api.logStatus(), api.logTail(logTailSize.value)])
+    if (sequence !== logLoadSequence) return
     logStatus.value = status.status
     logLevels.value = status.levels
     logLines.value = tail.lines
+    logsError.value = ''
   } catch (err) {
-    notifyError(err, 'Не удалось загрузить журнал')
+    if (sequence === logLoadSequence) logsError.value = errorMessage(err)
   } finally {
-    logLoading.value = false
+    if (sequence === logLoadSequence) logLoading.value = false
   }
 }
 
@@ -1080,7 +1166,13 @@ watch(() => [route.query, route.meta.settingsTab], applyDeepLink)
 
 <template>
   <q-page padding>
-    <div class="text-h5 q-mb-md">Администрирование</div>
+    <div class="row items-center q-mb-md">
+      <div class="text-h5">Администрирование</div>
+      <q-space />
+      <q-btn flat dense round icon="refresh" aria-label="Обновить настройки" :loading="loading" @click="load">
+        <q-tooltip>Обновить доступные разделы</q-tooltip>
+      </q-btn>
+    </div>
 
     <q-card flat bordered>
       <div class="row q-pa-sm q-gutter-sm">
@@ -1101,6 +1193,12 @@ watch(() => [route.query, route.meta.settingsTab], applyDeepLink)
           <IdentitySettingsPanel @dirty-change="identitySettingsDirty = $event" />
         </q-tab-panel>
         <q-tab-panel name="system">
+          <PageLoadError
+            :message="sectionErrors.runtime"
+            title="Не удалось загрузить параметры приложения"
+            :loading="sectionLoading.runtime"
+            @retry="loadRuntimeSettings"
+          />
           <div class="row q-col-gutter-md">
             <div class="col-12 col-md-6">
               <q-list bordered separator dense class="q-mb-md">
@@ -1148,7 +1246,7 @@ watch(() => [route.query, route.meta.settingsTab], applyDeepLink)
                       outlined
                       dense
                       :loading="compressionBusy"
-                      :disable="compressionBusy"
+                      :disable="compressionBusy || runtimeUnavailable"
                       @update:model-value="changeCompression"
                     >
                       <q-tooltip>Изменение применяется к новым запускам; выполняющиеся сохраняют прежний алгоритм</q-tooltip>
@@ -1156,7 +1254,7 @@ watch(() => [route.query, route.meta.settingsTab], applyDeepLink)
                   </q-item-section>
                   <q-item-section v-else side>{{ app.meta?.capabilities.compression }}</q-item-section>
                   <q-item-section v-if="auth.can('settings.admin') && runtimeSettings?.compression.source === 'database'" side>
-                    <q-btn flat dense round icon="restart_alt" :disable="compressionBusy" @click="resetCompression">
+                    <q-btn flat dense round icon="restart_alt" :disable="compressionBusy || runtimeUnavailable" @click="resetCompression">
                       <q-tooltip>Вернуть значение из YAML или окружения</q-tooltip>
                     </q-btn>
                   </q-item-section>
@@ -1191,7 +1289,7 @@ watch(() => [route.query, route.meta.settingsTab], applyDeepLink)
                         input-debounce="0"
                         new-value-mode="add-unique"
                         :loading="timezoneBusy"
-                        :disable="timezoneBusy"
+                        :disable="timezoneBusy || runtimeUnavailable"
                         aria-label="Системный часовой пояс"
                         @filter="filterTimezones"
                       />
@@ -1201,7 +1299,7 @@ watch(() => [route.query, route.meta.settingsTab], applyDeepLink)
                         round
                         icon="save"
                         aria-label="Сохранить часовой пояс"
-                        :disable="timezoneBusy || !timezoneDirty"
+                        :disable="timezoneBusy || runtimeUnavailable || !timezoneDirty"
                         @click="saveTimezone"
                       >
                         <q-tooltip>Сохранить и пересчитать следующие запуски</q-tooltip>
@@ -1213,7 +1311,7 @@ watch(() => [route.query, route.meta.settingsTab], applyDeepLink)
                         round
                         icon="restart_alt"
                         aria-label="Сбросить часовой пояс"
-                        :disable="timezoneBusy"
+                        :disable="timezoneBusy || runtimeUnavailable"
                         @click="resetTimezone"
                       >
                         <q-tooltip>Вернуть значение из YAML или окружения</q-tooltip>
@@ -1249,6 +1347,12 @@ watch(() => [route.query, route.meta.settingsTab], applyDeepLink)
             </div>
 
             <div v-if="auth.can('alerts.read')" class="col-12 col-md-6">
+              <PageLoadError
+                :message="modeError"
+                title="Не удалось загрузить режим авто-восстановления"
+                :loading="modeLoading"
+                @retry="loadMode"
+              />
               <q-list bordered separator dense>
                 <q-item-label header>Авто-восстановление</q-item-label>
                 <q-item>
@@ -1273,7 +1377,7 @@ watch(() => [route.query, route.meta.settingsTab], applyDeepLink)
                   <q-item-section side>
                     <q-toggle
                       :model-value="mode?.dry_run ?? false"
-                      :disable="!auth.can('alerts.admin') || modeBusy"
+                      :disable="!auth.can('alerts.admin') || modeBusy || modeLoading || Boolean(modeError)"
                       color="warning"
                       @update:model-value="askMode"
                     />
@@ -1344,6 +1448,12 @@ watch(() => [route.query, route.meta.settingsTab], applyDeepLink)
         </q-tab-panel>
 
         <q-tab-panel v-if="auth.can('settings.read')" name="monitoring">
+          <PageLoadError
+            :message="sectionErrors.runtime"
+            title="Не удалось загрузить пороги качества"
+            :loading="sectionLoading.runtime"
+            @retry="loadRuntimeSettings"
+          />
           <div class="row q-col-gutter-md">
             <div class="col-12 col-lg-8">
               <div class="text-subtitle1 q-mb-xs">Качество бэкапов</div>
@@ -1353,27 +1463,27 @@ watch(() => [route.query, route.meta.settingsTab], applyDeepLink)
               <div class="row q-col-gutter-md">
                 <div class="col-12 col-sm-6">
                   <q-input v-model.number="qualityForm.stale_intervals" type="number" min="1" max="10"
-                           label="Просрочка после интервалов" outlined dense :disable="qualityBusy || !auth.can('settings.admin')" />
+                           label="Просрочка после интервалов" outlined dense :disable="qualityBusy || runtimeUnavailable || !auth.can('settings.admin')" />
                 </div>
                 <div class="col-12 col-sm-6">
                   <q-input v-model.number="qualityForm.verify_max_age_days" type="number" min="1" max="365"
-                           label="Проверка старше, дней" outlined dense :disable="qualityBusy || !auth.can('settings.admin')" />
+                           label="Проверка старше, дней" outlined dense :disable="qualityBusy || runtimeUnavailable || !auth.can('settings.admin')" />
                 </div>
                 <div class="col-12 col-sm-6">
                   <q-input v-model.number="qualityForm.performance_window_runs" type="number" min="5" max="50"
-                           label="Запусков для базовой скорости" outlined dense :disable="qualityBusy || !auth.can('settings.admin')" />
+                           label="Запусков для базовой скорости" outlined dense :disable="qualityBusy || runtimeUnavailable || !auth.can('settings.admin')" />
                 </div>
                 <div class="col-12 col-sm-6">
                   <q-input v-model.number="qualityForm.performance_consecutive_runs" type="number" min="1" max="10"
-                           label="Медленных запусков подряд" outlined dense :disable="qualityBusy || !auth.can('settings.admin')" />
+                           label="Медленных запусков подряд" outlined dense :disable="qualityBusy || runtimeUnavailable || !auth.can('settings.admin')" />
                 </div>
                 <div class="col-12 col-sm-6">
                   <q-input v-model.number="qualityForm.performance_degradation_percent" type="number" min="10" max="90"
-                           label="Снижение скорости, %" outlined dense :disable="qualityBusy || !auth.can('settings.admin')" />
+                           label="Снижение скорости, %" outlined dense :disable="qualityBusy || runtimeUnavailable || !auth.can('settings.admin')" />
                 </div>
                 <div class="col-12 col-sm-6">
                   <q-input v-model.number="qualityForm.history_retention_days" type="number" min="7" max="3650"
-                           label="История ёмкости, дней" outlined dense :disable="qualityBusy || !auth.can('settings.admin')" />
+                           label="История ёмкости, дней" outlined dense :disable="qualityBusy || runtimeUnavailable || !auth.can('settings.admin')" />
                 </div>
               </div>
 
@@ -1382,32 +1492,38 @@ watch(() => [route.query, route.meta.settingsTab], applyDeepLink)
               <div class="row q-col-gutter-md">
                 <div class="col-6 col-sm-3">
                   <q-input v-model.number="qualityForm.storage_warning_free_percent" type="number" min="1" max="99"
-                           label="Предупреждение, %" outlined dense :disable="qualityBusy || !auth.can('settings.admin')" />
+                           label="Предупреждение, %" outlined dense :disable="qualityBusy || runtimeUnavailable || !auth.can('settings.admin')" />
                 </div>
                 <div class="col-6 col-sm-3">
                   <q-input v-model.number="qualityForm.storage_critical_free_percent" type="number" min="1" max="99"
-                           label="Критично, %" outlined dense :disable="qualityBusy || !auth.can('settings.admin')" />
+                           label="Критично, %" outlined dense :disable="qualityBusy || runtimeUnavailable || !auth.can('settings.admin')" />
                 </div>
                 <div class="col-6 col-sm-3">
                   <q-input v-model.number="qualityForm.storage_warning_forecast_days" type="number" min="1" max="365"
-                           label="Прогноз, дней" outlined dense :disable="qualityBusy || !auth.can('settings.admin')" />
+                           label="Прогноз, дней" outlined dense :disable="qualityBusy || runtimeUnavailable || !auth.can('settings.admin')" />
                 </div>
                 <div class="col-6 col-sm-3">
                   <q-input v-model.number="qualityForm.storage_critical_forecast_days" type="number" min="1" max="365"
-                           label="Критичный прогноз" outlined dense :disable="qualityBusy || !auth.can('settings.admin')" />
+                           label="Критичный прогноз" outlined dense :disable="qualityBusy || runtimeUnavailable || !auth.can('settings.admin')" />
                 </div>
               </div>
 
               <div class="row items-center q-gutter-sm q-mt-lg">
-                <q-btn v-if="auth.can('settings.admin')" color="primary" unelevated icon="save" label="Сохранить" :loading="qualityBusy" @click="saveQuality" />
+                <q-btn v-if="auth.can('settings.admin')" color="primary" unelevated icon="save" label="Сохранить" :loading="qualityBusy" :disable="runtimeUnavailable" @click="saveQuality" />
                 <q-btn v-if="auth.can('settings.admin') && runtimeSettings?.backup_quality.source === 'database'" flat icon="restart_alt"
-                       label="Вернуть конфигурацию" :disable="qualityBusy" @click="resetQuality" />
+                       label="Вернуть конфигурацию" :disable="qualityBusy || runtimeUnavailable" @click="resetQuality" />
               </div>
             </div>
           </div>
         </q-tab-panel>
 
 		<q-tab-panel v-if="auth.can('alerts.admin')" name="notifications">
+			<PageLoadError
+				:message="sectionErrors.notifications"
+				title="Не удалось загрузить настройки уведомлений"
+				:loading="sectionLoading.notifications"
+				@retry="loadNotificationSettings"
+			/>
 		  <div v-if="notificationConfig" class="row q-col-gutter-lg">
 			<div class="col-12 col-lg-5">
 			  <div class="text-subtitle1">Общая политика</div>
@@ -1436,8 +1552,10 @@ watch(() => [route.query, route.meta.settingsTab], applyDeepLink)
 			  </q-list>
 			  <div class="text-caption q-mt-sm">Каналы: {{ notificationConfig.settings.configured_channels.join(', ') || 'нет' }}</div>
 			  <div class="row q-gutter-sm q-mt-md">
-				<q-btn color="primary" unelevated icon="save" label="Сохранить" :loading="notificationBusy" @click="saveNotifications" />
-				<q-btn v-if="notificationConfig.settings.source === 'database'" flat icon="restart_alt" label="Сбросить" :disable="notificationBusy" @click="resetNotifications" />
+				<q-btn color="primary" unelevated icon="save" label="Сохранить" :loading="notificationBusy"
+				       :disable="sectionLoading.notifications || Boolean(sectionErrors.notifications)" @click="saveNotifications" />
+				<q-btn v-if="notificationConfig.settings.source === 'database'" flat icon="restart_alt" label="Сбросить"
+				       :disable="notificationBusy || sectionLoading.notifications || Boolean(sectionErrors.notifications)" @click="resetNotifications" />
 			  </div>
 			</div>
 
@@ -1475,6 +1593,12 @@ watch(() => [route.query, route.meta.settingsTab], applyDeepLink)
 		</q-tab-panel>
 
 		<q-tab-panel v-if="auth.can('dr.read')" name="dr">
+			<PageLoadError
+				:message="sectionErrors.dr"
+				title="Не удалось загрузить аварийную готовность"
+				:loading="sectionLoading.dr"
+				@retry="loadDRReadiness"
+			/>
 			<div class="row items-center q-mb-md">
 				<div>
 					<div class="text-subtitle1">Внешние данные для восстановления службы</div>
@@ -1491,7 +1615,7 @@ watch(() => [route.query, route.meta.settingsTab], applyDeepLink)
 				{{ drReadiness.ok ? 'Дамп PostgreSQL и внешняя копия ключа готовы.' : 'Аварийное восстановление не готово.' }}
 				<div v-for="problem in drReadiness.problems ?? []" :key="problem" class="jhv-wrap">{{ problem }}</div>
 			</q-banner>
-			<div class="row q-col-gutter-md">
+			<div v-if="drReadiness" class="row q-col-gutter-md">
 				<div class="col-12 col-md-6">
 					<q-list bordered dense>
 						<q-item-label header>Дамп PostgreSQL</q-item-label>
@@ -1515,10 +1639,18 @@ watch(() => [route.query, route.meta.settingsTab], applyDeepLink)
 		</q-tab-panel>
 
         <q-tab-panel name="users" class="q-pa-none">
+          <PageLoadError
+            class="q-ma-md q-mb-none"
+            :message="sectionErrors.access"
+            title="Не удалось загрузить учётные записи"
+            :loading="sectionLoading.access"
+            @retry="loadAccessSettings"
+          />
           <div class="row items-center q-pa-md">
             <div class="text-subtitle1">Учётные записи</div>
             <q-space />
-            <q-btn color="primary" unelevated icon="add" label="Добавить" @click="openCreate" />
+            <q-btn color="primary" unelevated icon="add" label="Добавить"
+                   :disable="sectionLoading.access || Boolean(sectionErrors.access)" @click="openCreate" />
           </div>
           <q-list separator dense>
             <q-item v-for="user in users" :key="user.id">
@@ -1544,10 +1676,13 @@ watch(() => [route.query, route.meta.settingsTab], applyDeepLink)
               </q-item-section>
               <q-item-section side>
                 <div class="row q-gutter-xs">
-                  <q-btn flat dense round icon="edit" @click="openEdit(user)" />
-                  <q-btn flat dense round icon="delete" color="negative" @click="confirmDelete(user)" />
+                  <q-btn flat dense round icon="edit" :disable="sectionLoading.access || Boolean(sectionErrors.access)" @click="openEdit(user)" />
+                  <q-btn flat dense round icon="delete" color="negative" :disable="sectionLoading.access || Boolean(sectionErrors.access)" @click="confirmDelete(user)" />
                 </div>
               </q-item-section>
+            </q-item>
+            <q-item v-if="!users.length && !sectionErrors.access">
+              <q-item-section class="text-grey-6">Учётных записей нет</q-item-section>
             </q-item>
           </q-list>
         </q-tab-panel>
@@ -1556,8 +1691,15 @@ watch(() => [route.query, route.meta.settingsTab], applyDeepLink)
           <div class="row items-center q-pa-md">
             <div class="text-subtitle1">Заявки на опасные действия</div>
             <q-space />
-            <q-btn flat dense round icon="refresh" @click="loadApprovals" />
+            <q-btn flat dense round icon="refresh" :loading="approvalsLoading" @click="loadApprovals" />
           </div>
+          <PageLoadError
+            class="q-mx-md"
+            :message="approvalsError"
+            title="Не удалось загрузить все сведения о согласованиях"
+            :loading="approvalsLoading"
+            @retry="loadApprovals"
+          />
           <div class="q-px-md q-pb-sm text-caption text-grey-7">
             Утечка одной учётной записи не должна давать возможности уничтожить копии.
             Подтвердить заявку может участник группы согласующих, кроме её инициатора.
@@ -1610,6 +1752,7 @@ watch(() => [route.query, route.meta.settingsTab], applyDeepLink)
                     v-if="['pending', 'escalated'].includes(request.state)"
                     flat dense round icon="check" color="positive"
                     :loading="approvalBusy === request.id"
+                    :disable="approvalsLoading || !approvalRequestsAvailable"
                     @click="voteApproval(request, true)"
                   >
                     <q-tooltip>Подтвердить</q-tooltip>
@@ -1618,6 +1761,7 @@ watch(() => [route.query, route.meta.settingsTab], applyDeepLink)
                     v-if="['pending', 'escalated'].includes(request.state)"
                     flat dense round icon="close" color="negative"
                     :loading="approvalBusy === request.id"
+                    :disable="approvalsLoading || !approvalRequestsAvailable"
                     @click="voteApproval(request, false)"
                   >
                     <q-tooltip>Отклонить</q-tooltip>
@@ -1626,6 +1770,7 @@ watch(() => [route.query, route.meta.settingsTab], applyDeepLink)
                     v-if="receivedDelegations.length && ['pending', 'escalated'].includes(request.state)"
                     flat dense round icon="how_to_vote" color="primary"
                     :loading="approvalBusy === request.id"
+                    :disable="approvalsLoading || !approvalRequestsAvailable || !delegationsAvailable"
                     @click="openVoteByDelegation(request, true)"
                   >
                     <q-tooltip>Проголосовать по переданному праву</q-tooltip>
@@ -1633,6 +1778,7 @@ watch(() => [route.query, route.meta.settingsTab], applyDeepLink)
                   <q-btn
                     v-if="!['rejected','vetoed','expired','executed'].includes(request.state)"
                     flat dense round icon="block" color="grey-7"
+                    :disable="approvalsLoading || !approvalRequestsAvailable"
                     @click="confirmCancelApproval(request)"
                   >
                     <q-tooltip>
@@ -1642,7 +1788,7 @@ watch(() => [route.query, route.meta.settingsTab], applyDeepLink)
                 </div>
               </q-item-section>
             </q-item>
-            <q-item v-if="!approvals.length">
+            <q-item v-if="!approvals.length && approvalRequestsAvailable">
               <q-item-section class="text-grey-6">Заявок нет</q-item-section>
             </q-item>
           </q-list>
@@ -1654,7 +1800,7 @@ watch(() => [route.query, route.meta.settingsTab], applyDeepLink)
               <q-space />
               <q-btn
                 flat dense no-caps icon="person_add" label="Передать право"
-                color="primary" @click="openDelegationCreate"
+                color="primary" :disable="approvalsLoading || !delegationsAvailable" @click="openDelegationCreate"
               />
             </div>
             <div class="text-caption text-grey-7 q-mb-sm">
@@ -1691,13 +1837,14 @@ watch(() => [route.query, route.meta.settingsTab], applyDeepLink)
                   <q-btn
                     v-if="!d.revoked_at && d.delegator === auth.username"
                     flat dense round icon="block" color="negative"
+                    :disable="approvalsLoading || !delegationsAvailable"
                     @click="confirmRevokeDelegation(d)"
                   >
                     <q-tooltip>Отозвать</q-tooltip>
                   </q-btn>
                 </q-item-section>
               </q-item>
-              <q-item v-if="!delegations.length">
+              <q-item v-if="!delegations.length && delegationsAvailable">
                 <q-item-section class="text-grey-6">
                   Делегирований нет — ни выданных вами, ни полученных.
                 </q-item-section>
@@ -1719,7 +1866,7 @@ watch(() => [route.query, route.meta.settingsTab], applyDeepLink)
                   <q-item-label caption>{{ group.members.join(', ') }}</q-item-label>
                 </q-item-section>
               </q-item>
-              <q-item v-if="!approvalGroups.length">
+              <q-item v-if="!approvalGroups.length && approvalGroupsAvailable">
                 <q-item-section class="text-grey-6">
                   Групп нет. Заведите её запросом POST /api/v1/approval-groups —
                   не меньше двух участников.
@@ -1747,10 +1894,18 @@ watch(() => [route.query, route.meta.settingsTab], applyDeepLink)
         </q-tab-panel>
 
         <q-tab-panel name="roles" class="q-pa-none">
+          <PageLoadError
+            class="q-ma-md q-mb-none"
+            :message="sectionErrors.access"
+            title="Не удалось загрузить роли"
+            :loading="sectionLoading.access"
+            @retry="loadAccessSettings"
+          />
           <div class="row items-center q-pa-md">
             <div class="text-subtitle1">Роли и права</div>
             <q-space />
-            <q-btn color="primary" unelevated icon="add" label="Новая роль" @click="openRoleCreate" />
+            <q-btn color="primary" unelevated icon="add" label="Новая роль"
+                   :disable="sectionLoading.access || Boolean(sectionErrors.access)" @click="openRoleCreate" />
           </div>
           <div class="q-px-md q-pb-sm text-caption text-grey-7">
             Право имеет вид <code>раздел.действие</code>. Три роли встроены и меняться не могут:
@@ -1782,6 +1937,7 @@ watch(() => [route.query, route.meta.settingsTab], applyDeepLink)
                   <q-btn
                     flat dense round
                     :icon="role.builtin ? 'visibility' : 'edit'"
+                    :disable="sectionLoading.access || Boolean(sectionErrors.access)"
                     @click="openRoleEdit(role)"
                   >
                     <q-tooltip>{{ role.builtin ? 'Посмотреть права' : 'Изменить' }}</q-tooltip>
@@ -1789,19 +1945,31 @@ watch(() => [route.query, route.meta.settingsTab], applyDeepLink)
                   <q-btn
                     v-if="!role.builtin"
                     flat dense round icon="delete" color="negative"
+                    :disable="sectionLoading.access || Boolean(sectionErrors.access)"
                     @click="confirmDeleteRole(role)"
                   />
                 </div>
               </q-item-section>
             </q-item>
+            <q-item v-if="!roles.length && !sectionErrors.access">
+              <q-item-section class="text-grey-6">Ролей нет</q-item-section>
+            </q-item>
           </q-list>
         </q-tab-panel>
 
         <q-tab-panel name="tokens" class="q-pa-none">
+          <PageLoadError
+            class="q-ma-md q-mb-none"
+            :message="sectionErrors.access"
+            title="Не удалось загрузить токены API"
+            :loading="sectionLoading.access"
+            @retry="loadAccessSettings"
+          />
           <div class="row items-center q-pa-md">
             <div class="text-subtitle1">Токены доступа к API</div>
             <q-space />
-            <q-btn color="primary" unelevated icon="add" label="Выпустить" @click="openTokenDialog" />
+            <q-btn color="primary" unelevated icon="add" label="Выпустить"
+                   :disable="sectionLoading.access || Boolean(sectionErrors.access)" @click="openTokenDialog" />
           </div>
           <div class="q-px-md q-pb-sm text-caption text-grey-7">
             Для интеграций, которые не могут держать сессию: скриптов, мониторинга,
@@ -1836,21 +2004,30 @@ watch(() => [route.query, route.meta.settingsTab], applyDeepLink)
                   <q-btn
                     flat dense round
                     :icon="token.disabled ? 'play_arrow' : 'block'"
+                    :disable="sectionLoading.access || Boolean(sectionErrors.access)"
                     @click="toggleToken(token)"
                   >
                     <q-tooltip>{{ token.disabled ? 'Включить' : 'Отозвать' }}</q-tooltip>
                   </q-btn>
-                  <q-btn flat dense round icon="delete" color="negative" @click="confirmDeleteToken(token)" />
+                  <q-btn flat dense round icon="delete" color="negative"
+                         :disable="sectionLoading.access || Boolean(sectionErrors.access)" @click="confirmDeleteToken(token)" />
                 </div>
               </q-item-section>
             </q-item>
-            <q-item v-if="!apiTokens.length">
+            <q-item v-if="!apiTokens.length && !sectionErrors.access">
               <q-item-section class="text-grey-6">Токенов нет</q-item-section>
             </q-item>
           </q-list>
         </q-tab-panel>
 
         <q-tab-panel name="audit" class="q-pa-none">
+          <PageLoadError
+            class="q-ma-md q-mb-none"
+            :message="sectionErrors.audit"
+            title="Не удалось загрузить аудит"
+            :loading="sectionLoading.audit"
+            @retry="loadAudit"
+          />
           <q-list separator dense>
             <q-item v-for="entry in audit" :key="entry.id">
               <q-item-section avatar>
@@ -1865,20 +2042,33 @@ watch(() => [route.query, route.meta.settingsTab], applyDeepLink)
               </q-item-section>
               <q-item-section side>{{ dateTime(entry.at) }}</q-item-section>
             </q-item>
-            <q-item v-if="!audit.length">
+            <q-item v-if="!audit.length && !sectionErrors.audit">
               <q-item-section class="text-grey-7">Записей аудита нет.</q-item-section>
             </q-item>
           </q-list>
         </q-tab-panel>
 
         <q-tab-panel v-if="auth.can('logs.read')" name="logs">
+          <PageLoadError
+            :message="logsError"
+            title="Не удалось загрузить журнал"
+            :loading="logLoading"
+            @retry="loadLogs"
+          />
+          <PageLoadError
+            v-if="auth.can('settings.read')"
+            :message="sectionErrors.runtime"
+            title="Не удалось загрузить политику ротации"
+            :loading="sectionLoading.runtime"
+            @retry="loadRuntimeSettings"
+          />
           <div class="row items-center q-col-gutter-sm q-mb-md">
             <q-select
               :model-value="logStatus?.level"
               :options="logLevels"
               label="Уровень"
               outlined dense style="width: 150px"
-              :disable="!auth.can('logs.admin')"
+              :disable="!auth.can('logs.admin') || logLoading || Boolean(logsError)"
               @update:model-value="changeLogLevel"
             />
             <q-select
@@ -1890,7 +2080,7 @@ watch(() => [route.query, route.meta.settingsTab], applyDeepLink)
             />
             <q-input v-model="logFilter" label="Фильтр" outlined dense clearable style="width: 260px" />
             <q-space />
-            <q-btn v-if="auth.can('logs.admin')" flat dense icon="cached" label="Сменить файл" :disable="!logStatus?.to_file"
+            <q-btn v-if="auth.can('logs.admin')" flat dense icon="cached" label="Сменить файл" :disable="logLoading || Boolean(logsError) || !logStatus?.to_file"
                    @click="confirmRotate" />
             <q-btn flat dense round icon="refresh" :loading="logLoading" @click="loadLogs" />
           </div>
@@ -1911,7 +2101,7 @@ watch(() => [route.query, route.meta.settingsTab], applyDeepLink)
                 label="Размер файла, МиБ"
                 outlined
                 dense
-                :disable="rotationBusy || !auth.can('settings.admin')"
+                :disable="rotationBusy || runtimeUnavailable || !auth.can('settings.admin')"
               />
             </div>
             <div class="col-12 col-sm-3">
@@ -1923,7 +2113,7 @@ watch(() => [route.query, route.meta.settingsTab], applyDeepLink)
                 label="Архивов"
                 outlined
                 dense
-                :disable="rotationBusy || !auth.can('settings.admin')"
+                :disable="rotationBusy || runtimeUnavailable || !auth.can('settings.admin')"
               />
             </div>
             <div class="col-12 col-sm-3">
@@ -1935,7 +2125,7 @@ watch(() => [route.query, route.meta.settingsTab], applyDeepLink)
                 label="Хранить, дней"
                 outlined
                 dense
-                :disable="rotationBusy || !auth.can('settings.admin')"
+                :disable="rotationBusy || runtimeUnavailable || !auth.can('settings.admin')"
               />
             </div>
             <div class="col-12 col-sm-3 row items-center q-gutter-xs">
@@ -1945,6 +2135,7 @@ watch(() => [route.query, route.meta.settingsTab], applyDeepLink)
                 icon="save"
                 label="Сохранить"
                 :loading="rotationBusy"
+                :disable="runtimeUnavailable"
                 @click="saveRotation"
               />
               <q-btn
@@ -1953,7 +2144,7 @@ watch(() => [route.query, route.meta.settingsTab], applyDeepLink)
                 dense
                 round
                 icon="restart_alt"
-                :disable="rotationBusy"
+                :disable="rotationBusy || runtimeUnavailable"
                 @click="resetRotation"
               >
                 <q-tooltip>Вернуть значения из YAML или окружения</q-tooltip>

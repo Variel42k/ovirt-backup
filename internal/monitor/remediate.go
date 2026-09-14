@@ -284,7 +284,10 @@ func (r *Remediator) gate(ctx context.Context, sit Situation) (string, error) {
 		return "автоматическое восстановление выключено в настройках", nil
 	}
 
-	if !r.allowed(sit.Action) {
+	// vm_reset никогда не запускается автоматикой и поэтому не имеет allow_*
+	// настройки. Оператору с отдельным disruptive-правом он доступен через
+	// ручной маршрут, где ещё требуется confirm=true.
+	if !r.actionAllowed(sit) {
 		return fmt.Sprintf("действие «%s» не разрешено политикой", sit.Action.Title()), nil
 	}
 
@@ -356,6 +359,10 @@ func (r *Remediator) allowed(action model.RemediationAction) bool {
 	default:
 		return false
 	}
+}
+
+func (r *Remediator) actionAllowed(sit Situation) bool {
+	return r.allowed(sit.Action) || (sit.Force && sit.Action == model.ActionVMReset)
 }
 
 func (r *Remediator) execute(ctx context.Context, sit Situation) error {

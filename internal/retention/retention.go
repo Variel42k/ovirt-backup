@@ -7,6 +7,9 @@
 package retention
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"time"
@@ -187,6 +190,11 @@ type Plan struct {
 	Keep       []RunNote `json:"keep"`
 	Delete     []RunNote `json:"delete"`
 	FreedBytes int64     `json:"freed_bytes"`
+	// Token привязывает подтверждение оператора к конкретному составу плана.
+	// Это не секрет и не право на удаление: API всё равно проверяет сессию и
+	// разрешения. Если между просмотром и применением появился новый бэкап или
+	// изменилась цепочка, токен станет другим и удаление не начнётся.
+	Token string `json:"token"`
 }
 
 // RunNote is one backup with the reason behind its fate.
@@ -223,5 +231,21 @@ func BuildPlan(serverID, vmID, vmName, targetID string, runs []*model.BackupRun,
 			plan.FreedBytes += r.StoredBytes
 		}
 	}
+	plan.Token = planToken(plan)
 	return plan
+}
+
+// planToken возвращает стабильный отпечаток всего решения. В отпечаток входит
+// и список сохраняемых точек: появление новой копии не должно пройти незаметно,
+// даже если набор удаляемых ID случайно остался прежним.
+func planToken(plan Plan) string {
+	payload, _ := json.Marshal(struct {
+		ServerID string    `json:"server_id"`
+		VMID     string    `json:"vm_id"`
+		TargetID string    `json:"storage_target_id"`
+		Keep     []RunNote `json:"keep"`
+		Delete   []RunNote `json:"delete"`
+	}{plan.ServerID, plan.VMID, plan.TargetID, plan.Keep, plan.Delete})
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:])
 }

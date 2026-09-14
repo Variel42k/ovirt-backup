@@ -162,6 +162,22 @@ func (a RemediationAction) Disruptive() bool {
 	return a == ActionHostFence || a == ActionVMReset
 }
 
+// ValidForScope prevents sending a VM operation to a host (or the other way
+// around). Apart from clearer API errors, this stops a connector with a loose
+// implementation from interpreting an object ID in the wrong namespace.
+func (a RemediationAction) ValidForScope(scope Scope) bool {
+	switch a {
+	case ActionVMStart, ActionVMUnpause, ActionVMReset:
+		return scope == ScopeVM
+	case ActionHostActivate, ActionHostFence:
+		return scope == ScopeHost
+	case ActionReconnect:
+		return scope == ScopeServer
+	default:
+		return false
+	}
+}
+
 // DisruptiveVMAction сообщает, обрывает ли действие над ВМ работу гостя без
 // остановки его ОС.
 //

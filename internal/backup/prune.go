@@ -2,6 +2,7 @@ package backup
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"time"
@@ -13,6 +14,10 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/store"
 )
 
+// ErrRetentionPlanChanged means the repository changed after the operator
+// reviewed the preview. The caller must build and confirm a fresh plan.
+var ErrRetentionPlanChanged = errors.New("план хранения изменился после предпросмотра")
+
 // ApplyRetention evaluates a policy over one VM's backups in one repository
 // and, unless dryRun, deletes what it selects.
 //
@@ -21,6 +26,25 @@ import (
 // policy before it runs unattended at 3am.
 func (e *Engine) ApplyRetention(ctx context.Context, serverID, vmID, targetID string,
 	policy model.RetentionPolicy, dryRun bool) (retention.Plan, error) {
+	return e.applyRetention(ctx, serverID, vmID, targetID, policy, dryRun, "")
+}
+
+// ApplyRetentionConfirmed applies only the exact plan previously returned by
+// preview. Scheduled retention uses ApplyRetention because it has no human
+// confirmation step and evaluates the current repository atomically itself.
+func (e *Engine) ApplyRetentionConfirmed(ctx context.Context, serverID, vmID, targetID string,
+	policy model.RetentionPolicy, planToken string) (retention.Plan, error) {
+	if planToken == "" {
+		return retention.Plan{}, fmt.Errorf("нужен токен предварительно просмотренного плана хранения")
+	}
+	return e.applyRetention(ctx, serverID, vmID, targetID, policy, false, planToken)
+}
+
+func (e *Engine) applyRetention(ctx context.Context, serverID, vmID, targetID string,
+	policy model.RetentionPolicy, dryRun bool, expectedToken string) (retention.Plan, error) {
+	if err := policy.Validate(); err != nil {
+		return retention.Plan{}, err
+	}
 
 	runs, err := e.store.ListBackupRuns(ctx, store.RunFilter{
 		ServerID: serverID,
@@ -40,16 +64,30 @@ func (e *Engine) ApplyRetention(ctx context.Context, serverID, vmID, targetID st
 
 	decision := retention.Apply(policy, runs, time.Now().UTC())
 	plan := retention.BuildPlan(serverID, vmID, vmName, targetID, runs, decision)
+	if expectedToken != "" && plan.Token != expectedToken {
+		return plan, ErrRetentionPlanChanged
+	}
 	if dryRun {
 		return plan, nil
 	}
 
+	deleted := 0
+	var firstDeleteErr error
 	for _, note := range plan.Delete {
 		if err := e.DeleteRunData(ctx, note.RunID); err != nil {
 			// Keep going: one unreachable object should not stop the whole
 			// retention pass, and the failure is reported per run.
 			e.log.Error().Err(err).Str("run", note.RunID).Msg("не удалось удалить бэкап по политике хранения")
+			if firstDeleteErr == nil {
+				firstDeleteErr = err
+			}
+			continue
 		}
+		deleted++
+	}
+	if firstDeleteErr != nil {
+		return plan, fmt.Errorf("ретенция выполнена частично: обработано %d из %d копий; первый сбой: %w",
+			deleted, len(plan.Delete), firstDeleteErr)
 	}
 	return plan, nil
 }

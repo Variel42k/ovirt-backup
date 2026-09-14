@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -168,7 +169,10 @@ func retentionTarget(req retentionRequest) guardedTarget {
 		payload = nil
 	}
 	return guardedTarget{
-		ID:   "retention",
+		// ID участвует в проверке подтверждённой заявки. Включение токена не
+		// позволяет использовать согласование для другой ВМ, другого
+		// хранилища или нового состава копий.
+		ID:   req.ServerID + "/" + req.VMID + "/" + req.StorageTargetID + "/" + req.PlanToken,
 		Name: "политика хранения",
 		Summary: "применение политики хранения к ВМ " + req.VMID +
 			" в хранилище " + req.StorageTargetID + ": устаревшие копии будут удалены пачкой",
@@ -258,9 +262,10 @@ func (s *Server) executeApproved(w http.ResponseWriter, r *http.Request, action 
 	// Заявка привязана к действию и к объекту. Без этой проверки подтверждение
 	// на удаление одного хранилища разрешало бы удалить любое другое — надо
 	// лишь подставить чужой идентификатор в адрес.
-	if req.Action != action || req.ObjectID != what.ID {
+	if req.Action != action || req.ObjectID != what.ID || req.Summary != what.Summary ||
+		!bytes.Equal(req.Payload, what.Payload) {
 		s.writeError(w, r, badRequest(
-			"заявка %s согласована для другого действия или объекта", requestID))
+			"заявка %s согласована для другого действия, объекта или набора параметров", requestID))
 		return
 	}
 
@@ -279,7 +284,18 @@ func (s *Server) executeApproved(w http.ResponseWriter, r *http.Request, action 
 		return
 	}
 
-	next(w, r)
+	// Согласование разрешает попытку, но не гарантирует успех самого действия.
+	// Смотрим на фактический HTTP-результат продолжения: иначе устаревший план
+	// ретенции или отказ хранилища помечал заявку выполненной, хотя данные не
+	// изменились. Заявка остаётся подтверждённой и её можно повторить после
+	// устранения причины.
+	recorder := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+	next(recorder, r)
+	if recorder.status >= http.StatusBadRequest {
+		s.audit(r, string(action)+".approved.failed", model.ScopeServer, what.ID, false,
+			"заявка "+req.ID+": действие завершилось с HTTP "+strconv.Itoa(recorder.status))
+		return
+	}
 
 	now := time.Now().UTC()
 	if err := s.store.SetApprovalState(context.WithoutCancel(r.Context()), req.ID,

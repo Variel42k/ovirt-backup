@@ -91,3 +91,50 @@ func TestValidateBootJobDefaultsToKVMSource(t *testing.T) {
 		t.Fatalf("boot для бэкапа без диска принят: %v", err)
 	}
 }
+
+func TestRetentionRequestRequiresValidPolicyAndConfirmationToken(t *testing.T) {
+	valid := retentionRequest{
+		ServerID: "srv", VMID: "vm", StorageTargetID: "storage",
+		Policy: model.RetentionPolicy{KeepLast: 3},
+	}
+	if err := valid.validate(false); err != nil {
+		t.Fatalf("корректный предпросмотр отвергнут: %v", err)
+	}
+	if err := valid.validate(true); err == nil || !strings.Contains(err.Error(), "plan_token") {
+		t.Fatalf("применение без plan_token принято: %v", err)
+	}
+
+	valid.PlanToken = "not-a-token"
+	if err := valid.validate(true); err == nil || !strings.Contains(err.Error(), "SHA-256") {
+		t.Fatalf("некорректный plan_token принят: %v", err)
+	}
+
+	valid.PlanToken = strings.Repeat("0", 64)
+	if err := valid.validate(true); err != nil {
+		t.Fatalf("подтверждённый план отвергнут: %v", err)
+	}
+
+	valid.Policy.KeepDaily = -1
+	if err := valid.validate(false); err == nil || !strings.Contains(err.Error(), "keep_daily") {
+		t.Fatalf("отрицательная ретенция принята: %v", err)
+	}
+}
+
+func TestRetentionApprovalIsBoundToExactReviewedPlan(t *testing.T) {
+	base := retentionRequest{
+		ServerID: "srv", VMID: "vm-1", StorageTargetID: "storage",
+		Policy: model.RetentionPolicy{KeepLast: 3}, PlanToken: strings.Repeat("a", 64),
+	}
+	otherVM := base
+	otherVM.VMID = "vm-2"
+	otherPlan := base
+	otherPlan.PlanToken = strings.Repeat("b", 64)
+
+	target := retentionTarget(base)
+	if target.ID == retentionTarget(otherVM).ID {
+		t.Fatal("заявка ретенции не привязана к ВМ")
+	}
+	if target.ID == retentionTarget(otherPlan).ID {
+		t.Fatal("заявка ретенции не привязана к просмотренному плану")
+	}
+}

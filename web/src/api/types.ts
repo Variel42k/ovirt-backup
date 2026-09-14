@@ -1176,6 +1176,8 @@ export interface RetentionPlan {
   keep: RetentionNote[]
   delete: RetentionNote[]
   freed_bytes: number
+  /** Отпечаток состава плана; обязателен при применении. */
+  token: string
 }
 
 export interface ListResponse<T> {

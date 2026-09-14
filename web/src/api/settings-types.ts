@@ -177,6 +177,14 @@ export interface ApprovalRequest {
   votes?: ApprovalVote[]
 }
 
+/** Ответ опасного маршрута, когда действие поставлено на согласование. */
+export interface ApprovalRequiredResponse {
+  status: 'approval_required'
+  request: ApprovalRequest
+  message: string
+  approver_group: string
+}
+
 /** Опасное действие и уровень его согласования. */
 export interface GuardedActionInfo {
   key: string

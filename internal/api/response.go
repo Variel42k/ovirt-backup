@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Variel42k/ovirt-backup/internal/backup"
 	"github.com/Variel42k/ovirt-backup/internal/ovirt"
 	"github.com/Variel42k/ovirt-backup/internal/repo"
 	"github.com/Variel42k/ovirt-backup/internal/scheduler"
@@ -72,6 +73,8 @@ func (s *Server) writeError(w http.ResponseWriter, r *http.Request, err error) {
 		// 409, а не 500: запрос корректен, просто сейчас неуместен, и
 		// интерфейсу нужно показать это как состояние, а не как поломку.
 		status, code = http.StatusConflict, "job_busy"
+	case errors.Is(err, backup.ErrRetentionPlanChanged):
+		status, code = http.StatusConflict, "retention_plan_changed"
 	case errors.Is(err, errBadRequest):
 		status, code = http.StatusBadRequest, "bad_request"
 	case errors.Is(err, errForbidden):

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { api, notifyError } from '@/api/client'
+import { api, errorMessage } from '@/api/client'
 import { bytes, dateTime } from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import type {
@@ -16,13 +16,30 @@ type SeriesField = 'duration_p50_sec' | 'duration_p95_sec' | 'throughput_p50_bps
 
 const app = useAppStore()
 const tab = ref('state')
-const loading = ref(false)
+const qualityLoading = ref(false)
+const seriesLoading = ref(false)
+const capacityLoading = ref(false)
+const qualityError = ref('')
+const seriesError = ref('')
+const capacityError = ref('')
+let qualitySequence = 0
+let seriesSequence = 0
+let capacitySequence = 0
 const serverFilter = ref('')
 const onlyProblems = ref(true)
 const period = ref<Period>('7d')
 const quality = ref<BackupQualitySummary | null>(null)
 const series = ref<BackupSeriesPoint[]>([])
 const capacities = ref<StorageCapacityItem[]>([])
+
+const loading = computed(() =>
+  tab.value === 'state' ? qualityLoading.value :
+    tab.value === 'trend' ? seriesLoading.value : capacityLoading.value,
+)
+const activeError = computed(() =>
+  tab.value === 'state' ? qualityError.value :
+    tab.value === 'trend' ? seriesError.value : capacityError.value,
+)
 
 const stateMeta: Record<BackupQualityState, { title: string; color: string; icon: string }> = {
   none: { title: 'Нет защиты', color: 'negative', icon: 'shield_moon' },
@@ -110,30 +127,76 @@ function forecast(item: StorageCapacityItem): string {
   return `${Math.max(0, Math.round(item.forecast_days))} дней`
 }
 
-async function load() {
-  loading.value = true
+async function loadQuality() {
+  const sequence = ++qualitySequence
+  const serverID = serverFilter.value
+  qualityLoading.value = true
+  qualityError.value = ''
+  quality.value = null
   try {
-    const [qualityData, seriesData, capacityData] = await Promise.all([
-      api.backupQuality(serverFilter.value),
-      api.backupSeries(period.value, serverFilter.value),
-      api.storageCapacity(period.value),
-    ])
-    quality.value = qualityData
-    // Empty Go slices are encoded as null by older/empty databases. Keep the
-    // view model array-shaped so charts and empty states render consistently.
-    series.value = seriesData ?? []
-    capacities.value = capacityData ?? []
+    const result = await api.backupQuality(serverID)
+    if (sequence === qualitySequence && serverID === serverFilter.value) quality.value = result
   } catch (err) {
-    notifyError(err, 'Не удалось загрузить качество бэкапов')
+    if (sequence === qualitySequence) qualityError.value = errorMessage(err)
   } finally {
-    loading.value = false
+    if (sequence === qualitySequence) qualityLoading.value = false
   }
 }
 
-watch([serverFilter, period], load)
+async function loadSeries() {
+  const sequence = ++seriesSequence
+  const serverID = serverFilter.value
+  const selectedPeriod = period.value
+  seriesLoading.value = true
+  seriesError.value = ''
+  series.value = []
+  try {
+    const result = await api.backupSeries(selectedPeriod, serverID)
+    if (sequence !== seriesSequence || serverID !== serverFilter.value || selectedPeriod !== period.value) return
+    // Empty Go slices are encoded as null by older/empty databases. Keep the
+    // view model array-shaped so charts and empty states render consistently.
+    series.value = result ?? []
+  } catch (err) {
+    if (sequence === seriesSequence) seriesError.value = errorMessage(err)
+  } finally {
+    if (sequence === seriesSequence) seriesLoading.value = false
+  }
+}
+
+async function loadCapacity() {
+  const sequence = ++capacitySequence
+  const selectedPeriod = period.value
+  capacityLoading.value = true
+  capacityError.value = ''
+  capacities.value = []
+  try {
+    const result = await api.storageCapacity(selectedPeriod)
+    if (sequence === capacitySequence && selectedPeriod === period.value) capacities.value = result ?? []
+  } catch (err) {
+    if (sequence === capacitySequence) capacityError.value = errorMessage(err)
+  } finally {
+    if (sequence === capacitySequence) capacityLoading.value = false
+  }
+}
+
+async function loadActive() {
+  if (tab.value === 'state') return loadQuality()
+  if (tab.value === 'trend') return loadSeries()
+  return loadCapacity()
+}
+
+watch(tab, () => void loadActive())
+watch(serverFilter, () => {
+  if (tab.value === 'state') void loadQuality()
+  else if (tab.value === 'trend') void loadSeries()
+})
+watch(period, () => {
+  if (tab.value === 'trend') void loadSeries()
+  else if (tab.value === 'storage') void loadCapacity()
+})
 onMounted(async () => {
   await app.bootstrap()
-  await load()
+  await loadActive()
 })
 
 const stateColumns = [
@@ -151,10 +214,15 @@ const stateColumns = [
     <div class="row items-center q-mb-sm">
       <div class="text-h5">Покрытие бэкапами</div>
       <q-space />
-      <q-btn flat dense round icon="refresh" :loading="loading" @click="load">
+      <q-btn flat dense round icon="refresh" :loading="loading" @click="loadActive">
         <q-tooltip>Обновить</q-tooltip>
       </q-btn>
     </div>
+
+    <q-banner v-if="activeError" dense rounded class="bg-red-1 text-negative q-mb-md">
+      Не удалось обновить данные: {{ activeError }}
+      <template #action><q-btn flat dense color="negative" label="Повторить" @click="loadActive" /></template>
+    </q-banner>
 
     <q-tabs v-model="tab" align="left" active-color="primary" indicator-color="primary" dense>
       <q-tab name="state" icon="verified_user" label="Состояние" />
@@ -164,7 +232,7 @@ const stateColumns = [
     <q-separator class="q-mb-md" />
 
     <div class="row q-col-gutter-sm items-center q-mb-md">
-      <div class="col-12 col-sm-5 col-md-4">
+      <div v-if="tab !== 'storage'" class="col-12 col-sm-5 col-md-4">
         <q-select
           v-model="serverFilter"
           :options="[{ label: 'Все подключения', value: '' }, ...app.servers.map((s) => ({ label: s.name, value: s.id }))]"
@@ -173,6 +241,7 @@ const stateColumns = [
       </div>
       <div v-if="tab !== 'state'" class="col-12 col-sm-auto">
         <q-btn-toggle
+          class="jhv-period-toggle"
           v-model="period"
           unelevated no-caps toggle-color="primary" color="grey-3" text-color="grey-9"
           :options="[{ label: '24 часа', value: '24h' }, { label: '7 дней', value: '7d' }, { label: '30 дней', value: '30d' }, { label: '90 дней', value: '90d' }]"
@@ -362,5 +431,6 @@ const stateColumns = [
 @media (max-width: 700px) {
   .jhv-chart { padding: 8px; }
   .jhv-series-table { font-size: 12px; }
+  .jhv-period-toggle { max-width: 100%; overflow-x: auto; }
 }
 </style>

@@ -88,7 +88,7 @@ func (s *Server) executeRetentionApply(ctx context.Context, req model.ApprovalRe
 	if err := json.Unmarshal(req.Payload, &payload); err != nil {
 		return fmt.Errorf("параметры заявки не разбираются: %w", err)
 	}
-	if err := payload.validate(); err != nil {
+	if err := payload.validate(true); err != nil {
 		return err
 	}
 	if s.engine == nil {

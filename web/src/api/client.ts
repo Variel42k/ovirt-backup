@@ -61,6 +61,7 @@ import type {
   ApprovalDelegation,
   ApprovalGroup,
   ApprovalRequest,
+  ApprovalRequiredResponse,
   AuditEntry,
   BackupQualitySettings,
   BreakGlassEvent,
@@ -484,8 +485,13 @@ export const api = {
   // Ретенция
   retentionPreview: (payload: { server_id: string; vm_id: string; storage_target_id: string; policy: RetentionPolicy }) =>
     http.post<RetentionPlan>('/retention/preview', payload).then((r) => r.data),
-  retentionApply: (payload: { server_id: string; vm_id: string; storage_target_id: string; policy: RetentionPolicy }) =>
-    http.post<RetentionPlan>('/retention/apply', payload).then((r) => r.data),
+  retentionApply: (
+    payload: { server_id: string; vm_id: string; storage_target_id: string; policy: RetentionPolicy; plan_token: string },
+    reason: string,
+  ) =>
+    http
+      .post<RetentionPlan | ApprovalRequiredResponse>('/retention/apply', payload, { params: { reason } })
+      .then((r) => ({ status: r.status, data: r.data })),
 
   // Мониторинг
   listAlerts: (params: Record<string, string | number | boolean> = {}) =>

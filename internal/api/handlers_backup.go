@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"slices"
 	"strings"
@@ -896,6 +898,7 @@ type retentionRequest struct {
 	VMID            string                `json:"vm_id"`
 	StorageTargetID string                `json:"storage_target_id"`
 	Policy          model.RetentionPolicy `json:"policy"`
+	PlanToken       string                `json:"plan_token,omitempty"`
 }
 
 func (s *Server) handleRetentionPreview(w http.ResponseWriter, r *http.Request) {
@@ -913,7 +916,7 @@ func (s *Server) handleRetentionApply(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
-	if err := req.validate(); err != nil {
+	if err := req.validate(true); err != nil {
 		s.writeError(w, r, err)
 		return
 	}
@@ -938,17 +941,28 @@ func (s *Server) handleRetentionApply(w http.ResponseWriter, r *http.Request) {
 //
 // Отдельно от выполнения: заявка на действие, которое всё равно отвергнут,
 // зря отнимает у согласующих внимание, а обнаруживается это через сутки.
-func (r retentionRequest) validate() error {
+func (r retentionRequest) validate(requirePlanToken bool) error {
 	if r.ServerID == "" || r.VMID == "" || r.StorageTargetID == "" {
 		return badRequest("нужны server_id, vm_id и storage_target_id")
+	}
+	if err := r.Policy.Validate(); err != nil {
+		return badRequest("правила хранения: %v", err)
+	}
+	if requirePlanToken && r.PlanToken == "" {
+		return badRequest("сначала постройте план хранения и передайте его plan_token")
+	}
+	if requirePlanToken {
+		if decoded, err := hex.DecodeString(r.PlanToken); err != nil || len(decoded) != sha256.Size {
+			return badRequest("plan_token должен быть SHA-256 отпечатком из предпросмотра")
+		}
 	}
 	return nil
 }
 
 // applyRetention выполняет ретенцию по разобранному запросу.
 func (s *Server) applyRetention(ctx context.Context, req retentionRequest) (retention.Plan, error) {
-	return s.engine.ApplyRetention(ctx, req.ServerID, req.VMID, req.StorageTargetID,
-		req.Policy, false)
+	return s.engine.ApplyRetentionConfirmed(ctx, req.ServerID, req.VMID, req.StorageTargetID,
+		req.Policy, req.PlanToken)
 }
 
 func (s *Server) evaluateRetention(r *http.Request, dryRun bool) (retention.Plan, error) {
@@ -956,7 +970,7 @@ func (s *Server) evaluateRetention(r *http.Request, dryRun bool) (retention.Plan
 	if err := decodeJSON(r, &req); err != nil {
 		return retention.Plan{}, err
 	}
-	if err := req.validate(); err != nil {
+	if err := req.validate(false); err != nil {
 		return retention.Plan{}, err
 	}
 	return s.engine.ApplyRetention(context.WithoutCancel(r.Context()),

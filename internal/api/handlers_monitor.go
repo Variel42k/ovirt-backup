@@ -253,9 +253,17 @@ func (s *Server) handleManualRemediation(w http.ResponseWriter, r *http.Request)
 	if scope == "" {
 		scope = model.ScopeVM
 	}
+	if !action.ValidForScope(scope) {
+		s.writeError(w, r, badRequest("действие %q неприменимо к объекту типа %q", action, scope))
+		return
+	}
 
 	objectName := req.ObjectID
 	switch scope {
+	case model.ScopeServer:
+		if server, err := s.store.GetServer(r.Context(), req.ServerID); err == nil {
+			objectName = server.Name
+		}
 	case model.ScopeVM:
 		if vm, err := s.store.GetVM(r.Context(), req.ServerID, req.ObjectID); err == nil {
 			objectName = vm.Name

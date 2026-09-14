@@ -179,4 +179,20 @@ func TestBuildPlanSummarisesFreedSpace(t *testing.T) {
 	if plan.Delete[0].Reason == "" {
 		t.Error("в плане нет объяснения, почему бэкап удаляется")
 	}
+	if plan.Token == "" {
+		t.Error("у плана нет токена подтверждения")
+	}
+
+	same := BuildPlan("srv", "vm", "db-01", "tgt", runs, d)
+	if same.Token != plan.Token {
+		t.Fatalf("одинаковый план получил другой токен: %q != %q", same.Token, plan.Token)
+	}
+
+	newest := run("newest", -1, model.BackupFull, "")
+	changedRuns := append([]*model.BackupRun{newest}, runs...)
+	changedDecision := Apply(model.RetentionPolicy{KeepLast: 1}, changedRuns, base)
+	changed := BuildPlan("srv", "vm", "db-01", "tgt", changedRuns, changedDecision)
+	if changed.Token == plan.Token {
+		t.Fatal("изменившийся состав копий не изменил токен плана")
+	}
 }

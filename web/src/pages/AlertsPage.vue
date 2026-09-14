@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useQuasar } from 'quasar'
 import { useRoute } from 'vue-router'
-import { api, notify, notifyError, notifyOk } from '@/api/client'
+import { api, errorMessage, notify, notifyError, notifyOk } from '@/api/client'
 import { ago, dateTime } from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
@@ -17,8 +17,14 @@ const tab = ref('alerts')
 const alerts = ref<Alert[]>([])
 const remediations = ref<RemediationRecord[]>([])
 const loading = ref(false)
+const pageError = ref('')
 const includeResolved = ref(false)
 const highlightedAlert = computed(() => String(route.query.alert ?? ''))
+const acking = ref<string[]>([])
+const changingNotifications = ref<string[]>([])
+const remediating = ref<string[]>([])
+let loadSequence = 0
+let loadInFlight = false
 
 /**
  * Отбор по адресату. Пусто — показывать всё.
@@ -55,29 +61,55 @@ const REM_STATUS_RU: Record<string, string> = {
   failed: 'ошибка',
 }
 
-async function load() {
-  loading.value = true
-  try {
-    const [alertList, remediationList] = await Promise.all([
-      api.listAlerts(includeResolved.value ? { include_resolved: true, limit: 300 } : { limit: 300 }),
-      api.listRemediations(),
-    ])
-    alerts.value = alertList
-    remediations.value = remediationList
-  } catch (err) {
-    notifyError(err, 'Не удалось загрузить оповещения')
-  } finally {
+async function load(silent = false, force = false) {
+  if (silent && loadInFlight && !force) return
+  const sequence = ++loadSequence
+  loadInFlight = true
+  if (!silent) loading.value = true
+  const results = await Promise.allSettled([
+    api.listAlerts(includeResolved.value ? { include_resolved: true, limit: 300 } : { limit: 300 }),
+    api.listRemediations(),
+  ])
+  if (sequence !== loadSequence) return
+
+  const errors: string[] = []
+  if (results[0].status === 'fulfilled') {
+    alerts.value = results[0].value
+  } else {
+    errors.push(`оповещения: ${errorMessage(results[0].reason)}`)
+  }
+  if (results[1].status === 'fulfilled') {
+    remediations.value = results[1].value
+  } else {
+    errors.push(`журнал действий: ${errorMessage(results[1].reason)}`)
+  }
+  pageError.value = errors.join('; ')
+
+  if (sequence === loadSequence) {
     loading.value = false
+    loadInFlight = false
+  }
+}
+
+function setBusy(list: typeof acking, id: string, active: boolean) {
+  if (active) {
+    if (!list.value.includes(id)) list.value = [...list.value, id]
+  } else {
+    list.value = list.value.filter((item) => item !== id)
   }
 }
 
 async function ack(alert: Alert) {
+  if (acking.value.includes(alert.id)) return
+  setBusy(acking, alert.id, true)
   try {
     await api.ackAlert(alert.id)
     notifyOk('Оповещение принято в работу')
-    await load()
+    await load(true, true)
   } catch (err) {
     notifyError(err, 'Не удалось изменить статус')
+  } finally {
+    setBusy(acking, alert.id, false)
   }
 }
 
@@ -99,6 +131,8 @@ function notificationAction(alert: Alert) {
     cancel: { label: 'Отмена', flat: true },
     ok: { label: 'Применить', color: 'primary' },
   }).onOk(async (choice: string) => {
+    if (changingNotifications.value.includes(alert.id)) return
+    setBusy(changingNotifications, alert.id, true)
     try {
       if (choice.startsWith('snooze_')) {
         const minutes = Number(choice.substring('snooze_'.length))
@@ -110,9 +144,11 @@ function notificationAction(alert: Alert) {
         await api.setAlertNotifications(alert.id, { action: choice as 'mute' | 'unmute' })
       }
       notifyOk(choice === 'unmute' ? 'Внешние уведомления возобновлены' : 'Повторы уведомления приостановлены')
-      await load()
+      await load(true, true)
     } catch (err) {
       notifyError(err, 'Не удалось изменить уведомления')
+    } finally {
+      setBusy(changingNotifications, alert.id, false)
     }
   })
 }
@@ -120,32 +156,45 @@ function notificationAction(alert: Alert) {
 // Ручное восстановление ведёт к тем же операциям, что и управление ВМ, поэтому
 // подчиняется тому же выключателю: где управление отключено, кнопки нет.
 const canManage = computed(
-  () => auth.canWrite() && app.meta?.capabilities.management_enabled !== false,
+  () => auth.can('alerts.write') && app.meta?.capabilities.management_enabled !== false,
 )
 const canDisrupt = computed(() => canManage.value && auth.can('servers.disruptive'))
 
+const actionsByScope: Record<string, string[]> = {
+  vm: ['vm_start', 'vm_unpause', 'vm_reset'],
+  host: ['host_activate', 'host_fence'],
+  server: ['engine_reconnect'],
+}
+
+function actionsFor(alert: Alert) {
+  const allowed = actionsByScope[alert.scope] ?? []
+  return (app.meta?.remediation_actions ?? [])
+    .filter((action) => allowed.includes(action.value))
+    .filter((action) => canDisrupt.value || !['vm_reset', 'host_fence'].includes(action.value))
+}
+
 /** Ручной запуск того же действия, что выполнил бы мониторинг. */
 function remediate(alert: Alert) {
-  const actions = (app.meta?.remediation_actions ?? [])
-    // Сброс ВМ и фенсинг хоста требуют отдельного права. Показывать их тому,
-    // у кого его нет, значит предложить выбор, который закончится отказом.
-    .filter((a) => canDisrupt.value || !['vm_reset', 'host_fence'].includes(a.value))
+  const actions = actionsFor(alert)
     .map((a) => ({
       label: a.title,
       value: a.value,
       description: a.description,
     }))
+  if (!actions.length || remediating.value.includes(alert.id)) return
   $q.dialog({
     title: `Действие для «${alert.object_name}»`,
     message:
       'Ручной запуск выполняется без учёта пауз и лимитов попыток — они существуют, чтобы ' +
       'ограничить автоматику, а не человека.',
-    options: { type: 'radio', model: 'vm_start', items: actions },
+    options: { type: 'radio', model: actions[0]?.value, items: actions },
     cancel: { label: 'Отмена', flat: true },
     ok: { label: 'Выполнить', color: 'primary' },
   }).onOk(async (action: string) => {
     const disruptive = action === 'host_fence' || action === 'vm_reset'
     const send = async () => {
+      if (remediating.value.includes(alert.id)) return
+      setBusy(remediating, alert.id, true)
       try {
         const record = await api.remediate({
           server_id: alert.server_id,
@@ -160,9 +209,11 @@ function remediate(alert: Alert) {
         } else {
           notify({ type: 'warning', message: `${REM_STATUS_RU[record.status] ?? record.status}: ${record.error ?? ''}`, timeout: 10000 })
         }
-        await load()
+        await load(true, true)
       } catch (err) {
         notifyError(err, 'Действие не выполнено')
+      } finally {
+        setBusy(remediating, alert.id, false)
       }
     }
     if (!disruptive) {
@@ -182,8 +233,9 @@ onMounted(async () => {
   await app.bootstrap()
   await load()
   liveSource = new EventSource('/api/v1/events', { withCredentials: true })
-  liveSource.addEventListener('alert', () => void load())
-  fallbackPoll = window.setInterval(() => void load(), 15_000)
+  liveSource.addEventListener('alert', () => void load(true))
+  liveSource.addEventListener('remediation', () => void load(true))
+  fallbackPoll = window.setInterval(() => void load(true), 15_000)
 })
 
 onBeforeUnmount(() => {
@@ -197,9 +249,14 @@ onBeforeUnmount(() => {
     <div class="row items-center q-mb-md">
       <div class="text-h5">Оповещения и восстановительные действия</div>
       <q-space />
-      <q-toggle v-model="includeResolved" label="Показывать закрытые" @update:model-value="load" />
-      <q-btn flat dense round icon="refresh" :loading="loading" class="q-ml-sm" @click="load" />
+      <q-toggle v-model="includeResolved" label="Показывать закрытые" @update:model-value="() => load()" />
+      <q-btn flat dense round icon="refresh" :loading="loading" class="q-ml-sm" @click="() => load()" />
     </div>
+
+    <q-banner v-if="pageError" dense rounded class="bg-red-1 text-negative q-mb-md">
+      Не всё удалось обновить: {{ pageError }}
+      <template #action><q-btn flat dense color="negative" label="Повторить" @click="() => load()" /></template>
+    </q-banner>
 
     <q-card flat bordered>
       <q-tabs v-model="tab" align="left" active-color="primary" indicator-color="primary" dense>
@@ -239,12 +296,12 @@ onBeforeUnmount(() => {
           </div>
           <q-separator />
           <q-list separator>
-            <q-item v-if="!visibleAlerts.length" class="text-grey-6">
+            <q-item v-if="!loading && !visibleAlerts.length" class="text-grey-6">
               <q-item-section>
-                {{ audienceFilter ? 'Для этого адресата оповещений нет' : 'Оповещений нет' }}
+                {{ audienceFilter ? 'Для этого адресата оповещений нет' : includeResolved ? 'Оповещений нет' : 'Активных оповещений нет' }}
               </q-item-section>
             </q-item>
-            <q-item v-for="alert in visibleAlerts" :key="alert.id" :class="highlightedAlert === alert.id ? 'bg-blue-1' : ''">
+            <q-item v-for="alert in visibleAlerts" :key="alert.id" class="jhv-alert-item" :class="highlightedAlert === alert.id ? 'bg-blue-1' : ''">
               <q-item-section avatar top>
                 <q-icon
                   :name="alert.severity === 'critical' ? 'error' : alert.severity === 'warning' ? 'warning' : 'info'"
@@ -273,7 +330,7 @@ onBeforeUnmount(() => {
                   <template v-if="alert.next_notification_at"> · следующий повтор {{ dateTime(alert.next_notification_at) }}</template>
                 </q-item-label>
               </q-item-section>
-              <q-item-section side top>
+              <q-item-section side top class="jhv-alert-state">
                 <q-chip
                   dense
                   :color="alert.state === 'firing' ? 'negative' : alert.state === 'acked' ? 'warning' : 'positive'"
@@ -283,39 +340,42 @@ onBeforeUnmount(() => {
                 </q-chip>
                 <div class="text-caption text-grey-7 text-center">{{ SEVERITY_RU[alert.severity] }}</div>
               </q-item-section>
-              <q-item-section side top>
-                <div class="column q-gutter-xs">
+              <q-item-section side top class="jhv-alert-actions">
+                <div class="column q-gutter-xs jhv-alert-actions__buttons">
                   <q-btn
-                    v-if="auth.canWrite() && alert.state === 'firing'"
+                    v-if="auth.can('alerts.write') && alert.state === 'firing'"
                     flat
                     dense
                     size="sm"
                     label="Принять"
+                    :loading="acking.includes(alert.id)"
+                    :disable="changingNotifications.includes(alert.id) || remediating.includes(alert.id)"
                     @click="ack(alert)"
                   />
                   <q-btn
-                    v-if="auth.canWrite() && alert.state !== 'resolved'"
+                    v-if="auth.can('alerts.write') && alert.state !== 'resolved'"
                     flat
                     dense
                     size="sm"
                     icon="notifications_paused"
                     label="Уведомления"
+                    :loading="changingNotifications.includes(alert.id)"
+                    :disable="acking.includes(alert.id) || remediating.includes(alert.id)"
                     @click="notificationAction(alert)"
                   />
                   <q-btn
-                    v-if="canManage && ['vm', 'host'].includes(alert.scope)"
+                    v-if="canManage && alert.state !== 'resolved' && actionsFor(alert).length"
                     flat
                     dense
                     size="sm"
                     color="primary"
                     label="Действие"
+                    :loading="remediating.includes(alert.id)"
+                    :disable="acking.includes(alert.id) || changingNotifications.includes(alert.id)"
                     @click="remediate(alert)"
                   />
                 </div>
               </q-item-section>
-            </q-item>
-            <q-item v-if="!alerts.length">
-              <q-item-section class="text-positive">Активных оповещений нет.</q-item-section>
             </q-item>
           </q-list>
         </q-tab-panel>
@@ -379,3 +439,12 @@ onBeforeUnmount(() => {
     </q-card>
   </q-page>
 </template>
+
+<style scoped>
+@media (max-width: 700px) {
+  .jhv-alert-item { flex-wrap: wrap; row-gap: 8px; }
+  .jhv-alert-state { padding-left: 0; }
+  .jhv-alert-actions { flex: 1 0 100%; padding-left: 48px; align-items: stretch; }
+  .jhv-alert-actions__buttons { flex-direction: row; flex-wrap: wrap; }
+}
+</style>

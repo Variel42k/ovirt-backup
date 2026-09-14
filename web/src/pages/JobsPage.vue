@@ -2,12 +2,13 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useQuasar } from 'quasar'
 import { useRoute, useRouter } from 'vue-router'
-import { api, notify, notifyError, notifyOk } from '@/api/client'
+import { api, errorMessage, notify, notifyError, notifyOk } from '@/api/client'
 import { dateTime, runStatus, statusColor } from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import BackupOptionsPicker from '@/components/BackupOptionsPicker.vue'
 import HelpButton from '@/components/HelpButton.vue'
+import PageLoadError from '@/components/PageLoadError.vue'
 import { useUnsavedChanges } from '@/composables/unsavedChanges'
 import type { BackupJob, BackupOption, Disk, Host, Recommendation, VM } from '@/api/types'
 
@@ -20,6 +21,7 @@ const auth = useAuthStore()
 const jobs = ref<BackupJob[]>([])
 const selectedJobs = ref<BackupJob[]>([])
 const loading = ref(false)
+const pageError = ref('')
 const saving = ref(false)
 const busyJobs = ref<string[]>([])
 const bulkRunning = ref(false)
@@ -181,11 +183,12 @@ function aggregateOptions(entries: Array<{ vm: VM; recommendation: Recommendatio
 async function load() {
   const sequence = ++jobsLoadSequence
   loading.value = true
+  pageError.value = ''
   try {
     const value = await api.listJobs()
     if (sequence === jobsLoadSequence) jobs.value = value
   } catch (err) {
-    if (sequence === jobsLoadSequence) notifyError(err, 'Не удалось загрузить задания')
+    if (sequence === jobsLoadSequence) pageError.value = errorMessage(err)
   } finally {
     if (sequence === jobsLoadSequence) loading.value = false
   }
@@ -630,6 +633,8 @@ const columns = [
       />
     </div>
 
+    <PageLoadError :message="pageError" title="Не удалось загрузить задания" :loading="loading" @retry="load" />
+
     <q-banner v-if="selectedJobs.length" dense rounded class="bg-blue-1 q-mb-md">
       <div class="row items-center q-gutter-sm">
         <div>Выбрано заданий: {{ selectedJobs.length }}</div>
@@ -650,7 +655,7 @@ const columns = [
       bordered
       :loading="loading"
       class="jhv-table"
-      no-data-label="Заданий нет. Создайте первое или используйте готовое расписание на странице ВМ."
+      :no-data-label="pageError ? 'Список заданий недоступен' : 'Заданий нет. Создайте первое или используйте готовое расписание на странице ВМ.'"
     >
       <template #item="props">
         <div class="q-pa-xs col-12">

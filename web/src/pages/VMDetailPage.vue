@@ -1,13 +1,14 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { useQuasar } from 'quasar'
-import { api, notifyError, notifyOk } from '@/api/client'
+import { api, errorMessage, notifyError, notifyOk } from '@/api/client'
 import { ago, bytes, dateTime, runStatus, statusColor, vmStatus } from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import BackupOptionsPicker from '@/components/BackupOptionsPicker.vue'
 import BackupTypeHelpCard from '@/components/BackupTypeHelpCard.vue'
 import HelpButton from '@/components/HelpButton.vue'
+import PageLoadError from '@/components/PageLoadError.vue'
 import type { BackupOption, BackupRun, Disk, Recommendation, SchedulePreset, VM } from '@/api/types'
 
 const props = defineProps<{ serverId: string; vmId: string }>()
@@ -17,6 +18,7 @@ const app = useAppStore()
 const auth = useAuthStore()
 
 const loading = ref(false)
+const pageError = ref('')
 const vm = ref<VM | null>(null)
 const disks = ref<Disk[]>([])
 const recommendation = ref<Recommendation | null>(null)
@@ -59,6 +61,7 @@ async function load() {
   const serverID = props.serverId
   const vmID = props.vmId
   loading.value = true
+  pageError.value = ''
   try {
     if (auth.can('storages.read') && !app.storages.length) await app.loadStorages()
     if (!selectedStorage.value) {
@@ -76,10 +79,11 @@ async function load() {
     vm.value = vmData
     disks.value = diskData
     runs.value = runData
+    pageError.value = ''
 
     if (auth.can('jobs.read')) await loadRecommendation()
   } catch (err) {
-    if (sequence === pageLoadSequence) notifyError(err, 'Не удалось загрузить данные ВМ')
+    if (sequence === pageLoadSequence) pageError.value = errorMessage(err)
   } finally {
     if (sequence === pageLoadSequence) loading.value = false
   }
@@ -225,6 +229,8 @@ onMounted(load)
       <q-btn flat dense round icon="refresh" :loading="loading" @click="load" />
     </div>
 
+    <PageLoadError :message="pageError" title="Не удалось загрузить виртуальную машину" :loading="loading" @retry="load" />
+
     <q-banner
       v-for="(warning, i) in assessment?.warnings ?? []"
       :key="i"
@@ -235,7 +241,7 @@ onMounted(load)
       <span class="jhv-wrap">{{ warning }}</span>
     </q-banner>
 
-    <div class="row q-col-gutter-md">
+    <div v-if="vm || !pageError" class="row q-col-gutter-md">
       <div class="col-12 col-lg-8">
         <q-card flat bordered>
           <q-banner v-if="!backupSupported" dense class="bg-blue-1">

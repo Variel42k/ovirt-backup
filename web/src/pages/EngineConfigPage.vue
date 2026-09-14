@@ -6,6 +6,7 @@ import { bytes, dateTime, runStatus, statusColor } from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import { useUnsavedChanges } from '@/composables/unsavedChanges'
+import PageLoadError from '@/components/PageLoadError.vue'
 import type { EngineConfigJob, EngineConfigRun } from '@/api/types'
 
 const $q = useQuasar()
@@ -14,6 +15,7 @@ const auth = useAuthStore()
 const jobs = ref<EngineConfigJob[]>([])
 const runs = ref<EngineConfigRun[]>([])
 const loading = ref(false)
+const pageError = ref('')
 const saving = ref(false)
 const formError = ref('')
 const runningJob = ref('')
@@ -71,6 +73,7 @@ async function load() {
   const sequence = ++loadSequence
   const serverID = filterServer.value
   loading.value = true
+  pageError.value = ''
   try {
     const [nextJobs, nextRuns] = await Promise.all([
       api.listEngineConfigJobs(), api.listEngineConfigRuns(serverID),
@@ -79,7 +82,7 @@ async function load() {
     jobs.value = nextJobs
     runs.value = nextRuns
   } catch (err) {
-    if (sequence === loadSequence) notifyError(err, 'Не удалось загрузить снимки Engine')
+    if (sequence === loadSequence) pageError.value = errorMessage(err)
   } finally {
     if (sequence === loadSequence) loading.value = false
   }
@@ -216,9 +219,11 @@ onMounted(async () => {
       <q-btn flat round dense icon="refresh" :loading="loading" @click="load" />
     </div>
 
+    <PageLoadError :message="pageError" title="Не удалось загрузить снимки Engine" :loading="loading" @retry="load" />
+
     <q-card flat bordered class="q-mb-lg">
       <q-card-section class="text-subtitle1">Задания Engine</q-card-section>
-      <q-table :rows="jobs" :columns="jobColumns" row-key="id" flat :loading="loading" class="jhv-table">
+      <q-table :rows="jobs" :columns="jobColumns" row-key="id" flat :loading="loading" class="jhv-table" :no-data-label="pageError ? 'Список заданий недоступен' : 'Заданий Engine нет'">
         <template #body-cell-name="p">
           <q-td :props="p"><q-icon :name="p.row.enabled ? 'schedule' : 'pause_circle'" :color="p.row.enabled ? 'positive' : 'grey-6'" /> {{ p.row.name }}</q-td>
         </template>
@@ -245,7 +250,7 @@ onMounted(async () => {
       <div class="text-h6">История снимков</div><q-space />
       <q-select v-model="filterServer" :options="[{label:'Все Engine',value:''}, ...ovirtServers.map(s => ({label:s.name,value:s.id}))]" emit-value map-options dense outlined style="min-width: 220px" @update:model-value="changeServerFilter" />
     </div>
-    <q-table v-model:selected="selected" selection="multiple" :rows="runs" :columns="runColumns" row-key="id" flat bordered :loading="loading" class="jhv-table">
+    <q-table v-model:selected="selected" selection="multiple" :rows="runs" :columns="runColumns" row-key="id" flat bordered :loading="loading" class="jhv-table" :no-data-label="pageError ? 'История снимков недоступна' : 'Снимков Engine нет'">
       <template #top-right><q-btn outline icon="difference" label="Сравнить два" :loading="comparing" :disable="selected.length !== 2" @click="compareSelected" /></template>
       <template #body-cell-created="p"><q-td :props="p">{{ dateTime(p.row.created_at) }}</q-td></template>
       <template #body-cell-server="p"><q-td :props="p">{{ app.serverName(p.row.server_id) }}</q-td></template>

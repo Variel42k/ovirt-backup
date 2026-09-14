@@ -6,6 +6,7 @@ import { ago, bytes, dateTime, storageKindIcon } from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import DirectoryPicker from '@/components/DirectoryPicker.vue'
+import PageLoadError from '@/components/PageLoadError.vue'
 import { useUnsavedChanges } from '@/composables/unsavedChanges'
 import type { CatalogScanDetail, StorageKind, StorageTarget } from '@/api/types'
 
@@ -14,6 +15,7 @@ const app = useAppStore()
 const auth = useAuthStore()
 
 const loading = ref(false)
+const pageError = ref('')
 const dialog = ref(false)
 const editing = ref<StorageTarget | null>(null)
 const saving = ref(false)
@@ -148,10 +150,11 @@ const rateLimitMiB = computed({
 async function load() {
   const sequence = ++storagesLoadSequence
   loading.value = true
+  pageError.value = ''
   try {
     await app.loadStorages()
   } catch (err) {
-    if (sequence === storagesLoadSequence) notifyError(err, 'Не удалось загрузить хранилища')
+    if (sequence === storagesLoadSequence) pageError.value = errorMessage(err)
   } finally {
     if (sequence === storagesLoadSequence) loading.value = false
   }
@@ -633,6 +636,8 @@ function location(target: StorageTarget): string {
       />
     </div>
 
+    <PageLoadError :message="pageError" title="Не удалось загрузить хранилища" :loading="loading" @retry="load" />
+
     <q-table
       :rows="app.storages"
       :columns="columns"
@@ -641,7 +646,7 @@ function location(target: StorageTarget): string {
       bordered
       :loading="loading"
       class="jhv-table"
-      no-data-label="Хранилища не настроены — бэкапы некуда складывать"
+      :no-data-label="pageError ? 'Список хранилищ недоступен' : 'Хранилища не настроены — бэкапы некуда складывать'"
     >
       <template #body-cell-name="props">
         <q-td :props="props">

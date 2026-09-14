@@ -2,12 +2,13 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useQuasar } from 'quasar'
 import { useRoute, useRouter } from 'vue-router'
-import { api, notifyError, notifyOk } from '@/api/client'
+import { api, errorMessage, notifyError, notifyOk } from '@/api/client'
 import { ago, bytes, connState, hostStatus, percent, statusColor, vmStatus } from '@/api/format'
 import { useAuthStore } from '@/stores/auth'
 import { useAppStore } from '@/stores/app'
 import HealthChart from '@/components/HealthChart.vue'
 import IOChart, { type IOPoint } from '@/components/IOChart.vue'
+import PageLoadError from '@/components/PageLoadError.vue'
 import type { Disk, DiskSample, HealthSample, Host, MountSample, Server, StorageDomain, VM } from '@/api/types'
 
 const props = defineProps<{ serverId: string }>()
@@ -18,6 +19,7 @@ const router = useRouter()
 const auth = useAuthStore()
 const app = useAppStore()
 const server = ref<Server | null>(null)
+const pageError = ref('')
 const busyResources = ref<string[]>([])
 
 function resourceBusy(kind: 'vm' | 'host' | 'disk', id: string): boolean {
@@ -179,6 +181,7 @@ async function load() {
   const sequence = ++serverLoadSequence
   const serverID = props.serverId
   loading.value = true
+  pageError.value = ''
   try {
     const [srv, vmList, hostList, diskList, domainList] = await Promise.all([
       api.getServer(serverID),
@@ -193,8 +196,9 @@ async function load() {
     hosts.value = hostList
     disks.value = diskList
     domains.value = domainList
+    pageError.value = ''
   } catch (err) {
-    if (sequence === serverLoadSequence) notifyError(err, 'Не удалось загрузить данные сервера')
+    if (sequence === serverLoadSequence) pageError.value = errorMessage(err)
   } finally {
     if (sequence === serverLoadSequence) loading.value = false
   }
@@ -421,12 +425,14 @@ const domainColumns = [
       <q-btn v-if="auth.can('servers.write')" flat dense icon="sync" label="Опросить" :loading="loading" :disable="loading" @click="refreshInventory" />
     </div>
 
+    <PageLoadError :message="pageError" title="Не удалось загрузить данные платформы" :loading="loading" @retry="load" />
+
     <q-banner v-if="server?.state_message" dense class="bg-red-1 q-mb-md">
       <template #avatar><q-icon name="error" color="negative" /></template>
       {{ server.state_message }}
     </q-banner>
 
-    <q-card flat bordered>
+    <q-card v-if="server || !pageError" flat bordered>
       <q-tabs v-model="tab" align="left" active-color="primary" indicator-color="primary" dense>
         <q-tab name="vms" :label="`Виртуальные машины (${vms.length})`" />
         <q-tab name="hosts" :label="`Хосты (${hosts.length})`" />

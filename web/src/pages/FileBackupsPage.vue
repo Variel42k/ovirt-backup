@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useQuasar } from 'quasar'
 import { api, errorMessage, notify, notifyError, notifyOk } from '@/api/client'
 import DirectoryPicker from '@/components/DirectoryPicker.vue'
+import PageLoadError from '@/components/PageLoadError.vue'
 import { bytes, dateTime, runStatus, statusColor } from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
@@ -13,6 +14,7 @@ const $q = useQuasar()
 const app = useAppStore()
 const auth = useAuthStore()
 const loading = ref(false)
+const pageError = ref('')
 const jobSaving = ref(false)
 const jobFormError = ref('')
 const treeLoading = ref('')
@@ -188,7 +190,10 @@ function storageName(id: string) {
 async function load(silent = false) {
   if (silent && loading.value) return
   const sequence = ++pageLoadSequence
-  if (!silent) loading.value = true
+  if (!silent) {
+    loading.value = true
+    pageError.value = ''
+  }
   try {
     const [rootResponse, nextJobs, nextRuns] = await Promise.all([
       api.listFileBackupRoots(),
@@ -199,8 +204,9 @@ async function load(silent = false) {
     roots.value = rootResponse.items
     jobs.value = nextJobs
     runs.value = nextRuns
+    pageError.value = ''
   } catch (err) {
-    if (!silent && sequence === pageLoadSequence) notifyError(err, 'Не удалось загрузить файловые бэкапы')
+    if (!silent && sequence === pageLoadSequence) pageError.value = errorMessage(err)
   } finally {
     if (!silent && sequence === pageLoadSequence) loading.value = false
   }
@@ -466,12 +472,14 @@ onBeforeUnmount(() => {
       />
     </div>
 
-    <q-banner v-if="roots.length === 0" rounded class="bg-warning text-dark q-mb-md">
+    <PageLoadError :message="pageError" title="Не удалось загрузить файловые бэкапы" :loading="loading" @retry="load()" />
+
+    <q-banner v-if="!pageError && roots.length === 0" rounded class="bg-warning text-dark q-mb-md">
       Нет разрешённых корней. Web-интерфейс намеренно не принимает произвольные абсолютные пути.
     </q-banner>
 
     <div class="text-subtitle1 q-mb-sm">Задания</div>
-      <q-table :rows="jobs" :columns="jobColumns" row-key="id" flat bordered :loading="loading" class="jhv-table q-mb-lg">
+      <q-table :rows="jobs" :columns="jobColumns" row-key="id" flat bordered :loading="loading" class="jhv-table q-mb-lg" :no-data-label="pageError ? 'Список заданий недоступен' : 'Файловых заданий нет'">
         <template #body-cell-name="props">
           <q-td :props="props">
             <q-icon :name="props.row.enabled ? 'check_circle' : 'pause_circle'" :color="props.row.enabled ? 'positive' : 'grey'" class="q-mr-xs" />
@@ -505,7 +513,7 @@ onBeforeUnmount(() => {
       </q-table>
 
       <div class="text-subtitle1 q-mb-sm">Точки восстановления</div>
-      <q-table :rows="runs" :columns="runColumns" row-key="id" flat bordered :loading="loading" class="jhv-table">
+      <q-table :rows="runs" :columns="runColumns" row-key="id" flat bordered :loading="loading" class="jhv-table" :no-data-label="pageError ? 'История запусков недоступна' : 'Запусков файлового бэкапа нет'">
         <template #body-cell-created="props"><q-td :props="props">{{ dateTime(props.row.created_at) }}</q-td></template>
         <template #body-cell-job="props"><q-td :props="props">{{ jobName(props.row.job_id) }}</q-td></template>
         <template #body-cell-storage="props"><q-td :props="props">{{ storageName(props.row.storage_target_id) }}</q-td></template>

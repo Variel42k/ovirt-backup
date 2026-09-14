@@ -9,6 +9,7 @@ import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import { useOperationsStore } from '@/stores/operations'
 import HelpButton from '@/components/HelpButton.vue'
+import PageLoadError from '@/components/PageLoadError.vue'
 import { useUnsavedChanges } from '@/composables/unsavedChanges'
 import type { BackupCopy, BackupDisk, BackupRun, BootReport, Cluster, Host, ReplicationDetail, RepositoryArtifact, RestoreNetworkTarget, RestoreRun, RestoreVMPlan, StorageDomain, VerifyRun } from '@/api/types'
 
@@ -22,6 +23,9 @@ const operations = useOperationsStore()
 const runs = ref<BackupRun[]>([])
 const selectedRuns = ref<BackupRun[]>([])
 const loading = ref(false)
+const runsError = ref('')
+const restoresError = ref('')
+const replicationsError = ref('')
 const busyCopies = ref<string[]>([])
 const busyRuns = ref<string[]>([])
 const bulkVerifyBusy = ref(false)
@@ -185,15 +189,21 @@ async function changeRestoreTarget(target: string) {
 async function load(silent = false) {
   if (silent && loading.value) return
   const sequence = ++runsLoadSequence
-  if (!silent) loading.value = true
+  if (!silent) {
+    loading.value = true
+    runsError.value = ''
+  }
   try {
     const params: Record<string, string | number> = { limit: 200, days: filters.value.days }
     if (filters.value.server_id) params.server_id = filters.value.server_id
     if (filters.value.status) params.status = filters.value.status
     const value = await api.listRuns(params)
-    if (sequence === runsLoadSequence) runs.value = value
+    if (sequence === runsLoadSequence) {
+      runs.value = value
+      runsError.value = ''
+    }
   } catch (err) {
-    if (sequence === runsLoadSequence) notifyError(err, 'Не удалось загрузить список бэкапов')
+    if (!silent && sequence === runsLoadSequence) runsError.value = errorMessage(err)
   } finally {
     if (!silent && sequence === runsLoadSequence) loading.value = false
   }
@@ -234,12 +244,18 @@ const restoresLoading = ref(false)
 async function loadRestores(silent = false) {
   if (silent && restoresLoading.value) return
   const sequence = ++restoresLoadSequence
-  if (!silent) restoresLoading.value = true
+  if (!silent) {
+    restoresLoading.value = true
+    restoresError.value = ''
+  }
   try {
     const value = await api.listRestores()
-    if (sequence === restoresLoadSequence) restores.value = value
+    if (sequence === restoresLoadSequence) {
+      restores.value = value
+      restoresError.value = ''
+    }
   } catch (err) {
-    if (sequence === restoresLoadSequence) notifyError(err, 'Не удалось загрузить историю восстановлений')
+    if (!silent && sequence === restoresLoadSequence) restoresError.value = errorMessage(err)
   } finally {
     if (!silent && sequence === restoresLoadSequence) restoresLoading.value = false
   }
@@ -500,12 +516,18 @@ function copyColor(status: string): string {
 async function loadReplications(silent = false) {
   if (silent && replicationsLoading.value) return
   const sequence = ++replicationsLoadSequence
-  if (!silent) replicationsLoading.value = true
+  if (!silent) {
+    replicationsLoading.value = true
+    replicationsError.value = ''
+  }
   try {
     const value = await api.listReplications({ limit: 200 })
-    if (sequence === replicationsLoadSequence) replications.value = value
+    if (sequence === replicationsLoadSequence) {
+      replications.value = value
+      replicationsError.value = ''
+    }
   } catch (err) {
-    if (sequence === replicationsLoadSequence) notifyError(err, 'Не удалось загрузить очередь репликации')
+    if (!silent && sequence === replicationsLoadSequence) replicationsError.value = errorMessage(err)
   } finally {
     if (!silent && sequence === replicationsLoadSequence) replicationsLoading.value = false
   }
@@ -874,6 +896,10 @@ const replicationColumns = [
       <q-tab name="restores" label="Восстановления" />
     </q-tabs>
 
+    <PageLoadError v-if="tab === 'runs'" :message="runsError" title="Не удалось загрузить бэкапы" :loading="loading" @retry="load()" />
+    <PageLoadError v-else-if="tab === 'restores'" :message="restoresError" title="Не удалось загрузить восстановления" :loading="restoresLoading" @retry="loadRestores()" />
+    <PageLoadError v-else :message="replicationsError" title="Не удалось загрузить репликации" :loading="replicationsLoading" @retry="loadReplications()" />
+
     <template v-if="tab === 'restores'">
       <div class="jhv-reason q-mb-md">
         Восстановление выполняется в фоне и может занять часы. Здесь видно, чем оно кончилось;
@@ -890,7 +916,7 @@ const replicationColumns = [
         :grid="$q.screen.lt.md"
         class="jhv-table"
         :pagination="{ rowsPerPage: 50 }"
-        no-data-label="Восстановлений не было"
+        :no-data-label="restoresError ? 'История восстановлений недоступна' : 'Восстановлений не было'"
       >
         <template #body-cell-created="props">
           <q-td :props="props">
@@ -933,7 +959,7 @@ const replicationColumns = [
 
 	<template v-else-if="tab === 'replications'">
 		<q-table :rows="replications" :columns="replicationColumns" row-key="id" flat bordered
-			:loading="replicationsLoading" :grid="$q.screen.lt.md" class="jhv-table" no-data-label="Реплик в очереди и истории нет">
+			:loading="replicationsLoading" :grid="$q.screen.lt.md" class="jhv-table" :no-data-label="replicationsError ? 'Очередь репликации недоступна' : 'Реплик в очереди и истории нет'">
 			<template #body-cell-storage="props">
 				<q-td :props="props">
 					{{ props.row.storage_target_name || app.storageName(props.row.storage_target_id) }}
@@ -1038,7 +1064,7 @@ const replicationColumns = [
       :loading="loading"
       class="jhv-table"
       :pagination="{ rowsPerPage: 50 }"
-      no-data-label="Бэкапов за выбранный период нет"
+      :no-data-label="runsError ? 'Список бэкапов недоступен' : 'Бэкапов за выбранный период нет'"
     >
       <template #item="props">
         <div class="q-pa-xs col-12">

@@ -1,46 +1,76 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { api, notifyError } from '@/api/client'
+import { api, errorMessage } from '@/api/client'
 import { ago, bytes, connState, dateTime, percent, runStatus, statusColor, storageKindIcon } from '@/api/format'
+import PageLoadError from '@/components/PageLoadError.vue'
+import { useAuthStore } from '@/stores/auth'
 import type { Dashboard } from '@/api/types'
 
 const data = ref<Dashboard | null>(null)
 const loading = ref(true)
+const pageError = ref('')
 const router = useRouter()
+const auth = useAuthStore()
 const jobsCount = ref(0)
 const restoreTested = ref(false)
 const oidcEnabled = ref(false)
 let timer: number | undefined
+let loadSequence = 0
+let loadInFlight = false
 
 const setupSteps = computed(() => [
-  { title: 'Подключить платформу', detail: 'oVirt, РЕД Виртуализация, Proxmox VE или KVM', done: (data.value?.totals.servers ?? 0) > 0, icon: 'dns', to: { name: 'servers' } },
-  { title: 'Добавить хранилище', detail: 'Основная точка и при необходимости реплики', done: (data.value?.storages.length ?? 0) > 0, icon: 'inventory_2', to: { name: 'storages' } },
-  { title: 'Создать политику защиты', detail: 'Выбор ВМ, расписание, хранение и проверка', done: jobsCount.value > 0 || (data.value?.totals.protected_vms ?? 0) > 0, icon: 'event_repeat', to: { name: 'jobs', query: { create: '1' } } },
-  { title: 'Получить первую копию', detail: 'Успешный запуск подтверждает весь путь записи', done: Boolean(data.value?.recent_runs.some((item) => item.status === 'succeeded')), icon: 'backup', to: { name: 'backups' } },
-  { title: 'Проверить восстановление', detail: 'Соберите тестовую ВМ или выполните глубокую проверку', done: restoreTested.value, icon: 'restore', to: { name: 'backups', query: { tab: 'restores' } } },
-  { title: 'Подключить единый вход', detail: 'Keycloak и доменные группы для рабочих пользователей', done: oidcEnabled.value, optional: true, icon: 'admin_panel_settings', to: { name: 'access-settings' } },
-])
+  { title: 'Подключить платформу', detail: 'oVirt, РЕД Виртуализация, Proxmox VE или KVM', done: (data.value?.totals.servers ?? 0) > 0, optional: false, available: auth.can('servers.read') && auth.can('servers.admin'), icon: 'dns', to: { name: 'servers' } },
+  { title: 'Добавить хранилище', detail: 'Основная точка и при необходимости реплики', done: (data.value?.storages.length ?? 0) > 0, optional: false, available: auth.can('storages.read') && auth.can('storages.admin'), icon: 'inventory_2', to: { name: 'storages' } },
+  { title: 'Создать политику защиты', detail: 'Выбор ВМ, расписание, хранение и проверка', done: jobsCount.value > 0 || (data.value?.totals.protected_vms ?? 0) > 0, optional: false, available: auth.can('jobs.read') && auth.can('jobs.write'), icon: 'event_repeat', to: { name: 'jobs', query: { create: '1' } } },
+  { title: 'Получить первую копию', detail: 'Успешный запуск подтверждает весь путь записи', done: Boolean(data.value?.recent_runs.some((item) => item.status === 'succeeded')), optional: false, available: auth.can('jobs.read') && auth.can('jobs.write') && auth.can('backups.read'), icon: 'backup', to: { name: 'backups' } },
+  { title: 'Проверить восстановление', detail: 'Соберите тестовую ВМ или выполните глубокую проверку', done: restoreTested.value, optional: false, available: auth.can('backups.read') && auth.can('backups.write'), icon: 'restore', to: { name: 'backups', query: { tab: 'restores' } } },
+  { title: 'Подключить единый вход', detail: 'Keycloak и доменные группы для рабочих пользователей', done: oidcEnabled.value, optional: true, available: auth.can('users.admin'), icon: 'admin_panel_settings', to: { name: 'access-settings' } },
+].filter((item) => item.available))
 const completedSteps = computed(() => setupSteps.value.filter((item) => item.done).length)
-const setupReady = computed(() => setupSteps.value.slice(0, 5).every((item) => item.done))
+const setupReady = computed(() => setupSteps.value.filter((item) => !item.optional).every((item) => item.done))
 
-async function load() {
+async function load(silent = false) {
+  if (silent && loadInFlight) return
+  const sequence = ++loadSequence
+  loadInFlight = true
+  if (!silent) {
+    loading.value = true
+    pageError.value = ''
+  }
   try {
-    data.value = await api.dashboard()
-    const [jobs, restores, oidc] = await Promise.allSettled([api.listJobs(), api.listRestores(), api.oidcInfo()])
-    if (jobs.status === 'fulfilled') jobsCount.value = jobs.value.length
-    if (restores.status === 'fulfilled') restoreTested.value = restores.value.some((item) => item.status === 'succeeded')
-    if (oidc.status === 'fulfilled') oidcEnabled.value = oidc.value.enabled
+    const nextData = await api.dashboard()
+    if (sequence !== loadSequence) return
+    data.value = nextData
+
+    const [jobs, restores, oidc] = await Promise.allSettled([
+      auth.can('jobs.read') ? api.listJobs() : Promise.resolve(null),
+      auth.can('backups.read') ? api.listRestores() : Promise.resolve(null),
+      auth.can('users.admin') ? api.oidcInfo() : Promise.resolve(null),
+    ])
+    if (sequence !== loadSequence) return
+    if (jobs.status === 'fulfilled' && jobs.value) jobsCount.value = jobs.value.length
+    if (restores.status === 'fulfilled' && restores.value) restoreTested.value = restores.value.some((item) => item.status === 'succeeded')
+    if (oidc.status === 'fulfilled' && oidc.value) oidcEnabled.value = oidc.value.enabled
+
+    const partialErrors = [jobs, restores, oidc]
+      .filter((result) => result.status === 'rejected')
+      .map((result) => errorMessage((result as PromiseRejectedResult).reason))
+    if (!partialErrors.length) pageError.value = ''
+    else if (!silent) pageError.value = `Часть сведений не обновлена: ${partialErrors.join('; ')}`
   } catch (err) {
-    notifyError(err, 'Не удалось загрузить обзор')
+    if (!silent && sequence === loadSequence) pageError.value = errorMessage(err)
   } finally {
-    loading.value = false
+    if (sequence === loadSequence) {
+      loadInFlight = false
+      if (!silent) loading.value = false
+    }
   }
 }
 
 onMounted(() => {
   void load()
-  timer = window.setInterval(load, 30_000)
+  timer = window.setInterval(() => void load(true), 30_000)
 })
 onBeforeUnmount(() => {
   if (timer) window.clearInterval(timer)
@@ -52,8 +82,10 @@ onBeforeUnmount(() => {
     <div class="row items-center q-mb-md">
       <div class="text-h5">Обзор</div>
       <q-space />
-      <q-btn flat dense round icon="refresh" aria-label="Обновить обзор" :loading="loading" @click="load"><q-tooltip>Обновить</q-tooltip></q-btn>
+      <q-btn flat dense round icon="refresh" aria-label="Обновить обзор" :loading="loading" @click="load()"><q-tooltip>Обновить</q-tooltip></q-btn>
     </div>
+
+    <PageLoadError :message="pageError" title="Обзор загружен не полностью" :loading="loading" @retry="load()" />
 
     <div v-if="loading && !data" class="row q-col-gutter-md q-mb-md" aria-label="Загрузка обзора">
       <div v-for="index in 6" :key="index" class="col-6 col-md-3 col-lg-2"><q-skeleton type="rect" height="104px" /></div>
@@ -89,7 +121,7 @@ onBeforeUnmount(() => {
 
     <div v-if="data && data.totals.servers > 0" class="row q-col-gutter-md q-mb-md">
       <div class="col-6 col-md-3 col-lg-2">
-        <q-card flat bordered class="q-pa-md jhv-metric jhv-action-card" tabindex="0" @click="router.push({ name: 'servers' })" @keyup.enter="router.push({ name: 'servers' })">
+        <q-card flat bordered :class="['q-pa-md jhv-metric', { 'jhv-action-card': auth.can('servers.read') }]" :tabindex="auth.can('servers.read') ? 0 : undefined" @click="auth.can('servers.read') && router.push({ name: 'servers' })" @keyup.enter="auth.can('servers.read') && router.push({ name: 'servers' })">
           <div class="jhv-metric__label">Серверы на связи</div>
           <div class="jhv-metric__value">
             {{ data.totals.servers_online }}<span class="text-h6 text-grey-6">/{{ data.totals.servers }}</span>
@@ -97,7 +129,7 @@ onBeforeUnmount(() => {
         </q-card>
       </div>
       <div class="col-6 col-md-3 col-lg-2">
-        <q-card flat bordered class="q-pa-md jhv-metric jhv-action-card" tabindex="0" @click="router.push({ name: 'servers' })" @keyup.enter="router.push({ name: 'servers' })">
+        <q-card flat bordered :class="['q-pa-md jhv-metric', { 'jhv-action-card': auth.can('servers.read') }]" :tabindex="auth.can('servers.read') ? 0 : undefined" @click="auth.can('servers.read') && router.push({ name: 'servers' })" @keyup.enter="auth.can('servers.read') && router.push({ name: 'servers' })">
           <div class="jhv-metric__label">Хосты в строю</div>
           <div class="jhv-metric__value">
             {{ data.totals.hosts_up }}<span class="text-h6 text-grey-6">/{{ data.totals.hosts }}</span>
@@ -105,7 +137,7 @@ onBeforeUnmount(() => {
         </q-card>
       </div>
       <div class="col-6 col-md-3 col-lg-2">
-        <q-card flat bordered class="q-pa-md jhv-metric jhv-action-card" tabindex="0" @click="router.push({ name: 'servers' })" @keyup.enter="router.push({ name: 'servers' })">
+        <q-card flat bordered :class="['q-pa-md jhv-metric', { 'jhv-action-card': auth.can('servers.read') }]" :tabindex="auth.can('servers.read') ? 0 : undefined" @click="auth.can('servers.read') && router.push({ name: 'servers' })" @keyup.enter="auth.can('servers.read') && router.push({ name: 'servers' })">
           <div class="jhv-metric__label">ВМ работают</div>
           <div class="jhv-metric__value">
             {{ data.totals.vms_up }}<span class="text-h6 text-grey-6">/{{ data.totals.vms }}</span>
@@ -125,7 +157,7 @@ onBeforeUnmount(() => {
         </q-card>
       </div>
       <div class="col-6 col-md-3 col-lg-2">
-        <q-card flat bordered class="q-pa-md jhv-metric jhv-action-card" tabindex="0" @click="router.push({ name: 'alerts' })" @keyup.enter="router.push({ name: 'alerts' })">
+        <q-card flat bordered :class="['q-pa-md jhv-metric', { 'jhv-action-card': auth.can('alerts.read') }]" :tabindex="auth.can('alerts.read') ? 0 : undefined" @click="auth.can('alerts.read') && router.push({ name: 'alerts' })" @keyup.enter="auth.can('alerts.read') && router.push({ name: 'alerts' })">
           <div class="jhv-metric__label">Открытые оповещения</div>
           <div class="jhv-metric__value" :class="data.totals.alerts_critical ? 'text-negative' : ''">
             {{ data.totals.alerts_firing }}
@@ -136,7 +168,7 @@ onBeforeUnmount(() => {
         </q-card>
       </div>
       <div class="col-6 col-md-3 col-lg-2">
-        <q-card flat bordered class="q-pa-md jhv-metric jhv-action-card" tabindex="0" @click="router.push({ name: 'backups' })" @keyup.enter="router.push({ name: 'backups' })">
+        <q-card flat bordered :class="['q-pa-md jhv-metric', { 'jhv-action-card': auth.can('backups.read') }]" :tabindex="auth.can('backups.read') ? 0 : undefined" @click="auth.can('backups.read') && router.push({ name: 'backups' })" @keyup.enter="auth.can('backups.read') && router.push({ name: 'backups' })">
           <div class="jhv-metric__label">Бэкапы сейчас</div>
           <div class="jhv-metric__value">{{ data.totals.running_backups }}</div>
           <div class="text-caption text-grey-7">за неделю: {{ bytes(data.totals.stored_bytes) }}</div>
@@ -168,8 +200,8 @@ onBeforeUnmount(() => {
             <q-item
               v-for="s in data?.servers ?? []"
               :key="s.server.id"
-              clickable
-              :to="{ name: 'server', params: { serverId: s.server.id } }"
+              :clickable="auth.can('servers.read')"
+              :to="auth.can('servers.read') ? { name: 'server', params: { serverId: s.server.id } } : undefined"
             >
               <q-item-section avatar>
                 <q-icon
@@ -216,7 +248,9 @@ onBeforeUnmount(() => {
             <q-item v-if="!loading && !(data?.servers ?? []).length">
               <q-item-section class="text-grey-7">
                 Ни одного сервера не подключено.
-                <router-link :to="{ name: 'servers' }">Добавьте первый</router-link>.
+                <template v-if="auth.can('servers.admin')">
+                  <router-link :to="{ name: 'servers' }">Добавьте первый</router-link>.
+                </template>
               </q-item-section>
             </q-item>
           </q-list>
@@ -251,7 +285,7 @@ onBeforeUnmount(() => {
           <q-card-section class="row items-center">
             <div class="text-subtitle1">Активные оповещения</div>
             <q-space />
-            <q-btn flat dense size="sm" :to="{ name: 'alerts' }" label="Все" />
+            <q-btn v-if="auth.can('alerts.read')" flat dense size="sm" :to="{ name: 'alerts' }" label="Все" />
           </q-card-section>
           <q-separator />
           <q-list separator dense>
@@ -279,7 +313,7 @@ onBeforeUnmount(() => {
           <q-card-section class="row items-center">
             <div class="text-subtitle1">Хранилища бэкапов</div>
             <q-space />
-            <q-btn flat dense size="sm" :to="{ name: 'storages' }" label="Настроить" />
+            <q-btn v-if="auth.can('storages.read')" flat dense size="sm" :to="{ name: 'storages' }" :label="auth.can('storages.admin') ? 'Настроить' : 'Открыть'" />
           </q-card-section>
           <q-separator />
           <q-list separator dense>

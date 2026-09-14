@@ -3,6 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useQuasar } from 'quasar'
 import { api, errorMessage, notify, notifyError, notifyOk } from '@/api/client'
 import DirectoryPicker from '@/components/DirectoryPicker.vue'
+import PageLoadError from '@/components/PageLoadError.vue'
 import { useUnsavedChanges } from '@/composables/unsavedChanges'
 import { ago, connState } from '@/api/format'
 import { useAppStore } from '@/stores/app'
@@ -14,6 +15,7 @@ const app = useAppStore()
 const auth = useAuthStore()
 
 const loading = ref(false)
+const pageError = ref('')
 const busyServers = ref<string[]>([])
 const dialog = ref(false)
 const editing = ref<Server | null>(null)
@@ -208,10 +210,11 @@ watch(
 async function load() {
   const sequence = ++serversLoadSequence
   loading.value = true
+  pageError.value = ''
   try {
     await app.loadServers()
   } catch (err) {
-    if (sequence === serversLoadSequence) notifyError(err, 'Не удалось загрузить список серверов')
+    if (sequence === serversLoadSequence) pageError.value = errorMessage(err)
   } finally {
     if (sequence === serversLoadSequence) loading.value = false
   }
@@ -728,6 +731,8 @@ onMounted(load)
       </q-btn>
     </div>
 
+    <PageLoadError :message="pageError" title="Не удалось загрузить платформы" :loading="loading" @retry="load" />
+
     <q-table
       :rows="app.servers"
       :columns="columns"
@@ -738,7 +743,7 @@ onMounted(load)
       :grid="$q.screen.lt.md"
       class="jhv-table"
       :pagination="{ rowsPerPage: 25 }"
-      no-data-label="Платформы виртуализации не подключены"
+      :no-data-label="pageError ? 'Список платформ недоступен' : 'Платформы виртуализации не подключены'"
     >
       <template #item="props">
         <div class="q-pa-xs col-12">

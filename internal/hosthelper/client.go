@@ -76,10 +76,29 @@ type SearchUsersRequest struct {
 	Query  string `json:"query"`
 }
 
+type SearchGroupsRequest struct {
+	Issuer string `json:"issuer"`
+	Query  string `json:"query"`
+}
+
+type UserGroupMembershipRequest struct {
+	Issuer  string `json:"issuer"`
+	UserID  string `json:"user_id"`
+	GroupID string `json:"group_id"`
+	Joined  bool   `json:"joined"`
+}
+
+type IdentityGroup struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Path string `json:"path,omitempty"`
+}
+
 type IdentityUser struct {
-	ID       string `json:"id"`
-	Username string `json:"username"`
-	Enabled  bool   `json:"enabled"`
+	ID       string          `json:"id"`
+	Username string          `json:"username"`
+	Enabled  bool            `json:"enabled"`
+	Groups   []IdentityGroup `json:"groups,omitempty"`
 }
 
 type errorResponse struct {
@@ -135,6 +154,18 @@ func (c *Client) ConsoleAdmin(ctx context.Context, request ConsoleAdminRequest) 
 func (c *Client) SearchUsers(ctx context.Context, request SearchUsersRequest) ([]IdentityUser, error) {
 	var out []IdentityUser
 	err := c.do(ctx, http.MethodPost, "/v1/keycloak/users", request, &out)
+	return out, err
+}
+
+func (c *Client) SearchGroups(ctx context.Context, request SearchGroupsRequest) ([]IdentityGroup, error) {
+	var out []IdentityGroup
+	err := c.do(ctx, http.MethodPost, "/v1/keycloak/groups", request, &out)
+	return out, err
+}
+
+func (c *Client) SetUserGroupMembership(ctx context.Context, request UserGroupMembershipRequest) (IdentityUser, error) {
+	var out IdentityUser
+	err := c.do(ctx, http.MethodPost, "/v1/keycloak/user-group-membership", request, &out)
 	return out, err
 }
 

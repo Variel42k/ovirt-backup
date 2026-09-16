@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { api, errorMessage, notifyError, notifyOk } from '@/api/client'
-import type { DomainSettingsWrite, EmbeddedKeycloakWrite, IdentitySettings, IdentitySettingsWrite, IdentityUser, KeycloakConsoleCredentials } from '@/api/settings-types'
+import type { DomainSettingsWrite, EmbeddedKeycloakWrite, IdentityGroup, IdentitySettings, IdentitySettingsWrite, IdentityUser, KeycloakConsoleCredentials } from '@/api/settings-types'
 import { useOperationsStore } from '@/stores/operations'
 import PageLoadError from '@/components/PageLoadError.vue'
 
@@ -37,6 +37,9 @@ const searchQuery = ref('')
 const searchPassword = ref('')
 const searchingUsers = ref(false)
 const foundUsers = ref<IdentityUser[]>([])
+const foundGroups = ref<IdentityGroup[]>([])
+const groupSearchQuery = ref('')
+const groupMembershipBusy = ref('')
 const oidc = ref<IdentitySettingsWrite>({
   local_password: '', enabled: true, issuer: '', backchannel_url: '', client_id: 'jhvirt',
   client_secret: '', redirect_url: `${window.location.origin}/api/v1/auth/oidc/callback`,
@@ -412,15 +415,58 @@ async function searchUsers() {
   if (searchQuery.value.trim().length < 2 || !searchPassword.value) { identityFormError.value = 'Введите не менее двух символов имени и пароль локального администратора.'; return }
   searchingUsers.value = true
   foundUsers.value = []
+  foundGroups.value = []
   const password = searchPassword.value
   searchPassword.value = ''
-  try { foundUsers.value = await api.searchIdentityUsers(searchQuery.value, password) }
-  catch (err) { identityFormError.value = errorMessage(err); notifyError(err, 'Не удалось найти пользователей') }
+  try {
+    const [users, groupsList] = await Promise.all([
+      api.searchIdentityUsers(searchQuery.value, password),
+      api.searchIdentityGroups(groupSearchQuery.value, password),
+    ])
+    foundUsers.value = users
+    foundGroups.value = groupsList
+  } catch (err) { identityFormError.value = errorMessage(err); notifyError(err, 'Не удалось загрузить пользователей и группы Keycloak') }
   finally { searchingUsers.value = false }
 }
 
-function addUser(user: IdentityUser) {
-  if (!assignments.value.some((entry) => entry.subject === user.id)) assignments.value.push({ subject: user.id, role: 'viewer' })
+
+function manualRoleFor(user: IdentityUser): string {
+  return assignments.value.find((entry) => entry.subject === user.id)?.role ?? ''
+}
+
+function setManualRole(user: IdentityUser, role: string | null) {
+  const index = assignments.value.findIndex((entry) => entry.subject === user.id)
+  if (!role) {
+    if (index >= 0) assignments.value.splice(index, 1)
+    return
+  }
+  if (index >= 0) assignments.value[index].role = role
+  else assignments.value.push({ subject: user.id, role })
+}
+
+function userInGroup(user: IdentityUser, group: IdentityGroup): boolean {
+  return Boolean(user.groups?.some((item) => item.id === group.id))
+}
+
+async function setUserGroup(user: IdentityUser, group: IdentityGroup, joined: boolean) {
+  if (!canConfigure.value || identityBusy.value || groupMembershipBusy.value) return
+  if (!searchPassword.value) {
+    identityFormError.value = 'Для изменения группы повторно введите пароль локального администратора в поле поиска.'
+    return
+  }
+  groupMembershipBusy.value = `${user.id}:${group.id}`
+  const password = searchPassword.value
+  try {
+    const updated = await api.setIdentityUserGroup(user.id, group.id, joined, password)
+    const index = foundUsers.value.findIndex((item) => item.id === user.id)
+    if (index >= 0) foundUsers.value[index] = updated
+    notifyOk(joined ? `Пользователь ${user.username} добавлен в ${group.name}` : `Пользователь ${user.username} удалён из ${group.name}`)
+  } catch (err) {
+    identityFormError.value = errorMessage(err)
+    notifyError(err, 'Не удалось изменить группу пользователя')
+  } finally {
+    groupMembershipBusy.value = ''
+  }
 }
 
 watch(() => domain.value.domain.name, (name, previous) => {
@@ -643,18 +689,58 @@ onMounted(load)
       <q-separator />
       <q-card-section>
         <div v-if="embeddedManaged" class="q-mb-md">
+          <div class="text-subtitle2">Управление учётными записями Keycloak</div>
+          <div class="text-caption text-grey-7 q-mb-sm">Найдите доменного пользователя, измените его членство в группах Keycloak или задайте индивидуальную роль приложения. Для AD с группами READ_ONLY изменение импортированной группы может быть отклонено Keycloak — в таком случае используйте индивидуальную роль ниже или измените членство в Active Directory.</div>
           <div class="row q-col-gutter-sm items-start">
-            <div class="col-12 col-md-5"><q-input v-model="searchQuery" outlined dense label="Найти пользователя Keycloak по имени" :disable="!canConfigure || identityBusy" /></div>
-            <div class="col-12 col-md-5"><q-input v-model="searchPassword" outlined dense type="password" label="Пароль локального администратора" :disable="!canConfigure || identityBusy" /></div>
+            <div class="col-12 col-md-4"><q-input v-model="searchQuery" outlined dense label="Пользователь" hint="Например: ivanov" :disable="!canConfigure || identityBusy" /></div>
+            <div class="col-12 col-md-3"><q-input v-model="groupSearchQuery" outlined dense label="Фильтр групп" hint="Пусто — показать до 100 групп" :disable="!canConfigure || identityBusy" /></div>
+            <div class="col-12 col-md-3"><q-input v-model="searchPassword" outlined dense type="password" label="Пароль локального администратора" hint="Нужен для поиска и изменений" :disable="!canConfigure || identityBusy" /></div>
             <div class="col-12 col-md-2"><q-btn color="primary" outline label="Найти" icon="search" :loading="searchingUsers" :disable="!canConfigure || identityBusy" @click="searchUsers" /></div>
           </div>
-          <q-list v-if="foundUsers.length" bordered separator class="q-mt-sm">
-            <q-item v-for="user in foundUsers" :key="user.id">
-              <q-item-section><q-item-label>{{ user.username }}</q-item-label><q-item-label caption>{{ user.id }}</q-item-label></q-item-section>
-              <q-item-section side><q-btn flat color="primary" label="Добавить" :disable="!user.enabled || !canConfigure || identityBusy" @click="addUser(user)" /></q-item-section>
-            </q-item>
+          <q-list v-if="foundUsers.length" bordered separator class="q-mt-md">
+            <q-expansion-item v-for="user in foundUsers" :key="user.id" expand-separator icon="person" :label="user.username" :caption="user.enabled ? user.id : `${user.id} · отключён`">
+              <q-card flat class="bg-grey-1">
+                <q-card-section>
+                  <div class="row q-col-gutter-md">
+                    <div class="col-12 col-md-5">
+                      <div class="text-subtitle2 q-mb-xs">Группы Keycloak</div>
+                      <div v-if="!foundGroups.length" class="text-caption text-grey-7">Группы не найдены по выбранному фильтру.</div>
+                      <q-list v-else dense bordered separator>
+                        <q-item v-for="group in foundGroups" :key="group.id" tag="label">
+                          <q-item-section>
+                            <q-item-label>{{ group.name }}</q-item-label>
+                            <q-item-label caption>{{ group.path || group.id }}</q-item-label>
+                          </q-item-section>
+                          <q-item-section side>
+                            <q-toggle
+                              :model-value="userInGroup(user, group)"
+                              :disable="!user.enabled || !canConfigure || identityBusy || Boolean(groupMembershipBusy)"
+                              @update:model-value="(value) => setUserGroup(user, group, Boolean(value))"
+                            />
+                          </q-item-section>
+                        </q-item>
+                      </q-list>
+                    </div>
+                    <div class="col-12 col-md-7">
+                      <div class="text-subtitle2 q-mb-xs">Индивидуальные настройки доступа</div>
+                      <q-select
+                        :model-value="manualRoleFor(user)"
+                        outlined dense emit-value map-options clearable
+                        :options="roleOptions" label="Индивидуальная роль"
+                        hint="Имеет приоритет над группами. Очистите поле, чтобы снова использовать правила групп."
+                        :disable="!canConfigure || identityBusy"
+                        @update:model-value="(value) => setManualRole(user, value)"
+                      />
+                      <q-banner dense class="bg-blue-1 q-mt-sm">
+                        Индивидуальная роль сохраняется кнопкой «Сохранить доступ» ниже. Членство в группе применяется сразу после подтверждения паролем локального администратора.
+                      </q-banner>
+                    </div>
+                  </div>
+                </q-card-section>
+              </q-card>
+            </q-expansion-item>
           </q-list>
-          <div class="text-caption text-grey-7 q-mt-xs">До 20 результатов. Если пользователь не найден, проверьте Users DN и синхронизацию LDAP.</div>
+          <div class="text-caption text-grey-7 q-mt-xs">До 20 пользователей. Если пользователь не найден, проверьте Users DN и синхронизацию LDAP.</div>
         </div>
         <div v-for="(entry, index) in assignments" :key="index" class="row q-col-gutter-sm q-mb-sm items-start">
           <div class="col"><q-input v-model="entry.subject" outlined dense label="ID пользователя Keycloak (OIDC subject)" hint="ID из карточки пользователя Keycloak; имя или email не подходят" :disable="!canConfigure || identityBusy" /></div>

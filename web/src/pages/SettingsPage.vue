@@ -1148,7 +1148,7 @@ const route = useRoute()
 const highlightedApproval = ref('')
 
 function applyDeepLink() {
-  const wanted = String(route.query.tab ?? route.meta.settingsTab ?? '')
+  const wanted = String(route.query.tab ?? route.meta.settingsTab ?? (route.name === 'settings' ? 'system' : ''))
   const allowed = settingsGroups.value.flatMap((group) => group.tabs).some((candidate) => candidate.value === wanted)
   if (wanted && allowed) tab.value = wanted
   alignSettingsCategory(tab.value)

@@ -53,6 +53,8 @@ func main() {
 	mux.HandleFunc("POST /v1/keycloak/domain", svc.domain)
 	mux.HandleFunc("POST /v1/keycloak/console-admin", svc.consoleAdmin)
 	mux.HandleFunc("POST /v1/keycloak/users", svc.searchUsers)
+	mux.HandleFunc("POST /v1/keycloak/groups", svc.searchGroups)
+	mux.HandleFunc("POST /v1/keycloak/user-group-membership", svc.setUserGroupMembership)
 	server := &http.Server{
 		Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 8 * time.Minute,
 		WriteTimeout: 8 * time.Minute, IdleTimeout: 30 * time.Second,
@@ -153,6 +155,32 @@ func (s *service) searchUsers(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), time.Minute)
 	defer cancel()
 	result, err := s.manager.SearchUsers(ctx, request)
+	w.Header().Set("Cache-Control", "no-store")
+	writeResult(w, result, err)
+}
+
+func (s *service) searchGroups(w http.ResponseWriter, r *http.Request) {
+	var request hosthelper.SearchGroupsRequest
+	if err := decode(w, r, &request); err != nil {
+		writeResult(w, nil, err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), time.Minute)
+	defer cancel()
+	result, err := s.manager.SearchGroups(ctx, request)
+	w.Header().Set("Cache-Control", "no-store")
+	writeResult(w, result, err)
+}
+
+func (s *service) setUserGroupMembership(w http.ResponseWriter, r *http.Request) {
+	var request hosthelper.UserGroupMembershipRequest
+	if err := decode(w, r, &request); err != nil {
+		writeResult(w, nil, err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), time.Minute)
+	defer cancel()
+	result, err := s.manager.SetUserGroupMembership(ctx, request)
 	w.Header().Set("Cache-Control", "no-store")
 	writeResult(w, result, err)
 }

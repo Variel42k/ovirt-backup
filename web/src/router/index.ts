@@ -37,7 +37,7 @@ const routes = [
       { path: 'storages', name: 'storages', component: () => import('@/pages/StoragesPage.vue'), meta: { perm: 'storages.read' } },
       { path: 'alerts', name: 'alerts', component: () => import('@/pages/AlertsPage.vue'), meta: { perm: 'alerts.read' } },
       { path: 'documentation', name: 'documentation', component: () => import('@/pages/DocumentationPage.vue') },
-      { path: 'settings', name: 'settings', component: () => import('@/pages/SettingsPage.vue') },
+      { path: 'settings', name: 'settings', component: () => import('@/pages/SettingsPage.vue'), meta: { settingsTab: 'system' } },
       {
         path: 'administration/identity', name: 'identity-settings',
         component: () => import('@/pages/IdentityPage.vue'), meta: { perm: 'users.admin' },

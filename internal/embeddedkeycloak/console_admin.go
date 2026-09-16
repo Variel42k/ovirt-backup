@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"path/filepath"
@@ -188,5 +189,125 @@ func (m *Manager) SearchUsers(ctx context.Context, request hosthelper.SearchUser
 	if out == nil {
 		out = []hosthelper.IdentityUser{}
 	}
+	for i := range out {
+		full, err := identityUserByID(ctx, admin, st.Realm, out[i].ID)
+		if err != nil {
+			return nil, err
+		}
+		out[i] = full
+	}
 	return out, nil
+}
+
+func (m *Manager) SearchGroups(ctx context.Context, request hosthelper.SearchGroupsRequest) ([]hosthelper.IdentityGroup, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	st, admin, err := m.managedRealmAdmin(ctx, request.Issuer)
+	if err != nil {
+		return nil, err
+	}
+	query := strings.TrimSpace(request.Query)
+	if len(query) > 128 || strings.ContainsAny(query, "\r\n\x00") {
+		return nil, errors.New("поиск группы содержит недопустимые символы")
+	}
+	path := "/admin/realms/" + url.PathEscape(st.Realm) + "/groups?max=100&briefRepresentation=false"
+	if query != "" {
+		path += "&search=" + url.QueryEscape(query)
+	}
+	raw, err := admin.do(ctx, http.MethodGet, path, nil, http.StatusOK)
+	if err != nil {
+		return nil, err
+	}
+	type groupRepresentation struct {
+		ID        string                `json:"id"`
+		Name      string                `json:"name"`
+		Path      string                `json:"path"`
+		SubGroups []groupRepresentation `json:"subGroups"`
+	}
+	var groups []groupRepresentation
+	if err := json.Unmarshal(raw, &groups); err != nil {
+		return nil, errors.New("не удалось прочитать группы Keycloak")
+	}
+	out := make([]hosthelper.IdentityGroup, 0, len(groups))
+	var appendGroups func([]groupRepresentation)
+	appendGroups = func(items []groupRepresentation) {
+		for _, group := range items {
+			if group.ID != "" {
+				out = append(out, hosthelper.IdentityGroup{ID: group.ID, Name: group.Name, Path: group.Path})
+			}
+			appendGroups(group.SubGroups)
+		}
+	}
+	appendGroups(groups)
+	return out, nil
+}
+
+func (m *Manager) SetUserGroupMembership(ctx context.Context, request hosthelper.UserGroupMembershipRequest) (hosthelper.IdentityUser, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	st, admin, err := m.managedRealmAdmin(ctx, request.Issuer)
+	if err != nil {
+		return hosthelper.IdentityUser{}, err
+	}
+	userID := strings.TrimSpace(request.UserID)
+	groupID := strings.TrimSpace(request.GroupID)
+	if userID == "" || groupID == "" || len(userID) > 128 || len(groupID) > 128 || strings.ContainsAny(userID+groupID, "\r\n\x00") {
+		return hosthelper.IdentityUser{}, errors.New("неверный ID пользователя или группы")
+	}
+	base := "/admin/realms/" + url.PathEscape(st.Realm)
+	method := http.MethodDelete
+	if request.Joined {
+		method = http.MethodPut
+	}
+	if _, err := admin.do(ctx, method, base+"/users/"+url.PathEscape(userID)+"/groups/"+url.PathEscape(groupID), nil, http.StatusNoContent); err != nil {
+		return hosthelper.IdentityUser{}, fmt.Errorf("не удалось изменить членство в группе: %w", err)
+	}
+	return identityUserByID(ctx, admin, st.Realm, userID)
+}
+
+func (m *Manager) managedRealmAdmin(ctx context.Context, issuer string) (helperState, *adminAPI, error) {
+	st, err := m.loadState()
+	if err != nil || strings.TrimRight(strings.TrimSpace(issuer), "/") != st.PublicURL+"/realms/"+st.Realm || !st.RealmScoped {
+		return st, nil, errors.New("операция доступна только в управляемом realm")
+	}
+	env, err := readEnv(filepath.Join(m.cfg.ComposeDir, ".env"))
+	if err != nil {
+		return st, nil, err
+	}
+	project := env["COMPOSE_PROJECT_NAME"]
+	if project == "" {
+		project = "ovirt-backup"
+	}
+	if !simpleNameRE.MatchString(project) {
+		return st, nil, errors.New("неверное имя compose project")
+	}
+	adminTLS, err := m.adminTLSConfig(ctx, helperImage(env), project+"_keycloak-data", st.PublicURL, st.DirectTLS)
+	if err != nil {
+		return st, nil, err
+	}
+	admin, err := authenticatedRealmAdmin(ctx, localURL(st.Port, st.DirectTLS), adminTLS, st.Realm, st.AdminClientID, st.AdminClientSecret)
+	return st, admin, err
+}
+
+func identityUserByID(ctx context.Context, admin *adminAPI, realm, userID string) (hosthelper.IdentityUser, error) {
+	base := "/admin/realms/" + url.PathEscape(realm) + "/users/" + url.PathEscape(userID)
+	raw, err := admin.do(ctx, http.MethodGet, base, nil, http.StatusOK)
+	if err != nil {
+		return hosthelper.IdentityUser{}, err
+	}
+	var user hosthelper.IdentityUser
+	if err := json.Unmarshal(raw, &user); err != nil || user.ID == "" {
+		return hosthelper.IdentityUser{}, errors.New("не удалось прочитать пользователя Keycloak")
+	}
+	groupsRaw, err := admin.do(ctx, http.MethodGet, base+"/groups?max=100&briefRepresentation=true", nil, http.StatusOK)
+	if err != nil {
+		return hosthelper.IdentityUser{}, err
+	}
+	if err := json.Unmarshal(groupsRaw, &user.Groups); err != nil {
+		return hosthelper.IdentityUser{}, errors.New("не удалось прочитать группы пользователя Keycloak")
+	}
+	if user.Groups == nil {
+		user.Groups = []hosthelper.IdentityGroup{}
+	}
+	return user, nil
 }

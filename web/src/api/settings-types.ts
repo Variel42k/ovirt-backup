@@ -112,10 +112,17 @@ export interface KeycloakConsoleCredentials {
   password: string
 }
 
+export interface IdentityGroup {
+  id: string
+  name: string
+  path?: string
+}
+
 export interface IdentityUser {
   id: string
   username: string
   enabled: boolean
+  groups?: IdentityGroup[]
 }
 
 export interface User {

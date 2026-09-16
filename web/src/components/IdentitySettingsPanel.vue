@@ -97,6 +97,18 @@ const embeddedManaged = computed(() => {
   return oidc.value.issuer.replace(/\/$/, '') === `${status.public_url.replace(/\/$/, '')}/realms/${status.realm}`
 })
 
+const adBaseDnExample = computed(() => {
+  const labels = domain.value.domain.name.trim().split('.').map((part) => part.trim()).filter(Boolean)
+  return labels.length >= 2 ? labels.map((part) => `DC=${part}`).join(',') : 'DC=example,DC=org'
+})
+const adLdapURLExample = computed(() => {
+  const name = domain.value.domain.name.trim() || 'example.org'
+  return `ldaps://dc01.${name}:636`
+})
+const adBindDNExample = computed(() => `CN=svc-keycloak,OU=Service Accounts,${adBaseDnExample.value}`)
+const adUsersDNHint = computed(() => `База поиска пользователей. Например: ${adBaseDnExample.value} или OU=Users,${adBaseDnExample.value}`)
+const adGroupsDNHint = computed(() => `База поиска групп. Например: ${adBaseDnExample.value} или OU=Groups,${adBaseDnExample.value}`)
+
 function roleMapping(): Record<string, string> {
   if (!useRoleGroups.value) return {}
   // Keep additional/custom mappings that the three standard fields do not edit.
@@ -456,7 +468,7 @@ onMounted(load)
     </q-banner>
 
     <q-stepper v-if="settings && !loadError" v-model="step" flat bordered animated color="primary">
-      <q-step :name="1" title="Подключение Keycloak" icon="vpn_key" :done="Boolean(settings?.enabled)">
+      <q-step :name="1" title="1. Keycloak и локальный вход" icon="vpn_key" :done="Boolean(settings?.enabled)">
         <q-card v-if="settings?.embedded_keycloak.available || settings?.embedded_keycloak.initialized" flat bordered class="q-mb-lg">
           <q-card-section>
             <div class="row items-center q-col-gutter-sm">
@@ -472,17 +484,24 @@ onMounted(load)
             <div class="col-12 col-md-6"><q-input v-model="embedded.realm" outlined dense label="Realm" :disable="!canConfigure || settings.embedded_keycloak.initialized" /></div>
             <div class="col-12 col-md-6"><q-input v-model="embedded.client_id" outlined dense label="OIDC client ID" :disable="!canConfigure" /></div>
             <div class="col-12"><q-toggle v-model="embedded.direct_tls" label="TLS непосредственно в Keycloak" :disable="!canConfigure || settings.embedded_keycloak.initialized" /></div>
-            <div class="col-12 col-md-4"><q-input v-model="groups.admin" outlined dense label="Группа администраторов" :disable="!canConfigure" /></div>
-            <div class="col-12 col-md-4"><q-input v-model="groups.operator" outlined dense label="Группа операторов" :disable="!canConfigure" /></div>
-            <div class="col-12 col-md-4"><q-input v-model="groups.viewer" outlined dense label="Группа наблюдателей" :disable="!canConfigure" /></div>
-            <div class="col-12"><q-input v-model="embedded.local_password" type="password" outlined dense label="Пароль текущего локального администратора" :disable="!canConfigure" /></div>
+            <div class="col-12">
+              <q-card flat bordered class="bg-blue-1">
+                <q-card-section class="q-py-sm">
+                  <q-toggle v-model="embedded.allow_local_login" color="primary" label="Сохранить вход локального администратора" :disable="!canConfigure" />
+                  <div class="text-caption q-ml-xl">
+                    Рекомендуется оставить включённым. Локальная учётная запись JustHPC продолжит работать независимо от AD и Keycloak и позволит войти при недоступности домена.
+                  </div>
+                </q-card-section>
+              </q-card>
+            </div>
+            <div class="col-12"><q-input v-model="embedded.local_password" type="password" outlined dense label="Пароль текущего локального администратора JustHPC" hint="Нужен только для подтверждения изменения настроек. Этот пароль не передаётся в Active Directory или Keycloak." :disable="!canConfigure" /></div>
             <div class="col-12"><q-btn color="primary" unelevated icon="play_circle" :label="settings.embedded_keycloak.initialized ? 'Проверить и применить' : 'Запустить и подключить'" :loading="startingEmbedded" :disable="!canConfigure || identityBusy" @click="startEmbedded" /></div>
           </q-card-section>
         </q-card>
 
         <q-banner v-else-if="settings" dense class="bg-blue-1 q-mb-md">Автоматический запуск встроенного Keycloak доступен в Docker-установке из .run. Здесь можно подключить внешний Keycloak.</q-banner>
 
-        <q-expansion-item :default-opened="!embeddedManaged" icon="language" label="Подключение OIDC и параметры входа" header-class="text-weight-medium">
+        <q-expansion-item :default-opened="!settings?.embedded_keycloak.available" icon="language" label="Внешний Keycloak / расширенные OIDC-настройки" header-class="text-weight-medium">
           <div class="row q-col-gutter-md q-pt-md">
             <div class="col-12"><q-toggle v-model="oidc.enabled" label="Включить вход через Keycloak" :disable="!canConfigure" /></div>
             <div class="col-12"><q-input v-model="oidc.issuer" outlined dense label="Issuer Keycloak" hint="https://sso.example.org/realms/jhvirt" :disable="!canConfigure" /></div>
@@ -490,12 +509,9 @@ onMounted(load)
             <div class="col-12 col-md-6"><q-input v-model="oidc.client_secret" outlined dense type="password" label="Секрет OIDC-клиента" :hint="oidcSecretReusable ? 'Пусто — оставить сохранённый' : 'Укажите секрет для этих issuer и client ID'" :disable="!canConfigure" /></div>
             <div class="col-12"><q-input v-model="oidc.redirect_url" outlined dense label="Redirect URL" :disable="!canConfigure" /></div>
             <div class="col-12"><q-input v-model="oidc.backchannel_url" outlined dense label="Внутренний адрес Keycloak" hint="Оставьте пустым, если issuer доступен приложению" :disable="!canConfigure" /></div>
-            <div class="col-12 col-md-4"><q-input v-model="groups.admin" outlined dense label="Группа администраторов" :disable="!canConfigure" /></div>
-            <div class="col-12 col-md-4"><q-input v-model="groups.operator" outlined dense label="Группа операторов" :disable="!canConfigure" /></div>
-            <div class="col-12 col-md-4"><q-input v-model="groups.viewer" outlined dense label="Группа наблюдателей" :disable="!canConfigure" /></div>
             <div class="col-12 col-md-6"><q-input v-model.number="oidc.session_ttl_minutes" type="number" min="5" max="1440" outlined dense label="Срок сессии, минут" :disable="!canConfigure" /></div>
             <div class="col-12 col-md-6"><q-input v-model.number="oidc.revalidate_seconds" type="number" min="30" max="900" outlined dense label="Проверять группы каждые, секунд" :disable="!canConfigure" /></div>
-            <div class="col-12"><q-toggle v-model="oidc.allow_local_login" label="Оставить локальный вход для аварийного доступа" :disable="!canConfigure" /></div>
+            <div class="col-12"><q-toggle v-model="oidc.allow_local_login" label="Сохранить вход локального администратора" hint="Локальный вход JustHPC останется доступен параллельно с Keycloak." :disable="!canConfigure" /></div>
             <div class="col-12 col-md-6"><q-input v-model="oidc.button_label" outlined dense label="Текст кнопки входа" :disable="!canConfigure" /></div>
             <div class="col-12 col-md-6"><q-input v-model="oidc.groups_claim" outlined dense label="Claim с группами" :disable="!canConfigure" /></div>
             <div class="col-12"><q-input v-model="oidc.local_password" type="password" outlined dense label="Пароль текущего локального администратора" :disable="!canConfigure" /></div>
@@ -506,39 +522,111 @@ onMounted(load)
         <q-stepper-navigation v-if="identityReady"><q-btn flat color="primary" label="Перейти к домену" @click="step = 2" /></q-stepper-navigation>
       </q-step>
 
-      <q-step :name="2" title="Active Directory" icon="domain" :done="Boolean(settings?.domain.connected)" :disable="!identityReady">
+      <q-step :name="2" title="2. Подключение Active Directory" icon="domain" :done="Boolean(settings?.domain.connected)" :disable="!identityReady">
         <q-banner dense class="bg-blue-1 q-mb-md">
-          <template #avatar><q-icon name="security" color="primary" /></template>
-          <span v-if="embeddedManaged">Для встроенного Keycloak helper использует закрытую служебную учётную запись. Введите только параметры домена и bind-пароль.</span>
-          <span v-else>Для внешнего Keycloak укажите временный service client с правами управления realm, клиентами, пользователями и группами.</span>
+          <template #avatar><q-icon name="domain" color="primary" /></template>
+          <div class="text-weight-medium">Что нужно для подключения домена</div>
+          <div class="text-caption q-mt-xs">
+            Нужны адрес контроллера домена, DN для поиска пользователей и групп, а также отдельная служебная AD-учётная запись с правом чтения каталога.
+            После подключения пользователи входят своим обычным доменным логином и паролем через Keycloak.
+          </div>
         </q-banner>
-        <div class="row q-col-gutter-md">
-          <template v-if="!embeddedManaged">
+
+        <q-card flat bordered class="q-mb-md">
+          <q-card-section>
+            <div class="text-subtitle1 text-weight-medium">1. Домен и контроллер</div>
+            <div class="text-caption text-grey-7 q-mb-md">Введите DNS-имя домена и LDAPS-адрес контроллера. Для LDAPS на 636 StartTLS не используется.</div>
+            <div class="row q-col-gutter-md">
+              <div class="col-12 col-md-6">
+                <q-input v-model="domain.domain.name" outlined dense label="DNS-домен Active Directory" hint="Пример: advengineering.ru" :disable="!canConfigure">
+                  <template #prepend><q-icon name="dns" /></template>
+                </q-input>
+              </div>
+              <div class="col-12 col-md-6">
+                <q-input v-model="domain.domain.ldap_url" outlined dense label="LDAPS URL контроллера" :hint="`Пример: ${adLdapURLExample}`" :disable="!canConfigure">
+                  <template #prepend><q-icon name="lan" /></template>
+                </q-input>
+              </div>
+              <div class="col-12">
+                <q-banner dense class="bg-grey-2">
+                  Пример для указанного домена: <b>{{ adLdapURLExample }}</b>.
+                  Замените dc01 на имя вашего контроллера домена. Сертификат контроллера должен быть доверенным; при внутреннем CA загрузите сертификат ниже.
+                </q-banner>
+              </div>
+            </div>
+          </q-card-section>
+        </q-card>
+
+        <q-card flat bordered class="q-mb-md">
+          <q-card-section>
+            <div class="text-subtitle1 text-weight-medium">2. Где искать пользователей и группы</div>
+            <div class="text-caption text-grey-7 q-mb-md">Если нужно искать по всему домену, оставьте Base DN вида DC=company,DC=ru. Для ограничения можно указать конкретный OU.</div>
+            <div class="row q-col-gutter-md">
+              <div class="col-12 col-md-6"><q-input v-model="domain.domain.users_dn" outlined dense label="Users DN" :hint="adUsersDNHint" :disable="!canConfigure" /></div>
+              <div v-if="domain.domain.group_mode === 'read-only'" class="col-12 col-md-6"><q-input v-model="domain.domain.groups_dn" outlined dense label="Groups DN" :hint="adGroupsDNHint" :disable="!canConfigure" /></div>
+              <div class="col-12"><q-select v-model="domain.domain.group_mode" outlined dense emit-value map-options label="Как назначать доступ" :options="[{ label: 'Автоматически по группам AD', value: 'read-only' }, { label: 'Вручную после синхронизации пользователей', value: 'manual' }]" :disable="!canConfigure" /></div>
+            </div>
+          </q-card-section>
+        </q-card>
+
+        <q-card flat bordered class="q-mb-md">
+          <q-card-section>
+            <div class="text-subtitle1 text-weight-medium">3. Служебная учётная запись AD</div>
+            <div class="text-caption text-grey-7 q-mb-md">Эта учётная запись нужна Keycloak только для чтения пользователей и групп. Это не локальный администратор JustHPC и не учётная запись обычного пользователя.</div>
+            <div class="row q-col-gutter-md">
+              <div class="col-12 col-md-6"><q-input v-model="domain.domain.bind_dn" outlined dense label="Bind DN или UPN" :hint="`Пример: ${adBindDNExample} или svc-keycloak@${domain.domain.name || 'example.org'}`" :disable="!canConfigure" /></div>
+              <div class="col-12 col-md-6"><q-input v-model="domain.domain.bind_password" outlined dense type="password" label="Пароль служебной AD-учётной записи" hint="Введите пароль учётной записи из Bind DN/UPN." :disable="!canConfigure" /></div>
+              <div v-if="embeddedManaged" class="col-12">
+                <q-file v-model="domainCAFile" outlined dense clearable accept=".pem,.crt,application/x-pem-file,application/x-x509-ca-cert" label="CA-сертификат домена (если используется внутренний CA)" :disable="!canConfigure"><template #prepend><q-icon name="verified" /></template></q-file>
+                <div class="text-caption q-mt-xs">Нужен, если сертификат LDAPS-контроллера не подписан публичным доверенным CA. Содержимое файла в Web-интерфейсе после применения не показывается.</div>
+              </div>
+            </div>
+          </q-card-section>
+        </q-card>
+
+        <q-card v-if="domain.domain.group_mode === 'read-only'" flat bordered class="q-mb-md">
+          <q-card-section>
+            <div class="text-subtitle1 text-weight-medium">4. Какие AD-группы получают доступ</div>
+            <div class="text-caption text-grey-7 q-mb-md">Указывайте короткое имя группы (CN), например <b>virt-readers</b>, а не полный DN. Admin и operator можно оставить пустыми; для вашего сценария достаточно группы viewer.</div>
+            <div class="row q-col-gutter-md">
+              <div class="col-12 col-md-4"><q-input v-model="groups.admin" outlined dense label="AD-группа → admin" hint="Необязательно. Пример: virt-admins" :disable="!canConfigure" /></div>
+              <div class="col-12 col-md-4"><q-input v-model="groups.operator" outlined dense label="AD-группа → operator" hint="Необязательно. Пример: virt-operators" :disable="!canConfigure" /></div>
+              <div class="col-12 col-md-4"><q-input v-model="groups.viewer" outlined dense label="AD-группа → viewer" hint="Например: virt-readers" :disable="!canConfigure" /></div>
+            </div>
+            <q-banner dense class="bg-green-1 q-mt-md">
+              Пользователь, входящий в указанную viewer-группу AD, после входа через Keycloak автоматически получит роль <b>viewer</b>. Пароль пользователя хранится и проверяется в Active Directory, а не в JustHPC.
+            </q-banner>
+          </q-card-section>
+        </q-card>
+
+        <q-banner v-if="domain.domain.group_mode === 'manual'" dense class="bg-orange-1 q-mb-md">
+          Группы AD не нужны. После подключения найдите пользователей ниже и назначьте роли вручную. По умолчанию пользователь без назначения не получит доступ.
+        </q-banner>
+
+        <q-expansion-item v-if="!embeddedManaged" icon="settings" label="Расширенные параметры внешнего Keycloak" header-class="text-weight-medium" class="q-mb-md">
+          <div class="row q-col-gutter-md q-pt-md">
             <div class="col-12 col-md-4"><q-input v-model="domain.admin_realm" outlined dense label="Realm служебной записи" :disable="!canConfigure" /></div>
             <div class="col-12 col-md-4"><q-input v-model="domain.admin_client_id" outlined dense label="Service client ID" :disable="!canConfigure" /></div>
             <div class="col-12 col-md-4"><q-input v-model="domain.admin_client_secret" outlined dense type="password" label="Service client secret" :disable="!canConfigure" /></div>
-          </template>
-          <div class="col-12 col-md-6"><q-input v-model="domain.domain.name" outlined dense label="DNS-домен AD" hint="example.org" :disable="!canConfigure" /></div>
-          <div class="col-12 col-md-6"><q-input v-model="domain.domain.provider_name" outlined dense label="Имя provider в Keycloak" :disable="!canConfigure" /></div>
-          <div class="col-12"><q-input v-model="domain.domain.ldap_url" outlined dense label="LDAPS URL контроллера" hint="ldaps://dc01.example.org:636" :disable="!canConfigure" /></div>
-          <div class="col-12"><q-select v-model="domain.domain.group_mode" outlined dense emit-value map-options label="Назначение доступа" :options="[{ label: 'По группам AD (только чтение)', value: 'read-only' }, { label: 'Вручную, без групп AD', value: 'manual' }]" :disable="!canConfigure" /></div>
-          <div class="col-12 col-md-6"><q-input v-model="domain.domain.users_dn" outlined dense label="Users DN" hint="Точная OU или база поиска пользователей. Доступ задаётся отдельно." :disable="!canConfigure" /></div>
-          <div v-if="domain.domain.group_mode === 'read-only'" class="col-12 col-md-6"><q-input v-model="domain.domain.groups_dn" outlined dense label="Groups DN" :disable="!canConfigure" /></div>
-          <div class="col-12 col-md-6"><q-input v-model="domain.domain.bind_dn" outlined dense label="Bind DN или UPN" :disable="!canConfigure" /></div>
-          <div class="col-12 col-md-6"><q-input v-model="domain.domain.bind_password" outlined dense type="password" label="Bind-пароль" :disable="!canConfigure" /></div>
-          <div v-if="embeddedManaged" class="col-12">
-            <q-file v-model="domainCAFile" outlined dense clearable accept=".pem,.crt,application/x-pem-file,application/x-x509-ca-cert" label="CA-сертификат контроллера домена (при необходимости)" :disable="!canConfigure"><template #prepend><q-icon name="verified" /></template></q-file>
-            <div class="text-caption q-mt-xs">Сертификат будет установлен в truststore встроенного Keycloak; его содержимое в интерфейсе не сохраняется и не показывается.</div>
+            <div class="col-12"><q-input v-model="domain.domain.provider_name" outlined dense label="Имя LDAP provider в Keycloak" hint="Обычно: active-directory" :disable="!canConfigure" /></div>
           </div>
-          <div v-if="domain.domain.group_mode === 'read-only'" class="col-12 col-md-4"><q-input v-model="groups.admin" outlined dense label="AD-группа → admin (необязательно)" :disable="!canConfigure" /></div>
-          <div v-if="domain.domain.group_mode === 'read-only'" class="col-12 col-md-4"><q-input v-model="groups.operator" outlined dense label="AD-группа → operator (необязательно)" :disable="!canConfigure" /></div>
-          <div v-if="domain.domain.group_mode === 'read-only'" class="col-12 col-md-4"><q-input v-model="groups.viewer" outlined dense label="AD-группа → viewer" hint="Пользователи этой группы автоматически получают роль viewer." :disable="!canConfigure" /></div>
-          <div v-if="domain.domain.group_mode === 'manual'" class="col-12"><q-banner dense class="bg-orange-1">Группы AD не нужны. После подключения найдите пользователей в разделе ниже и сохраните их роли. По умолчанию вход без назначения запрещён.</q-banner></div>
-          <div class="col-12"><q-input v-model="domain.local_password" type="password" outlined dense label="Пароль текущего локального администратора" hint="Только подтверждает это изменение; это не пароль консоли Keycloak." :disable="!canConfigure" /></div>
-        </div>
+        </q-expansion-item>
+
+        <q-card flat bordered class="q-mb-md">
+          <q-card-section>
+            <div class="text-subtitle1 text-weight-medium">5. Подтверждение</div>
+            <div class="text-caption text-grey-7 q-mb-md">Введите пароль локального администратора JustHPC, чтобы подтвердить изменение. Локальная учётная запись при этом не удаляется.</div>
+            <q-input v-model="domain.local_password" type="password" outlined dense label="Пароль текущего локального администратора JustHPC" hint="Не является Bind-паролем и не передаётся в домен." :disable="!canConfigure" />
+            <q-banner dense class="bg-blue-1 q-mt-md">
+              <template #avatar><q-icon name="admin_panel_settings" color="primary" /></template>
+              <b>Локальный администратор сохраняется.</b> Если на шаге Keycloak включено «Сохранить вход локального администратора», вы сможете входить локально даже при недоступности AD или Keycloak.
+            </q-banner>
+          </q-card-section>
+        </q-card>
+
         <q-stepper-navigation>
-          <q-btn color="primary" unelevated icon="domain_add" label="Проверить и подключить домен" :loading="connectingDomain" :disable="!canConfigure || identityBusy" @click="configureDomain" />
-          <q-btn flat label="Назад" class="q-ml-sm" @click="step = 1" />
+          <q-btn color="primary" unelevated icon="domain_add" label="Проверить AD и подключить домен" :loading="connectingDomain" :disable="!canConfigure || identityBusy" @click="configureDomain" />
+          <q-btn flat label="Назад к Keycloak" class="q-ml-sm" @click="step = 1" />
         </q-stepper-navigation>
       </q-step>
     </q-stepper>

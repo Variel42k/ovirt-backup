@@ -1147,28 +1147,36 @@ func (m *Manager) ensureVaultSecretReadable(ctx context.Context, realm, key stri
 		return errors.New("bind-секрет Keycloak имеет недопустимый тип")
 	}
 
+	// The vault is bind-mounted read-only into Keycloak. Ownership and mode
+	// must therefore be repaired on the host path. chown/chmod through
+	// docker exec would correctly fail with EROFS on the read-only mount.
 	gidOut, err := m.composeOutput(ctx, "exec", "-T", "keycloak", "id", "-g")
 	if err != nil {
 		return fmt.Errorf("определение группы процесса Keycloak: %w", err)
 	}
-	gid := strings.TrimSpace(gidOut)
-	if _, err := strconv.ParseUint(gid, 10, 31); err != nil {
-		return fmt.Errorf("Keycloak вернул некорректный gid %q", gid)
+	gidText := strings.TrimSpace(gidOut)
+	gid64, err := strconv.ParseUint(gidText, 10, 31)
+	if err != nil {
+		return fmt.Errorf("Keycloak вернул некорректный gid %q", gidText)
 	}
-	containerDir := "/opt/keycloak/conf/vault"
-	containerPath := containerDir + "/" + name
-	owner := "0:" + gid
-	if _, err := m.composeOutput(ctx, "exec", "-T", "--user", "0:0", "keycloak", "chown", owner, containerDir, containerPath); err != nil {
-		return fmt.Errorf("назначение владельца bind-секрета Keycloak: %w", err)
+	gid := int(gid64)
+
+	if err := os.Chown(m.cfg.VaultDir, 0, gid); err != nil {
+		return fmt.Errorf("назначение владельца каталога vault Keycloak: %w", err)
 	}
-	if _, err := m.composeOutput(ctx, "exec", "-T", "--user", "0:0", "keycloak", "chmod", "0750", containerDir); err != nil {
+	if err := os.Chmod(m.cfg.VaultDir, 0o750); err != nil {
 		return fmt.Errorf("права каталога vault Keycloak: %w", err)
 	}
-	if _, err := m.composeOutput(ctx, "exec", "-T", "--user", "0:0", "keycloak", "chmod", "0440", containerPath); err != nil {
+	if err := os.Chown(hostPath, 0, gid); err != nil {
+		return fmt.Errorf("назначение владельца bind-секрета Keycloak: %w", err)
+	}
+	if err := os.Chmod(hostPath, 0o440); err != nil {
 		return fmt.Errorf("права bind-секрета Keycloak: %w", err)
 	}
-	if _, err := m.composeOutput(ctx, "exec", "-T", "keycloak", "/bin/sh", "-ec", `test -r "$1"`, "--", containerPath); err != nil {
-		return errors.New("Keycloak не может прочитать bind-секрет после исправления прав; проверьте SELinux label каталога vault")
+
+	containerPath := "/opt/keycloak/conf/vault/" + name
+	if _, err := m.composeOutput(ctx, "exec", "-T", "keycloak", "/bin/sh", "-ec", `test -s "$1" && test -r "$1"`, "--", containerPath); err != nil {
+		return errors.New("Keycloak не может прочитать bind-секрет после исправления host-side прав; проверьте bind mount и SELinux label каталога vault")
 	}
 	return nil
 }

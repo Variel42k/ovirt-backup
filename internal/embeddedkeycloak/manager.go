@@ -262,6 +262,13 @@ func (m *Manager) Bootstrap(ctx context.Context, request hosthelper.BootstrapReq
 	if _, err := m.composeOutput(ctx, "up", "-d", "--build", "--no-deps", "--force-recreate", "keycloak", "keycloak-backup"); err != nil {
 		return out, fmt.Errorf("запуск контейнеров Keycloak: %w", err)
 	}
+	// Repair permissions of an already persisted LDAP bind secret as part of
+	// every Keycloak bootstrap/update. Older releases could leave the host file
+	// owned by the application UID/GID, while the Keycloak image runs with a
+	// different UID and therefore could not read the file-vault credential.
+	if err := m.ensureVaultSecretReadable(ctx, st.Realm, "ad-bind"); err != nil {
+		return out, err
+	}
 	localURL := localURL(request.Port, request.DirectTLS)
 	adminTLS, err := m.adminTLSConfig(ctx, image, keycloakVolume, request.PublicURL, request.DirectTLS)
 	if err != nil {
@@ -480,9 +487,20 @@ func (m *Manager) ConfigureDomain(ctx context.Context, request hosthelper.Domain
 	if err := writeSecret(vaultPath, request.Domain.BindPassword); err != nil {
 		return out, err
 	}
+	if err := m.ensureVaultSecretReadable(ctx, st.Realm, "ad-bind"); err != nil {
+		if previousErr == nil {
+			_ = writeSecret(vaultPath, string(previous))
+		} else {
+			_ = os.Remove(vaultPath)
+		}
+		return out, err
+	}
 	rollback := func() {
 		if previousErr == nil {
 			_ = writeSecret(vaultPath, string(previous))
+			repairCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			_ = m.ensureVaultSecretReadable(repairCtx, st.Realm, "ad-bind")
+			cancel()
 		} else {
 			_ = os.Remove(vaultPath)
 		}
@@ -492,12 +510,6 @@ func (m *Manager) ConfigureDomain(ctx context.Context, request hosthelper.Domain
 			_, _ = m.composeOutput(rollbackCtx, "restart", "keycloak")
 			cancel()
 		}
-	}
-	// Check the real container identity and SELinux access without printing
-	// the credential. Raw LDAP tests alone cannot verify the saved vault file.
-	if _, err := m.composeOutput(ctx, "exec", "-T", "--user", "1000:0", "keycloak", "/bin/bash", "-ec", `test -r "$1"`, "--", "/opt/keycloak/conf/vault/"+vaultName); err != nil {
-		rollback()
-		return out, errors.New("Keycloak не может прочитать bind-секрет: проверьте владельца root:root, права 0440 и SELinux label каталога vault")
 	}
 	kc, err := keycloakadmin.NewWithBackchannelTransport(wantedIssuer, localURL(st.Port, st.DirectTLS),
 		"master", st.AdminClientID, st.AdminClientSecret, tlsTransport(adminTLS))
@@ -658,7 +670,7 @@ func helperImage(env map[string]string) string {
 }
 
 func (m *Manager) ensureVolume(ctx context.Context, name string) error {
-	_, err := m.dockerOutput(ctx, "volume", "create", "--label", "com.ovirt-backup.volume=keycloak-data", name)
+	_, err := m.dockerOutput(ctx, "volume", "create", "--label", "com.justhpc.virt-manager.volume=keycloak-data", name)
 	return err
 }
 
@@ -1117,6 +1129,50 @@ func writeSecret(path, value string) error {
 	return atomicWrite(path, []byte(value), 0o440)
 }
 
+// ensureVaultSecretReadable normalizes ownership/mode of a host-mounted
+// file-vault secret and proves that the actual Keycloak container user can
+// read it. The helper itself may create the file with its own host UID/GID,
+// which is not necessarily the UID/GID used by the Keycloak image.
+func (m *Manager) ensureVaultSecretReadable(ctx context.Context, realm, key string) error {
+	name := vaultFileName(realm, key)
+	hostPath := filepath.Join(m.cfg.VaultDir, name)
+	info, err := os.Lstat(hostPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("проверка bind-секрета Keycloak: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("bind-секрет Keycloak имеет недопустимый тип")
+	}
+
+	gidOut, err := m.composeOutput(ctx, "exec", "-T", "keycloak", "id", "-g")
+	if err != nil {
+		return fmt.Errorf("определение группы процесса Keycloak: %w", err)
+	}
+	gid := strings.TrimSpace(gidOut)
+	if _, err := strconv.ParseUint(gid, 10, 31); err != nil {
+		return fmt.Errorf("Keycloak вернул некорректный gid %q", gid)
+	}
+	containerDir := "/opt/keycloak/conf/vault"
+	containerPath := containerDir + "/" + name
+	owner := "0:" + gid
+	if _, err := m.composeOutput(ctx, "exec", "-T", "--user", "0:0", "keycloak", "chown", owner, containerDir, containerPath); err != nil {
+		return fmt.Errorf("назначение владельца bind-секрета Keycloak: %w", err)
+	}
+	if _, err := m.composeOutput(ctx, "exec", "-T", "--user", "0:0", "keycloak", "chmod", "0750", containerDir); err != nil {
+		return fmt.Errorf("права каталога vault Keycloak: %w", err)
+	}
+	if _, err := m.composeOutput(ctx, "exec", "-T", "--user", "0:0", "keycloak", "chmod", "0440", containerPath); err != nil {
+		return fmt.Errorf("права bind-секрета Keycloak: %w", err)
+	}
+	if _, err := m.composeOutput(ctx, "exec", "-T", "keycloak", "/bin/sh", "-ec", `test -r "$1"`, "--", containerPath); err != nil {
+		return errors.New("Keycloak не может прочитать bind-секрет после исправления прав; проверьте SELinux label каталога vault")
+	}
+	return nil
+}
+
 func vaultFileName(realm, key string) string {
 	return strings.ReplaceAll(realm, "_", "__") + "_" + strings.ReplaceAll(key, "_", "__")
 }
@@ -1232,8 +1288,8 @@ func readAdminResponse(resp *http.Response) ([]byte, error) {
 
 func (a *adminAPI) ensureRealm(ctx context.Context, realm string) error {
 	_, err := a.do(ctx, http.MethodPost, "/admin/realms", map[string]any{
-		"realm": realm, "enabled": true, "displayName": "oVirt Backup",
-		"displayNameHtml": "oVirt Backup", "internationalizationEnabled": true,
+		"realm": realm, "enabled": true, "displayName": "JustHPC Virt Manager",
+		"displayNameHtml": "JustHPC Virt Manager", "internationalizationEnabled": true,
 		"defaultLocale": "ru", "supportedLocales": []string{"ru", "en"},
 	}, http.StatusCreated, http.StatusConflict)
 	if err != nil {
@@ -1251,8 +1307,8 @@ func (a *adminAPI) ensureRealm(ctx context.Context, realm string) error {
 	if json.Unmarshal(raw, &current) != nil {
 		return errors.New("не удалось прочитать настройки realm Keycloak")
 	}
-	current["displayName"] = "oVirt Backup"
-	current["displayNameHtml"] = "oVirt Backup"
+	current["displayName"] = "JustHPC Virt Manager"
+	current["displayNameHtml"] = "JustHPC Virt Manager"
 	current["internationalizationEnabled"] = true
 	current["defaultLocale"] = "ru"
 	current["supportedLocales"] = []string{"ru", "en"}

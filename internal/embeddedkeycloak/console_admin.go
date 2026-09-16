@@ -265,7 +265,7 @@ func (m *Manager) SetUserGroupMembership(ctx context.Context, request hosthelper
 	return identityUserByID(ctx, admin, st.Realm, userID)
 }
 
-func (m *Manager) managedRealmAdmin(ctx context.Context, issuer string) (helperState, *adminAPI, error) {
+func (m *Manager) managedRealmAdmin(ctx context.Context, issuer string) (state, *adminAPI, error) {
 	st, err := m.loadState()
 	if err != nil || strings.TrimRight(strings.TrimSpace(issuer), "/") != st.PublicURL+"/realms/"+st.Realm || !st.RealmScoped {
 		return st, nil, errors.New("операция доступна только в управляемом realm")

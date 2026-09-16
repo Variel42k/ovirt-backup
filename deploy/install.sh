@@ -16,6 +16,7 @@
 #   ./install.sh --port 18080          порт наружу, если 8080 занят
 #   ./install.sh --database-url-file /root/jhvirt.dsn  внешняя PostgreSQL
 #   ./install.sh --no-start            подготовить, но не запускать
+#   ./install.sh --update              обновить найденную установку без повторной настройки
 #   ./install.sh --migration-export /root/jhvirt-migration.tar.gz
 #                                      создать пакет переноса на старом сервере
 #   ./install.sh --migration-export /root/rehearsal.tar.gz --keep-source-running
@@ -102,6 +103,7 @@ KEYCLOAK_DB_USER="keycloak_app"
 LOCAL_ADMIN_USER="local-admin"
 
 MODE=""; URL=""; DATABASE_URL_FILE=""; UNINSTALL_TARGET=""; START=1; PORT=8080
+UPDATE_REQUESTED=0; UPDATE_BACKUP_FILE=""
 URL_EXPLICIT=0; PORT_EXPLICIT=0
 UNINSTALL_REMOVE_CONFIG=0; UNINSTALL_REMOVE_DATA=0
 MIGRATION_ACTION=""; MIGRATION_EXPORT_FILE=""; MIGRATION_IMPORT_FILE=""
@@ -161,6 +163,7 @@ while [ $# -gt 0 ]; do
         --database-url-file) [ $# -ge 2 ] || die "--database-url-file требует путь"; DATABASE_URL_FILE="$2"; shift 2 ;;
         --database-url-file=*) DATABASE_URL_FILE="${1#--database-url-file=}"; shift ;;
         --no-start) START=0; shift ;;
+        --update) UPDATE_REQUESTED=1; shift ;;
         --migration-export) [ $# -ge 2 ] || die "--migration-export требует путь"; MIGRATION_ACTION="export"; MIGRATION_EXPORT_FILE="$2"; shift 2 ;;
         --migration-export=*) MIGRATION_ACTION="export"; MIGRATION_EXPORT_FILE="${1#--migration-export=}"; shift ;;
         --migrate-from) [ $# -ge 2 ] || die "--migrate-from требует путь"; MIGRATION_ACTION="import"; MIGRATION_IMPORT_FILE="$2"; shift 2 ;;
@@ -1791,9 +1794,184 @@ uninstall() {
     exit 0
 }
 
+# --- Обновление -------------------------------------------------------------
+
+select_update_mode() {
+    UPDATE_DOCKER=0; UPDATE_SYSTEMD=0
+    docker_bundle_present && UPDATE_DOCKER=1
+    systemd_install_present && UPDATE_SYSTEMD=1
+
+    if [ -n "$MODE" ]; then
+        case "$MODE" in
+            docker|docker-compose)
+                [ "$UPDATE_DOCKER" -eq 1 ] || die "контейнерная установка для обновления не найдена в $PREFIX"
+                ;;
+            systemd)
+                [ "$UPDATE_SYSTEMD" -eq 1 ] || die "systemd-установка для обновления не найдена"
+                ;;
+            *) die "--update поддерживает --mode docker|docker-compose|systemd" ;;
+        esac
+        return 0
+    fi
+
+    if [ "$UPDATE_DOCKER" -eq 1 ] && [ "$UPDATE_SYSTEMD" -eq 0 ]; then
+        if has_docker; then MODE=docker
+        elif has_dockerc; then MODE=docker-compose
+        else die "найдена Docker-установка, но Docker Compose недоступен"
+        fi
+        return 0
+    fi
+    if [ "$UPDATE_SYSTEMD" -eq 1 ] && [ "$UPDATE_DOCKER" -eq 0 ]; then
+        MODE=systemd
+        return 0
+    fi
+    if [ "$UPDATE_DOCKER" -eq 1 ] && [ "$UPDATE_SYSTEMD" -eq 1 ]; then
+        [ -t 0 ] || die "найдены Docker и systemd; укажите обновляемую установку через --mode"
+        say ""
+        say "Найдены две установки. Какую обновить?"
+        say "  1) Docker Compose"
+        say "  2) systemd"
+        while :; do
+            printf 'Номер [1]: '
+            read -r UPDATE_CHOICE || UPDATE_CHOICE=""
+            [ -n "$UPDATE_CHOICE" ] || UPDATE_CHOICE=1
+            case "$UPDATE_CHOICE" in
+                1)
+                    if has_docker; then MODE=docker
+                    elif has_dockerc; then MODE=docker-compose
+                    else die "Docker Compose недоступен"
+                    fi
+                    return 0
+                    ;;
+                2) MODE=systemd; return 0 ;;
+                *) say "Нет такого варианта." ;;
+            esac
+        done
+    fi
+    die "существующая установка для обновления не найдена в $PREFIX"
+}
+
+load_update_runtime_settings() {
+    [ "$UPDATE_REQUESTED" -eq 1 ] || return 0
+    case "$MODE" in
+        docker|docker-compose)
+            UPDATE_WORK="$(migration_docker_work 2>/dev/null || true)"
+            [ -n "$UPDATE_WORK" ] || die "не найден каталог существующей Docker-установки"
+            UPDATE_ENV="$UPDATE_WORK/.env"
+            [ -f "$UPDATE_ENV" ] || die "не найден $UPDATE_ENV"
+            if [ "$URL_EXPLICIT" -eq 0 ]; then
+                URL="$(env_file_value "$UPDATE_ENV" JHV_EXTERNAL_URL)"
+            fi
+            if [ "$PORT_EXPLICIT" -eq 0 ]; then
+                UPDATE_VALUE="$(env_file_value "$UPDATE_ENV" JHV_PORT)"
+                [ -z "$UPDATE_VALUE" ] || PORT="$UPDATE_VALUE"
+            fi
+            UPDATE_VALUE="$(env_file_value "$UPDATE_ENV" JHV_BIND_ADDRESS)"
+            [ -z "$UPDATE_VALUE" ] || BIND_ADDRESS="$UPDATE_VALUE"
+            if [ -z "$TLS_MODE" ]; then
+                if [ "$(env_file_value "$UPDATE_ENV" JHV_TLS_ENABLED)" = true ]; then
+                    TLS_MODE=preserve
+                    READY_SCHEME=https
+                else
+                    TLS_MODE=none
+                    READY_SCHEME=http
+                fi
+            fi
+            ;;
+        systemd)
+            UPDATE_ENV="$PREFIX/config/jhvirt.env"
+            [ -f "$UPDATE_ENV" ] || die "не найден $UPDATE_ENV"
+            if [ "$URL_EXPLICIT" -eq 0 ]; then
+                URL="$(env_file_value "$UPDATE_ENV" JHV_SERVER_EXTERNAL_URL)"
+            fi
+            if [ "$PORT_EXPLICIT" -eq 0 ]; then
+                UPDATE_VALUE="$(env_file_value "$UPDATE_ENV" JHV_SERVER_PORT)"
+                [ -z "$UPDATE_VALUE" ] || PORT="$UPDATE_VALUE"
+            fi
+            UPDATE_VALUE="$(env_file_value "$UPDATE_ENV" JHV_SERVER_ADDR)"
+            [ -z "$UPDATE_VALUE" ] || BIND_ADDRESS="$UPDATE_VALUE"
+            if [ -z "$TLS_MODE" ]; then
+                UPDATE_TLS="$(env_file_value "$UPDATE_ENV" JHV_SERVER_TLS_ENABLED)"
+                [ -n "$UPDATE_TLS" ] || UPDATE_TLS="$(yaml_server_tls_value "$PREFIX/config/$CONFIG_NAME" enabled 2>/dev/null || true)"
+                if [ "$UPDATE_TLS" = true ]; then
+                    TLS_MODE=preserve
+                    READY_SCHEME=https
+                else
+                    TLS_MODE=none
+                    READY_SCHEME=http
+                fi
+            fi
+            ;;
+    esac
+    [ -n "$URL" ] || die "в существующей установке не найден внешний URL; задайте --url явно"
+}
+
+create_update_backup() {
+    [ "$UPDATE_REQUESTED" -eq 1 ] || return 0
+    UPDATE_DIR="$PREFIX/backups"
+    mkdir -p "$UPDATE_DIR"
+    UPDATE_STAMP="$(date '+%Y%m%d-%H%M%S')"
+    UPDATE_BACKUP_FILE="$UPDATE_DIR/update-$UPDATE_STAMP.tar.gz"
+    UPDATE_TMP="$(mktemp -d "${TMPDIR:-/tmp}/jhvirt-update.XXXXXX")" || die "не удалось создать временный каталог backup"
+    mkdir -p "$UPDATE_TMP/config" "$UPDATE_TMP/environment" "$UPDATE_TMP/database" \
+        "$UPDATE_TMP/data" "$UPDATE_TMP/tls" "$UPDATE_TMP/truststores"
+    chmod 700 "$UPDATE_TMP"
+
+    step "резервная копия перед обновлением"
+    case "$MODE" in
+        docker|docker-compose) migration_export_docker "$UPDATE_TMP" ;;
+        systemd) migration_export_systemd "$UPDATE_TMP" ;;
+    esac
+    have sha256sum || { rm -rf "$UPDATE_TMP"; die "для backup нужен sha256sum"; }
+    (cd "$UPDATE_TMP" && find . -type f ! -name checksums.sha256 -print | LC_ALL=C sort | xargs sha256sum) \
+        > "$UPDATE_TMP/checksums.sha256" || { rm -rf "$UPDATE_TMP"; die "не удалось вычислить контрольные суммы backup"; }
+    chmod 600 "$UPDATE_TMP/checksums.sha256"
+    umask 077
+    tar czf "$UPDATE_BACKUP_FILE.tmp.$$" -C "$UPDATE_TMP" . || {
+        rm -rf "$UPDATE_TMP" "$UPDATE_BACKUP_FILE.tmp.$$"
+        die "не удалось создать backup перед обновлением"
+    }
+    mv "$UPDATE_BACKUP_FILE.tmp.$$" "$UPDATE_BACKUP_FILE"
+    chmod 600 "$UPDATE_BACKUP_FILE"
+    rm -rf "$UPDATE_TMP"
+    umask 022
+    say "    backup: $UPDATE_BACKUP_FILE"
+}
+
 # --- Выбор ------------------------------------------------------------------
 
 choose() {
+    if docker_bundle_present || systemd_install_present; then
+        if [ ! -t 0 ]; then
+            die "найдена существующая установка — используйте --update (и --mode, если установок две)"
+        fi
+        say ""
+        say "Обнаружена существующая установка."
+        docker_bundle_present && say "  Docker Compose: $PREFIX/compose"
+        systemd_install_present && say "  systemd: jhvirt.service"
+        say ""
+        say "Что сделать?"
+        say "  1) обновить существующую установку (рекомендуется)"
+        say "  2) изменить параметры / переустановить"
+        say "  3) подготовить перенос"
+        say "  4) удалить"
+        say "  5) выйти"
+        say ""
+        while :; do
+            printf 'Номер [1]: '
+            read -r EXISTING_CHOICE || EXISTING_CHOICE=""
+            [ -n "$EXISTING_CHOICE" ] || EXISTING_CHOICE=1
+            case "$EXISTING_CHOICE" in
+                1) UPDATE_REQUESTED=1; select_update_mode; return ;;
+                2) break ;;
+                3) MIGRATION_ACTION="export"; MODE=migration-export; return ;;
+                4) MODE=uninstall; return ;;
+                5) exit 0 ;;
+                *) say "Нет такого варианта." ;;
+            esac
+        done
+    fi
+
     i=0; a=""; b=""; d=""; m=""; e=""; u=""
     has_docker   && { i=$((i+1)); a=$i; }
     has_dockerc  && { i=$((i+1)); b=$i; }
@@ -1846,6 +2024,11 @@ if [ "$UNINSTALL_REMOVE_CONFIG" -eq 1 ] && [ "$MODE" != uninstall ]; then
 fi
 [ "$MIGRATION_KEEP_SOURCE" -eq 0 ] || [ "$MIGRATION_ACTION" = export ] ||
     die "--keep-source-running используется только с --migration-export"
+[ "$UPDATE_REQUESTED" -eq 0 ] || { [ -z "$MIGRATION_ACTION" ] && [ "$MODE" != uninstall ]; } ||
+    die "--update нельзя совмещать с переносом или удалением"
+if [ "$UPDATE_REQUESTED" -eq 1 ]; then
+    select_update_mode
+fi
 [ -n "$MODE" ] || [ -n "$MIGRATION_ACTION" ] || choose
 
 if [ "$MODE" = migration-import ]; then
@@ -1893,6 +2076,8 @@ if [ "$MODE" = uninstall ]; then
     fi
     uninstall
 fi
+
+load_update_runtime_settings
 
 # Права root нужны там, где скрипт трогает систему: раскладывает комплект в
 # /opt, заводит пользователя, ставит юнит. Запуск контейнеров из каталога
@@ -2347,7 +2532,9 @@ ensure_container_port() {
 
 case "$MODE" in
     docker|docker-compose)
-        [ "$START" -eq 0 ] || ensure_container_port
+        if [ "$UPDATE_REQUESTED" -eq 0 ]; then
+            [ "$START" -eq 0 ] || ensure_container_port
+        fi
         ;;
 esac
 
@@ -4547,6 +4734,10 @@ install_containers() {
     fi
 	DOCKER_ENV_EXISTED=0
 	[ -f "$WORK/.env" ] && DOCKER_ENV_EXISTED=1
+    if [ "$UPDATE_REQUESTED" -eq 1 ]; then
+        [ "$DOCKER_ENV_EXISTED" -eq 1 ] || die "обновление запрошено, но $WORK/.env не найден"
+        create_update_backup
+    fi
 
     if [ "$START" -eq 1 ] && ! have curl && ! have wget; then
         die "для проверки готовности нужен curl или wget"
@@ -4634,8 +4825,7 @@ install_containers() {
         VOL=""
         for CANDIDATE in \
                 "$(project_name)_postgres-data" \
-                "jhvirt_postgres-data" \
-                "${LEGACY_COMPOSE_SERVICE}_postgres-data"; do
+                "jhvirt_postgres-data"; do
             if volume_exists "$CANDIDATE"; then
                 VOL="$CANDIDATE"
                 break
@@ -4883,9 +5073,14 @@ PostgreSQL хранит пароль внутри тома и новый не п
 
     say ""
     say "════════════════════════════════════════════════════════════"
-    say "  ГОТОВО"
+    if [ "$UPDATE_REQUESTED" -eq 1 ]; then
+        say "  ОБНОВЛЕНО"
+    else
+        say "  ГОТОВО"
+    fi
     say ""
     say "  интерфейс:     $URL"
+    [ -z "$UPDATE_BACKUP_FILE" ] || say "  backup до обновления: $UPDATE_BACKUP_FILE"
     if [ "$OIDC_MODE" != none ] && [ "$OIDC_ALLOW_LOCAL_LOGIN" = false ]; then
         say "  локальный вход: выключен"
         say "  local-admin создан с неизвестным случайным паролем."
@@ -5283,6 +5478,13 @@ install_systemd() {
     fi
     [ -n "$INSTALLED_BINARY" ] && [ -f "$UNIT" ] && UPGRADE=1
 
+    if [ "$UPDATE_REQUESTED" -eq 1 ] && [ "$UPGRADE" -eq 0 ]; then
+        die "обновление systemd запрошено, но завершённая установка не найдена"
+    fi
+    if [ "$UPDATE_REQUESTED" -eq 1 ]; then
+        create_update_backup
+    fi
+
     if [ "$UPGRADE" -eq 1 ]; then
         # -version печатает «<имя бинаря> 1.0.0»; нужна только версия.
         OLD="$("$INSTALLED_BINARY" -version 2>/dev/null | awk '{print $NF}' || true)"
@@ -5525,13 +5727,18 @@ install_systemd() {
     say ""
     say "════════════════════════════════════════════════════════════"
     if [ "$SHOULD_START" -eq 1 ]; then
-        say "  ГОТОВО"
+        if [ "$UPDATE_REQUESTED" -eq 1 ]; then
+            say "  ОБНОВЛЕНО"
+        else
+            say "  ГОТОВО"
+        fi
     else
         say "  УСТАНОВЛЕНО, НО НЕ ЗАПУЩЕНО"
     fi
     say ""
     say "  каталог:        $PREFIX"
     say "  интерфейс:      $URL"
+    [ -z "$UPDATE_BACKUP_FILE" ] || say "  backup до обновления: $UPDATE_BACKUP_FILE"
     if [ -n "$ADMPASS" ]; then
         say "  пользователь:   $LOCAL_ADMIN_USER"
         say "  пароль:         $ADMPASS"

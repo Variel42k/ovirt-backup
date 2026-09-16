@@ -271,10 +271,11 @@ func (m *Manager) Bootstrap(ctx context.Context, request hosthelper.BootstrapReq
 		return out, err
 	}
 	admin := newAdminAPI(localURL, adminTLS)
+	recoveryClientID := ""
 	if fresh {
 		if authErr := admin.authenticatePassword(ctx, "master", bootstrapUser, bootstrapPassword); authErr != nil {
 			var recoveryErr error
-			_, recoveryErr = m.startRecoveryClient(ctx, admin, localURL, adminTLS)
+			recoveryClientID, recoveryErr = m.startRecoveryClient(ctx, admin, localURL, adminTLS)
 			if recoveryErr != nil {
 				return out, fmt.Errorf("bootstrap и восстановительная авторизация Keycloak недоступны: %w", recoveryErr)
 			}
@@ -304,7 +305,11 @@ func (m *Manager) Bootstrap(ctx context.Context, request hosthelper.BootstrapReq
 		if err := helperAdmin.verifyMasterAdminRevoked(ctx, request.Realm); err != nil {
 			return out, err
 		}
-		if err := admin.cleanupTemporaryPrincipals(ctx); err != nil {
+		currentBootstrapUser := bootstrapUser
+		if recoveryClientID != "" {
+			currentBootstrapUser = ""
+		}
+		if err := admin.cleanupTemporaryPrincipals(ctx, currentBootstrapUser, recoveryClientID); err != nil {
 			return out, err
 		}
 		configBody = keycloakConfig(request, dbPassword, "", "")
@@ -335,7 +340,7 @@ func (m *Manager) Bootstrap(ctx context.Context, request hosthelper.BootstrapReq
 		if helperErr != nil {
 			return out, helperErr
 		}
-		if err := admin.cleanupTemporaryPrincipals(ctx); err != nil {
+		if err := admin.cleanupTemporaryPrincipals(ctx, "", ""); err != nil {
 			return out, err
 		}
 		if err := admin.removeServiceClientMasterAdmin(ctx, st.AdminClientID); err != nil {
@@ -1382,14 +1387,30 @@ func (a *adminAPI) verifyMasterAdminRevoked(ctx context.Context, existingRealm s
 	return nil
 }
 
-func (a *adminAPI) cleanupTemporaryPrincipals(ctx context.Context) error {
-	if err := a.deleteUsersWithPrefix(ctx, "master", "kc-web-bootstrap-"); err != nil {
+func (a *adminAPI) cleanupTemporaryPrincipals(ctx context.Context, currentBootstrapUser, currentRecoveryClient string) error {
+	// The access token belongs either to the temporary bootstrap user or to the
+	// temporary recovery service client. Deleting the principal that issued the
+	// token invalidates it immediately, so the current principal must be the
+	// very last administrative request in the cleanup sequence.
+	if currentBootstrapUser != "" {
+		if err := a.deleteClientsWithPrefix(ctx, "master", "kc-web-recovery-", ""); err != nil {
+			return err
+		}
+		return a.deleteUsersWithPrefix(ctx, "master", "kc-web-bootstrap-", currentBootstrapUser)
+	}
+	if currentRecoveryClient != "" {
+		if err := a.deleteUsersWithPrefix(ctx, "master", "kc-web-bootstrap-", ""); err != nil {
+			return err
+		}
+		return a.deleteClientsWithPrefix(ctx, "master", "kc-web-recovery-", currentRecoveryClient)
+	}
+	if err := a.deleteUsersWithPrefix(ctx, "master", "kc-web-bootstrap-", ""); err != nil {
 		return err
 	}
-	return a.deleteClientsWithPrefix(ctx, "master", "kc-web-recovery-")
+	return a.deleteClientsWithPrefix(ctx, "master", "kc-web-recovery-", "")
 }
 
-func (a *adminAPI) deleteUsersWithPrefix(ctx context.Context, realm, prefix string) error {
+func (a *adminAPI) deleteUsersWithPrefix(ctx context.Context, realm, prefix, currentLast string) error {
 	path := "/admin/realms/" + url.PathEscape(realm) + "/users"
 	raw, err := a.do(ctx, http.MethodGet,
 		path+"?search="+url.QueryEscape(prefix)+"&first=0&max=1000", nil, http.StatusOK)
@@ -1403,21 +1424,40 @@ func (a *adminAPI) deleteUsersWithPrefix(ctx context.Context, realm, prefix stri
 	if json.Unmarshal(raw, &users) != nil {
 		return errors.New("не удалось прочитать временных администраторов Keycloak")
 	}
-	for _, user := range users {
-		if !strings.HasPrefix(user.Username, prefix) {
-			continue
-		}
+	deleteUser := func(user struct {
+		ID       string `json:"id"`
+		Username string `json:"username"`
+	}) error {
 		if user.ID == "" {
 			return errors.New("у временного администратора Keycloak нет ID")
 		}
-		if _, err := a.do(ctx, http.MethodDelete, path+"/"+url.PathEscape(user.ID), nil, http.StatusNoContent); err != nil {
+		_, err := a.do(ctx, http.MethodDelete, path+"/"+url.PathEscape(user.ID), nil, http.StatusNoContent)
+		return err
+	}
+	var current *struct {
+		ID       string `json:"id"`
+		Username string `json:"username"`
+	}
+	for i := range users {
+		user := &users[i]
+		if !strings.HasPrefix(user.Username, prefix) {
+			continue
+		}
+		if currentLast != "" && user.Username == currentLast {
+			current = user
+			continue
+		}
+		if err := deleteUser(*user); err != nil {
 			return err
 		}
+	}
+	if current != nil {
+		return deleteUser(*current)
 	}
 	return nil
 }
 
-func (a *adminAPI) deleteClientsWithPrefix(ctx context.Context, realm, prefix string) error {
+func (a *adminAPI) deleteClientsWithPrefix(ctx context.Context, realm, prefix, currentLast string) error {
 	path := "/admin/realms/" + url.PathEscape(realm) + "/clients"
 	raw, err := a.do(ctx, http.MethodGet,
 		path+"?clientId="+url.QueryEscape(prefix)+"&search=true&first=0&max=1000", nil, http.StatusOK)
@@ -1431,16 +1471,35 @@ func (a *adminAPI) deleteClientsWithPrefix(ctx context.Context, realm, prefix st
 	if json.Unmarshal(raw, &clients) != nil {
 		return errors.New("не удалось прочитать временные recovery-клиенты Keycloak")
 	}
-	for _, client := range clients {
-		if !strings.HasPrefix(client.ClientID, prefix) {
-			continue
-		}
+	deleteClient := func(client struct {
+		ID       string `json:"id"`
+		ClientID string `json:"clientId"`
+	}) error {
 		if client.ID == "" {
 			return errors.New("у временного recovery-клиента Keycloak нет ID")
 		}
-		if _, err := a.do(ctx, http.MethodDelete, path+"/"+url.PathEscape(client.ID), nil, http.StatusNoContent); err != nil {
+		_, err := a.do(ctx, http.MethodDelete, path+"/"+url.PathEscape(client.ID), nil, http.StatusNoContent)
+		return err
+	}
+	var current *struct {
+		ID       string `json:"id"`
+		ClientID string `json:"clientId"`
+	}
+	for i := range clients {
+		client := &clients[i]
+		if !strings.HasPrefix(client.ClientID, prefix) {
+			continue
+		}
+		if currentLast != "" && client.ClientID == currentLast {
+			current = client
+			continue
+		}
+		if err := deleteClient(*client); err != nil {
 			return err
 		}
+	}
+	if current != nil {
+		return deleteClient(*current)
 	}
 	return nil
 }

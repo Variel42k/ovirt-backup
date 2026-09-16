@@ -87,16 +87,24 @@ func TestWriteSecretRejectsMultilineValue(t *testing.T) {
 func TestVaultPreservesPasswordBytesAndEscapesRealm(t *testing.T) {
 	path := filepath.Join(t.TempDir(), vaultFileName("realm_with_underscore", "ad-bind"))
 	password := ` leading $${vault.test}\ ! trailing `
-	if err := writeSecret(path, password); err != nil { t.Fatal(err) }
+	if err := writeSecret(path, password); err != nil {
+		t.Fatal(err)
+	}
 	got, err := os.ReadFile(path)
-	if err != nil || string(got) != password { t.Fatal("vault writer altered password bytes") }
-	if filepath.Base(path) != "realm__with__underscore_ad-bind" { t.Fatal("vault resolver underscore escaping missing") }
+	if err != nil || string(got) != password {
+		t.Fatal("vault writer altered password bytes")
+	}
+	if filepath.Base(path) != "realm__with__underscore_ad-bind" {
+		t.Fatal("vault resolver underscore escaping missing")
+	}
 }
 
 func TestBootstrapAllowsClosedAccessWithoutGroups(t *testing.T) {
 	req := validBootstrapRequest()
 	req.RoleMapping = map[string]string{}
-	if err := validateBootstrap(req); err != nil { t.Fatal(err) }
+	if err := validateBootstrap(req); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestVolumeWriteKeepsDockerStdinOpen(t *testing.T) {
@@ -242,11 +250,71 @@ func TestCleanupTemporaryPrincipalsKeepsUnrelatedAccounts(t *testing.T) {
 
 	admin := newAdminAPI(server.URL, nil)
 	admin.token = "test-token"
-	if err := admin.cleanupTemporaryPrincipals(context.Background()); err != nil {
+	if err := admin.cleanupTemporaryPrincipals(context.Background(), "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if !deleted["bootstrap"] || !deleted["recovery"] {
 		t.Fatalf("temporary principals were not deleted: %#v", deleted)
+	}
+}
+
+func TestCleanupTemporaryPrincipalsDeletesCurrentBootstrapLast(t *testing.T) {
+	var requests []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.Path)
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/admin/realms/master/clients":
+			_, _ = w.Write([]byte(`[{"id":"recovery-id","clientId":"kc-web-recovery-old"}]`))
+		case r.Method == http.MethodDelete && r.URL.Path == "/admin/realms/master/clients/recovery-id":
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && r.URL.Path == "/admin/realms/master/users":
+			_, _ = w.Write([]byte(`[{"id":"old-id","username":"kc-web-bootstrap-old"},{"id":"current-id","username":"kc-web-bootstrap-current"}]`))
+		case r.Method == http.MethodDelete && (r.URL.Path == "/admin/realms/master/users/old-id" || r.URL.Path == "/admin/realms/master/users/current-id"):
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, "unexpected request", http.StatusForbidden)
+		}
+	}))
+	defer server.Close()
+
+	admin := newAdminAPI(server.URL, nil)
+	admin.token = "test-token"
+	if err := admin.cleanupTemporaryPrincipals(context.Background(), "kc-web-bootstrap-current", ""); err != nil {
+		t.Fatal(err)
+	}
+	wantLast := "DELETE /admin/realms/master/users/current-id"
+	if len(requests) == 0 || requests[len(requests)-1] != wantLast {
+		t.Fatalf("current bootstrap principal must be deleted last: %#v", requests)
+	}
+}
+
+func TestCleanupTemporaryPrincipalsDeletesCurrentRecoveryLast(t *testing.T) {
+	var requests []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.Path)
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/admin/realms/master/users":
+			_, _ = w.Write([]byte(`[{"id":"bootstrap-id","username":"kc-web-bootstrap-old"}]`))
+		case r.Method == http.MethodDelete && r.URL.Path == "/admin/realms/master/users/bootstrap-id":
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && r.URL.Path == "/admin/realms/master/clients":
+			_, _ = w.Write([]byte(`[{"id":"old-id","clientId":"kc-web-recovery-old"},{"id":"current-id","clientId":"kc-web-recovery-current"}]`))
+		case r.Method == http.MethodDelete && (r.URL.Path == "/admin/realms/master/clients/old-id" || r.URL.Path == "/admin/realms/master/clients/current-id"):
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, "unexpected request", http.StatusForbidden)
+		}
+	}))
+	defer server.Close()
+
+	admin := newAdminAPI(server.URL, nil)
+	admin.token = "test-token"
+	if err := admin.cleanupTemporaryPrincipals(context.Background(), "", "kc-web-recovery-current"); err != nil {
+		t.Fatal(err)
+	}
+	wantLast := "DELETE /admin/realms/master/clients/current-id"
+	if len(requests) == 0 || requests[len(requests)-1] != wantLast {
+		t.Fatalf("current recovery principal must be deleted last: %#v", requests)
 	}
 }
 

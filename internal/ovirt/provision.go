@@ -31,11 +31,14 @@ import (
 var ErrObjectNotFound = errors.New("объект не найден на движке")
 
 // Role — роль движка.
+//
+// administrative движок отдаёт строкой ("true"/"false"), а не булевым литералом,
+// поэтому тип толерантный Bool — иначе разбор ответа /roles падает.
 type Role struct {
 	ID             string `json:"id"`
 	Name           string `json:"name"`
 	Description    string `json:"description"`
-	Administrative bool   `json:"administrative"`
+	Administrative Bool   `json:"administrative"`
 }
 
 type roleList struct {

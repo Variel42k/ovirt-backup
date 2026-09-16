@@ -2,8 +2,22 @@ package ovirt
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 )
+
+// Движок РЕД/oVirt отдаёт administrative строкой ("true"/"false"); разбор
+// /roles не должен на этом падать.
+func TestRoleDecodesStringAdministrative(t *testing.T) {
+	var list roleList
+	body := `{"role":[{"id":"1","name":"SuperUser","administrative":"true"},{"id":"2","name":"UserRole","administrative":"false"}]}`
+	if err := json.Unmarshal([]byte(body), &list); err != nil {
+		t.Fatalf("разбор /roles со строковым administrative: %v", err)
+	}
+	if len(list.Role) != 2 || !bool(list.Role[0].Administrative) || bool(list.Role[1].Administrative) {
+		t.Fatalf("administrative разобрался неверно: %+v", list.Role)
+	}
+}
 
 // SelectPermits оставляет существующие права и отдельно возвращает отброшенные;
 // пустой каталог означает «не выяснить» — тогда набор проходит как есть.

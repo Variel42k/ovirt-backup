@@ -109,8 +109,8 @@ type Deps struct {
 	Notifications *notify.Manager
 	DR            *drcheck.Checker
 	FileBackup    *filebackup.Engine
-	// StorageMounts supplies writable roots for local repositories. Production
-	// uses repo.WritableMounts; tests may provide isolated temporary roots.
+	// StorageMounts supplies browsable mount roots for local repositories. Production
+	// uses repo.BrowsableStorageMounts; tests may provide isolated temporary roots.
 	StorageMounts func() []string
 	// AuditFile — журнал аудита для внешнего сборщика. Может быть nil.
 	AuditFile *auditlog.Writer
@@ -126,7 +126,7 @@ func New(d Deps) *Server {
 		d.Quality = quality.New(d.Store, d.Config.Monitor.BackupQuality, d.Config.Location())
 	}
 	if d.StorageMounts == nil {
-		d.StorageMounts = repo.WritableMounts
+		d.StorageMounts = repo.BrowsableStorageMounts
 	}
 	var metricsToken []byte
 	if d.Config.Metrics.Enabled {

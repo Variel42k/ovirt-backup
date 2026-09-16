@@ -9,6 +9,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/google/uuid"
@@ -65,28 +67,45 @@ func pathHint(root string) string {
 		"Служба может писать в: %s", root, strings.Join(writable, ", "))
 }
 
-// WritableMounts is writableMounts for callers outside the package: the
-// directory picker offers exactly these as roots for local storage, so that
-// what the operator can choose and what the service can write to are the same
-// list, derived the same way.
+// WritableMounts lists mount roots that are writable themselves. It is kept
+// for validation hints and callers that really need to create an object at the
+// mount root.
 func WritableMounts() []string { return writableMounts() }
 
-// writableMounts lists mounted directories the service can actually write to.
+// BrowsableStorageMounts lists non-system mount roots visible to the service.
 //
-// Смотрим именно точки монтирования, а не каталоги вообще: том с копиями и
-// каталог восстановления попадают внутрь контейнера монтированием, и ровно они
-// оператору и нужны. Системные файловые системы отсеиваются — предлагать
-// хранить бэкапы в /proc не стоит.
+// A storage mount root does not have to be writable itself. A common layout is
+// /storage owned by the storage subsystem with writable children such as
+// /storage/backups. Requiring a successful mkdir directly in /storage hides
+// exactly those useful mounts from the web picker. The picker already probes
+// every opened directory and only enables "choose" for writable paths, so it
+// is both safer and more useful to expose the readable mount root and let the
+// operator descend to a writable child.
+func BrowsableStorageMounts() []string {
+	raw, err := os.ReadFile("/proc/self/mountinfo")
+	if err != nil {
+		return nil
+	}
+	return mountPointsFrom(raw, browsableDirectory)
+}
+
+// writableMounts lists mounted directories the service can actually write to.
 func writableMounts() []string {
 	raw, err := os.ReadFile("/proc/self/mountinfo")
 	if err != nil {
 		return nil
 	}
+	return mountPointsFrom(raw, writableDirectory)
+}
 
+// mountPointsFrom parses Linux mountinfo and returns a deterministic, bounded
+// set of non-system mount points accepted by probe. Keeping parsing separate
+// makes the policy testable without depending on the test runner's mounts.
+func mountPointsFrom(raw []byte, probe func(string) bool) []string {
 	seen := map[string]bool{}
 	var out []string
 	for _, line := range strings.Split(string(raw), "\n") {
-		// Поля до " - " описывают точку монтирования, после — тип ФС.
+		// Fields before " - " describe the mount; field 5 is mount point.
 		parts := strings.SplitN(line, " - ", 2)
 		if len(parts) != 2 {
 			continue
@@ -95,30 +114,63 @@ func writableMounts() []string {
 		if len(fields) < 5 {
 			continue
 		}
-		point := fields[4]
-		if point == "/" || seen[point] || isSystemPath(point) {
+		point := unescapeMountInfoField(fields[4])
+		if point == "" || point == "/" || seen[point] || isSystemPath(point) {
 			continue
 		}
 		seen[point] = true
-
-		// Права проверяем попыткой, а не разбором режима и владельца: в
-		// контейнере действуют и capabilities, и uid, и права на ФС, и
-		// единственный надёжный ответ даёт сама файловая система.
-		probe, err := os.MkdirTemp(point, ".jhv-probe-")
-		if err != nil {
+		if !probe(point) {
 			continue
 		}
-		_ = os.RemoveAll(probe)
 		out = append(out, point)
-		if len(out) == 8 {
-			break
-		}
+	}
+	sort.Strings(out)
+	// A container can have hundreds of implementation mounts. The system-path
+	// filter removes the usual noise; this final bound protects the API/UI from
+	// pathological mount namespaces without the old order-dependent "first 8".
+	if len(out) > 32 {
+		out = out[:32]
 	}
 	return out
 }
 
+func unescapeMountInfoField(value string) string {
+	// mountinfo escapes whitespace and backslash as octal sequences. strconv
+	// can decode those sequences when the field is treated as a quoted string.
+	unquoted, err := strconv.Unquote(`"` + strings.ReplaceAll(value, `"`, `\"`) + `"`)
+	if err != nil {
+		return value
+	}
+	return unquoted
+}
+
+func browsableDirectory(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = f.Close() }()
+	_, err = f.Readdirnames(1)
+	return err == nil || errors.Is(err, io.EOF)
+}
+
+func writableDirectory(path string) bool {
+	probe, err := os.MkdirTemp(path, ".jhv-probe-")
+	if err != nil {
+		return false
+	}
+	_ = os.RemoveAll(probe)
+	return true
+}
+
 func isSystemPath(point string) bool {
-	for _, prefix := range []string{"/proc", "/sys", "/dev", "/run", "/etc"} {
+	for _, prefix := range []string{
+		"/proc", "/sys", "/dev", "/run", "/etc", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/boot",
+	} {
 		if point == prefix || strings.HasPrefix(point, prefix+"/") {
 			return true
 		}

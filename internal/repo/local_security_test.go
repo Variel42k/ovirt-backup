@@ -79,3 +79,50 @@ func TestLocalBackendRejectsSymlinkObjects(t *testing.T) {
 		t.Fatalf("symlink write escaped the repository: %v", err)
 	}
 }
+
+func TestMountPointsFromIncludesReadableNonSystemMounts(t *testing.T) {
+	raw := []byte(strings.Join([]string{
+		"36 25 0:32 / / rw,relatime - overlay overlay rw",
+		"41 36 253:2 / /storage rw,relatime - xfs /dev/mapper/storage-data rw",
+		"42 36 8:1 / /backups rw,relatime - ext4 /dev/sda1 rw",
+		"43 36 0:50 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw",
+		"44 36 0:51 / /etc/hosts rw,relatime - tmpfs tmpfs rw",
+		"45 36 0:52 / /app/data rw,relatime - tmpfs tmpfs rw",
+	}, "\n"))
+
+	accepted := map[string]bool{
+		"/storage":  true,
+		"/backups":  true,
+		"/app/data": true,
+	}
+	got := mountPointsFrom(raw, func(path string) bool { return accepted[path] })
+	want := []string{"/app/data", "/backups", "/storage"}
+	if len(got) != len(want) {
+		t.Fatalf("mounts = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("mounts = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestMountPointsFromDoesNotRequireWritableMountRoot(t *testing.T) {
+	raw := []byte("41 36 253:2 / /storage rw,relatime - xfs /dev/mapper/storage-data rw\n")
+	got := mountPointsFrom(raw, func(path string) bool {
+		// The mount root may be only traversable while a child directory is
+		// writable. Storage browsing must still expose the root.
+		return path == "/storage"
+	})
+	if len(got) != 1 || got[0] != "/storage" {
+		t.Fatalf("mounts = %v, want [/storage]", got)
+	}
+}
+
+func TestMountPointsFromUnescapesMountInfoPath(t *testing.T) {
+	raw := []byte("41 36 8:1 / /mnt/backup\\040pool rw,relatime - ext4 /dev/sda1 rw\n")
+	got := mountPointsFrom(raw, func(path string) bool { return path == "/mnt/backup pool" })
+	if len(got) != 1 || got[0] != "/mnt/backup pool" {
+		t.Fatalf("mounts = %v, want escaped path decoded", got)
+	}
+}

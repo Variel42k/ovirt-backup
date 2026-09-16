@@ -609,6 +609,14 @@ export const api = {
   provisionServer: (payload: Record<string, unknown>) =>
     http.post<ProvisionResult>('/servers/provision', payload).then((r) => r.data),
 
+  /**
+   * Настроить роль и сервисную запись для уже добавленного подключения и
+   * перевести его на эту запись. Адрес, тип и доверие берутся из сохранённого
+   * сервера; администратор уходит разово и не сохраняется.
+   */
+  provisionExistingServer: (id: string, payload: Record<string, unknown>) =>
+    http.post<ProvisionResult>(`/servers/${id}/provision`, payload).then((r) => r.data),
+
   // Согласование опасных действий.
   listApprovals: (includeClosed = false) =>
     http

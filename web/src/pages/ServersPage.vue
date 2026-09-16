@@ -144,6 +144,15 @@ function kindSupportsBackup(kind: string): boolean {
   return virtualizationKinds.value.find((item) => item.value === kind)?.supports_backup ?? false
 }
 
+function kindLabel(kind: string): string {
+  return virtualizationKinds.value.find((item) => item.value === kind)?.title ?? kind
+}
+
+/** Безопасный мастер (роль + сервисная запись) есть только у oVirt и форков. */
+function kindSafeProvision(kind: string): boolean {
+  return virtualizationKinds.value.find((item) => item.value === kind)?.safe_provision ?? false
+}
+
 /** У голого libvirt нет движка: подключение идёт по SSH, а не по REST. */
 const isLibvirt = computed(() => kindUsesLibvirt(form.value.kind))
 const isProxmox = computed(() => selectedKind.value?.family === 'proxmox-api')
@@ -237,6 +246,10 @@ const provisionForm = ref({
   service_username: '',
   service_password: '',
 })
+// Непустой id — режим уже добавленного подключения: адрес, тип и доверие берутся
+// из сохранённого сервера, а на выходе подключение переводится на сервисную запись.
+const provisionExistingId = ref<string | null>(null)
+const provisionExistingSummary = ref({ name: '', engine_url: '', product: '', username: '' })
 const provisionFormBaseline = ref('')
 const provisionFormSignature = computed(() => JSON.stringify(provisionForm.value))
 const { confirmDiscard: confirmProvisionDiscard } = useUnsavedChanges(
@@ -244,10 +257,35 @@ const { confirmDiscard: confirmProvisionDiscard } = useUnsavedChanges(
 )
 
 function openProvision() {
+  provisionExistingId.value = null
   provisionResult.value = null
   provisionForm.value = {
     name: '', kind: 'ovirt', engine_url: '', ca_cert: '', insecure_tls: false,
     admin_username: '', admin_password: '', service_username: '', service_password: '',
+  }
+  provisionCAUpload.value = null
+  provisionCAFingerprint.value = ''
+  provisionFormError.value = ''
+  provisionFormBaseline.value = provisionFormSignature.value
+  provisionOpen.value = true
+}
+
+// openProvisionExisting настраивает роль и сервисную запись для уже добавленного
+// подключения. Адрес и доверие не редактируются — они у сервера уже есть.
+function openProvisionExisting(server: Server) {
+  provisionExistingId.value = server.id
+  provisionExistingSummary.value = {
+    name: server.name,
+    engine_url: server.engine_url,
+    product: kindLabel(server.kind),
+    username: server.username,
+  }
+  provisionResult.value = null
+  provisionForm.value = {
+    name: server.name, kind: server.kind, engine_url: server.engine_url,
+    ca_cert: '', insecure_tls: server.insecure_tls,
+    admin_username: '', admin_password: '',
+    service_username: server.username, service_password: '',
   }
   provisionCAUpload.value = null
   provisionCAFingerprint.value = ''
@@ -319,15 +357,22 @@ async function runProvision() {
     const payload = { ...provisionForm.value }
     provisionForm.value.admin_password = ''
     provisionForm.value.service_password = ''
-    const result = await api.provisionServer(payload)
+    const existingId = provisionExistingId.value
+    const result = existingId
+      ? await api.provisionExistingServer(existingId, payload)
+      : await api.provisionServer(payload)
     provisionResult.value = result
     if (result.ok) {
       provisionFormBaseline.value = provisionFormSignature.value
-      notifyOk('Подключение настроено: сохранена только сервисная учётная запись')
+      notifyOk(
+        existingId
+          ? 'Роль настроена, подключение переведено на сервисную учётную запись'
+          : 'Подключение настроено: сохранена только сервисная учётная запись',
+      )
       try {
         await app.loadServers()
       } catch (refreshError) {
-        notifyError(refreshError, 'Подключение создано, но список не обновился')
+        notifyError(refreshError, 'Подключение настроено, но список не обновился')
       }
     }
   } catch (err) {
@@ -761,6 +806,7 @@ onMounted(load)
                 <q-list dense>
                   <q-item v-if="auth.can('servers.write')" clickable v-close-popup @click="refresh(props.row)"><q-item-section avatar><q-icon name="sync" /></q-item-section><q-item-section>Опросить сейчас</q-item-section></q-item>
                   <q-item v-if="auth.can('servers.admin')" clickable v-close-popup @click="openEdit(props.row)"><q-item-section avatar><q-icon name="edit" /></q-item-section><q-item-section>Изменить</q-item-section></q-item>
+                  <q-item v-if="auth.can('servers.admin') && kindSafeProvision(props.row.kind)" clickable v-close-popup @click="openProvisionExisting(props.row)"><q-item-section avatar><q-icon name="admin_panel_settings" /></q-item-section><q-item-section>Настроить сервисную запись</q-item-section></q-item>
                   <q-item v-if="auth.can('servers.admin')" clickable v-close-popup @click="confirmDelete(props.row)"><q-item-section avatar><q-icon name="delete" color="negative" /></q-item-section><q-item-section class="text-negative">Удалить</q-item-section></q-item>
                 </q-list>
               </q-btn-dropdown>
@@ -869,6 +915,7 @@ onMounted(load)
             <q-tooltip>Опросить сейчас</q-tooltip>
           </q-btn>
           <q-btn v-if="auth.can('servers.admin')" flat dense round icon="edit" aria-label="Изменить подключение" :disable="busyServers.includes(props.row.id)" @click="openEdit(props.row)"><q-tooltip>Изменить</q-tooltip></q-btn>
+          <q-btn v-if="auth.can('servers.admin') && kindSafeProvision(props.row.kind)" flat dense round icon="admin_panel_settings" aria-label="Настроить сервисную запись" :disable="busyServers.includes(props.row.id)" @click="openProvisionExisting(props.row)"><q-tooltip>Настроить сервисную запись</q-tooltip></q-btn>
           <q-btn v-if="auth.can('servers.admin')" flat dense round icon="delete" color="negative" aria-label="Удалить подключение" :loading="busyServers.includes(props.row.id)" :disable="busyServers.includes(props.row.id)" @click="confirmDelete(props.row)"><q-tooltip>Удалить</q-tooltip></q-btn>
         </q-td>
       </template>
@@ -1291,7 +1338,9 @@ onMounted(load)
          выдаёт её сервисной записи. В базу попадает только сервисная. -->
     <q-dialog v-model="provisionOpen" persistent :maximized="$q.screen.lt.sm">
       <q-card class="jhv-dialog-page" style="width: 680px; max-width: 96vw">
-        <q-card-section class="text-h6">Подключение oVirt-кластера или совместимого форка</q-card-section>
+        <q-card-section class="text-h6">
+          {{ provisionExistingId ? 'Настройка сервисной записи для подключения' : 'Подключение oVirt-кластера или совместимого форка' }}
+        </q-card-section>
         <q-separator />
 
         <q-banner v-if="provisionFormError" dense class="bg-red-1 text-negative q-ma-md q-mb-none">
@@ -1299,58 +1348,84 @@ onMounted(load)
         </q-banner>
 
         <q-card-section class="q-gutter-md">
-          <q-banner dense class="bg-blue-1">
-            <template #avatar><q-icon name="info" color="primary" /></template>
-            Одно подключение к Engine охватывает весь управляемый контур: все кластеры,
-            гипервизоры, ВМ, диски и домены хранения. Добавлять узлы по одному не требуется.
-            <br><br>
-            Административные данные нужны только на время настройки и нигде не сохраняются.
-            Сервисная запись должна уже существовать в каталоге: движок пользователями
-            не управляет, и создать её через API нельзя — во встроенном домене она
-            заводится командой <code>ovirt-aaa-jdbc-tool user add</code> на самом движке.
-          </q-banner>
-
-          <div class="row q-col-gutter-md">
-            <div class="col-12 col-sm-6">
-              <q-input v-model="provisionForm.name" label="Название контура" outlined dense autofocus />
-            </div>
-            <div class="col-12 col-sm-6">
-              <q-select v-model="provisionForm.kind" :options="provisionKinds" emit-value map-options label="Продукт" outlined dense />
-            </div>
-          </div>
-          <q-input
-            v-model="provisionForm.engine_url"
-            label="Адрес движка"
-            hint="https://engine.example.org — без /ovirt-engine/api"
-            outlined
-            dense
-          />
-
-          <q-card flat bordered>
-            <q-card-section class="row items-center q-gutter-sm">
-              <q-icon :name="provisionForm.ca_cert ? 'verified_user' : 'gpp_bad'" :color="provisionForm.ca_cert ? 'positive' : 'negative'" size="sm" />
-              <div class="col">
-                <div class="text-subtitle2">CA-сертификат движка</div>
-                <div class="text-caption text-grey-7">
-                  {{ provisionForm.ca_cert ? 'Сертификат выбран' : 'Сертификат не задан' }}
-                  <span v-if="provisionCAFingerprint"> · SHA-256 {{ provisionCAFingerprint }}</span>
+          <!-- Уже добавленное подключение: адрес и доверие уже есть у сервера. -->
+          <template v-if="provisionExistingId">
+            <q-banner dense class="bg-blue-1">
+              <template #avatar><q-icon name="info" color="primary" /></template>
+              Под разовым администратором создаётся (или дополняется) роль с минимальными
+              правами и выдаётся сервисной записи, после чего подключение переводится на неё.
+              Администратор нигде не сохраняется.
+              <br><br>
+              Оставьте того же пользователя, чтобы просто выверить и дочинить его права;
+              укажите отдельную запись, чтобы понизить права подключения. Сервисная запись
+              должна уже существовать в каталоге движка.
+            </q-banner>
+            <q-card flat bordered>
+              <q-card-section class="q-py-sm">
+                <div class="text-subtitle2">{{ provisionExistingSummary.name }} · {{ provisionExistingSummary.product }}</div>
+                <div class="text-caption text-grey-7 jhv-wrap">
+                  {{ provisionExistingSummary.engine_url }}
+                  <br>Текущая учётная запись: <code>{{ provisionExistingSummary.username }}</code>
                 </div>
+              </q-card-section>
+            </q-card>
+          </template>
+
+          <!-- Новое подключение: вводятся адрес, продукт и доверие. -->
+          <template v-else>
+            <q-banner dense class="bg-blue-1">
+              <template #avatar><q-icon name="info" color="primary" /></template>
+              Одно подключение к Engine охватывает весь управляемый контур: все кластеры,
+              гипервизоры, ВМ, диски и домены хранения. Добавлять узлы по одному не требуется.
+              <br><br>
+              Административные данные нужны только на время настройки и нигде не сохраняются.
+              Сервисная запись должна уже существовать в каталоге: движок пользователями
+              не управляет, и создать её через API нельзя — во встроенном домене она
+              заводится командой <code>ovirt-aaa-jdbc-tool user add</code> на самом движке.
+            </q-banner>
+
+            <div class="row q-col-gutter-md">
+              <div class="col-12 col-sm-6">
+                <q-input v-model="provisionForm.name" label="Название контура" outlined dense autofocus />
               </div>
-              <q-file
-                v-model="provisionCAUpload" accept=".pem,.crt,.cer,application/x-pem-file"
-                outlined dense label="Выбрать файл" style="width: 190px"
-                :disable="provisionFetchingCA || provisionBusy"
-                @update:model-value="useProvisionCAFile"
-              >
-                <template #prepend><q-icon name="upload_file" /></template>
-              </q-file>
-              <q-btn outline dense no-caps icon="download" label="Получить" :loading="provisionFetchingCA" :disable="provisionBusy" @click="fetchProvisionCA" />
-              <q-btn v-if="provisionForm.ca_cert" flat dense round icon="delete_outline" color="negative" aria-label="Удалить сертификат" @click="clearProvisionCA"><q-tooltip>Удалить сертификат</q-tooltip></q-btn>
-            </q-card-section>
-            <q-card-section class="q-pt-none text-caption">
-              PEM не показывается. Полученный SHA-256 нужно сверить на стороне движка до подключения.
-            </q-card-section>
-          </q-card>
+              <div class="col-12 col-sm-6">
+                <q-select v-model="provisionForm.kind" :options="provisionKinds" emit-value map-options label="Продукт" outlined dense />
+              </div>
+            </div>
+            <q-input
+              v-model="provisionForm.engine_url"
+              label="Адрес движка"
+              hint="https://engine.example.org — без /ovirt-engine/api"
+              outlined
+              dense
+            />
+
+            <q-card flat bordered>
+              <q-card-section class="row items-center q-gutter-sm">
+                <q-icon :name="provisionForm.ca_cert ? 'verified_user' : 'gpp_bad'" :color="provisionForm.ca_cert ? 'positive' : 'negative'" size="sm" />
+                <div class="col">
+                  <div class="text-subtitle2">CA-сертификат движка</div>
+                  <div class="text-caption text-grey-7">
+                    {{ provisionForm.ca_cert ? 'Сертификат выбран' : 'Сертификат не задан' }}
+                    <span v-if="provisionCAFingerprint"> · SHA-256 {{ provisionCAFingerprint }}</span>
+                  </div>
+                </div>
+                <q-file
+                  v-model="provisionCAUpload" accept=".pem,.crt,.cer,application/x-pem-file"
+                  outlined dense label="Выбрать файл" style="width: 190px"
+                  :disable="provisionFetchingCA || provisionBusy"
+                  @update:model-value="useProvisionCAFile"
+                >
+                  <template #prepend><q-icon name="upload_file" /></template>
+                </q-file>
+                <q-btn outline dense no-caps icon="download" label="Получить" :loading="provisionFetchingCA" :disable="provisionBusy" @click="fetchProvisionCA" />
+                <q-btn v-if="provisionForm.ca_cert" flat dense round icon="delete_outline" color="negative" aria-label="Удалить сертификат" @click="clearProvisionCA"><q-tooltip>Удалить сертификат</q-tooltip></q-btn>
+              </q-card-section>
+              <q-card-section class="q-pt-none text-caption">
+                PEM не показывается. Полученный SHA-256 нужно сверить на стороне движка до подключения.
+              </q-card-section>
+            </q-card>
+          </template>
 
           <div class="text-subtitle2">Административная запись — только на время настройки</div>
           <q-input v-model="provisionForm.admin_username" label="Пользователь" hint="например admin@internal" outlined dense />
@@ -1366,14 +1441,16 @@ onMounted(load)
           />
           <q-input v-model="provisionForm.service_password" label="Пароль" type="password" outlined dense />
 
-          <q-toggle
-            v-model="provisionForm.insecure_tls"
-            label="Не проверять сертификат движка"
-            color="negative"
-          />
-          <div v-if="provisionForm.insecure_tls" class="text-caption text-negative">
-            Соединение можно подменить. Используйте только на изолированном тестовом стенде.
-          </div>
+          <template v-if="!provisionExistingId">
+            <q-toggle
+              v-model="provisionForm.insecure_tls"
+              label="Не проверять сертификат движка"
+              color="negative"
+            />
+            <div v-if="provisionForm.insecure_tls" class="text-caption text-negative">
+              Соединение можно подменить. Используйте только на изолированном тестовом стенде.
+            </div>
+          </template>
         </q-card-section>
 
         <q-card-section v-if="provisionResult" class="q-pt-none">
@@ -1422,7 +1499,7 @@ onMounted(load)
           <q-btn
             color="primary"
             unelevated
-            label="Настроить и подключить"
+            :label="provisionExistingId ? 'Настроить права' : 'Настроить и подключить'"
             :loading="provisionBusy"
             :disable="provisionFetchingCA"
             @click="runProvision"

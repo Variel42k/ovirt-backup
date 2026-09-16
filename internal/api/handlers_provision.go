@@ -137,6 +137,111 @@ func (s *Server) handleProvisionServer(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
+// existingProvisionRequest — вход мастера для уже добавленного подключения.
+//
+// Адрес движка, тип и параметры доверия берутся из сохранённого сервера — их не
+// вводят заново. Остаётся то, что нельзя хранить: разовый администратор и
+// сервисная запись, под которой служба будет работать дальше.
+type existingProvisionRequest struct {
+	AdminUsername   string   `json:"admin_username"`
+	AdminPassword   string   `json:"admin_password"`
+	ServiceUsername string   `json:"service_username"`
+	ServicePassword string   `json:"service_password"`
+	RoleName        string   `json:"role_name"`
+	Permits         []string `json:"permits"`
+}
+
+// handleProvisionExistingServer настраивает роль и сервисную запись для уже
+// добавленного подключения и переводит его на эту запись.
+//
+// Один эндпоинт покрывает оба сценария: «дочинить права» (сервисная запись та
+// же, что уже сохранена, — состав роли лишь дополняется и проверяется) и
+// «понизить права» (указывается отдельная сервисная запись, и подключение
+// переключается на неё). Разницы в коде нет: она в том, совпадает ли введённая
+// запись с текущей.
+func (s *Server) handleProvisionExistingServer(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	existing, err := s.store.GetServer(r.Context(), id)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	if !existing.Kind.UsesOVirtAPI() {
+		s.writeError(w, r, badRequest(
+			"безопасный мастер поддерживает oVirt и совместимые форки, у подключения тип %q", existing.Kind))
+		return
+	}
+
+	var in existingProvisionRequest
+	if err := decodeJSON(r, &in); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	in.AdminUsername = strings.TrimSpace(in.AdminUsername)
+	in.ServiceUsername = strings.TrimSpace(in.ServiceUsername)
+	switch {
+	case in.AdminUsername == "" || in.AdminPassword == "":
+		s.writeError(w, r, badRequest(
+			"нужна административная учётная запись движка: под ней настраивается роль. "+
+				"Сохранена она не будет"))
+		return
+	case in.ServiceUsername == "" || in.ServicePassword == "":
+		s.writeError(w, r, badRequest(
+			"нужна сервисная учётная запись, под которой служба будет работать дальше. "+
+				"Она должна уже существовать в каталоге — движок пользователями не "+
+				"управляет и создать её через API нельзя"))
+		return
+	}
+
+	req := provisionRequest{
+		Name: existing.Name, Kind: existing.Kind, EngineURL: existing.EngineURL,
+		CACert: existing.CACert, InsecureTLS: existing.InsecureTLS,
+		AdminUsername: in.AdminUsername, AdminPassword: in.AdminPassword,
+		ServiceUsername: in.ServiceUsername, ServicePassword: in.ServicePassword,
+		RoleName: in.RoleName, Permits: in.Permits,
+	}
+	if req.RoleName == "" {
+		req.RoleName = defaultBackupRoleName
+	}
+	if len(req.Permits) == 0 {
+		req.Permits = ovirt.DefaultBackupPermits
+	}
+
+	result := s.provision(r.Context(), req)
+	if !result.OK {
+		s.audit(r, "server.provision", model.ScopeServer, id, false, result.Error)
+		writeJSON(w, http.StatusOK, result)
+		return
+	}
+
+	// Перевод сохранённой учётки на сервисную (или подтверждение той же).
+	// Смена учётных данных подключения идёт без кворума — как обычная правка.
+	switched := !strings.EqualFold(existing.Username, req.ServiceUsername)
+	existing.Username = req.ServiceUsername
+	existing.Password = req.ServicePassword
+	existing.ClearPassword = false
+	if err := s.store.UpdateServer(r.Context(), existing); err != nil {
+		result.OK = false
+		result.Error = err.Error()
+		s.audit(r, "server.provision", model.ScopeServer, id, false, err.Error())
+		writeJSON(w, http.StatusOK, result)
+		return
+	}
+	s.pool.Invalidate(id)
+	if s.proxmox != nil {
+		s.proxmox.Invalidate(id)
+	}
+
+	note := "роль " + req.RoleName + ", учётная запись " + req.ServiceUsername
+	if switched {
+		note = "роль " + req.RoleName + ", подключение переведено на " + req.ServiceUsername
+	}
+	result.ServerID = id
+	s.audit(r, "server.provision", model.ScopeServer, id, true, note)
+	go s.refreshServer(context.WithoutCancel(r.Context()), id)
+	writeJSON(w, http.StatusOK, result)
+}
+
 // provision выполняет настройку и возвращает отчёт по шагам.
 //
 // Отчёт по шагам, а не одна ошибка: настройка идёт на чужой системе, и «не
@@ -170,6 +275,22 @@ func (s *Server) provision(ctx context.Context, req provisionRequest) provisionR
 		return fail("подключение администратором", err)
 	}
 	ok("подключение администратором", "движок "+info.ProductInfo.Version.FullVersion)
+
+	// Состав прав сверяется с живым каталогом движка. Имена групп действий
+	// отличаются между версиями oVirt и форками (на РЕД 7.3, например, нет
+	// access_image_transfer — есть access_image_storage), а запрос
+	// несуществующего имени движок отвергает вместе со всей ролью. Пересечение
+	// с каталогом делает набор пригодным сразу для 4.3 и для актуальной версии.
+	if catalog, catErr := admin.EnginePermits(ctx); catErr != nil {
+		ok("каталог прав движка", "получить не удалось, набор отправляется как есть: "+catErr.Error())
+	} else if use, skipped := ovirt.SelectPermits(req.Permits, catalog); len(use) > 0 {
+		req.Permits = use
+		if len(skipped) > 0 {
+			ok("каталог прав движка", "пропущены отсутствующие на движке права: "+strings.Join(skipped, ", "))
+		} else {
+			ok("каталог прав движка", "все запрошенные права существуют")
+		}
+	}
 
 	// Роль: если она уже есть, состав прав только дополняется. Пересоздавать
 	// нельзя — её могли выдать другим объектам, и удаление отняло бы доступ у

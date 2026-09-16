@@ -209,11 +209,83 @@ var DefaultBackupPermits = []string{
 	"create_disk",
 	"delete_disk",
 	"configure_disk_storage",
-	"access_image_transfer",
+	"access_image_storage",
 	"manipulate_vm_snapshots",
 	"create_vm",
 	"edit_vm_properties",
 	"configure_vm_storage",
+}
+
+// clusterLevel — один уровень кластера движка вместе с его каталогом прав.
+type clusterLevel struct {
+	ID      string     `json:"id"`
+	Permits permitList `json:"permits"`
+}
+
+type clusterLevelList struct {
+	ClusterLevel []clusterLevel `json:"cluster_level"`
+}
+
+// EnginePermits возвращает множество имён групп действий, которые движок
+// объявляет, — объединение по всем поддерживаемым уровням кластера.
+//
+// Это авторитетный источник, по которому состав роли держат в согласии с тем,
+// что данная версия движка вообще понимает: имена отличаются между поколениями
+// oVirt и форками, а запрос несуществующего имени движок отвергает целиком,
+// вместе со всей ролью. Проверено на РЕД 7.3: уровни 4.2–4.6, набор совпадает.
+func (c *Client) EnginePermits(ctx context.Context) (map[string]bool, error) {
+	var list clusterLevelList
+	if err := c.get(ctx, "/clusterlevels", &list); err != nil {
+		return nil, fmt.Errorf("каталог прав движка: %w", err)
+	}
+	catalog := map[string]bool{}
+	var noInline []string
+	for _, lvl := range list.ClusterLevel {
+		if len(lvl.Permits.Permit) == 0 {
+			noInline = append(noInline, lvl.ID)
+			continue
+		}
+		for _, p := range lvl.Permits.Permit {
+			if p.Name != "" {
+				catalog[p.Name] = true
+			}
+		}
+	}
+	// Некоторые движки не встраивают права в представление коллекции — тогда
+	// уровень читается отдельным запросом. Одного успешного уровня достаточно.
+	for _, id := range noInline {
+		var lvl clusterLevel
+		if err := c.get(ctx, "/clusterlevels/"+id, &lvl); err != nil {
+			continue
+		}
+		for _, p := range lvl.Permits.Permit {
+			if p.Name != "" {
+				catalog[p.Name] = true
+			}
+		}
+	}
+	return catalog, nil
+}
+
+// SelectPermits оставляет только те права, которые движок реально объявляет, и
+// отдельно возвращает отброшенные.
+//
+// Пустой каталог означает «выяснить не удалось»: тогда набор возвращается как
+// есть, а отказ самого движка остаётся последней проверкой. Так один
+// устаревший или переименованный permit на конкретной версии не роняет всю
+// настройку роли, но и не проходит молча — отброшенное видно в отчёте.
+func SelectPermits(desired []string, catalog map[string]bool) (use, skipped []string) {
+	if len(catalog) == 0 {
+		return desired, nil
+	}
+	for _, p := range desired {
+		if catalog[p] {
+			use = append(use, p)
+		} else {
+			skipped = append(skipped, p)
+		}
+	}
+	return use, skipped
 }
 
 // AccessCheck — результат одной проверки доступа.

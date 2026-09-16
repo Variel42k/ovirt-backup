@@ -218,6 +218,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 		s.guarded(model.GuardServerDelete, s.serverTarget, s.handleDeleteServer)))
 	mux.HandleFunc("POST /servers/probe", s.perm(model.PermServersAdmin, s.handleProbeServer))
 	mux.HandleFunc("POST /servers/provision", s.perm(model.PermServersAdmin, s.handleProvisionServer))
+	mux.HandleFunc("POST /servers/{id}/provision", s.perm(model.PermServersAdmin, s.handleProvisionExistingServer))
 	mux.HandleFunc("POST /servers/ca-certificate", s.perm(model.PermServersAdmin, s.handleFetchCA))
 	mux.HandleFunc("POST /servers/host-key", s.perm(model.PermServersAdmin, s.handleScanHostKey))
 	mux.HandleFunc("POST /servers/proxmox-host-keys", s.perm(model.PermServersAdmin, s.handleScanProxmoxHostKeys))

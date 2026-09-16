@@ -354,10 +354,20 @@ async function runProvision() {
   provisionResult.value = null
   provisionFormError.value = ''
   try {
-    const payload = { ...provisionForm.value }
+    const existingId = provisionExistingId.value
+    const f = provisionForm.value
+    // У by-id эндпоинта адрес, тип и доверие берутся из сохранённого сервера, а
+    // разбор JSON строгий — поэтому в этом режиме шлём только учётки, не всю форму.
+    const payload = existingId
+      ? {
+          admin_username: f.admin_username,
+          admin_password: f.admin_password,
+          service_username: f.service_username,
+          service_password: f.service_password,
+        }
+      : { ...f }
     provisionForm.value.admin_password = ''
     provisionForm.value.service_password = ''
-    const existingId = provisionExistingId.value
     const result = existingId
       ? await api.provisionExistingServer(existingId, payload)
       : await api.provisionServer(payload)

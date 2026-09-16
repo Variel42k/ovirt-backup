@@ -106,41 +106,52 @@ func (c *Client) RoleByName(ctx context.Context, name string) (*Role, error) {
 	return nil, ErrObjectNotFound
 }
 
-// CreateRole заводит роль с указанными правами.
+// CreateRole заводит роль сразу с указанными правами.
+//
+// Права передаются прямо в теле создания и по id: движок РЕД/oVirt требует
+// role.permits.id при создании и не принимает добавление по имени отдельным
+// шагом. Имена сопоставляются с id по каталогу движка (см. EnginePermits).
 //
 // Роль административная: без этого признака движок не отдаёт её обладателю
 // доступ к API администрирования, а бэкап читает инвентарь целиком, а не
 // только «свои» объекты.
-func (c *Client) CreateRole(ctx context.Context, name, description string, permits []string) (*Role, error) {
+func (c *Client) CreateRole(ctx context.Context, name, description string, permitNames []string, catalog map[string]string) (*Role, error) {
+	permits := make([]map[string]string, 0, len(permitNames))
+	for _, n := range permitNames {
+		if id := catalog[n]; id != "" {
+			permits = append(permits, map[string]string{"id": id})
+		}
+	}
+	if len(permits) == 0 {
+		return nil, fmt.Errorf("создание роли %q: ни одно право не сопоставлено с id движка", name)
+	}
 	body := map[string]any{
 		"name":           name,
 		"description":    description,
 		"administrative": true,
+		"permits":        map[string]any{"permit": permits},
 	}
 	var created Role
 	if err := c.post(ctx, "/roles", body, &created); err != nil {
 		return nil, fmt.Errorf("создание роли %q: %w", name, err)
 	}
-
-	for _, permit := range permits {
-		if err := c.AddRolePermit(ctx, created.ID, permit); err != nil {
-			return nil, err
-		}
-	}
 	return &created, nil
 }
 
-// AddRolePermit добавляет право в роль.
+// AddRolePermit добавляет право в уже существующую роль по его id.
 //
 // Уже имеющееся право движок отвергает конфликтом — это не ошибка настройки, а
 // признак того, что роль уже настроена, и повторный запуск не должен из-за
 // этого падать.
-func (c *Client) AddRolePermit(ctx context.Context, roleID, permit string) error {
-	err := c.post(ctx, "/roles/"+roleID+"/permits", Permit{Name: permit}, nil)
+func (c *Client) AddRolePermit(ctx context.Context, roleID, permitID string) error {
+	if permitID == "" {
+		return nil
+	}
+	err := c.post(ctx, "/roles/"+roleID+"/permits", map[string]string{"id": permitID}, nil)
 	if err == nil || IsConflict(err) {
 		return nil
 	}
-	return fmt.Errorf("право %q для роли: %w", permit, err)
+	return fmt.Errorf("право (id %s) для роли: %w", permitID, err)
 }
 
 // RolePermits возвращает права роли.
@@ -176,23 +187,75 @@ func (c *Client) UserByName(ctx context.Context, name string) (*User, error) {
 	return nil, ErrObjectNotFound
 }
 
-// AddDirectoryUser показывает движку пользователя домена.
+// AddDirectoryUser показывает движку пользователя домена авторизации.
+//
+// localPart — чистое имя без домена (jhvirt-backup), domainName — имя домена
+// авторизации на движке (internal-authz, а не профиль входа internal). Движок
+// хранит запись как <localPart>@<domainName> и так же её потом находит.
 //
 // Создать учётную запись это не может: движок лишь запоминает того, кто уже
 // есть в каталоге. Если пользователя в домене нет, движок ответит отказом, и
-// заводить его нужно средствами самого каталога.
-func (c *Client) AddDirectoryUser(ctx context.Context, principal, domainName string) (*User, error) {
+// заводить его нужно средствами самого каталога (ovirt-aaa-jdbc-tool).
+func (c *Client) AddDirectoryUser(ctx context.Context, localPart, domainName string) (*User, error) {
 	body := map[string]any{
-		"user_name": principal,
-		"principal": principal,
+		"user_name": localPart + "@" + domainName,
 		"domain":    map[string]any{"name": domainName},
 	}
 	var created User
 	if err := c.post(ctx, "/users", body, &created); err != nil {
 		return nil, fmt.Errorf("добавление пользователя %q из домена %q: %w",
-			principal, domainName, err)
+			localPart, domainName, err)
 	}
 	return &created, nil
+}
+
+// ResolveAuthzDomain находит на движке домен авторизации по суффиксу, введённому
+// оператором.
+//
+// Профиль входа (internal) и домен авторизации, где движок хранит пользователей
+// (internal-authz), — разные имена, поэтому доверять введённому суффиксу дословно
+// нельзя. Ищем: точное совпадение имени, затем имя с суффиксом -authz, затем —
+// единственный домен, если он на движке один.
+func (c *Client) ResolveAuthzDomain(ctx context.Context, typed string) (string, error) {
+	domains, err := c.ListDomains(ctx)
+	if err != nil {
+		return "", err
+	}
+	for i := range domains {
+		if strings.EqualFold(domains[i].Name, typed) ||
+			strings.EqualFold(domains[i].Name, typed+"-authz") {
+			return domains[i].Name, nil
+		}
+	}
+	if len(domains) == 1 {
+		return domains[0].Name, nil
+	}
+	names := make([]string, 0, len(domains))
+	for i := range domains {
+		names = append(names, domains[i].Name)
+	}
+	return "", fmt.Errorf("домен %q не найден на движке; доступны: %s",
+		typed, strings.Join(names, ", "))
+}
+
+// UserByPrincipal ищет уже известного движку пользователя по чистому имени и
+// домену авторизации.
+func (c *Client) UserByPrincipal(ctx context.Context, localPart, domainName string) (*User, error) {
+	users, err := c.ListUsersRaw(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("список пользователей: %w", err)
+	}
+	want := localPart + "@" + domainName
+	for i := range users {
+		if strings.EqualFold(users[i].UserName, want) {
+			return &users[i], nil
+		}
+		if strings.EqualFold(users[i].Principal, localPart) &&
+			strings.EqualFold(users[i].Domain.Name, domainName) {
+			return &users[i], nil
+		}
+	}
+	return nil, ErrObjectNotFound
 }
 
 // DefaultBackupPermits — права, которые служба просит для своей роли.
@@ -229,19 +292,20 @@ type clusterLevelList struct {
 	ClusterLevel []clusterLevel `json:"cluster_level"`
 }
 
-// EnginePermits возвращает множество имён групп действий, которые движок
-// объявляет, — объединение по всем поддерживаемым уровням кластера.
+// EnginePermits возвращает соответствие «имя группы действий → id», объединённое
+// по всем поддерживаемым уровням кластера.
 //
-// Это авторитетный источник, по которому состав роли держат в согласии с тем,
-// что данная версия движка вообще понимает: имена отличаются между поколениями
-// oVirt и форками, а запрос несуществующего имени движок отвергает целиком,
-// вместе со всей ролью. Проверено на РЕД 7.3: уровни 4.2–4.6, набор совпадает.
-func (c *Client) EnginePermits(ctx context.Context) (map[string]bool, error) {
+// Это авторитетный источник сразу для двух задач: сверить состав роли с тем, что
+// движок понимает (имена отличаются между поколениями oVirt и форками), и
+// получить id — движок создаёт роль только с правами по id (role.permits.id).
+// Проверено на РЕД 7.3: уровни 4.2–4.6, набор совпадает, id стабильны
+// (login=1300).
+func (c *Client) EnginePermits(ctx context.Context) (map[string]string, error) {
 	var list clusterLevelList
 	if err := c.get(ctx, "/clusterlevels", &list); err != nil {
 		return nil, fmt.Errorf("каталог прав движка: %w", err)
 	}
-	catalog := map[string]bool{}
+	catalog := map[string]string{}
 	var noInline []string
 	for _, lvl := range list.ClusterLevel {
 		if len(lvl.Permits.Permit) == 0 {
@@ -249,8 +313,8 @@ func (c *Client) EnginePermits(ctx context.Context) (map[string]bool, error) {
 			continue
 		}
 		for _, p := range lvl.Permits.Permit {
-			if p.Name != "" {
-				catalog[p.Name] = true
+			if p.Name != "" && p.ID != "" {
+				catalog[p.Name] = p.ID
 			}
 		}
 	}
@@ -262,8 +326,8 @@ func (c *Client) EnginePermits(ctx context.Context) (map[string]bool, error) {
 			continue
 		}
 		for _, p := range lvl.Permits.Permit {
-			if p.Name != "" {
-				catalog[p.Name] = true
+			if p.Name != "" && p.ID != "" {
+				catalog[p.Name] = p.ID
 			}
 		}
 	}
@@ -274,15 +338,14 @@ func (c *Client) EnginePermits(ctx context.Context) (map[string]bool, error) {
 // отдельно возвращает отброшенные.
 //
 // Пустой каталог означает «выяснить не удалось»: тогда набор возвращается как
-// есть, а отказ самого движка остаётся последней проверкой. Так один
-// устаревший или переименованный permit на конкретной версии не роняет всю
-// настройку роли, но и не проходит молча — отброшенное видно в отчёте.
-func SelectPermits(desired []string, catalog map[string]bool) (use, skipped []string) {
+// есть. Так один устаревший или переименованный permit на конкретной версии не
+// роняет всю настройку роли, но и не проходит молча — отброшенное видно в отчёте.
+func SelectPermits(desired []string, catalog map[string]string) (use, skipped []string) {
 	if len(catalog) == 0 {
 		return desired, nil
 	}
 	for _, p := range desired {
-		if catalog[p] {
+		if _, ok := catalog[p]; ok {
 			use = append(use, p)
 		} else {
 			skipped = append(skipped, p)

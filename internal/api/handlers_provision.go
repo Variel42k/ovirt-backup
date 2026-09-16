@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -278,18 +279,23 @@ func (s *Server) provision(ctx context.Context, req provisionRequest) provisionR
 
 	// Состав прав сверяется с живым каталогом движка. Имена групп действий
 	// отличаются между версиями oVirt и форками (на РЕД 7.3, например, нет
-	// access_image_transfer — есть access_image_storage), а запрос
-	// несуществующего имени движок отвергает вместе со всей ролью. Пересечение
-	// с каталогом делает набор пригодным сразу для 4.3 и для актуальной версии.
-	if catalog, catErr := admin.EnginePermits(ctx); catErr != nil {
-		ok("каталог прав движка", "получить не удалось, набор отправляется как есть: "+catErr.Error())
-	} else if use, skipped := ovirt.SelectPermits(req.Permits, catalog); len(use) > 0 {
-		req.Permits = use
-		if len(skipped) > 0 {
-			ok("каталог прав движка", "пропущены отсутствующие на движке права: "+strings.Join(skipped, ", "))
-		} else {
-			ok("каталог прав движка", "все запрошенные права существуют")
-		}
+	// access_image_transfer — есть access_image_storage). Каталог даёт и id:
+	// движок создаёт роль только с правами по id (role.permits.id), поэтому без
+	// каталога роль не собрать — при неудаче это ошибка, а не «как есть».
+	catalog, err := admin.EnginePermits(ctx)
+	if err != nil {
+		return fail("каталог прав движка", err)
+	}
+	use, skipped := ovirt.SelectPermits(req.Permits, catalog)
+	if len(use) == 0 {
+		return fail("каталог прав движка",
+			fmt.Errorf("ни одно из прав %v не найдено на движке", req.Permits))
+	}
+	req.Permits = use
+	if len(skipped) > 0 {
+		ok("каталог прав движка", "пропущены отсутствующие на движке права: "+strings.Join(skipped, ", "))
+	} else {
+		ok("каталог прав движка", "все запрошенные права существуют")
 	}
 
 	// Роль: если она уже есть, состав прав только дополняется. Пересоздавать
@@ -299,14 +305,14 @@ func (s *Server) provision(ctx context.Context, req provisionRequest) provisionR
 	switch {
 	case err == nil:
 		for _, permit := range req.Permits {
-			if permitErr := admin.AddRolePermit(ctx, role.ID, permit); permitErr != nil {
+			if permitErr := admin.AddRolePermit(ctx, role.ID, catalog[permit]); permitErr != nil {
 				return fail("настройка прав роли", permitErr)
 			}
 		}
 		ok("роль "+req.RoleName, "уже существовала, состав прав дополнен")
 	case errors.Is(err, ovirt.ErrObjectNotFound):
 		role, err = admin.CreateRole(ctx, req.RoleName,
-			"Резервное копирование: доступ для службы ovirt-backup", req.Permits)
+			"Резервное копирование: доступ для службы ovirt-backup", req.Permits, catalog)
 		if err != nil {
 			return fail("создание роли", err)
 		}
@@ -315,24 +321,34 @@ func (s *Server) provision(ctx context.Context, req provisionRequest) provisionR
 		return fail("поиск роли", err)
 	}
 
-	// Пользователь: сначала среди известных движку, затем — показать движку
-	// запись из каталога. Создать её здесь нельзя.
-	user, err := admin.UserByName(ctx, req.ServiceUsername)
-	if errors.Is(err, ovirt.ErrObjectNotFound) {
-		domain := domainOf(req.ServiceUsername)
-		if domain == "" {
-			return fail("поиск учётной записи", errors.New(
-				"укажите учётную запись вместе с доменом, например jhvirt-backup@internal"))
-		}
-		user, err = admin.AddDirectoryUser(ctx, req.ServiceUsername, domain)
+	// Пользователь. Оператор вводит имя с профилем входа (jhvirt-backup@internal),
+	// а движок хранит запись в домене авторизации (internal-authz) под чистым
+	// именем. Поэтому домен берём с самого движка, а не из введённой строки, и
+	// работаем с чистым именем.
+	localPart := req.ServiceUsername
+	typed := domainOf(req.ServiceUsername)
+	if typed != "" {
+		localPart = strings.TrimSuffix(req.ServiceUsername, "@"+typed)
+	}
+	domainName, derr := admin.ResolveAuthzDomain(ctx, typed)
+	if derr != nil {
+		return fail("поиск домена учётной записи", derr)
+	}
+
+	// Сначала среди известных движку, затем — показать движку запись из каталога.
+	// Создать её здесь нельзя.
+	user, err := admin.UserByPrincipal(ctx, localPart, domainName)
+	switch {
+	case err == nil:
+		ok("учётная запись "+req.ServiceUsername, "уже известна движку")
+	case errors.Is(err, ovirt.ErrObjectNotFound):
+		user, err = admin.AddDirectoryUser(ctx, localPart, domainName)
 		if err != nil {
 			return fail("добавление учётной записи", err)
 		}
-		ok("учётная запись "+req.ServiceUsername, "добавлена из домена "+domain)
-	} else if err != nil {
+		ok("учётная запись "+req.ServiceUsername, "добавлена из домена "+domainName)
+	default:
 		return fail("поиск учётной записи", err)
-	} else {
-		ok("учётная запись "+req.ServiceUsername, "уже известна движку")
 	}
 
 	if err := admin.GrantSystemPermission(ctx, user.ID, role.ID); err != nil {

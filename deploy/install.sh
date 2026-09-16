@@ -91,7 +91,9 @@ DR_TIMER="/etc/systemd/system/jhvirt-dr-backup.timer"
 KEYCLOAK_HELPER_UNIT="/etc/systemd/system/jhvirt-keycloak-helper.service"
 KEYCLOAK_HELPER_SOCKET="/etc/systemd/system/jhvirt-keycloak-helper.socket"
 SERVER_BINARY="ovirt-backup-server"
+LEGACY_SERVER_BINARY="justhpc-virt-server"
 COMPOSE_SERVICE="ovirt-backup"
+LEGACY_COMPOSE_SERVICE="justhpc-virt-manager"
 CONFIG_NAME="ovirt-backup.yaml"
 LEGACY_CONFIG_NAME="virt-manager.yaml"
 # Один digest используется и Compose, и служебными одноразовыми контейнерами.
@@ -557,7 +559,7 @@ remove_docker_metrics_token() {
 # «полное удаление» оставило бы данные лежать под чужим именем, а установка
 # рядом завела бы пустую базу.
 data_volume_candidates() {
-    for PREF in "$(project_name)" jhvirt "$COMPOSE_SERVICE"; do
+    for PREF in "$(project_name)" jhvirt "$COMPOSE_SERVICE" "$LEGACY_COMPOSE_SERVICE"; do
         printf '%s_postgres-data\n%s_jhvirt-data\n' "$PREF" "$PREF"
     done | awk '!seen[$0]++'
 }
@@ -2473,7 +2475,7 @@ compose_container_ids() {
         cd "$CHECK_COMPOSE_DIR"
         $CHECK_RUN ps -q "$COMPOSE_SERVICE" 2>/dev/null || true
         # Старое имя нужно только для обновления уже развёрнутого Compose.
-        $CHECK_RUN ps -q 2>/dev/null || true
+        $CHECK_RUN ps -q "$LEGACY_COMPOSE_SERVICE" 2>/dev/null || true
     )
 }
 
@@ -3130,7 +3132,7 @@ prepare_oidc() {
         if [ "$OIDC_MODE" = keycloak ] && [ "$OIDC_EXISTING" -eq 0 ] &&
                 [ "$KEYCLOAK_APP_ADMIN_USER_EXPLICIT" -eq 0 ]; then
             say ""
-            say "Эта запись входит в oVirt Backup через realm $KEYCLOAK_REALM."
+            say "Эта запись входит в JustHPC Virt Manager через realm $KEYCLOAK_REALM."
             say "Она отличается от администратора консоли Keycloak."
             printf 'Первый администратор приложения [%s; none — не создавать]: ' "$KEYCLOAK_APP_ADMIN_USER"
             read -r ANSWER || ANSWER=""
@@ -3997,7 +3999,7 @@ keycloak_bootstrap() {
     keycloak_remove_stale_recovery_admins || keycloak_bootstrap_die \
         "не удалось удалить временного администратора от прерванной установки"
 
-    KC_CODE="$(keycloak_post "" "{\"realm\":\"$KEYCLOAK_REALM\",\"enabled\":true,\"displayName\":\"oVirt Backup\",\"displayNameHtml\":\"oVirt Backup\",\"internationalizationEnabled\":true,\"defaultLocale\":\"ru\",\"supportedLocales\":[\"ru\",\"en\"]}")"
+    KC_CODE="$(keycloak_post "" "{\"realm\":\"$KEYCLOAK_REALM\",\"enabled\":true,\"displayName\":\"JustHPC Virt Manager\",\"displayNameHtml\":\"JustHPC Virt Manager\",\"internationalizationEnabled\":true,\"defaultLocale\":\"ru\",\"supportedLocales\":[\"ru\",\"en\"]}")"
     case "$KC_CODE" in
         201|409) ;;
         *) keycloak_bootstrap_die "не удалось создать realm $KEYCLOAK_REALM (код $KC_CODE)" ;;
@@ -4395,6 +4397,58 @@ prepare_docker_keycloak_truststore() {
     if [ -n "$KEYCLOAK_AD_CA_TARGET" ]; then
         say "    CA Active Directory: $KEYCLOAK_AD_CA_TARGET"
     fi
+}
+
+normalize_docker_keycloak_vault_permissions() {
+    NDKV_WORK="$1"
+    [ -f "$NDKV_WORK/.env" ] || return 0
+    NDKV_VALUE="$(env_file_value "$NDKV_WORK/.env" JHV_KEYCLOAK_VAULT_DIR)"
+    [ -n "$NDKV_VALUE" ] || return 0
+    NDKV_PATH="$(docker_host_path "$NDKV_WORK" "$NDKV_VALUE")"
+    [ -d "$NDKV_PATH" ] || return 0
+
+    # Bundle updates intentionally chown most of PREFIX to the service user.
+    # The Keycloak file vault is different: it is mounted read-only and the
+    # Keycloak image runs with GID 0. Restore a stable host ownership/mode after
+    # every update/restore so host-specific UID/GID values can never leak into
+    # the container and make ${vault.ad-bind} unreadable.
+    chown root:root "$NDKV_PATH" || die "не удалось восстановить владельца каталога Keycloak vault: $NDKV_PATH"
+    chmod 0750 "$NDKV_PATH" || die "не удалось восстановить права каталога Keycloak vault: $NDKV_PATH"
+
+    NDKV_REALM="$(env_file_value "$NDKV_WORK/.env" KEYCLOAK_REALM)"
+    [ -n "$NDKV_REALM" ] || NDKV_REALM="$KEYCLOAK_REALM"
+    [ -n "$NDKV_REALM" ] || NDKV_REALM=jhvirt
+    NDKV_SECRET="$NDKV_PATH/${NDKV_REALM}_ad-bind"
+    if [ -f "$NDKV_SECRET" ]; then
+        chown root:root "$NDKV_SECRET" || die "не удалось восстановить владельца bind-секрета Keycloak: $NDKV_SECRET"
+        chmod 0440 "$NDKV_SECRET" || die "не удалось восстановить права bind-секрета Keycloak: $NDKV_SECRET"
+    fi
+}
+
+verify_docker_keycloak_vault_runtime() {
+    VDKV_WORK="$1"
+    VDKV_RUN="$2"
+    [ -f "$VDKV_WORK/.env" ] || return 0
+    VDKV_VALUE="$(env_file_value "$VDKV_WORK/.env" JHV_KEYCLOAK_VAULT_DIR)"
+    [ -n "$VDKV_VALUE" ] || return 0
+    VDKV_PATH="$(docker_host_path "$VDKV_WORK" "$VDKV_VALUE")"
+    VDKV_REALM="$(env_file_value "$VDKV_WORK/.env" KEYCLOAK_REALM)"
+    [ -n "$VDKV_REALM" ] || VDKV_REALM="$KEYCLOAK_REALM"
+    [ -n "$VDKV_REALM" ] || VDKV_REALM=jhvirt
+    VDKV_SECRET="$VDKV_PATH/${VDKV_REALM}_ad-bind"
+    [ -f "$VDKV_SECRET" ] || return 0
+
+    # If embedded Keycloak is not part of this installation there is nothing
+    # to verify. If it is running, test the bind mount using the image's normal
+    # user rather than root so an update cannot finish successfully with a
+    # vault that will fail only on the first domain login.
+    # shellcheck disable=SC2086
+    VDKV_CID="$(cd "$VDKV_WORK" && $VDKV_RUN ps -q keycloak 2>/dev/null || true)"
+    [ -n "$VDKV_CID" ] || return 0
+    # shellcheck disable=SC2086
+    (cd "$VDKV_WORK" && $VDKV_RUN exec -T keycloak sh -ec \
+        "test -s '/opt/keycloak/conf/vault/${VDKV_REALM}_ad-bind' && test -r '/opt/keycloak/conf/vault/${VDKV_REALM}_ad-bind'") \
+        >/dev/null 2>&1 || die "Keycloak не может прочитать ${VDKV_REALM}_ad-bind после обновления. Права vault автоматически восстановлены, но bind mount/SELinux всё ещё блокирует чтение."
 }
 
 prepare_docker_keycloak_vault() {
@@ -4945,6 +4999,10 @@ PostgreSQL хранит пароль внутри тома и новый не п
 		# 10001, который не обязан совпадать с системным пользователем хоста.
 		chmod 644 "$PREFIX/config/$CONFIG_NAME"
 	fi
+	# chown -R выше нужен для обычных runtime-файлов, но не должен менять
+	# владельца root-only file vault Keycloak. Восстанавливаем его всегда,
+	# включая обычное обновление без повторной настройки OIDC/AD.
+	normalize_docker_keycloak_vault_permissions "$WORK"
 	install_keycloak_host_helper
 
 	if [ "$BUNDLE" -eq 1 ]; then
@@ -4982,6 +5040,8 @@ PostgreSQL хранит пароль внутри тома и новый не п
 	prepare_docker_file_backup_source "$WORK"
 	prepare_docker_keycloak_truststore "$WORK"
 	prepare_docker_keycloak_vault "$WORK"
+	# Миграция/восстановление могли заменить сам файл после первого прохода.
+	normalize_docker_keycloak_vault_permissions "$WORK"
 	prepare_docker_dr_backup "$WORK"
 	migration_restore_docker_database "$WORK" "$RUN"
 	ensure_docker_database_roles "$WORK" "$RUN"
@@ -4999,6 +5059,10 @@ PostgreSQL хранит пароль внутри тома и новый не п
     step "сборка образа и запуск (в первый раз это несколько минут)"
     # shellcheck disable=SC2086
     (cd "$WORK" && $RUN up -d --build --remove-orphans) || die "запуск не удался; смотрите вывод выше"
+    # Последняя проверка выполняется уже внутри реального контейнера Keycloak.
+    # Она защищает update/restore от ложного успеха, когда host-права выглядят
+    # корректно, но контейнер всё равно не может прочитать LDAP bind secret.
+    verify_docker_keycloak_vault_runtime "$WORK" "$RUN"
     if [ "$TLS_RESTART_REQUIRED" -eq 1 ]; then
         # shellcheck disable=SC2086
         (cd "$WORK" && $RUN restart "$COMPOSE_SERVICE") ||
@@ -5098,7 +5162,7 @@ PostgreSQL хранит пароль внутри тома и новый не п
     fi
     if [ "$OIDC_MODE" = keycloak ]; then
         say ""
-        say "  Вход в oVirt Backup через Keycloak:"
+        say "  Вход в JustHPC Virt Manager через Keycloak:"
         say "    realm:        $KEYCLOAK_REALM"
         if [ "$KEYCLOAK_APP_ADMIN_USER" = none ]; then
             say "    первый пользователь не создавался (--keycloak-app-admin-user none)"
@@ -5129,7 +5193,7 @@ PostgreSQL хранит пароль внутри тома и новый не п
         fi
         say "    после добавления CA: cd $WORK && $RUN restart keycloak"
         say ""
-        say "  Администрирование Keycloak (не вход в oVirt Backup):"
+        say "  Администрирование Keycloak (не вход в JustHPC Virt Manager):"
         say "    консоль:       $KEYCLOAK_URL/admin/master/console/"
         say "    realm:         master"
         say "    администратор: $KEYCLOAK_ADMIN_USER"
@@ -5475,6 +5539,8 @@ install_systemd() {
     INSTALLED_BINARY=""
     if [ -x "$PREFIX/bin/$SERVER_BINARY" ]; then
         INSTALLED_BINARY="$PREFIX/bin/$SERVER_BINARY"
+    elif [ -x "$PREFIX/bin/$LEGACY_SERVER_BINARY" ]; then
+        INSTALLED_BINARY="$PREFIX/bin/$LEGACY_SERVER_BINARY"
     fi
     [ -n "$INSTALLED_BINARY" ] && [ -f "$UNIT" ] && UPGRADE=1
 
@@ -5683,6 +5749,7 @@ install_systemd() {
 
     step "проверка конфигурации"
     check_installed_config || die "установленная конфигурация не прошла проверку"
+    rm -f "$PREFIX/bin/$LEGACY_SERVER_BINARY"
 
     SHOULD_START=0
     if [ "$START" -eq 1 ]; then

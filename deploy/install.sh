@@ -90,9 +90,7 @@ DR_TIMER="/etc/systemd/system/jhvirt-dr-backup.timer"
 KEYCLOAK_HELPER_UNIT="/etc/systemd/system/jhvirt-keycloak-helper.service"
 KEYCLOAK_HELPER_SOCKET="/etc/systemd/system/jhvirt-keycloak-helper.socket"
 SERVER_BINARY="ovirt-backup-server"
-LEGACY_SERVER_BINARY="justhpc-virt-server"
 COMPOSE_SERVICE="ovirt-backup"
-LEGACY_COMPOSE_SERVICE="justhpc-virt-manager"
 CONFIG_NAME="ovirt-backup.yaml"
 LEGACY_CONFIG_NAME="virt-manager.yaml"
 # Один digest используется и Compose, и служебными одноразовыми контейнерами.
@@ -556,7 +554,7 @@ remove_docker_metrics_token() {
 # «полное удаление» оставило бы данные лежать под чужим именем, а установка
 # рядом завела бы пустую базу.
 data_volume_candidates() {
-    for PREF in "$(project_name)" jhvirt "$COMPOSE_SERVICE" "$LEGACY_COMPOSE_SERVICE"; do
+    for PREF in "$(project_name)" jhvirt "$COMPOSE_SERVICE"; do
         printf '%s_postgres-data\n%s_jhvirt-data\n' "$PREF" "$PREF"
     done | awk '!seen[$0]++'
 }
@@ -2290,7 +2288,7 @@ compose_container_ids() {
         cd "$CHECK_COMPOSE_DIR"
         $CHECK_RUN ps -q "$COMPOSE_SERVICE" 2>/dev/null || true
         # Старое имя нужно только для обновления уже развёрнутого Compose.
-        $CHECK_RUN ps -q "$LEGACY_COMPOSE_SERVICE" 2>/dev/null || true
+        $CHECK_RUN ps -q 2>/dev/null || true
     )
 }
 
@@ -2945,7 +2943,7 @@ prepare_oidc() {
         if [ "$OIDC_MODE" = keycloak ] && [ "$OIDC_EXISTING" -eq 0 ] &&
                 [ "$KEYCLOAK_APP_ADMIN_USER_EXPLICIT" -eq 0 ]; then
             say ""
-            say "Эта запись входит в JustHPC Virt Manager через realm $KEYCLOAK_REALM."
+            say "Эта запись входит в oVirt Backup через realm $KEYCLOAK_REALM."
             say "Она отличается от администратора консоли Keycloak."
             printf 'Первый администратор приложения [%s; none — не создавать]: ' "$KEYCLOAK_APP_ADMIN_USER"
             read -r ANSWER || ANSWER=""
@@ -3812,7 +3810,7 @@ keycloak_bootstrap() {
     keycloak_remove_stale_recovery_admins || keycloak_bootstrap_die \
         "не удалось удалить временного администратора от прерванной установки"
 
-    KC_CODE="$(keycloak_post "" "{\"realm\":\"$KEYCLOAK_REALM\",\"enabled\":true,\"displayName\":\"JustHPC Virt Manager\",\"displayNameHtml\":\"JustHPC Virt Manager\",\"internationalizationEnabled\":true,\"defaultLocale\":\"ru\",\"supportedLocales\":[\"ru\",\"en\"]}")"
+    KC_CODE="$(keycloak_post "" "{\"realm\":\"$KEYCLOAK_REALM\",\"enabled\":true,\"displayName\":\"oVirt Backup\",\"displayNameHtml\":\"oVirt Backup\",\"internationalizationEnabled\":true,\"defaultLocale\":\"ru\",\"supportedLocales\":[\"ru\",\"en\"]}")"
     case "$KC_CODE" in
         201|409) ;;
         *) keycloak_bootstrap_die "не удалось создать realm $KEYCLOAK_REALM (код $KC_CODE)" ;;
@@ -4905,7 +4903,7 @@ PostgreSQL хранит пароль внутри тома и новый не п
     fi
     if [ "$OIDC_MODE" = keycloak ]; then
         say ""
-        say "  Вход в JustHPC Virt Manager через Keycloak:"
+        say "  Вход в oVirt Backup через Keycloak:"
         say "    realm:        $KEYCLOAK_REALM"
         if [ "$KEYCLOAK_APP_ADMIN_USER" = none ]; then
             say "    первый пользователь не создавался (--keycloak-app-admin-user none)"
@@ -4936,7 +4934,7 @@ PostgreSQL хранит пароль внутри тома и новый не п
         fi
         say "    после добавления CA: cd $WORK && $RUN restart keycloak"
         say ""
-        say "  Администрирование Keycloak (не вход в JustHPC Virt Manager):"
+        say "  Администрирование Keycloak (не вход в oVirt Backup):"
         say "    консоль:       $KEYCLOAK_URL/admin/master/console/"
         say "    realm:         master"
         say "    администратор: $KEYCLOAK_ADMIN_USER"
@@ -5282,8 +5280,6 @@ install_systemd() {
     INSTALLED_BINARY=""
     if [ -x "$PREFIX/bin/$SERVER_BINARY" ]; then
         INSTALLED_BINARY="$PREFIX/bin/$SERVER_BINARY"
-    elif [ -x "$PREFIX/bin/$LEGACY_SERVER_BINARY" ]; then
-        INSTALLED_BINARY="$PREFIX/bin/$LEGACY_SERVER_BINARY"
     fi
     [ -n "$INSTALLED_BINARY" ] && [ -f "$UNIT" ] && UPGRADE=1
 
@@ -5485,7 +5481,6 @@ install_systemd() {
 
     step "проверка конфигурации"
     check_installed_config || die "установленная конфигурация не прошла проверку"
-    rm -f "$PREFIX/bin/$LEGACY_SERVER_BINARY"
 
     SHOULD_START=0
     if [ "$START" -eq 1 ]; then

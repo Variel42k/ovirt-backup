@@ -86,7 +86,7 @@ func (a *adminAPI) rotateConsoleAdmin(ctx context.Context, realm, id, name, pass
 		}
 		if len(list) == 0 {
 			_, err := a.do(ctx, http.MethodPost, base+"/users", map[string]any{
-				"username": name, "enabled": true, "firstName": "JustHPC", "lastName": "Administrator",
+				"username": name, "enabled": true, "firstName": "Local", "lastName": "Administrator",
 				"attributes": map[string][]string{"jhvirt-console-owner": {name}},
 			}, http.StatusCreated)
 			if err != nil {

@@ -1,5 +1,5 @@
 [Unit]
-Description=JustHPC Virt Manager
+Description=oVirt Backup
 Documentation=file:@PREFIX@/docs/DEPLOY.md
 After=network-online.target postgresql.service
 Wants=network-online.target

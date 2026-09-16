@@ -658,7 +658,7 @@ func helperImage(env map[string]string) string {
 }
 
 func (m *Manager) ensureVolume(ctx context.Context, name string) error {
-	_, err := m.dockerOutput(ctx, "volume", "create", "--label", "com.justhpc.virt-manager.volume=keycloak-data", name)
+	_, err := m.dockerOutput(ctx, "volume", "create", "--label", "com.ovirt-backup.volume=keycloak-data", name)
 	return err
 }
 
@@ -1232,8 +1232,8 @@ func readAdminResponse(resp *http.Response) ([]byte, error) {
 
 func (a *adminAPI) ensureRealm(ctx context.Context, realm string) error {
 	_, err := a.do(ctx, http.MethodPost, "/admin/realms", map[string]any{
-		"realm": realm, "enabled": true, "displayName": "JustHPC Virt Manager",
-		"displayNameHtml": "JustHPC Virt Manager", "internationalizationEnabled": true,
+		"realm": realm, "enabled": true, "displayName": "oVirt Backup",
+		"displayNameHtml": "oVirt Backup", "internationalizationEnabled": true,
 		"defaultLocale": "ru", "supportedLocales": []string{"ru", "en"},
 	}, http.StatusCreated, http.StatusConflict)
 	if err != nil {
@@ -1251,8 +1251,8 @@ func (a *adminAPI) ensureRealm(ctx context.Context, realm string) error {
 	if json.Unmarshal(raw, &current) != nil {
 		return errors.New("не удалось прочитать настройки realm Keycloak")
 	}
-	current["displayName"] = "JustHPC Virt Manager"
-	current["displayNameHtml"] = "JustHPC Virt Manager"
+	current["displayName"] = "oVirt Backup"
+	current["displayNameHtml"] = "oVirt Backup"
 	current["internationalizationEnabled"] = true
 	current["defaultLocale"] = "ru"
 	current["supportedLocales"] = []string{"ru", "en"}

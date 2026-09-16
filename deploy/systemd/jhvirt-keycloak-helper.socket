@@ -1,5 +1,5 @@
 [Unit]
-Description=justhpc virt manager Keycloak lifecycle socket
+Description=oVirt Backup Keycloak lifecycle socket
 Documentation=file:@PREFIX@/docs/DEPLOY.md
 
 [Socket]

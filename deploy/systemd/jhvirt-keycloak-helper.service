@@ -1,5 +1,5 @@
 [Unit]
-Description=justhpc virt manager Keycloak lifecycle helper
+Description=oVirt Backup Keycloak lifecycle helper
 Documentation=file:@PREFIX@/docs/DEPLOY.md
 Requires=jhvirt-keycloak-helper.socket docker.service
 After=docker.service

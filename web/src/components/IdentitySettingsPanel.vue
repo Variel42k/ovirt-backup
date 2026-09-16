@@ -489,12 +489,12 @@ onMounted(load)
                 <q-card-section class="q-py-sm">
                   <q-toggle v-model="embedded.allow_local_login" color="primary" label="Сохранить вход локального администратора" :disable="!canConfigure" />
                   <div class="text-caption q-ml-xl">
-                    Рекомендуется оставить включённым. Локальная учётная запись JustHPC продолжит работать независимо от AD и Keycloak и позволит войти при недоступности домена.
+                    Рекомендуется оставить включённым. Локальная учётная запись продолжит работать независимо от AD и Keycloak и позволит войти при недоступности домена.
                   </div>
                 </q-card-section>
               </q-card>
             </div>
-            <div class="col-12"><q-input v-model="embedded.local_password" type="password" outlined dense label="Пароль текущего локального администратора JustHPC" hint="Нужен только для подтверждения изменения настроек. Этот пароль не передаётся в Active Directory или Keycloak." :disable="!canConfigure" /></div>
+            <div class="col-12"><q-input v-model="embedded.local_password" type="password" outlined dense label="Пароль текущего локального администратора" hint="Нужен только для подтверждения изменения настроек. Этот пароль не передаётся в Active Directory или Keycloak." :disable="!canConfigure" /></div>
             <div class="col-12"><q-btn color="primary" unelevated icon="play_circle" :label="settings.embedded_keycloak.initialized ? 'Проверить и применить' : 'Запустить и подключить'" :loading="startingEmbedded" :disable="!canConfigure || identityBusy" @click="startEmbedded" /></div>
           </q-card-section>
         </q-card>
@@ -511,7 +511,7 @@ onMounted(load)
             <div class="col-12"><q-input v-model="oidc.backchannel_url" outlined dense label="Внутренний адрес Keycloak" hint="Оставьте пустым, если issuer доступен приложению" :disable="!canConfigure" /></div>
             <div class="col-12 col-md-6"><q-input v-model.number="oidc.session_ttl_minutes" type="number" min="5" max="1440" outlined dense label="Срок сессии, минут" :disable="!canConfigure" /></div>
             <div class="col-12 col-md-6"><q-input v-model.number="oidc.revalidate_seconds" type="number" min="30" max="900" outlined dense label="Проверять группы каждые, секунд" :disable="!canConfigure" /></div>
-            <div class="col-12"><q-toggle v-model="oidc.allow_local_login" label="Сохранить вход локального администратора" hint="Локальный вход JustHPC останется доступен параллельно с Keycloak." :disable="!canConfigure" /></div>
+            <div class="col-12"><q-toggle v-model="oidc.allow_local_login" label="Сохранить вход локального администратора" hint="Локальный вход останется доступен параллельно с Keycloak." :disable="!canConfigure" /></div>
             <div class="col-12 col-md-6"><q-input v-model="oidc.button_label" outlined dense label="Текст кнопки входа" :disable="!canConfigure" /></div>
             <div class="col-12 col-md-6"><q-input v-model="oidc.groups_claim" outlined dense label="Claim с группами" :disable="!canConfigure" /></div>
             <div class="col-12"><q-input v-model="oidc.local_password" type="password" outlined dense label="Пароль текущего локального администратора" :disable="!canConfigure" /></div>
@@ -572,7 +572,7 @@ onMounted(load)
         <q-card flat bordered class="q-mb-md">
           <q-card-section>
             <div class="text-subtitle1 text-weight-medium">3. Служебная учётная запись AD</div>
-            <div class="text-caption text-grey-7 q-mb-md">Эта учётная запись нужна Keycloak только для чтения пользователей и групп. Это не локальный администратор JustHPC и не учётная запись обычного пользователя.</div>
+            <div class="text-caption text-grey-7 q-mb-md">Эта учётная запись нужна Keycloak только для чтения пользователей и групп. Это не локальный администратор и не учётная запись обычного пользователя.</div>
             <div class="row q-col-gutter-md">
               <div class="col-12 col-md-6"><q-input v-model="domain.domain.bind_dn" outlined dense label="Bind DN или UPN" :hint="`Пример: ${adBindDNExample} или svc-keycloak@${domain.domain.name || 'example.org'}`" :disable="!canConfigure" /></div>
               <div class="col-12 col-md-6"><q-input v-model="domain.domain.bind_password" outlined dense type="password" label="Пароль служебной AD-учётной записи" hint="Введите пароль учётной записи из Bind DN/UPN." :disable="!canConfigure" /></div>
@@ -594,7 +594,7 @@ onMounted(load)
               <div class="col-12 col-md-4"><q-input v-model="groups.viewer" outlined dense label="AD-группа → viewer" hint="Например: virt-readers" :disable="!canConfigure" /></div>
             </div>
             <q-banner dense class="bg-green-1 q-mt-md">
-              Пользователь, входящий в указанную viewer-группу AD, после входа через Keycloak автоматически получит роль <b>viewer</b>. Пароль пользователя хранится и проверяется в Active Directory, а не в JustHPC.
+              Пользователь, входящий в указанную viewer-группу AD, после входа через Keycloak автоматически получит роль <b>viewer</b>. Пароль пользователя хранится и проверяется в Active Directory, а не в приложении.
             </q-banner>
           </q-card-section>
         </q-card>
@@ -615,8 +615,8 @@ onMounted(load)
         <q-card flat bordered class="q-mb-md">
           <q-card-section>
             <div class="text-subtitle1 text-weight-medium">5. Подтверждение</div>
-            <div class="text-caption text-grey-7 q-mb-md">Введите пароль локального администратора JustHPC, чтобы подтвердить изменение. Локальная учётная запись при этом не удаляется.</div>
-            <q-input v-model="domain.local_password" type="password" outlined dense label="Пароль текущего локального администратора JustHPC" hint="Не является Bind-паролем и не передаётся в домен." :disable="!canConfigure" />
+            <div class="text-caption text-grey-7 q-mb-md">Введите пароль локального администратора, чтобы подтвердить изменение. Локальная учётная запись при этом не удаляется.</div>
+            <q-input v-model="domain.local_password" type="password" outlined dense label="Пароль текущего локального администратора" hint="Не является Bind-паролем и не передаётся в домен." :disable="!canConfigure" />
             <q-banner dense class="bg-blue-1 q-mt-md">
               <template #avatar><q-icon name="admin_panel_settings" color="primary" /></template>
               <b>Локальный администратор сохраняется.</b> Если на шаге Keycloak включено «Сохранить вход локального администратора», вы сможете входить локально даже при недоступности AD или Keycloak.

@@ -210,7 +210,7 @@ docker compose -f /opt/jhvirt/compose/docker-compose.yml \
 
 При `--oidc keycloak` установщик поднимает Keycloak тем же compose (профиль
 `keycloak`), заводит ему базу в том же кластере PostgreSQL, создаёт realm
-`jhvirt` с отображаемым именем `JustHPC Virt Manager`, клиента с секретом, три группы
+`jhvirt` с отображаемым именем `oVirt Backup`, клиента с секретом, три группы
 допуска и mapper групп. Случайная bootstrap-запись используется только во
 время этой операции. Затем установщик создаёт постоянного администратора
 master realm `kc-bootstrap-admin`, проверяет его права, удаляет bootstrap-запись
@@ -446,7 +446,7 @@ docker inspect "$(docker compose ps -q ovirt-backup)" \
 
 Откройте ровно тот адрес, который передали через `--url`. Без OIDC войдите как
 `local-admin`. С OIDC нажмите кнопку Keycloak и войдите как `backup-admin` с
-отдельным паролем из блока **«Вход в JustHPC Virt Manager через Keycloak»**.
+отдельным паролем из блока **«Вход в oVirt Backup через Keycloak»**.
 `kc-bootstrap-admin` подходит только для Admin Console и в realm `jhvirt` не
 существует. Если профиль другого заведённого пользователя неполный, Keycloak откроет
 `Update Account Information`; это обязательное действие провайдера, а не ошибка
@@ -720,7 +720,7 @@ REST API Proxmox не отдаёт `vzdump --stdout`, поэтому для ба
 токена:
 
 ```bash
-pveum user add jhvirt@pve --comment 'JustHPC Virt Manager API'
+pveum user add jhvirt@pve --comment 'oVirt Backup API'
 pveum role add JHVirtManager -privs \
   'Datastore.Audit Pool.Audit Sys.Audit VM.Audit VM.Migrate VM.PowerMgmt'
 pveum acl modify / -user jhvirt@pve -role JHVirtManager

@@ -40,6 +40,11 @@ func TestConfigureDomainUsesTransientCredentialsAndChecksGroups(t *testing.T) {
 	mux.HandleFunc("GET /admin/realms/jhvirt/components", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("[]"))
 	})
+	mux.HandleFunc("GET /admin/realms/jhvirt/components/{id}", func(w http.ResponseWriter, r *http.Request) {
+		body := createdProvider
+		body.ID = r.PathValue("id")
+		_ = json.NewEncoder(w).Encode(body)
+	})
 	mux.HandleFunc("POST /admin/realms/jhvirt/components", func(w http.ResponseWriter, r *http.Request) {
 		var body component
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -106,6 +111,83 @@ func TestConfigureDomainUsesTransientCredentialsAndChecksGroups(t *testing.T) {
 		!strings.Contains(string(raw), `"name":"groups"`) ||
 		strings.Contains(string(raw), "setup-secret") || strings.Contains(string(raw), "bind-secret") {
 		t.Fatalf("unsafe or incomplete OIDC client: %s", raw)
+	}
+}
+
+func TestConfigureDomainUpdatesExistingProviderAndVerifiesUsersDN(t *testing.T) {
+	var provider = component{
+		ID: "ldap-1", Name: "active-directory", ProviderID: "ldap", ProviderType: componentUserStorage, ParentID: "realm-uuid",
+		Config: map[string][]string{
+			"connectionUrl":  {"ldaps://old.example.org:636"},
+			"usersDn":        {"OU=Old,DC=example,DC=org"},
+			"bindDn":         {"CN=old,DC=example,DC=org"},
+			"bindCredential": {"${vault.ad-bind}"},
+		},
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /realms/master/protocol/openid-connect/token", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"access_token": "admin-token"})
+	})
+	mux.HandleFunc("GET /admin/realms/jhvirt", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"id": "realm-uuid"})
+	})
+	mux.HandleFunc("POST /admin/realms/jhvirt/testLDAPConnection", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("GET /admin/realms/jhvirt/components", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("type") == componentUserStorage {
+			_ = json.NewEncoder(w).Encode([]component{provider})
+			return
+		}
+		_ = json.NewEncoder(w).Encode([]component{})
+	})
+	mux.HandleFunc("PUT /admin/realms/jhvirt/components/{id}", func(w http.ResponseWriter, r *http.Request) {
+		if r.PathValue("id") != provider.ID {
+			t.Fatalf("unexpected provider id %q", r.PathValue("id"))
+		}
+		if err := json.NewDecoder(r.Body).Decode(&provider); err != nil {
+			t.Fatal(err)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("GET /admin/realms/jhvirt/components/{id}", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(provider)
+	})
+	mux.HandleFunc("POST /admin/realms/jhvirt/components", func(w http.ResponseWriter, r *http.Request) {
+		var body component
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("Location", "/admin/realms/jhvirt/components/mapper-1")
+		w.WriteHeader(http.StatusCreated)
+	})
+	mux.HandleFunc("POST /admin/realms/jhvirt/user-storage/{provider}/sync", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"status":"users synchronized","failed":0}`))
+	})
+	mux.HandleFunc("POST /admin/realms/jhvirt/user-storage/{provider}/mappers/{mapper}/sync", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"status":"groups synchronized","failed":0}`))
+	})
+	mux.HandleFunc("GET /admin/realms/jhvirt/groups", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode([]map[string]string{{"id": "g", "name": r.URL.Query().Get("search")}})
+	})
+
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+	client, err := New(ts.URL+"/realms/jhvirt", "master", "setup-client", "setup-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.ConfigureDomain(t.Context(), Domain{
+		Name: "example.org", ProviderName: "active-directory", URL: "ldaps://dc01.example.org:636",
+		UsersDN: "DC=example,DC=org", GroupsDN: "DC=example,DC=org",
+		BindDN: "CN=svc,DC=example,DC=org", BindPassword: "bind-secret", StoredBindCredential: "${vault.ad-bind}",
+		ViewerGroup: "virt-readers", GroupMode: "read-only",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := provider.Config["usersDn"]; len(got) != 1 || got[0] != "DC=example,DC=org" {
+		t.Fatalf("usersDn was not updated: %#v", got)
 	}
 }
 

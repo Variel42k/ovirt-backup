@@ -541,7 +541,7 @@ func (m *Manager) ConfigureDomain(ctx context.Context, request hosthelper.Domain
 	if err != nil {
 		return out, err
 	}
-	persistedStatus, err := kc.VerifyStoredDomain(ctx, request.Domain.ProviderName, request.Domain.StoredBindCredential)
+	persistedStatus, err := kc.VerifyStoredDomain(ctx, request.Domain)
 	if err != nil {
 		return out, fmt.Errorf("сохранённая настройка Active Directory не прошла проверку после перезапуска Keycloak: %w", err)
 	}

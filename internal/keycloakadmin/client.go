@@ -451,6 +451,9 @@ func (c *Client) configureDomain(ctx context.Context, d Domain) (Result, error) 
 	if err != nil {
 		return out, err
 	}
+	if err := c.verifyLDAPProviderConfig(ctx, realmID, providerID, d); err != nil {
+		return out, err
+	}
 	out.ProviderID = providerID
 
 	_, err = c.upsertComponent(ctx, component{
@@ -520,11 +523,12 @@ func storedBindCredential(d Domain) string {
 // password. It is intended for the embedded-Keycloak lifecycle check after a
 // container restart, so a configuration is not marked healthy merely because
 // the one-shot testAuthentication call succeeded before restart.
-func (c *Client) VerifyStoredDomain(ctx context.Context, providerName, expectedCredential string) (string, error) {
+func (c *Client) VerifyStoredDomain(ctx context.Context, d Domain) (string, error) {
 	realmID, err := c.VerifyAccess(ctx)
 	if err != nil {
 		return "", err
 	}
+	providerName := strings.TrimSpace(d.ProviderName)
 	query := "?parent=" + url.QueryEscape(realmID) + "&type=" + url.QueryEscape(componentUserStorage) + "&name=" + url.QueryEscape(providerName)
 	raw, _, err := c.do(ctx, http.MethodGet, "/components"+query, nil, http.StatusOK)
 	if err != nil {
@@ -556,10 +560,50 @@ func (c *Client) VerifyStoredDomain(ctx context.Context, providerName, expectedC
 	// credential resolves after restart.
 	visibleCredential := strings.TrimSpace(credentials[0])
 	redacted := visibleCredential != "" && strings.Trim(visibleCredential, "*") == ""
-	if !redacted && visibleCredential != expectedCredential {
+	if !redacted && visibleCredential != d.StoredBindCredential {
 		return "", errors.New("Keycloak не сохранил ссылку на bind-секрет в ожидаемом виде")
 	}
+	if err := verifyLDAPConfigValues(*provider, d); err != nil {
+		return "", fmt.Errorf("Keycloak не сохранил новые параметры LDAP после перезапуска: %w", err)
+	}
 	return c.sync(ctx, "/user-storage/"+url.PathEscape(provider.ID)+"/sync?action=triggerFullSync")
+}
+
+func (c *Client) verifyLDAPProviderConfig(ctx context.Context, realmID, providerID string, d Domain) error {
+	raw, _, err := c.do(ctx, http.MethodGet, "/components/"+url.PathEscape(providerID), nil, http.StatusOK)
+	if err != nil {
+		return fmt.Errorf("не удалось проверить сохранённый LDAP provider: %w", err)
+	}
+	var provider component
+	if err := json.Unmarshal(raw, &provider); err != nil {
+		return errors.New("не удалось разобрать сохранённый LDAP provider")
+	}
+	if provider.ID != providerID || provider.ParentID != realmID || provider.ProviderID != "ldap" {
+		return errors.New("Keycloak вернул неожиданный LDAP provider после сохранения")
+	}
+	if err := verifyLDAPConfigValues(provider, d); err != nil {
+		return fmt.Errorf("Keycloak не применил новые параметры LDAP: %w", err)
+	}
+	return nil
+}
+
+func verifyLDAPConfigValues(provider component, d Domain) error {
+	wanted := map[string]string{
+		"connectionUrl": strings.TrimSpace(d.URL),
+		"usersDn":       strings.TrimSpace(d.UsersDN),
+		"bindDn":        strings.TrimSpace(d.BindDN),
+	}
+	for key, expected := range wanted {
+		values := provider.Config[key]
+		if len(values) != 1 || strings.TrimSpace(values[0]) != expected {
+			actual := ""
+			if len(values) > 0 {
+				actual = strings.TrimSpace(values[0])
+			}
+			return fmt.Errorf("%s: ожидалось %q, сохранено %q", key, expected, actual)
+		}
+	}
+	return nil
 }
 
 func validateDomain(d Domain) error {

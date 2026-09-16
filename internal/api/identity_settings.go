@@ -29,6 +29,8 @@ type identityResponse struct {
 	ButtonLabel        string            `json:"button_label"`
 	GroupsClaim        string            `json:"groups_claim"`
 	RoleMapping        map[string]string `json:"role_mapping"`
+	DefaultRole        string            `json:"default_role"`
+	SubjectRoleMapping map[string]string `json:"subject_role_mapping"`
 	AllowLocalLogin    bool              `json:"allow_local_login"`
 	SessionTTLMinutes  int               `json:"session_ttl_minutes"`
 	RevalidateSeconds  int               `json:"revalidate_seconds"`
@@ -46,23 +48,26 @@ type domainResponse struct {
 	UsersDN      string     `json:"users_dn,omitempty"`
 	GroupsDN     string     `json:"groups_dn,omitempty"`
 	BindDN       string     `json:"bind_dn,omitempty"`
+	GroupMode    string     `json:"group_mode"`
 	CheckedAt    *time.Time `json:"checked_at,omitempty"`
 }
 
 type identityWriteRequest struct {
-	LocalPassword     string            `json:"local_password"`
-	Enabled           bool              `json:"enabled"`
-	Issuer            string            `json:"issuer"`
-	BackchannelURL    string            `json:"backchannel_url"`
-	ClientID          string            `json:"client_id"`
-	ClientSecret      string            `json:"client_secret"`
-	RedirectURL       string            `json:"redirect_url"`
-	ButtonLabel       string            `json:"button_label"`
-	GroupsClaim       string            `json:"groups_claim"`
-	RoleMapping       map[string]string `json:"role_mapping"`
-	AllowLocalLogin   bool              `json:"allow_local_login"`
-	SessionTTLMinutes int               `json:"session_ttl_minutes"`
-	RevalidateSeconds int               `json:"revalidate_seconds"`
+	LocalPassword      string             `json:"local_password"`
+	Enabled            bool               `json:"enabled"`
+	Issuer             string             `json:"issuer"`
+	BackchannelURL     string             `json:"backchannel_url"`
+	ClientID           string             `json:"client_id"`
+	ClientSecret       string             `json:"client_secret"`
+	RedirectURL        string             `json:"redirect_url"`
+	ButtonLabel        string             `json:"button_label"`
+	GroupsClaim        string             `json:"groups_claim"`
+	RoleMapping        map[string]string  `json:"role_mapping"`
+	DefaultRole        *string            `json:"default_role"`
+	SubjectRoleMapping *map[string]string `json:"subject_role_mapping"`
+	AllowLocalLogin    bool               `json:"allow_local_login"`
+	SessionTTLMinutes  int                `json:"session_ttl_minutes"`
+	RevalidateSeconds  int                `json:"revalidate_seconds"`
 }
 
 type domainWriteRequest struct {
@@ -87,17 +92,19 @@ type domainWriteRequest struct {
 }
 
 type embeddedKeycloakRequest struct {
-	LocalPassword     string            `json:"local_password"`
-	PublicURL         string            `json:"public_url"`
-	Port              int               `json:"port"`
-	DirectTLS         bool              `json:"direct_tls"`
-	Realm             string            `json:"realm"`
-	ClientID          string            `json:"client_id"`
-	ButtonLabel       string            `json:"button_label"`
-	RoleMapping       map[string]string `json:"role_mapping"`
-	AllowLocalLogin   bool              `json:"allow_local_login"`
-	SessionTTLMinutes int               `json:"session_ttl_minutes"`
-	RevalidateSeconds int               `json:"revalidate_seconds"`
+	LocalPassword      string             `json:"local_password"`
+	PublicURL          string             `json:"public_url"`
+	Port               int                `json:"port"`
+	DirectTLS          bool               `json:"direct_tls"`
+	Realm              string             `json:"realm"`
+	ClientID           string             `json:"client_id"`
+	ButtonLabel        string             `json:"button_label"`
+	RoleMapping        map[string]string  `json:"role_mapping"`
+	DefaultRole        *string            `json:"default_role"`
+	SubjectRoleMapping *map[string]string `json:"subject_role_mapping"`
+	AllowLocalLogin    bool               `json:"allow_local_login"`
+	SessionTTLMinutes  int                `json:"session_ttl_minutes"`
+	RevalidateSeconds  int                `json:"revalidate_seconds"`
 }
 
 // OIDCConfigFromIdentity translates the database representation used by both
@@ -107,7 +114,8 @@ func OIDCConfigFromIdentity(value model.IdentitySettings) config.OIDCConfig {
 		Enabled: value.Enabled, Issuer: value.Issuer, BackchannelURL: value.BackchannelURL,
 		ClientID: value.ClientID, ClientSecret: value.ClientSecret, RedirectURL: value.RedirectURL,
 		Scopes: []string{"openid", "profile", "email"}, ButtonLabel: value.ButtonLabel,
-		GroupsClaim: value.GroupsClaim, RoleMapping: value.RoleMapping,
+		GroupsClaim: value.GroupsClaim, RoleMapping: cloneRoleMapping(value.RoleMapping),
+		DefaultRole: value.DefaultRole, SubjectRoleMapping: cloneRoleMapping(value.SubjectRoleMapping),
 		PostLogoutRedirectURL: strings.TrimSuffix(value.RedirectURL, "/api/v1/auth/oidc/callback") + "/login",
 		SessionTTL:            value.SessionTTL, RevalidateInterval: value.RevalidateInterval,
 		AllowLocalLogin: value.AllowLocalLogin,
@@ -120,6 +128,7 @@ func identityFromConfig(cfg config.OIDCConfig) model.IdentitySettings {
 		ClientID: cfg.ClientID, ClientSecret: cfg.ClientSecret, RedirectURL: cfg.RedirectURL,
 		ButtonLabel: cfg.ButtonLabel, GroupsClaim: cfg.GroupsClaim,
 		RoleMapping: cloneRoleMapping(cfg.RoleMapping), AllowLocalLogin: cfg.AllowLocalLogin,
+		DefaultRole: cfg.DefaultRole, SubjectRoleMapping: cloneRoleMapping(cfg.SubjectRoleMapping),
 		SessionTTL: cfg.SessionTTL, RevalidateInterval: cfg.RevalidateInterval,
 	}
 }
@@ -178,6 +187,7 @@ func (s *Server) identityResponse(value model.IdentitySettings, source string, r
 		ClientID: value.ClientID, ClientSecretStored: value.ClientSecret != "",
 		RedirectURL: value.RedirectURL, ButtonLabel: value.ButtonLabel,
 		GroupsClaim: value.GroupsClaim, RoleMapping: cloneRoleMapping(value.RoleMapping),
+		DefaultRole: value.DefaultRole, SubjectRoleMapping: cloneRoleMapping(value.SubjectRoleMapping),
 		AllowLocalLogin:   value.AllowLocalLogin,
 		SessionTTLMinutes: int(value.SessionTTL / time.Minute),
 		RevalidateSeconds: int(value.RevalidateInterval / time.Second), Source: source,
@@ -187,7 +197,7 @@ func (s *Server) identityResponse(value model.IdentitySettings, source string, r
 			Connected: value.DomainConnected, Name: value.DomainName,
 			ProviderName: value.LDAPProviderName, LDAPURL: value.LDAPURL,
 			UsersDN: value.LDAPUsersDN, GroupsDN: value.LDAPGroupsDN,
-			BindDN: value.LDAPBindDN, CheckedAt: value.DomainCheckedAt,
+			BindDN: value.LDAPBindDN, CheckedAt: value.DomainCheckedAt, GroupMode: value.LDAPGroupMode,
 		},
 	}
 }
@@ -263,6 +273,10 @@ func (s *Server) handleSetIdentitySettings(w http.ResponseWriter, r *http.Reques
 	if value.ButtonLabel == "" {
 		value.ButtonLabel = "Войти через Keycloak"
 	}
+	if err := applyIdentityAccessPolicy(&value, current, req.DefaultRole, req.SubjectRoleMapping); err != nil {
+		s.writeError(w, r, badRequest("%v", err))
+		return
+	}
 	if value.GroupsClaim == "" {
 		value.GroupsClaim = "groups"
 	}
@@ -283,7 +297,7 @@ func (s *Server) handleSetIdentitySettings(w http.ResponseWriter, r *http.Reques
 			clearDomainMetadata(&value)
 		}
 	}
-	bindingChanged := identityDomainBindingChanged(identityFromConfig(current), value)
+	bindingChanged := identityDomainBindingChanged(identityFromConfig(current), value) || identityAccessPolicyChanged(identityFromConfig(current), value)
 	if err := validateLocalLoginFallback(value); err != nil {
 		s.writeError(w, r, badRequest("%v", err))
 		return
@@ -351,6 +365,12 @@ func (s *Server) handleBootstrapEmbeddedKeycloak(w http.ResponseWriter, r *http.
 		return
 	}
 	redirectURL := external + "/api/v1/auth/oidc/callback"
+	_, current := s.oidcSnapshot()
+	policy := model.IdentitySettings{Issuer: strings.TrimRight(strings.TrimSpace(req.PublicURL), "/") + "/realms/" + strings.TrimSpace(req.Realm)}
+	if err := applyIdentityAccessPolicy(&policy, current, req.DefaultRole, req.SubjectRoleMapping); err != nil {
+		s.writeError(w, r, badRequest("%v", err))
+		return
+	}
 	// The host helper owns a long-running deployment. Detach it from the HTTP
 	// request so a navigation or browser refresh cannot leave Keycloak half
 	// configured. The bounded context still prevents a stuck helper from
@@ -372,6 +392,7 @@ func (s *Server) handleBootstrapEmbeddedKeycloak(w http.ResponseWriter, r *http.
 		ClientID: strings.TrimSpace(req.ClientID), ClientSecret: result.ClientSecret,
 		RedirectURL: redirectURL, ButtonLabel: strings.TrimSpace(req.ButtonLabel),
 		GroupsClaim: "groups", RoleMapping: cloneRoleMapping(req.RoleMapping),
+		DefaultRole: policy.DefaultRole, SubjectRoleMapping: policy.SubjectRoleMapping,
 		AllowLocalLogin:    req.AllowLocalLogin,
 		SessionTTL:         time.Duration(req.SessionTTLMinutes) * time.Minute,
 		RevalidateInterval: time.Duration(req.RevalidateSeconds) * time.Second,
@@ -410,9 +431,8 @@ func (s *Server) handleBootstrapEmbeddedKeycloak(w http.ResponseWriter, r *http.
 		s.writeError(w, r, badRequest("Keycloak запущен, но discovery приложения не прошёл: %v", err))
 		return
 	}
-	_, current := s.oidcSnapshot()
 	var revoked int64
-	if identityDomainBindingChanged(identityFromConfig(current), value) {
+	if identityDomainBindingChanged(identityFromConfig(current), value) || identityAccessPolicyChanged(identityFromConfig(current), value) {
 		revoked, err = s.store.DeleteOIDCSessions(bootstrapCtx)
 		if err != nil {
 			s.writeError(w, r, err)
@@ -435,6 +455,37 @@ func copyDomainMetadata(dst *model.IdentitySettings, src model.IdentitySettings)
 	dst.LDAPURL, dst.LDAPUsersDN, dst.LDAPGroupsDN = src.LDAPURL, src.LDAPUsersDN, src.LDAPGroupsDN
 	dst.LDAPBindDN, dst.DomainConnected = src.LDAPBindDN, src.DomainConnected
 	dst.DomainCheckedAt = src.DomainCheckedAt
+	dst.LDAPGroupMode = src.LDAPGroupMode
+}
+
+func applyIdentityAccessPolicy(value *model.IdentitySettings, current config.OIDCConfig, fallback *string, subjects *map[string]string) error {
+	value.DefaultRole = current.DefaultRole
+	if fallback != nil {
+		if *fallback != "" && *fallback != "viewer" {
+			return errors.New("через веб можно назначить по умолчанию только наблюдателя или запретить вход")
+		}
+		value.DefaultRole = *fallback
+	}
+	issuerChanged := strings.TrimRight(value.Issuer, "/") != strings.TrimRight(current.Issuer, "/")
+	value.SubjectRoleMapping = cloneRoleMapping(current.SubjectRoleMapping)
+	if issuerChanged {
+		value.SubjectRoleMapping = map[string]string{}
+		if subjects != nil && len(*subjects) != 0 {
+			return errors.New("при смене issuer сначала очистите ручные назначения: subject принадлежит конкретному провайдеру")
+		}
+	} else if subjects != nil {
+		value.SubjectRoleMapping = cloneRoleMapping(*subjects)
+	}
+	for subject, role := range value.SubjectRoleMapping {
+		if subject == "" || len(subject) > 255 || strings.TrimSpace(subject) != subject || strings.ContainsFunc(subject, unicode.IsControl) || !model.IsBuiltinRole(model.Role(role)) {
+			return errors.New("ручное назначение требует точного subject и роли admin, operator или viewer")
+		}
+	}
+	return nil
+}
+
+func identityAccessPolicyChanged(before, after model.IdentitySettings) bool {
+	return before.DefaultRole != after.DefaultRole || !maps.Equal(before.SubjectRoleMapping, after.SubjectRoleMapping)
 }
 
 // identityDomainBindingChanged identifies values whose change invalidates the
@@ -461,6 +512,7 @@ func clearDomainMetadata(value *model.IdentitySettings) {
 	value.LDAPUsersDN = ""
 	value.LDAPGroupsDN = ""
 	value.LDAPBindDN = ""
+	value.LDAPGroupMode = ""
 	value.DomainConnected = false
 	value.DomainCheckedAt = nil
 }
@@ -511,9 +563,8 @@ func (s *Server) validateIdentityConfig(oidcCfg config.OIDCConfig) error {
 	if oidcCfg.ClientID == "" || len(oidcCfg.ClientID) > 255 || strings.ContainsFunc(oidcCfg.ClientID, unicode.IsControl) {
 		return errors.New("OIDC client ID пуст или недопустим")
 	}
-	seenRoles := map[string]bool{}
 	seenGroups := map[string]bool{}
-	for group, role := range oidcCfg.RoleMapping {
+	for group := range oidcCfg.RoleMapping {
 		group = strings.TrimSpace(group)
 		if group == "" || len(group) > 256 || strings.ContainsAny(group, "\r\n\x00") {
 			return errors.New("имя группы роли пусто или недопустимо")
@@ -522,12 +573,7 @@ func (s *Server) validateIdentityConfig(oidcCfg config.OIDCConfig) error {
 		if seenGroups[key] {
 			return errors.New("группы ролей должны различаться")
 		}
-		seenGroups[key], seenRoles[role] = true, true
-	}
-	for _, role := range []string{"admin", "operator", "viewer"} {
-		if !seenRoles[role] {
-			return fmt.Errorf("не задана группа для роли %s", role)
-		}
+		seenGroups[key] = true
 	}
 	external := strings.TrimRight(strings.TrimSpace(s.cfg.Server.ExternalURL), "/")
 	if external == "" {
@@ -631,8 +677,18 @@ func (s *Server) handleConfigureDomain(w http.ResponseWriter, r *http.Request) {
 	value.DomainName, value.LDAPProviderName = domain.Name, domain.ProviderName
 	value.LDAPURL, value.LDAPUsersDN, value.LDAPGroupsDN = domain.URL, domain.UsersDN, domain.GroupsDN
 	value.LDAPBindDN, value.DomainConnected, value.DomainCheckedAt = domain.BindDN, true, &now
-	value.RoleMapping = map[string]string{
-		domain.AdminGroup: "admin", domain.OperatorGroup: "operator", domain.ViewerGroup: "viewer",
+	value.LDAPGroupMode = domain.GroupMode
+	if domain.GroupMode == "manual" {
+		value.RoleMapping = map[string]string{}
+	} else {
+		value.RoleMapping = map[string]string{}
+		for group, role := range map[string]string{
+			domain.AdminGroup: "admin", domain.OperatorGroup: "operator", domain.ViewerGroup: "viewer",
+		} {
+			if group = strings.TrimSpace(group); group != "" {
+				value.RoleMapping[group] = role
+			}
+		}
 	}
 	value.UpdatedBy = user.Username
 	revoked, err := s.store.DeleteOIDCSessions(configureCtx)

@@ -61,6 +61,27 @@ type DomainResponse struct {
 	Result keycloakadmin.Result `json:"result"`
 }
 
+type ConsoleAdminRequest struct {
+	Issuer string `json:"issuer"`
+}
+
+type ConsoleAdminResponse struct {
+	ConsoleURL string `json:"console_url"`
+	Username   string `json:"username"`
+	Password   string `json:"password"`
+}
+
+type SearchUsersRequest struct {
+	Issuer string `json:"issuer"`
+	Query  string `json:"query"`
+}
+
+type IdentityUser struct {
+	ID       string `json:"id"`
+	Username string `json:"username"`
+	Enabled  bool   `json:"enabled"`
+}
+
 type errorResponse struct {
 	Error string `json:"error"`
 }
@@ -102,6 +123,18 @@ func (c *Client) Bootstrap(ctx context.Context, request BootstrapRequest) (Boots
 func (c *Client) ConfigureDomain(ctx context.Context, request DomainRequest) (DomainResponse, error) {
 	var out DomainResponse
 	err := c.do(ctx, http.MethodPost, "/v1/keycloak/domain", request, &out)
+	return out, err
+}
+
+func (c *Client) ConsoleAdmin(ctx context.Context, request ConsoleAdminRequest) (ConsoleAdminResponse, error) {
+	var out ConsoleAdminResponse
+	err := c.do(ctx, http.MethodPost, "/v1/keycloak/console-admin", request, &out)
+	return out, err
+}
+
+func (c *Client) SearchUsers(ctx context.Context, request SearchUsersRequest) ([]IdentityUser, error) {
+	var out []IdentityUser
+	err := c.do(ctx, http.MethodPost, "/v1/keycloak/users", request, &out)
 	return out, err
 }
 

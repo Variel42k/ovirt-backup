@@ -20,6 +20,7 @@ func TestIdentitySettingsRoundTripEncryptsClientSecret(t *testing.T) {
 		ClientSecret: "client-secret-value", RedirectURL: "https://backup.example.org/api/v1/auth/oidc/callback",
 		ButtonLabel: "Войти через Keycloak", GroupsClaim: "groups",
 		RoleMapping:     map[string]string{"admins": "admin", "operators": "operator", "readers": "viewer"},
+		DefaultRole: "viewer", SubjectRoleMapping: map[string]string{"exact-subject": "operator"}, LDAPGroupMode: "manual",
 		AllowLocalLogin: true, SessionTTL: time.Hour, RevalidateInterval: 5 * time.Minute,
 		DomainName: "example.org", LDAPProviderName: "active-directory",
 		LDAPURL: "ldaps://dc01.example.org:636", LDAPUsersDN: "DC=example,DC=org",
@@ -41,6 +42,7 @@ func TestIdentitySettingsRoundTripEncryptsClientSecret(t *testing.T) {
 		t.Fatalf("read settings: found=%v err=%v", found, err)
 	}
 	if got.ClientSecret != want.ClientSecret || got.Issuer != want.Issuer ||
+		got.DefaultRole != want.DefaultRole || got.SubjectRoleMapping["exact-subject"] != "operator" || got.LDAPGroupMode != "manual" ||
 		got.RoleMapping["admins"] != "admin" || !got.DomainConnected || got.DomainCheckedAt == nil {
 		t.Fatalf("round trip mismatch: %+v", got)
 	}

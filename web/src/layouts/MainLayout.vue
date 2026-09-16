@@ -55,7 +55,8 @@ const allLinks = [
   { name: 'engine-config', label: 'Конфигурация Engine', icon: 'account_tree', perm: 'engine_config.read', group: 'Защита данных' },
   { name: 'alerts', label: 'Оповещения', icon: 'notifications_active', perm: 'alerts.read', group: 'Операции' },
   { name: 'approvals', label: 'Согласования', icon: 'approval', perm: '', group: 'Операции' },
-  { name: 'access-settings', label: 'Доступ и роли', icon: 'admin_panel_settings', perm: 'users.admin', group: 'Администрирование' },
+  { name: 'identity-settings', label: 'Домен и единый вход', icon: 'domain', perm: 'users.admin', group: 'Администрирование' },
+  { name: 'access-settings', label: 'Пользователи и роли', icon: 'admin_panel_settings', perm: 'users.admin', group: 'Администрирование' },
   { name: 'settings', label: 'Параметры системы', icon: 'settings', perm: '', group: 'Администрирование' },
   { name: 'documentation', label: 'Документация', icon: 'menu_book', perm: '', group: 'Справка' },
 ]

@@ -437,7 +437,7 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	role, err := mapOIDCRole(oidcCfg, groups)
+	role, err := mapOIDCSubjectRole(oidcCfg, idToken.Subject, groups)
 	if err != nil {
 		// Причина уходит человеку целиком: в ней перечислены пришедшие группы,
 		// без них разбор шёл бы по двум журналам сразу.

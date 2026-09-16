@@ -366,6 +366,8 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /settings/identity", s.perm(model.PermUsersAdmin, s.handleSetIdentitySettings))
 	mux.HandleFunc("POST /settings/identity/embedded-keycloak", s.perm(model.PermUsersAdmin, s.handleBootstrapEmbeddedKeycloak))
 	mux.HandleFunc("POST /settings/identity/domain", s.perm(model.PermUsersAdmin, s.handleConfigureDomain))
+	mux.HandleFunc("POST /settings/identity/console-admin", s.perm(model.PermUsersAdmin, s.handleKeycloakConsoleAdmin))
+	mux.HandleFunc("POST /settings/identity/users", s.perm(model.PermUsersAdmin, s.handleSearchIdentityUsers))
 	mux.HandleFunc("PUT /settings/runtime/compression", s.perm(model.PermSettingsAdmin, s.handleSetRuntimeCompression))
 	mux.HandleFunc("DELETE /settings/runtime/compression", s.perm(model.PermSettingsAdmin, s.handleResetRuntimeCompression))
 	mux.HandleFunc("PUT /settings/runtime/timezone", s.perm(model.PermSettingsAdmin, s.handleSetRuntimeTimezone))

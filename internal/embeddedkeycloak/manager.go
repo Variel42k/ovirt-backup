@@ -64,6 +64,8 @@ type state struct {
 	AdminClientSecret string            `json:"admin_client_secret"`
 	RealmScoped       bool              `json:"realm_scoped"`
 	AppSecrets        map[string]string `json:"app_secrets"`
+	ConsoleAdminID    string            `json:"console_admin_id,omitempty"`
+	ConsoleAdminName  string            `json:"console_admin_name,omitempty"`
 }
 
 func New(cfg Config) (*Manager, error) {
@@ -464,7 +466,8 @@ func (m *Manager) ConfigureDomain(ctx context.Context, request hosthelper.Domain
 			}
 		}
 	}
-	vaultPath := filepath.Join(m.cfg.VaultDir, st.Realm+"_ad-bind")
+	vaultName := vaultFileName(st.Realm, "ad-bind")
+	vaultPath := filepath.Join(m.cfg.VaultDir, vaultName)
 	previous, previousErr := os.ReadFile(vaultPath)
 	if previousErr != nil && !errors.Is(previousErr, os.ErrNotExist) {
 		return out, previousErr
@@ -485,6 +488,12 @@ func (m *Manager) ConfigureDomain(ctx context.Context, request hosthelper.Domain
 			cancel()
 		}
 	}
+	// Check the real container identity and SELinux access without printing
+	// the credential. Raw LDAP tests alone cannot verify the saved vault file.
+	if _, err := m.composeOutput(ctx, "exec", "-T", "--user", "1000:0", "keycloak", "/bin/bash", "-ec", `test -r "$1"`, "--", "/opt/keycloak/conf/vault/"+vaultName); err != nil {
+		rollback()
+		return out, errors.New("Keycloak не может прочитать bind-секрет: проверьте владельца root:root, права 0440 и SELinux label каталога vault")
+	}
 	kc, err := keycloakadmin.NewWithBackchannelTransport(wantedIssuer, localURL(st.Port, st.DirectTLS),
 		"master", st.AdminClientID, st.AdminClientSecret, tlsTransport(adminTLS))
 	if err != nil {
@@ -497,6 +506,30 @@ func (m *Manager) ConfigureDomain(ctx context.Context, request hosthelper.Domain
 	if err != nil {
 		rollback()
 		return out, err
+	}
+
+	// The live LDAP test above uses the raw password, while the persisted
+	// provider deliberately stores only a file-vault expression. A domain
+	// setup is therefore not complete until that persisted credential is
+	// proven to survive the same Keycloak restart that previously exposed
+	// broken post-install/domain-join configurations.
+	if _, err := m.composeOutput(ctx, "restart", "keycloak"); err != nil {
+		return out, fmt.Errorf("перезапуск Keycloak для проверки сохранённого bind-секрета: %w", err)
+	}
+	if err := m.waitReady(ctx, localURL(st.Port, st.DirectTLS), adminTLS); err != nil {
+		return out, fmt.Errorf("Keycloak не поднялся после сохранения домена: %w", err)
+	}
+	kc, err = keycloakadmin.NewWithBackchannelTransport(wantedIssuer, localURL(st.Port, st.DirectTLS),
+		"master", st.AdminClientID, st.AdminClientSecret, tlsTransport(adminTLS))
+	if err != nil {
+		return out, err
+	}
+	persistedStatus, err := kc.VerifyStoredDomain(ctx, request.Domain.ProviderName, request.Domain.StoredBindCredential)
+	if err != nil {
+		return out, fmt.Errorf("сохранённая настройка Active Directory не прошла проверку после перезапуска Keycloak: %w", err)
+	}
+	if strings.TrimSpace(persistedStatus) != "" {
+		result.UsersStatus = strings.TrimSpace(result.UsersStatus + "; после перезапуска: " + persistedStatus)
 	}
 	out.Result = result
 	return out, nil
@@ -536,16 +569,9 @@ func validateBootstrap(request hosthelper.BootstrapRequest) error {
 		!strings.HasSuffix(redirect.Path, "/api/v1/auth/oidc/callback") {
 		return errors.New("redirect URL должен быть HTTPS-адресом callback приложения")
 	}
-	roles := map[string]bool{}
 	for group, role := range request.RoleMapping {
-		if !simpleNameRE.MatchString(group) || len(group) > 255 {
+		if !simpleNameRE.MatchString(group) || len(group) > 255 || (role != "admin" && role != "operator" && role != "viewer") {
 			return errors.New("имя группы доступа задано неверно")
-		}
-		roles[role] = true
-	}
-	for _, role := range []string{"admin", "operator", "viewer"} {
-		if !roles[role] {
-			return fmt.Errorf("не задана группа для роли %s", role)
 		}
 	}
 	return nil
@@ -1084,6 +1110,10 @@ func writeSecret(path, value string) error {
 		return errors.New("bind-пароль пуст или имеет недопустимый формат")
 	}
 	return atomicWrite(path, []byte(value), 0o440)
+}
+
+func vaultFileName(realm, key string) string {
+	return strings.ReplaceAll(realm, "_", "__") + "_" + strings.ReplaceAll(key, "_", "__")
 }
 
 type adminAPI struct {

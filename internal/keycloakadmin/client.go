@@ -463,7 +463,16 @@ func (c *Client) configureDomain(ctx context.Context, d Domain) (Result, error) 
 	if err != nil {
 		return out, err
 	}
-	filter, err := groupFilter(d.AdminGroup, d.OperatorGroup, d.ViewerGroup)
+	if d.GroupMode == "manual" {
+		if err := c.removeManagedGroupMapper(ctx, providerID); err != nil {
+			return out, err
+		}
+		out.UsersStatus, err = c.sync(ctx, "/user-storage/"+url.PathEscape(providerID)+"/sync?action=triggerFullSync")
+		out.GroupsStatus = "группы AD не используются; доступ назначается вручную"
+		return out, err
+	}
+	groups := nonEmptyGroups(d.AdminGroup, d.OperatorGroup, d.ViewerGroup)
+	filter, err := groupFilter(groups...)
 	if err != nil {
 		return out, err
 	}
@@ -491,7 +500,7 @@ func (c *Client) configureDomain(ctx context.Context, d Domain) (Result, error) 
 	if err != nil {
 		return out, err
 	}
-	for _, group := range []string{d.AdminGroup, d.OperatorGroup, d.ViewerGroup} {
+	for _, group := range groups {
 		if err := c.requireGroup(ctx, group); err != nil {
 			return out, err
 		}
@@ -507,10 +516,59 @@ func storedBindCredential(d Domain) string {
 	return d.BindPassword
 }
 
+// VerifyStoredDomain checks the persisted LDAP provider without accepting a raw
+// password. It is intended for the embedded-Keycloak lifecycle check after a
+// container restart, so a configuration is not marked healthy merely because
+// the one-shot testAuthentication call succeeded before restart.
+func (c *Client) VerifyStoredDomain(ctx context.Context, providerName, expectedCredential string) (string, error) {
+	realmID, err := c.VerifyAccess(ctx)
+	if err != nil {
+		return "", err
+	}
+	query := "?parent=" + url.QueryEscape(realmID) + "&type=" + url.QueryEscape(componentUserStorage) + "&name=" + url.QueryEscape(providerName)
+	raw, _, err := c.do(ctx, http.MethodGet, "/components"+query, nil, http.StatusOK)
+	if err != nil {
+		return "", err
+	}
+	var list []component
+	if json.Unmarshal(raw, &list) != nil {
+		return "", errors.New("не удалось прочитать LDAP provider после перезапуска Keycloak")
+	}
+	var provider *component
+	for i := range list {
+		if list[i].Name == providerName && list[i].ParentID == realmID && list[i].ProviderID == "ldap" {
+			if provider != nil {
+				return "", fmt.Errorf("в Keycloak несколько LDAP provider %q", providerName)
+			}
+			provider = &list[i]
+		}
+	}
+	if provider == nil || provider.ID == "" {
+		return "", fmt.Errorf("LDAP provider %q не найден после перезапуска Keycloak", providerName)
+	}
+	credentials := provider.Config["bindCredential"]
+	if len(credentials) != 1 {
+		return "", errors.New("Keycloak не сохранил bind-секрет LDAP provider")
+	}
+	// Some Keycloak builds redact secret component values in Admin REST. If
+	// the value is visible, enforce the vault expression; if it is redacted,
+	// the full sync below is the authoritative proof that the persisted
+	// credential resolves after restart.
+	visibleCredential := strings.TrimSpace(credentials[0])
+	redacted := visibleCredential != "" && strings.Trim(visibleCredential, "*") == ""
+	if !redacted && visibleCredential != expectedCredential {
+		return "", errors.New("Keycloak не сохранил ссылку на bind-секрет в ожидаемом виде")
+	}
+	return c.sync(ctx, "/user-storage/"+url.PathEscape(provider.ID)+"/sync?action=triggerFullSync")
+}
+
 func validateDomain(d Domain) error {
+	if d.GroupMode != "read-only" && d.GroupMode != "manual" {
+		return errors.New("режим групп должен быть read-only или manual; запись в AD запрещена")
+	}
 	for label, value := range map[string]string{
 		"домен": d.Name, "имя LDAP provider": d.ProviderName,
-		"Users DN": d.UsersDN, "Groups DN": d.GroupsDN, "Bind DN": d.BindDN,
+		"Users DN": d.UsersDN, "Bind DN": d.BindDN,
 	} {
 		if strings.TrimSpace(value) == "" || len(value) > 2048 || strings.ContainsFunc(value, unicode.IsControl) {
 			return fmt.Errorf("%s не задан или содержит недопустимые символы", label)
@@ -522,13 +580,25 @@ func validateDomain(d Domain) error {
 	if !validDomainName(d.Name) {
 		return errors.New("неверное DNS-имя домена")
 	}
-	for _, group := range []string{d.AdminGroup, d.OperatorGroup, d.ViewerGroup} {
-		if err := simpleName("имя группы", group); err != nil {
-			return err
+	if d.GroupMode == "read-only" {
+		if strings.TrimSpace(d.GroupsDN) == "" || len(d.GroupsDN) > 2048 || strings.ContainsFunc(d.GroupsDN, unicode.IsControl) {
+			return errors.New("Groups DN не задан или недопустим")
 		}
-	}
-	if strings.EqualFold(d.AdminGroup, d.OperatorGroup) || strings.EqualFold(d.AdminGroup, d.ViewerGroup) || strings.EqualFold(d.OperatorGroup, d.ViewerGroup) {
-		return errors.New("группы ролей должны различаться")
+		groups := nonEmptyGroups(d.AdminGroup, d.OperatorGroup, d.ViewerGroup)
+		if len(groups) == 0 {
+			return errors.New("укажите хотя бы одну AD-группу доступа")
+		}
+		seen := map[string]bool{}
+		for _, group := range groups {
+			if err := simpleName("имя группы", group); err != nil {
+				return err
+			}
+			key := strings.ToLower(strings.TrimSpace(group))
+			if seen[key] {
+				return errors.New("группы ролей должны различаться")
+			}
+			seen[key] = true
+		}
 	}
 	u, err := url.Parse(strings.TrimSpace(d.URL))
 	if err != nil || u.Scheme != "ldaps" || u.Hostname() == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
@@ -537,8 +607,27 @@ func validateDomain(d Domain) error {
 	if u.Port() == "" {
 		return errors.New("в LDAP URL нужно явно указать порт")
 	}
-	if d.GroupMode != "read-only" && d.GroupMode != "ldap-only" {
-		return errors.New("режим групп должен быть read-only или ldap-only")
+	return nil
+}
+
+// Remove only the mapper owned by this wizard; preserve unrelated federation
+// mappers and local groups configured by the Keycloak administrator.
+func (c *Client) removeManagedGroupMapper(ctx context.Context, providerID string) error {
+	query := "?parent=" + url.QueryEscape(providerID) + "&type=" + url.QueryEscape(componentLDAPMapper) + "&name=jhvirt-groups"
+	raw, _, err := c.do(ctx, http.MethodGet, "/components"+query, nil, http.StatusOK)
+	if err != nil {
+		return err
+	}
+	var list []component
+	if json.Unmarshal(raw, &list) != nil {
+		return errors.New("не удалось прочитать LDAP mappers")
+	}
+	for _, entry := range list {
+		if entry.Name == "jhvirt-groups" && entry.ParentID == providerID && entry.ProviderID == "group-ldap-mapper" && entry.ID != "" {
+			if _, _, err := c.do(ctx, http.MethodDelete, "/components/"+url.PathEscape(entry.ID), nil, http.StatusNoContent); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
@@ -628,7 +717,21 @@ func (c *Client) upsertComponent(ctx context.Context, wanted component) (string,
 	return list[0].ID, nil
 }
 
+func nonEmptyGroups(groups ...string) []string {
+	out := make([]string, 0, len(groups))
+	for _, group := range groups {
+		if group = strings.TrimSpace(group); group != "" {
+			out = append(out, group)
+		}
+	}
+	return out
+}
+
 func groupFilter(groups ...string) (string, error) {
+	groups = nonEmptyGroups(groups...)
+	if len(groups) == 0 {
+		return "", errors.New("не задана ни одна AD-группа доступа")
+	}
 	var b strings.Builder
 	b.WriteString("(|")
 	for _, group := range groups {

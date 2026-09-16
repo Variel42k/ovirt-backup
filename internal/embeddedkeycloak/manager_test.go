@@ -84,6 +84,21 @@ func TestWriteSecretRejectsMultilineValue(t *testing.T) {
 	}
 }
 
+func TestVaultPreservesPasswordBytesAndEscapesRealm(t *testing.T) {
+	path := filepath.Join(t.TempDir(), vaultFileName("realm_with_underscore", "ad-bind"))
+	password := ` leading $${vault.test}\ ! trailing `
+	if err := writeSecret(path, password); err != nil { t.Fatal(err) }
+	got, err := os.ReadFile(path)
+	if err != nil || string(got) != password { t.Fatal("vault writer altered password bytes") }
+	if filepath.Base(path) != "realm__with__underscore_ad-bind" { t.Fatal("vault resolver underscore escaping missing") }
+}
+
+func TestBootstrapAllowsClosedAccessWithoutGroups(t *testing.T) {
+	req := validBootstrapRequest()
+	req.RoleMapping = map[string]string{}
+	if err := validateBootstrap(req); err != nil { t.Fatal(err) }
+}
+
 func TestVolumeWriteKeepsDockerStdinOpen(t *testing.T) {
 	args := volumeWriteRunArgs("helper:1", "keycloak-data", "cat > /data/config")
 	for _, arg := range args {

@@ -51,6 +51,8 @@ func main() {
 	mux.HandleFunc("GET /v1/status", svc.status)
 	mux.HandleFunc("POST /v1/keycloak/bootstrap", svc.bootstrap)
 	mux.HandleFunc("POST /v1/keycloak/domain", svc.domain)
+	mux.HandleFunc("POST /v1/keycloak/console-admin", svc.consoleAdmin)
+	mux.HandleFunc("POST /v1/keycloak/users", svc.searchUsers)
 	server := &http.Server{
 		Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 8 * time.Minute,
 		WriteTimeout: 8 * time.Minute, IdleTimeout: 30 * time.Second,
@@ -127,6 +129,32 @@ func decode(w http.ResponseWriter, r *http.Request, value any) error {
 		return errors.New("после JSON обнаружены лишние данные")
 	}
 	return nil
+}
+
+func (s *service) consoleAdmin(w http.ResponseWriter, r *http.Request) {
+	var request hosthelper.ConsoleAdminRequest
+	if err := decode(w, r, &request); err != nil {
+		writeResult(w, nil, err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+	defer cancel()
+	result, err := s.manager.ConsoleAdmin(ctx, request)
+	w.Header().Set("Cache-Control", "no-store")
+	writeResult(w, result, err)
+}
+
+func (s *service) searchUsers(w http.ResponseWriter, r *http.Request) {
+	var request hosthelper.SearchUsersRequest
+	if err := decode(w, r, &request); err != nil {
+		writeResult(w, nil, err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), time.Minute)
+	defer cancel()
+	result, err := s.manager.SearchUsers(ctx, request)
+	w.Header().Set("Cache-Control", "no-store")
+	writeResult(w, result, err)
 }
 
 func writeResult(w http.ResponseWriter, value any, err error) {

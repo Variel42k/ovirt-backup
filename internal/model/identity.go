@@ -14,6 +14,8 @@ type IdentitySettings struct {
 	ButtonLabel        string
 	GroupsClaim        string
 	RoleMapping        map[string]string
+	DefaultRole        string
+	SubjectRoleMapping map[string]string
 	AllowLocalLogin    bool
 	SessionTTL         time.Duration
 	RevalidateInterval time.Duration
@@ -24,6 +26,7 @@ type IdentitySettings struct {
 	LDAPUsersDN      string
 	LDAPGroupsDN     string
 	LDAPBindDN       string
+	LDAPGroupMode    string
 	DomainConnected  bool
 	DomainCheckedAt  *time.Time
 	UpdatedBy        string

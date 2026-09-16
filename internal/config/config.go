@@ -111,6 +111,8 @@ type OIDCConfig struct {
 	// групп, и старшая должна побеждать.
 	GroupsClaim string            `mapstructure:"groups_claim"`
 	RoleMapping map[string]string `mapstructure:"role_mapping"`
+	// Exact, case-sensitive OIDC subjects; scoped to this configured issuer.
+	SubjectRoleMapping map[string]string `mapstructure:"subject_role_mapping"`
 	// DefaultRole получают те, чьи группы ни во что не отобразились. Пусто —
 	// вход запрещён: молча выдавать права тому, кого не ждали, нельзя.
 	DefaultRole string `mapstructure:"default_role"`
@@ -890,9 +892,12 @@ func (c *Config) Validate() error {
 		// не отображаются и умолчания нет, вход запрещается, и это правильный
 		// исход: неизвестному пользователю не место в системе, которая
 		// управляет чужими виртуальными машинами.
-		if len(c.Auth.OIDC.RoleMapping) == 0 && c.Auth.OIDC.DefaultRole == "" {
-			return fmt.Errorf("задайте auth.oidc.role_mapping либо auth.oidc.default_role: " +
-				"иначе вошедшему через провайдера не из чего назначить роль")
+		// An empty access policy is valid: all external logins are denied until
+		// the administrator assigns groups or exact subjects.
+		for subject, role := range c.Auth.OIDC.SubjectRoleMapping {
+			if subject == "" || len(subject) > 255 || strings.TrimSpace(subject) != subject || strings.ContainsAny(subject, "\r\n\x00") || !validRole(role) {
+				return fmt.Errorf("auth.oidc.subject_role_mapping: недопустимый subject или роль")
+			}
 		}
 		for group, role := range c.Auth.OIDC.RoleMapping {
 			if !validRole(role) {

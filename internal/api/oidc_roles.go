@@ -18,6 +18,17 @@ import (
 // администраторские права, а остальные группы его не отменяют.
 var roleOrder = []model.Role{model.RoleAdmin, model.RoleOperator, model.RoleViewer}
 
+// Manual assignments override group membership, including a deliberate
+// downgrade. Never use the mutable username/email as an authorization key.
+func mapOIDCSubjectRole(cfg config.OIDCConfig, subject string, groups []string) (model.Role, error) {
+	if subject != "" {
+		if role, ok := cfg.SubjectRoleMapping[subject]; ok {
+			return model.Role(role), nil
+		}
+	}
+	return mapOIDCRole(cfg, groups)
+}
+
 // mapOIDCRole turns the groups from the token into the role of the session.
 //
 // Пустой результат — не ошибка настройки, а отказ во входе: пользователь

@@ -10,6 +10,8 @@ export interface IdentitySettings {
   button_label: string
   groups_claim: string
   role_mapping: Record<string, string>
+  default_role: string
+  subject_role_mapping: Record<string, string>
   allow_local_login: boolean
   session_ttl_minutes: number
   revalidate_seconds: number
@@ -24,6 +26,7 @@ export interface IdentitySettings {
     users_dn?: string
     groups_dn?: string
     bind_dn?: string
+    group_mode: 'read-only' | 'manual'
     checked_at?: string
   }
 }
@@ -47,6 +50,8 @@ export interface EmbeddedKeycloakWrite {
   client_id: string
   button_label: string
   role_mapping: Record<string, string>
+  default_role: string
+  subject_role_mapping: Record<string, string>
   allow_local_login: boolean
   session_ttl_minutes: number
   revalidate_seconds: number
@@ -63,6 +68,8 @@ export interface IdentitySettingsWrite {
   button_label: string
   groups_claim: string
   role_mapping: Record<string, string>
+  default_role: string
+  subject_role_mapping: Record<string, string>
   allow_local_login: boolean
   session_ttl_minutes: number
   revalidate_seconds: number
@@ -85,7 +92,7 @@ export interface DomainSettingsWrite {
     admin_group: string
     operator_group: string
     viewer_group: string
-    group_mode: 'read-only' | 'ldap-only'
+    group_mode: 'read-only' | 'manual'
   }
 }
 
@@ -97,6 +104,18 @@ export interface DomainConfigureResult {
     groups_status: string
     groups_checked: number
   }
+}
+
+export interface KeycloakConsoleCredentials {
+  console_url: string
+  username: string
+  password: string
+}
+
+export interface IdentityUser {
+  id: string
+  username: string
+  enabled: boolean
 }
 
 export interface User {

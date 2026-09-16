@@ -541,6 +541,10 @@ export const api = {
   // Настройки, которые сохраняются в PostgreSQL и действуют без перезапуска.
   runtimeSettings: () => http.get<RuntimeSettings>('/settings/runtime').then((r) => r.data),
   identitySettings: () => http.get<IdentitySettings>('/settings/identity').then((r) => r.data),
+  keycloakConsoleAdmin: (local_password: string) =>
+    http.post<import('./settings-types').KeycloakConsoleCredentials>('/settings/identity/console-admin', { local_password }, { timeout: 130_000 }).then((r) => r.data),
+  searchIdentityUsers: (query: string, local_password: string) =>
+    http.post<import('./settings-types').IdentityUser[]>('/settings/identity/users', { query, local_password }, { timeout: 70_000 }).then((r) => r.data),
   setIdentitySettings: (payload: IdentitySettingsWrite) =>
     http.put<IdentitySettings>('/settings/identity', payload, { timeout: 45_000 }).then((r) => r.data),
   bootstrapEmbeddedKeycloak: (payload: EmbeddedKeycloakWrite) =>

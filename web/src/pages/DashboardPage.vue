@@ -25,7 +25,7 @@ const setupSteps = computed(() => [
   { title: 'Создать политику защиты', detail: 'Выбор ВМ, расписание, хранение и проверка', done: jobsCount.value > 0 || (data.value?.totals.protected_vms ?? 0) > 0, optional: false, available: auth.can('jobs.read') && auth.can('jobs.write'), icon: 'event_repeat', to: { name: 'jobs', query: { create: '1' } } },
   { title: 'Получить первую копию', detail: 'Успешный запуск подтверждает весь путь записи', done: Boolean(data.value?.recent_runs.some((item) => item.status === 'succeeded')), optional: false, available: auth.can('jobs.read') && auth.can('jobs.write') && auth.can('backups.read'), icon: 'backup', to: { name: 'backups' } },
   { title: 'Проверить восстановление', detail: 'Соберите тестовую ВМ или выполните глубокую проверку', done: restoreTested.value, optional: false, available: auth.can('backups.read') && auth.can('backups.write'), icon: 'restore', to: { name: 'backups', query: { tab: 'restores' } } },
-  { title: 'Подключить единый вход', detail: 'Keycloak и доменные группы для рабочих пользователей', done: oidcEnabled.value, optional: true, available: auth.can('users.admin'), icon: 'admin_panel_settings', to: { name: 'access-settings' } },
+  { title: 'Подключить единый вход', detail: 'Keycloak, Active Directory и доступ по группам или вручную', done: oidcEnabled.value, optional: true, available: auth.can('users.admin'), icon: 'domain', to: { name: 'identity-settings' } },
 ].filter((item) => item.available))
 const completedSteps = computed(() => setupSteps.value.filter((item) => item.done).length)
 const setupReady = computed(() => setupSteps.value.filter((item) => !item.optional).every((item) => item.done))

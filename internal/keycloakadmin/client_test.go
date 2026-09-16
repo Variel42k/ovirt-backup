@@ -109,6 +109,25 @@ func TestConfigureDomainUsesTransientCredentialsAndChecksGroups(t *testing.T) {
 	}
 }
 
+func TestValidateDomainAllowsViewerOnlyGroup(t *testing.T) {
+	domain := Domain{
+		Name: "example.org", ProviderName: "active-directory", URL: "ldaps://dc01.example.org:636",
+		UsersDN: "DC=example,DC=org", GroupsDN: "OU=Groups,DC=example,DC=org",
+		BindDN: "svc@example.org", BindPassword: "bind-secret", ViewerGroup: "virt-readers",
+		GroupMode: "read-only",
+	}
+	if err := validateDomain(domain); err != nil {
+		t.Fatalf("viewer-only role mapping rejected: %v", err)
+	}
+	filter, err := groupFilter(domain.AdminGroup, domain.OperatorGroup, domain.ViewerGroup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filter != "(|(cn=virt-readers))" {
+		t.Fatalf("unexpected viewer-only LDAP filter: %s", filter)
+	}
+}
+
 func TestNewRejectsPlaintextRemoteIssuer(t *testing.T) {
 	if _, err := New("http://sso.example.org/realms/jhvirt", "master", "client", "secret"); err == nil {
 		t.Fatal("remote HTTP issuer accepted")

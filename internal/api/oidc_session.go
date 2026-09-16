@@ -85,7 +85,7 @@ func (s *Server) revalidateOIDCSession(ctx context.Context, session *model.Sessi
 				return reject()
 			}
 		}
-		role, err := mapOIDCRole(oidcCfg, groups)
+		role, err := mapOIDCSubjectRole(oidcCfg, fresh.OIDCSubject, groups)
 		if err != nil {
 			return reject()
 		}

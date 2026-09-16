@@ -74,6 +74,12 @@ function alignSettingsCategory(value: string) {
   const group = settingsGroups.value.find((item) => item.tabs.some((candidate) => candidate.value === value))
   if (group) settingsCategory.value = group.value
 }
+
+function syncSettingsTabRoute(value: string | number) {
+  const selected = String(value)
+  if (route.name !== 'settings' || String(route.query.tab ?? '') === selected) return
+  void router.replace({ name: 'settings', query: { ...route.query, tab: selected } })
+}
 const users = ref<User[]>([])
 const audit = ref<AuditEntry[]>([])
 const apiTokens = ref<ApiToken[]>([])
@@ -1183,7 +1189,7 @@ watch(() => [route.query, route.meta.settingsTab], applyDeepLink)
         />
       </div>
       <q-separator />
-      <q-tabs v-model="tab" align="left" active-color="primary" indicator-color="primary" dense outside-arrows mobile-arrows>
+      <q-tabs v-model="tab" align="left" active-color="primary" indicator-color="primary" dense outside-arrows mobile-arrows @update:model-value="syncSettingsTabRoute">
         <q-tab v-for="item in visibleSettingsTabs" :key="item.value" :name="item.value" :label="item.label" />
       </q-tabs>
       <q-separator />

@@ -43,8 +43,12 @@ const routes = [
         component: () => import('@/pages/IdentityPage.vue'), meta: { perm: 'users.admin' },
       },
       {
+        path: 'administration/users', name: 'users-access',
+        component: () => import('@/pages/UsersAccessPage.vue'), meta: { perm: 'users.admin' },
+      },
+      {
         path: 'administration/access', name: 'access-settings',
-        component: () => import('@/pages/SettingsPage.vue'), meta: { settingsTab: 'users', perm: 'users.admin' },
+        component: () => import('@/pages/SettingsPage.vue'), meta: { settingsTab: 'roles', perm: 'users.admin' },
       },
       {
         path: 'operations/approvals', name: 'approvals',

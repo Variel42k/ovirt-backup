@@ -370,6 +370,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /settings/identity/users", s.perm(model.PermUsersAdmin, s.handleSearchIdentityUsers))
 	mux.HandleFunc("POST /settings/identity/groups", s.perm(model.PermUsersAdmin, s.handleSearchIdentityGroups))
 	mux.HandleFunc("POST /settings/identity/user-group-membership", s.perm(model.PermUsersAdmin, s.handleSetIdentityUserGroup))
+	mux.HandleFunc("PUT /settings/identity/users/{id}/role", s.perm(model.PermUsersAdmin, s.handleSetIdentityUserRole))
 	mux.HandleFunc("PUT /settings/runtime/compression", s.perm(model.PermSettingsAdmin, s.handleSetRuntimeCompression))
 	mux.HandleFunc("DELETE /settings/runtime/compression", s.perm(model.PermSettingsAdmin, s.handleResetRuntimeCompression))
 	mux.HandleFunc("PUT /settings/runtime/timezone", s.perm(model.PermSettingsAdmin, s.handleSetRuntimeTimezone))

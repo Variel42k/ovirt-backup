@@ -156,8 +156,8 @@ func (m *Manager) SearchUsers(ctx context.Context, request hosthelper.SearchUser
 		return nil, errors.New("поиск доступен только в управляемом realm")
 	}
 	query := strings.TrimSpace(request.Query)
-	if len(query) < 2 || len(query) > 128 || strings.ContainsAny(query, "\r\n\x00") {
-		return nil, errors.New("для поиска введите 2–128 символов имени")
+	if len(query) == 1 || len(query) > 128 || strings.ContainsAny(query, "\r\n\x00") {
+		return nil, errors.New("для поиска введите не менее 2 символов имени или оставьте поле пустым")
 	}
 	env, err := readEnv(filepath.Join(m.cfg.ComposeDir, ".env"))
 	if err != nil {
@@ -178,7 +178,11 @@ func (m *Manager) SearchUsers(ctx context.Context, request hosthelper.SearchUser
 	if err != nil {
 		return nil, err
 	}
-	raw, err := admin.do(ctx, http.MethodGet, "/admin/realms/"+url.PathEscape(st.Realm)+"/users?username="+url.QueryEscape(query)+"&max=20&briefRepresentation=true", nil, http.StatusOK)
+	path := "/admin/realms/" + url.PathEscape(st.Realm) + "/users?max=20&briefRepresentation=true"
+	if query != "" {
+		path += "&username=" + url.QueryEscape(query)
+	}
+	raw, err := admin.do(ctx, http.MethodGet, path, nil, http.StatusOK)
 	if err != nil {
 		return nil, err
 	}

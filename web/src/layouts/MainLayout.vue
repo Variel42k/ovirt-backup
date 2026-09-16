@@ -56,7 +56,8 @@ const allLinks = [
   { name: 'alerts', label: 'Оповещения', icon: 'notifications_active', perm: 'alerts.read', group: 'Операции' },
   { name: 'approvals', label: 'Согласования', icon: 'approval', perm: '', group: 'Операции' },
   { name: 'identity-settings', label: 'Домен и единый вход', icon: 'domain', perm: 'users.admin', group: 'Администрирование' },
-  { name: 'access-settings', label: 'Пользователи и роли', icon: 'admin_panel_settings', perm: 'users.admin', group: 'Администрирование' },
+  { name: 'users-access', label: 'Пользователи и доступ', icon: 'manage_accounts', perm: 'users.admin', group: 'Администрирование' },
+  { name: 'access-settings', label: 'Роли и токены', icon: 'admin_panel_settings', perm: 'users.admin', group: 'Администрирование' },
   { name: 'settings', label: 'Параметры системы', icon: 'settings', perm: '', group: 'Администрирование' },
   { name: 'documentation', label: 'Документация', icon: 'menu_book', perm: '', group: 'Справка' },
 ]
@@ -259,7 +260,7 @@ onBeforeUnmount(() => {
             v-for="link in group.links"
             :key="link.name"
             clickable
-            :to="{ name: link.name }"
+            :to="link.name === 'settings' ? { name: link.name, query: { tab: 'system' } } : { name: link.name }"
             active-class="jhv-nav-active"
           >
             <q-item-section avatar>

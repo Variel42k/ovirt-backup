@@ -543,12 +543,14 @@ export const api = {
   identitySettings: () => http.get<IdentitySettings>('/settings/identity').then((r) => r.data),
   keycloakConsoleAdmin: (local_password: string) =>
     http.post<import('./settings-types').KeycloakConsoleCredentials>('/settings/identity/console-admin', { local_password }, { timeout: 130_000 }).then((r) => r.data),
-  searchIdentityUsers: (query: string, local_password: string) =>
-    http.post<import('./settings-types').IdentityUser[]>('/settings/identity/users', { query, local_password }, { timeout: 70_000 }).then((r) => r.data),
-  searchIdentityGroups: (query: string, local_password: string) =>
-    http.post<import('./settings-types').IdentityGroup[]>('/settings/identity/groups', { query, local_password }, { timeout: 70_000 }).then((r) => r.data),
-  setIdentityUserGroup: (user_id: string, group_id: string, joined: boolean, local_password: string) =>
-    http.post<import('./settings-types').IdentityUser>('/settings/identity/user-group-membership', { user_id, group_id, joined, local_password }, { timeout: 70_000 }).then((r) => r.data),
+  searchIdentityUsers: (query = '') =>
+    http.post<import('./settings-types').IdentityUser[]>('/settings/identity/users', { query }, { timeout: 70_000 }).then((r) => r.data),
+  searchIdentityGroups: (query = '') =>
+    http.post<import('./settings-types').IdentityGroup[]>('/settings/identity/groups', { query }, { timeout: 70_000 }).then((r) => r.data),
+  setIdentityUserGroup: (user_id: string, group_id: string, joined: boolean) =>
+    http.post<import('./settings-types').IdentityUser>('/settings/identity/user-group-membership', { user_id, group_id, joined }, { timeout: 70_000 }).then((r) => r.data),
+  setIdentityUserRole: (user_id: string, role: string) =>
+    http.put<{ user_id: string; role: string; revoked_sessions: number }>(`/settings/identity/users/${encodeURIComponent(user_id)}/role`, { role }).then((r) => r.data),
   setIdentitySettings: (payload: IdentitySettingsWrite) =>
     http.put<IdentitySettings>('/settings/identity', payload, { timeout: 45_000 }).then((r) => r.data),
   bootstrapEmbeddedKeycloak: (payload: EmbeddedKeycloakWrite) =>

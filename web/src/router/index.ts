@@ -32,11 +32,13 @@ const routes = [
       { path: 'backups', name: 'backups', component: () => import('@/pages/BackupsPage.vue'), meta: { perm: 'backups.read' } },
       { path: 'engine-config', name: 'engine-config', component: () => import('@/pages/EngineConfigPage.vue'), meta: { perm: 'engine_config.read' } },
 			{ path: 'file-backups', name: 'file-backups', component: () => import('@/pages/FileBackupsPage.vue'), meta: { perm: 'file_backups.read' } },
+      { path: 'db-dumps', name: 'db-dumps', component: () => import('@/pages/DbDumpsPage.vue'), meta: { perm: 'jobs.read' } },
       { path: 'coverage', name: 'coverage', component: () => import('@/pages/CoveragePage.vue'), meta: { perm: 'monitoring.read' } },
       { path: 'retention', name: 'retention', component: () => import('@/pages/RetentionPage.vue'), meta: { perm: 'backups.read' } },
       { path: 'storages', name: 'storages', component: () => import('@/pages/StoragesPage.vue'), meta: { perm: 'storages.read' } },
       { path: 'alerts', name: 'alerts', component: () => import('@/pages/AlertsPage.vue'), meta: { perm: 'alerts.read' } },
-      { path: 'documentation', name: 'documentation', component: () => import('@/pages/DocumentationPage.vue') },
+      // /documentation — оглавление, /documentation/deploy#раздел — руководство.
+      { path: 'documentation/:doc?', name: 'documentation', component: () => import('@/pages/DocumentationPage.vue') },
       { path: 'settings', name: 'settings', component: () => import('@/pages/SettingsPage.vue'), meta: { settingsTab: 'system' } },
       {
         path: 'administration/identity', name: 'identity-settings',

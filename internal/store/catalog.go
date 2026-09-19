@@ -191,14 +191,15 @@ func (s *Store) ImportCatalogRun(ctx context.Context, entryID string, run *model
 
 		if isNew {
 			_, err = tx.ExecContext(ctx, s.db.Rebind(`INSERT INTO backup_runs (`+runColumns+`)
-				VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`),
+				VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`),
 				run.ID, nil, run.JobID, run.JobName, run.ServerID, run.VMID, run.VMName,
 				string(run.Type), string(run.Status), run.ParentRunID, run.ChainID, run.ChainIndex,
 				run.StorageTargetID, run.RepoPath, run.EngineBackupID, run.FromCheckpointID,
 				run.ToCheckpointID, run.SnapshotID, run.DiskCount, run.LogicalBytes, run.ReadBytes,
 				run.StoredBytes, run.Progress, run.Encrypted, run.Compression, string(run.VerifyStatus),
 				run.VerifiedAt, run.Error, run.StartedAt, run.EndedAt, run.ExpiresAt, run.Deleted,
-				run.CreatedAt, encodeSkipped(run.SkippedDisks), run.ManifestSHA256, true)
+				run.CreatedAt, encodeSkipped(run.SkippedDisks), run.ManifestSHA256, true,
+				string(run.Consistency), run.ConsistencyNote)
 			if err != nil {
 				return err
 			}

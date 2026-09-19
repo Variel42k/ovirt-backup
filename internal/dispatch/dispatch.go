@@ -186,19 +186,21 @@ func (d *Dispatcher) executeLibvirt(ctx context.Context, srv *model.Server, req 
 	}, d.cipher, log)
 
 	driverReq := kvm.Request{
-		DomainName:       vm.Name,
-		Type:             run.Type,
-		RunID:            run.ID,
-		ChainID:          run.ChainID,
-		ParentRunID:      run.ParentRunID,
-		ChainIndex:       run.ChainIndex,
-		ParentCheckpoint: run.FromCheckpointID,
-		Backend:          backend,
-		RepoPath:         run.RepoPath,
-		ServerID:         srv.ID,
-		ExcludeDisks:     diskTargets(req.ExcludeDiskIDs),
-		Quiesce:          req.Quiesce,
-		Encrypt:          req.Encrypt,
+		DomainName:         vm.Name,
+		Type:               run.Type,
+		RunID:              run.ID,
+		ChainID:            run.ChainID,
+		ParentRunID:        run.ParentRunID,
+		ChainIndex:         run.ChainIndex,
+		ParentCheckpoint:   run.FromCheckpointID,
+		Backend:            backend,
+		RepoPath:           run.RepoPath,
+		ServerID:           srv.ID,
+		ExcludeDisks:       diskTargets(req.ExcludeDiskIDs),
+		Quiesce:            req.Quiesce,
+		Consistency:        req.ConsistencyTarget(),
+		RequireConsistency: req.RequireConsistency,
+		Encrypt:            req.Encrypt,
 		OnProgress: func(target string, done, total int64) {
 			pct := 0
 			if total > 0 {
@@ -238,6 +240,7 @@ func (d *Dispatcher) executeLibvirt(ctx context.Context, srv *model.Server, req 
 		run.ReadBytes = result.ReadBytes
 		run.StoredBytes = result.StoredBytes
 		run.DiskCount = len(result.Manifests)
+		run.Consistency, run.ConsistencyNote = result.Consistency, result.ConsistencyNote
 		if result.Note != "" {
 			log.Info().Msg(result.Note)
 		}
@@ -336,6 +339,8 @@ func (d *Dispatcher) writeRunManifest(ctx context.Context, backend repo.Backend,
 		EndedAt:          time.Now().UTC(),
 		Compression:      run.Compression,
 		Encrypted:        run.Encrypted,
+		Consistency:      run.Consistency,
+		ConsistencyNote:  run.ConsistencyNote,
 		LogicalBytes:     run.ReadBytes,
 		StoredBytes:      run.StoredBytes,
 		VMProfile:        result.Profile,

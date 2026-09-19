@@ -167,9 +167,18 @@ func writableDirectory(path string) bool {
 	return true
 }
 
+// isSystemPath reports whether a mount point is a kernel/OS filesystem or one of
+// the service's own internal mounts — neither is a place to store backups.
+//
+// /app держит данные, конфигурацию и staging самой службы (secret.key, пароль
+// БД, каталоги восстановления): показывать его в выборе хранилища — это шум, а
+// так как /app/data доступен на запись, ещё и приглашение положить репозиторий
+// рядом с секретами службы. /tmp — контейнерный tmpfs, исчезающий при
+// перезапуске. /run покрывает сокет host-helper.
 func isSystemPath(point string) bool {
 	for _, prefix := range []string{
 		"/proc", "/sys", "/dev", "/run", "/etc", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/boot",
+		"/app", "/tmp",
 	} {
 		if point == prefix || strings.HasPrefix(point, prefix+"/") {
 			return true

@@ -123,12 +123,16 @@ type RunRequest struct {
 	MirrorTargetIDs []string
 	ExcludeDiskIDs  []string
 
-	Quiesce       bool
-	Encrypt       bool
-	ExportQcow2   bool
-	VerifyAfter   model.VerifyMode
-	VerifyOptions model.VerifyOptions
-	Retention     model.RetentionPolicy
+	Quiesce bool
+	// Consistency и RequireConsistency приходят из задания; см.
+	// ConsistencyTarget и QuiesceGuest.
+	Consistency        model.Consistency
+	RequireConsistency bool
+	Encrypt            bool
+	ExportQcow2        bool
+	VerifyAfter        model.VerifyMode
+	VerifyOptions      model.VerifyOptions
+	Retention          model.RetentionPolicy
 
 	// OVAHostID и OVADirectory нужны только для типа ova.
 	OVAHostID    string
@@ -652,14 +656,9 @@ func (e *Engine) runCBT(ctx context.Context, client *ovirt.Client, backend repo.
 		diskIDs = append(diskIDs, d.ID)
 	}
 
-	frozen := false
-	if req.Quiesce && vm.GuestAgent && vm.Running() {
-		if err := client.FreezeFilesystems(ctx, vm.ID); err != nil {
-			e.log.Warn().Err(err).Str("vm", vm.Name).
-				Msg("не удалось заморозить файловые системы гостя — бэкап будет crash-consistent")
-		} else {
-			frozen = true
-		}
+	frozen, err := e.quiesce(ctx, client, vm, run, req)
+	if err != nil {
+		return nil, err
 	}
 	thaw := func() {
 		if !frozen {
@@ -727,6 +726,23 @@ func (e *Engine) runCBT(ctx context.Context, client *ovirt.Client, backend repo.
 	}, extentContext)
 }
 
+// quiesce prepares the guest for the point in time and records the level the
+// run actually reaches. true means the guest is frozen and must be thawed.
+func (e *Engine) quiesce(ctx context.Context, client *ovirt.Client, vm *model.VM,
+	run *model.BackupRun, req RunRequest) (bool, error) {
+	q, err := QuiesceGuest(ctx, req.ConsistencyTarget(), req.RequireConsistency,
+		GuestState{Running: vm.Running(), Agent: vm.GuestAgent},
+		func(ctx context.Context) error { return client.FreezeFilesystems(ctx, vm.ID) })
+	run.Consistency, run.ConsistencyNote = q.Level, q.Note
+	if err != nil {
+		return false, err
+	}
+	if q.Note != "" && q.Level.Below(req.ConsistencyTarget()) {
+		e.log.Warn().Str("vm", vm.Name).Str("уровень", string(q.Level)).Msg(q.Note)
+	}
+	return q.Frozen, nil
+}
+
 // runSnapshot performs a hot backup through a temporary snapshot, for disks or
 // engines without changed block tracking.
 func (e *Engine) runSnapshot(ctx context.Context, client *ovirt.Client, backend repo.Backend,
@@ -738,14 +754,9 @@ func (e *Engine) runSnapshot(ctx context.Context, client *ovirt.Client, backend 
 		diskIDs = append(diskIDs, d.ID)
 	}
 
-	frozen := false
-	if req.Quiesce && vm.GuestAgent && vm.Running() {
-		if err := client.FreezeFilesystems(ctx, vm.ID); err == nil {
-			frozen = true
-		} else {
-			e.log.Warn().Err(err).Str("vm", vm.Name).
-				Msg("не удалось заморозить файловые системы гостя — снапшот будет crash-consistent")
-		}
+	frozen, err := e.quiesce(ctx, client, vm, run, req)
+	if err != nil {
+		return nil, err
 	}
 
 	description := fmt.Sprintf("jhvirt backup %s", run.ID)
@@ -1125,6 +1136,8 @@ func (e *Engine) writeRunManifest(ctx context.Context, backend repo.Backend, srv
 		EndedAt:          time.Now().UTC(),
 		Compression:      run.Compression,
 		Encrypted:        run.Encrypted,
+		Consistency:      run.Consistency,
+		ConsistencyNote:  run.ConsistencyNote,
 		LogicalBytes:     run.ReadBytes,
 		StoredBytes:      run.StoredBytes,
 		VMProfile:        ProfileFromOVirtConfig(vmConfig, vm, manifests),

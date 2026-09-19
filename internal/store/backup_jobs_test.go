@@ -60,3 +60,78 @@ func TestBackupJobRoundTripKeepsBootVerifyOptions(t *testing.T) {
 		t.Fatalf("обновлённые параметры не сохранены: %#v", again.VerifyOptions)
 	}
 }
+
+func TestBackupConsistencyRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+
+	srv := &model.Server{
+		ID: "kvm-db", Name: "KVM db", Kind: model.KindKVM,
+		Username: "root", SSHHost: "kvm.example", Password: "secret", Enabled: true,
+	}
+	if err := st.CreateServer(ctx, srv); err != nil {
+		t.Fatalf("создание сервера: %v", err)
+	}
+	target := &model.StorageTarget{
+		ID: "repo-db", Name: "repo", Kind: model.StorageLocal,
+		BasePath: t.TempDir(), Enabled: true,
+	}
+	if err := st.CreateStorageTarget(ctx, target); err != nil {
+		t.Fatalf("создание хранилища: %v", err)
+	}
+
+	// Задание прежнего клиента: только флаг заморозки.
+	legacy := &model.BackupJob{
+		ID: "job-legacy", Name: "legacy", Enabled: true, ServerID: srv.ID, Type: model.BackupFull,
+		StorageTargetIDs: []string{target.ID}, Quiesce: true,
+	}
+	if err := st.CreateBackupJob(ctx, legacy); err != nil {
+		t.Fatalf("создание задания: %v", err)
+	}
+	got, err := st.GetBackupJob(ctx, legacy.ID)
+	if err != nil {
+		t.Fatalf("чтение задания: %v", err)
+	}
+	if got.Consistency != model.ConsistencyFilesystem || !got.Quiesce || got.RequireConsistency {
+		t.Fatalf("уровень прежнего задания: %q quiesce=%v require=%v", got.Consistency, got.Quiesce, got.RequireConsistency)
+	}
+
+	got.Consistency, got.RequireConsistency = model.ConsistencyApplication, true
+	if err := st.UpdateBackupJob(ctx, got); err != nil {
+		t.Fatalf("обновление задания: %v", err)
+	}
+	again, err := st.GetBackupJob(ctx, legacy.ID)
+	if err != nil {
+		t.Fatalf("повторное чтение: %v", err)
+	}
+	if again.Consistency != model.ConsistencyApplication || !again.RequireConsistency || !again.Quiesce {
+		t.Fatalf("уровень не сохранён: %q require=%v quiesce=%v", again.Consistency, again.RequireConsistency, again.Quiesce)
+	}
+
+	run := &model.BackupRun{
+		JobID: again.ID, ServerID: srv.ID, VMID: "vm-db", VMName: "db-01", Type: model.BackupFull,
+		StorageTargetID: target.ID, RepoPath: "jhvirt/kvm-db/db-01/run/",
+		Consistency: model.ConsistencyCrash, ConsistencyNote: "заморозка не удалась: test",
+	}
+	if err := st.CreateBackupRun(ctx, run); err != nil {
+		t.Fatalf("создание запуска: %v", err)
+	}
+	stored, err := st.GetBackupRun(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("чтение запуска: %v", err)
+	}
+	if stored.Consistency != model.ConsistencyCrash || stored.ConsistencyNote != run.ConsistencyNote {
+		t.Fatalf("уровень запуска: %q %q", stored.Consistency, stored.ConsistencyNote)
+	}
+	stored.Consistency, stored.ConsistencyNote = model.ConsistencyApplication, ""
+	if err := st.UpdateBackupRun(ctx, stored); err != nil {
+		t.Fatalf("обновление запуска: %v", err)
+	}
+	final, err := st.GetBackupRun(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("повторное чтение запуска: %v", err)
+	}
+	if final.Consistency != model.ConsistencyApplication || final.ConsistencyNote != "" {
+		t.Fatalf("обновлённый уровень запуска: %q %q", final.Consistency, final.ConsistencyNote)
+	}
+}

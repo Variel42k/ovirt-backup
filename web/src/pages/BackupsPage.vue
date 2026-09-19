@@ -4,7 +4,7 @@ import { useQuasar } from 'quasar'
 import { useRoute, useRouter } from 'vue-router'
 import { api, errorMessage, notify, notifyError, notifyOk } from '@/api/client'
 import DirectoryPicker from '@/components/DirectoryPicker.vue'
-import { bytes, dateTime, elapsed, runStatus, statusColor } from '@/api/format'
+import { bytes, consistencyColor, consistencyLabel, dateTime, elapsed, runStatus, statusColor } from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import { useOperationsStore } from '@/stores/operations'
@@ -1106,6 +1106,11 @@ const replicationColumns = [
             <q-badge v-if="props.row.skipped_disks?.length" color="warning" class="q-ml-xs">
               не всё: пропущено {{ props.row.skipped_disks.length }}
             </q-badge>
+            <q-badge v-if="props.row.consistency" :color="consistencyColor(props.row.consistency)" outline class="q-ml-xs"
+                     data-testid="run-consistency">
+              {{ consistencyLabel(props.row.consistency).toLowerCase() }}
+              <q-tooltip v-if="props.row.consistency_note">{{ props.row.consistency_note }}</q-tooltip>
+            </q-badge>
           </div>
         </q-td>
       </template>
@@ -1328,6 +1333,15 @@ const replicationColumns = [
             «успешно» с тихо выпавшим диском — самый опасный случай во всей
             системе, и узнавать о нём из журнала поздно.
           -->
+          <q-banner v-if="detail?.consistency" dense class="q-mb-md"
+                    :class="detail.consistency === 'crash' && detail.consistency_note ? 'bg-orange-1' : 'bg-grey-2'">
+            <template #avatar>
+              <q-icon :name="detail.consistency === 'crash' ? 'bolt' : 'ac_unit'" :color="consistencyColor(detail.consistency)" />
+            </template>
+            <div class="text-weight-medium">Согласованность: {{ consistencyLabel(detail.consistency).toLowerCase() }}</div>
+            <div v-if="detail.consistency_note" class="text-caption jhv-wrap">{{ detail.consistency_note }}</div>
+          </q-banner>
+
           <template v-if="detail?.skipped_disks?.length">
             <q-banner dense class="bg-orange-1 q-mb-md">
               <template #avatar><q-icon name="report_problem" color="warning" /></template>

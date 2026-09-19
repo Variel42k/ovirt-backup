@@ -68,6 +68,7 @@ var alertAudienceByKind = map[string]AlertAudience{
 	AlertBackupVerifyStale:    AudienceBackup,
 	AlertBackupPerformance:    AudienceBackup,
 	AlertBackupScheduleMissed: AudienceBackup,
+	AlertBackupConsistency:    AudienceBackup,
 	AlertVerifyFailed:         AudienceBackup,
 	AlertCBTUnavailable:       AudienceBackup,
 

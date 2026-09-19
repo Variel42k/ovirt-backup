@@ -16,7 +16,8 @@ const jobColumns = `id, name, enabled, server_id, vm_ids, vm_name_regex, cluster
 	exclude_vm_ids, exclude_disk_ids, type, full_every, fallback_type, schedule, max_duration_sec,
 	storage_target_ids, retention, quiesce, verify_after, verify_options, export_qcow2, encrypt, priority,
 	concurrency, last_run_at, last_status, next_run_at, created_at, updated_at,
-	replication_enabled, force_full_next, storage_mode, ova_host_id, ova_directory`
+	replication_enabled, force_full_next, storage_mode, ova_host_id, ova_directory,
+	consistency, require_consistency`
 
 // CreateBackupJob stores a new job definition.
 func (s *Store) CreateBackupJob(ctx context.Context, j *model.BackupJob) error {
@@ -32,9 +33,10 @@ func (s *Store) CreateBackupJob(ctx context.Context, j *model.BackupJob) error {
 		j.FallbackType = model.BackupSnapshot
 	}
 	j.NormalizeStorageMode()
+	j.NormalizeConsistency()
 
 	_, err := s.db.Exec(ctx, `INSERT INTO backup_jobs (`+jobColumns+`)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		j.ID, j.Name, j.Enabled, j.ServerID, encodeJSON(j.VMIDs), j.VMNameRegex,
 		encodeJSON(j.ClusterIDs), encodeJSON(j.Tags), encodeJSON(j.ExcludeVMIDs),
 		encodeJSON(j.ExcludeDiskIDs), string(j.Type), j.FullEvery, string(j.FallbackType),
@@ -43,7 +45,8 @@ func (s *Store) CreateBackupJob(ctx context.Context, j *model.BackupJob) error {
 		j.ExportQcow2, j.Encrypt,
 		j.Priority, j.Concurrency, j.LastRunAt, string(j.LastStatus),
 		j.NextRunAt, j.CreatedAt, j.UpdatedAt, j.ReplicationEnabled, j.ForceFullNext,
-		string(j.StorageMode), j.OVAHostID, j.OVADirectory)
+		string(j.StorageMode), j.OVAHostID, j.OVADirectory,
+		string(j.Consistency), j.RequireConsistency)
 	if err != nil {
 		return fmt.Errorf("insert backup job: %w", err)
 	}
@@ -58,18 +61,21 @@ func (s *Store) UpdateBackupJob(ctx context.Context, j *model.BackupJob) error {
 		j.Concurrency = 1
 	}
 	j.NormalizeStorageMode()
+	j.NormalizeConsistency()
 	res, err := s.db.Exec(ctx, `UPDATE backup_jobs SET
 		name=?, enabled=?, server_id=?, vm_ids=?, vm_name_regex=?, cluster_ids=?, tags=?,
 		exclude_vm_ids=?, exclude_disk_ids=?, type=?, full_every=?, fallback_type=?, schedule=?,
 		max_duration_sec=?, storage_target_ids=?, retention=?, quiesce=?, verify_after=?,
 		verify_options=?, export_qcow2=?, encrypt=?, priority=?, concurrency=?, updated_at=?,
-		replication_enabled=?, force_full_next=?, storage_mode=?, ova_host_id=?, ova_directory=? WHERE id=?`,
+		replication_enabled=?, force_full_next=?, storage_mode=?, ova_host_id=?, ova_directory=?,
+		consistency=?, require_consistency=? WHERE id=?`,
 		j.Name, j.Enabled, j.ServerID, encodeJSON(j.VMIDs), j.VMNameRegex, encodeJSON(j.ClusterIDs),
 		encodeJSON(j.Tags), encodeJSON(j.ExcludeVMIDs), encodeJSON(j.ExcludeDiskIDs),
 		string(j.Type), j.FullEvery, string(j.FallbackType), j.Schedule, toSeconds(j.MaxDuration),
 		encodeJSON(j.StorageTargetIDs), encodeJSON(j.Retention), j.Quiesce, string(j.VerifyAfter), encodeJSON(j.VerifyOptions),
 		j.ExportQcow2, j.Encrypt, j.Priority, j.Concurrency, j.UpdatedAt,
-		j.ReplicationEnabled, j.ForceFullNext, string(j.StorageMode), j.OVAHostID, j.OVADirectory, j.ID)
+		j.ReplicationEnabled, j.ForceFullNext, string(j.StorageMode), j.OVAHostID, j.OVADirectory,
+		string(j.Consistency), j.RequireConsistency, j.ID)
 	if err != nil {
 		return fmt.Errorf("update backup job: %w", err)
 	}
@@ -148,7 +154,7 @@ func scanJob(row rowScanner) (*model.BackupJob, error) {
 		vmIDs, clusterIDs, tags, excludeVMs, excludeDisks string
 		targets, retention, verifyOptions                 string
 		typ, fallback, verifyAfter, lastStatus            string
-		storageMode                                       string
+		storageMode, consistency                          string
 		maxDurationSec                                    int64
 		lastRun, nextRun                                  sql.NullTime
 		createdAt, updatedAt                              time.Time
@@ -158,7 +164,7 @@ func scanJob(row rowScanner) (*model.BackupJob, error) {
 		&maxDurationSec, &targets, &retention, &j.Quiesce, &verifyAfter, &verifyOptions, &j.ExportQcow2,
 		&j.Encrypt, &j.Priority, &j.Concurrency, &lastRun, &lastStatus, &nextRun,
 		&createdAt, &updatedAt, &j.ReplicationEnabled, &j.ForceFullNext, &storageMode,
-		&j.OVAHostID, &j.OVADirectory)
+		&j.OVAHostID, &j.OVADirectory, &consistency, &j.RequireConsistency)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -187,6 +193,8 @@ func scanJob(row rowScanner) (*model.BackupJob, error) {
 	// режим выводится из прежнего флага, и поведение не меняется.
 	j.StorageMode = model.StorageMode(storageMode)
 	j.NormalizeStorageMode()
+	j.Consistency = model.Consistency(consistency)
+	j.NormalizeConsistency()
 	return &j, nil
 }
 

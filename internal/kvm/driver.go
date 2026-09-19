@@ -103,7 +103,11 @@ type Request struct {
 	ExcludeDisks []string
 
 	Quiesce bool
-	Encrypt bool
+	// Consistency и RequireConsistency — заявленный уровень и строгость, как
+	// в backup.RunRequest.
+	Consistency        model.Consistency
+	RequireConsistency bool
+	Encrypt            bool
 
 	// SourceVerifyFraction — какую долю скопированных чанков перечитать с
 	// источника и сверить, пока экспорт ещё открыт. 0 — не проверять,
@@ -128,6 +132,11 @@ type Result struct {
 	// SourceVerified — сколько чанков сверено с источником и сколько не сошлось.
 	SourceChecked  int
 	SourceMismatch int
+
+	// Consistency — достигнутый уровень, ConsistencyNote — почему он ниже
+	// заявленного или почему заморозка не понадобилась.
+	Consistency     model.Consistency
+	ConsistencyNote string
 
 	// Note объясняет, почему тип бэкапа мог отличаться от запрошенного.
 	Note string
@@ -339,7 +348,13 @@ func (d *Driver) Backup(ctx context.Context, req Request) (*Result, error) {
 				"копия снимается полностью и на горячую")
 	}
 
-	frozen := d.freezeIfPossible(ctx, dom, info, req.Quiesce, log)
+	q, err := d.quiesce(ctx, dom, info, req, log)
+	result.Consistency, result.ConsistencyNote = q.Level, q.Note
+	if err != nil {
+		_ = d.conn.RemoveSocket(ctx, socketPath)
+		return result, err
+	}
+	frozen := q.Frozen
 
 	if err := d.conn.BeginBackup(ctx, dom, spec, checkpoint); err != nil {
 		d.thaw(ctx, dom, frozen, log)
@@ -393,33 +408,35 @@ func (d *Driver) Backup(ctx context.Context, req Request) (*Result, error) {
 	return result, nil
 }
 
-// freezeIfPossible quiesces the guest filesystems when asked and possible.
-func (d *Driver) freezeIfPossible(ctx context.Context, dom golibvirt.Domain, info *libvirtx.Domain,
-	want bool, log zerolog.Logger) bool {
-	if !want {
-		return false
+// quiesce freezes the guest filesystems when the requested level needs it and
+// reports the level reached. An error means the job demands a level that could
+// not be reached; nothing has been started on the hypervisor at that point.
+func (d *Driver) quiesce(ctx context.Context, dom golibvirt.Domain, info *libvirtx.Domain,
+	req Request, log zerolog.Logger) (backup.Quiesced, error) {
+	target := req.Consistency
+	if !target.Valid() {
+		target = model.ConsistencyCrash
+		if req.Quiesce {
+			target = model.ConsistencyFilesystem
+		}
 	}
-	if !info.State.Running() {
-		return false
+	q, err := backup.QuiesceGuest(ctx, target, req.RequireConsistency,
+		backup.GuestState{Running: info.State.Running(), Agent: info.GuestAgent},
+		func(ctx context.Context) error {
+			// The agent runs the guest's fsfreeze hooks before the freeze
+			// itself; a database flush has to fit into the same minute.
+			freezeCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+			defer cancel()
+			n, err := d.conn.FreezeFilesystems(freezeCtx, dom)
+			if err == nil {
+				log.Debug().Int("файловых систем", n).Msg("файловые системы гостя заморожены")
+			}
+			return err
+		})
+	if err == nil && q.Level.Below(target) {
+		log.Warn().Str("уровень", string(q.Level)).Msg(q.Note)
 	}
-	if !info.GuestAgent {
-		log.Warn().Msg("канал гостевого агента не объявлен — копия будет crash-consistent")
-		return false
-	}
-
-	freezeCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
-	defer cancel()
-
-	n, err := d.conn.FreezeFilesystems(freezeCtx, dom)
-	if err != nil {
-		// A guest without the agent installed, or one that refuses to freeze,
-		// still gets a crash-consistent backup — which is what most systems
-		// survive anyway.
-		log.Warn().Err(err).Msg("заморозка файловых систем не удалась — копия будет crash-consistent")
-		return false
-	}
-	log.Debug().Int("файловых систем", n).Msg("файловые системы гостя заморожены")
-	return true
+	return q, err
 }
 
 func (d *Driver) thaw(ctx context.Context, dom golibvirt.Domain, frozen bool, log zerolog.Logger) {

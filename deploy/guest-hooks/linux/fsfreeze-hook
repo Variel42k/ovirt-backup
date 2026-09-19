@@ -1,0 +1,97 @@
+#!/bin/sh
+# fsfreeze-hook — строгий диспетчер сценариев заморозки (комплект jhvirt).
+#
+# Заменяет штатный /etc/qemu-ga/fsfreeze-hook (/etc/qemu/fsfreeze-hook в
+# Debian и производных) и ведёт себя так же: qemu-guest-agent вызывает его с
+# freeze перед заморозкой файловых систем и с thaw после разморозки, а он по
+# очереди запускает исполняемые файлы из fsfreeze-hook.d рядом с собой.
+#
+# Отличие одно, и ради него файл существует. Штатный диспетчер QEMU всегда
+# завершается с 0: если сценарий СУБД не сбросил буферы или не получил
+# блокировку, агент всё равно замораживает ФС, и копия выглядит согласованной,
+# хотя СУБД к ней не готовилась. Этот диспетчер при неудаче freeze отдаёт уже
+# подготовленным сценариям thaw в обратном порядке и завершается с ошибкой:
+# агент отменяет заморозку, а служба копий записывает причину в точку.
+#
+# На thaw диспетчер всегда завершается с 0. Файловые системы к этому моменту
+# уже разморожены, и ошибка лишь выглядела бы как сбой разморозки.
+
+LOGFILE=/var/log/qga-fsfreeze-hook.log
+FSFREEZE_D=$(dirname -- "$0")/fsfreeze-hook.d
+
+USE_SYSLOG=0
+if ! { touch "$LOGFILE" 2>/dev/null && [ -w "$LOGFILE" ]; }; then
+    USE_SYSLOG=1
+fi
+
+log() {
+    if [ "$USE_SYSLOG" -eq 0 ]; then
+        printf '%s %s\n' "$(date '+%F %T')" "$*" >>"$LOGFILE"
+    else
+        logger -t qemu-ga-freeze-hook -- "$*" 2>/dev/null || true
+    fi
+}
+
+# run_hook FILE ARG — запускает сценарий, вывод уходит в журнал.
+run_hook() {
+    if [ "$USE_SYSLOG" -eq 0 ]; then
+        "$1" "$2" >>"$LOGFILE" 2>&1
+        return
+    fi
+    out=$("$1" "$2" 2>&1)
+    rc=$?
+    if [ -n "$out" ]; then
+        printf '%s\n' "$out" | logger -t qemu-ga-freeze-hook 2>/dev/null || true
+    fi
+    return "$rc"
+}
+
+# Те же исключения, что у штатного диспетчера: резервные копии и файлы
+# пакетных менеджеров не запускаются.
+is_ignored() {
+    case "$1" in
+    *~ | *.bak | *.orig | *.rpmnew | *.rpmorig | *.rpmsave | *.sample | \
+    *.dpkg-old | *.dpkg-new | *.dpkg-tmp | *.dpkg-dist | *.dpkg-bak | \
+    *.dpkg-backup | *.dpkg-remove | *.jhvirt-orig)
+        return 0 ;;
+    esac
+    return 1
+}
+
+case "${1:-}" in
+freeze | thaw) ;;
+*)
+    log "неизвестная операция: ${1:-}"
+    exit 1
+    ;;
+esac
+
+[ -d "$FSFREEZE_D" ] || exit 0
+
+prepared=""
+for file in "$FSFREEZE_D"/*; do
+    is_ignored "$file" && continue
+    [ -f "$file" ] && [ -x "$file" ] || continue
+
+    log "Executing $file $1"
+    if run_hook "$file" "$1"; then
+        log "$file finished successfully"
+        # В начало списка: откат идёт в обратном порядке.
+        prepared="$file
+$prepared"
+        continue
+    else
+        status=$?
+    fi
+    log "Error: $file finished with status=$status"
+    [ "$1" = freeze ] || continue
+
+    printf '%s' "$prepared" | while IFS= read -r done_file; do
+        [ -n "$done_file" ] || continue
+        log "Rollback: $done_file thaw"
+        run_hook "$done_file" thaw || log "Error: rollback of $done_file finished with status=$?"
+    done
+    log "freeze отменён: $file не подготовил приложение к копии"
+    exit "$status"
+done
+exit 0

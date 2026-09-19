@@ -48,6 +48,7 @@ jhvirt/
   "from_checkpoint_id": "…", "to_checkpoint_id": "…",
   "created_at": "2026-08-03T01:00:00Z", "ended_at": "2026-08-03T01:07:12Z",
   "compression": "zstd", "encrypted": false,
+  "consistency": "application",
   "logical_bytes": 3221225472, "stored_bytes": 811597824,
   "config_key": "…/vm-config.xml", "config_format": "libvirt-domain-xml",
   "vm_profile": {
@@ -83,6 +84,10 @@ jhvirt/
   ]
 }
 ```
+
+`consistency` — уровень согласованности, которого достиг запуск: `crash`,
+`filesystem` или `application`; `consistency_note` объясняет понижение. У точек
+прежних версий поля нет — уровень неизвестен, а не `crash`.
 
 `vm_profile` — безопасный переносимый профиль, а не готовая команда
 гипервизору. Версия 2 добавляет NIC; при восстановлении сеть сопоставляется с
@@ -338,6 +343,43 @@ jhvirt/files/<root-id>/<YYYY>/<MM>/<DD>/<run-id>/
 Allowlist исходных и restore-корней намеренно находится в конфигурации сервиса,
 а не в manifest. Manifest содержит только ID корня и относительные пути, чтобы
 его нельзя было использовать для записи в произвольное место.
+
+## Формат логических дампов СУБД
+
+Дампы СУБД используют своё пространство:
+
+```
+jhvirt/db/<хост>/<postgresql|mysql>/<YYYY>/<MM>/<DD>/<run-id>/
+├── db-000-<база>.data
+├── db-001-<база>.data
+└── dumps.manifest          — публикуется последним
+```
+
+`dumps.manifest` — zstd JSON с `format: "jhvirt-db-dump"` и своей версией:
+
+```json
+{
+  "format": "jhvirt-db-dump", "version": 1,
+  "run_id": "…", "job_id": "…", "job_name": "Ночные дампы",
+  "host_name": "db-prod", "engine": "postgresql", "server_version": "16.4",
+  "created_at": "2026-09-19T23:30:00Z",
+  "entries": [
+    { "database": "billing", "kind": "database", "format": "custom",
+      "data": { "format": "jhvirt-disk", "version": 1, "chunks": [] } },
+    { "database": "globals", "kind": "globals", "format": "sql", "data": { } }
+  ]
+}
+```
+
+Содержимое каждой базы описывает тот же `DiskManifest`, что и диск ВМ: чанки,
+SHA-256 открытых данных, сжатие и AES-256-GCM. `virtual_size` равен длине
+потока дампа — она известна только после его окончания. `format` —
+`custom` для `pg_dump -Fc` (восстанавливается `pg_restore`) и `sql` для
+`mysqldump` и ролей PostgreSQL. Базы, дамп которых не удался, в манифест не
+попадают; их ошибки хранятся в PostgreSQL рядом с запуском.
+
+Собрать дамп без службы можно тем же путём, что образ диска: прочитать
+манифест, пройти чанки по порядку, расшифровать, распаковать и сверить SHA-256.
 
 ## Снимки конфигурации oVirt Engine
 

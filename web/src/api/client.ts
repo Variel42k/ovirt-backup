@@ -2,8 +2,11 @@ import axios, { AxiosError } from 'axios'
 import { Notify } from 'quasar'
 import type { QNotifyCreateOptions } from 'quasar'
 import { ref } from 'vue'
+import { noteServerDate } from './format'
 import type {
   DirectoryListing,
+  DocGuide,
+  DocGuideContent,
   HostKeyScan,
   ProxmoxNodeKeys,
   Alert,
@@ -24,6 +27,11 @@ import type {
   DRReadiness,
   EngineConfigRun,
   EngineConfigJob,
+	DBDumpJob,
+	DBDumpRun,
+	DBHost,
+	DBHostProbe,
+	DBRestoreStatus,
 	FileBackupJob,
 	FileBackupManifest,
 	FileBackupRoot,
@@ -237,9 +245,19 @@ export function setUnauthorizedHandler(fn: () => void): void {
   onUnauthorized = fn
 }
 
+/** Заголовок Date ответа — по нему интерфейс сверяет свои часы с сервером. */
+function responseDate(headers: unknown): string | null {
+  const value = (headers as Record<string, unknown> | undefined)?.date
+  return typeof value === 'string' ? value : null
+}
+
 http.interceptors.response.use(
-  (response) => response,
+  (response) => {
+    noteServerDate(responseDate(response.headers))
+    return response
+  },
   (error: AxiosError) => {
+    noteServerDate(responseDate(error.response?.headers))
     // Логин отвечает 401 при неверном пароле — это не протухшая сессия,
     // и выкидывать пользователя на страницу входа из неё же бессмысленно.
     const isLogin = error.config?.url?.includes('/auth/login')
@@ -272,6 +290,11 @@ export const api = {
   // Метаданные и дашборд
   meta: () => http.get<Meta>('/meta').then((r) => r.data),
   help: () => http.get<Help>('/help').then((r) => r.data),
+  /** Оглавление руководств из docs/, собранных в эту версию. */
+  guides: () => http.get<ListResponse<DocGuide>>('/docs').then((r) => unwrap(r.data)),
+  /** Одно руководство целиком, в Markdown. */
+  guide: (slug: string) =>
+    http.get<DocGuideContent>(`/docs/${encodeURIComponent(slug)}`).then((r) => r.data),
   dashboard: () => http.get<Dashboard>('/dashboard').then((r) => r.data),
   audit: (limit = 200) => http.get<ListResponse<AuditEntry>>(`/audit?limit=${limit}`).then((r) => unwrap(r.data)),
 
@@ -347,6 +370,30 @@ export const api = {
   compareEngineConfig: (left: string, right: string) =>
     http.get('/engine-config/compare', { params: { left, right } }).then((r) => r.data),
 
+  listDBHosts: () => http.get<ListResponse<DBHost>>('/db-dump/hosts').then((r) => unwrap(r.data)),
+  createDBHost: (payload: Record<string, unknown>) => http.post<DBHost>('/db-dump/hosts', payload).then((r) => r.data),
+  updateDBHost: (id: string, payload: Record<string, unknown>) =>
+    http.put<DBHost>(`/db-dump/hosts/${id}`, payload).then((r) => r.data),
+  deleteDBHost: (id: string) => http.delete(`/db-dump/hosts/${id}`).then((r) => r.data),
+  probeDBHost: (id: string) =>
+    http.post<DBHostProbe>(`/db-dump/hosts/${id}/probe`, {}, { timeout: 45_000 }).then((r) => r.data),
+  listDBHostDatabases: (id: string, engine: string) =>
+    http
+      .get<ListResponse<string>>(`/db-dump/hosts/${id}/databases`, { params: { engine }, timeout: 45_000 })
+      .then((r) => unwrap(r.data)),
+  listDBDumpJobs: () => http.get<ListResponse<DBDumpJob>>('/db-dump/jobs').then((r) => unwrap(r.data)),
+  createDBDumpJob: (payload: Partial<DBDumpJob>) => http.post<DBDumpJob>('/db-dump/jobs', payload).then((r) => r.data),
+  updateDBDumpJob: (id: string, payload: Partial<DBDumpJob>) =>
+    http.put<DBDumpJob>(`/db-dump/jobs/${id}`, payload).then((r) => r.data),
+  deleteDBDumpJob: (id: string) => http.delete(`/db-dump/jobs/${id}`).then((r) => r.data),
+  runDBDumpJob: (id: string) => http.post<DBDumpRun>(`/db-dump/jobs/${id}/run`).then((r) => r.data),
+  listDBDumpRuns: (jobId = '', limit = 100) =>
+    http.get<ListResponse<DBDumpRun>>('/db-dump/runs', { params: { job_id: jobId, limit } }).then((r) => unwrap(r.data)),
+  deleteDBDumpRun: (id: string) => http.delete(`/db-dump/runs/${id}`).then((r) => r.data),
+  verifyDBDump: (id: string) => http.post<{ status: string }>(`/db-dump/runs/${id}/verify`, {}).then((r) => r.data),
+  restoreDBDump: (id: string, payload: { database: string; new_name: string }) =>
+    http.post<DBRestoreStatus>(`/db-dump/runs/${id}/restore`, payload).then((r) => r.data),
+  listDBRestores: () => http.get<ListResponse<DBRestoreStatus>>('/db-dump/restores').then((r) => unwrap(r.data)),
   listFileBackupRoots: () =>
     http.get<{ enabled: boolean; items: FileBackupRoot[]; total: number }>('/file-backup/roots').then((r) => r.data),
   listFileBackupJobs: () =>

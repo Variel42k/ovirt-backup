@@ -211,6 +211,11 @@ type RunManifest struct {
 	Compression string `json:"compression"`
 	Encrypted   bool   `json:"encrypted"`
 
+	// Consistency — уровень согласованности, которого достиг запуск.
+	// Пусто у точек, снятых до появления уровней: там он неизвестен.
+	Consistency     model.Consistency `json:"consistency,omitempty"`
+	ConsistencyNote string            `json:"consistency_note,omitempty"`
+
 	LogicalBytes int64 `json:"logical_bytes"`
 	StoredBytes  int64 `json:"stored_bytes"`
 

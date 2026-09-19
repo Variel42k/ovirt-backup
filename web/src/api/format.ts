@@ -64,13 +64,58 @@ export function dateOnly(value?: string | null): string {
   })
 }
 
+// Часы браузера и часы сервера.
+//
+// Относительное время считается от «сейчас», а у браузера и сервера оно своё. У
+// Windows синхронизация времени редкая, и расхождение в секунду и больше — норма.
+// Метка только что выполненной проверки, прочитанная браузером с отстающими
+// часами, оказывалась на доли секунды «впереди», и Math.floor превращал это в
+// «в будущем». Поэтому «сейчас» берётся по часам сервера — смещение считается по
+// заголовку Date ответов API, — а небольшое опережение считается разницей часов.
+
+/** Опережение, которое ещё считается разницей часов, а не странными данными. */
+const CLOCK_TOLERANCE_MS = 5 * 60_000
+/** Заголовок Date точен до секунды, плюс задержка сети: меньший сдвиг — шум. */
+const DATE_HEADER_NOISE_MS = 2_000
+
+const serverClockOffset = ref(0)
+const relativeTick = ref(Date.now())
+if (typeof window !== 'undefined') {
+  // Без этого «только что» так и висело до перезагрузки данных.
+  window.setInterval(() => {
+    relativeTick.value = Date.now()
+  }, 30_000)
+}
+
+/** Учитывает заголовок Date ответа сервера, чтобы «сейчас» совпадало с его часами. */
+export function noteServerDate(header?: string | null): void {
+  if (!header) return
+  const server = Date.parse(header)
+  if (Number.isNaN(server)) return
+  const measured = server - Date.now()
+  const next = Math.abs(measured) <= DATE_HEADER_NOISE_MS ? 0 : measured
+  // Каждое изменение перерисовывает все относительные подписи; дрожание в
+  // пределах секунды того не стоит.
+  if (Math.abs(next - serverClockOffset.value) > 1_000) serverClockOffset.value = next
+}
+
+/** «Сейчас» по часам сервера. Шаблон, который его читает, обновляется раз в 30 с. */
+export function serverNow(): number {
+  void relativeTick.value
+  return Date.now() + serverClockOffset.value
+}
+
 /** Относительное время: «3 мин назад». Абсолютное время рядом всё равно нужно. */
 export function ago(value?: string | null): string {
   if (!value) return '—'
   const d = new Date(value)
   if (Number.isNaN(d.getTime())) return '—'
-  const seconds = Math.floor((Date.now() - d.getTime()) / 1000)
-  if (seconds < 0) return 'в будущем'
+  const diffMs = serverNow() - d.getTime()
+  // Прошедшее событие не бывает в будущем: небольшое опережение — это разница
+  // часов. Далеко впереди — уже не часы, а странные данные; тогда честнее
+  // показать абсолютное время, чем выдумывать относительное.
+  if (diffMs < -CLOCK_TOLERANCE_MS) return dateTime(value)
+  const seconds = Math.max(0, Math.floor(diffMs / 1000))
   if (seconds < 60) return 'только что'
   const minutes = Math.floor(seconds / 60)
   if (minutes < 60) return `${minutes} мин назад`
@@ -216,4 +261,22 @@ const STORAGE_KIND_ICON: Record<string, string> = {
 /** Иконка типа хранилища. Одна на всё приложение: список показывают и панель, и страница хранилищ. */
 export function storageKindIcon(kind?: string): string {
   return STORAGE_KIND_ICON[kind ?? ''] ?? 'folder'
+}
+
+/** Уровни согласованности точки в порядке возрастания — для выбора в задании. */
+export const consistencyOptions = [
+  { value: 'crash', label: 'Как после сбоя питания', caption: 'без заморозки гостя' },
+  { value: 'filesystem', label: 'Файловые системы', caption: 'заморозка ФС через qemu-guest-agent' },
+  { value: 'application', label: 'Приложения (СУБД)', caption: 'агент + сценарии fsfreeze-hook или VSS в госте' },
+] as const
+
+export function consistencyLabel(level?: string | null): string {
+  return consistencyOptions.find((option) => option.value === level)?.label ?? 'неизвестно'
+}
+
+export function consistencyColor(level?: string | null): string {
+  if (level === 'application') return 'positive'
+  if (level === 'filesystem') return 'primary'
+  if (level === 'crash') return 'orange-8'
+  return 'grey-6'
 }

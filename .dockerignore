@@ -13,9 +13,11 @@ deploy/backups/
 deploy/restores/
 # Собранные пакеты: почти гигабайт, который незачем отправлять демону.
 dist/
-docs/
 *.md
 !README.md
+# Руководства встроены в бинарь (docs/embed.go) и показываются в интерфейсе:
+# без них go:embed не соберёт образ из исходников.
+!docs/*.md
 coverage.out
 .idea/
 .vscode/

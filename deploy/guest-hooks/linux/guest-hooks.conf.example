@@ -1,0 +1,21 @@
+# /etc/jhvirt/guest-hooks.conf — настройки сценариев заморозки jhvirt.
+#
+# Файл выполняется как shell-сценарий от root при каждой заморозке, поэтому
+# сценарии откажутся его читать, если он не принадлежит root или доступен на
+# запись группе и другим. Права: root:root 0600.
+
+# Сколько секунд сценарий ждёт СУБД (CHECKPOINT, FLUSH TABLES WITH READ LOCK).
+# Служба копий ждёт заморозку целиком около минуты: держите запас.
+#JHVIRT_HOOK_TIMEOUT=30
+
+# PostgreSQL: системный пользователь, порты кластеров через пробел и каталог
+# сокета, если он не стандартный (/var/run/postgresql или /tmp).
+#JHVIRT_PG_OS_USER=postgres
+#JHVIRT_PG_PORTS="5432"
+#JHVIRT_PG_SOCKET_DIR=
+
+# MySQL / MariaDB: клиент (по умолчанию mariadb или mysql из PATH), файл
+# параметров с учётной записью и предельный срок удержания блокировки.
+#JHVIRT_MYSQL_CLIENT=
+#JHVIRT_MYSQL_DEFAULTS_FILE=/etc/jhvirt/mysql-freeze.cnf
+#JHVIRT_MYSQL_HOLD=120

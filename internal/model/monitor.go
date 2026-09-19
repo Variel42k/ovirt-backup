@@ -54,6 +54,7 @@ const (
 	AlertBackupVerifyStale    = "backup_verification_stale"
 	AlertBackupPerformance    = "backup_performance_degraded"
 	AlertBackupScheduleMissed = "backup_schedule_missed"
+	AlertBackupConsistency    = "backup_consistency_degraded"
 	AlertStorageCapacityLow   = "storage_capacity_low"
 	AlertStorageCapacityTrend = "storage_capacity_forecast"
 	AlertVerifyFailed         = "verify_failed"

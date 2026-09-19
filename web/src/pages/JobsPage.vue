@@ -3,14 +3,14 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useQuasar } from 'quasar'
 import { useRoute, useRouter } from 'vue-router'
 import { api, errorMessage, notify, notifyError, notifyOk } from '@/api/client'
-import { dateTime, runStatus, statusColor } from '@/api/format'
+import { consistencyLabel, consistencyOptions, dateTime, runStatus, statusColor } from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import BackupOptionsPicker from '@/components/BackupOptionsPicker.vue'
 import HelpButton from '@/components/HelpButton.vue'
 import PageLoadError from '@/components/PageLoadError.vue'
 import { useUnsavedChanges } from '@/composables/unsavedChanges'
-import type { BackupJob, BackupOption, Disk, Host, Recommendation, VM } from '@/api/types'
+import type { BackupJob, BackupOption, Consistency, Disk, Host, Recommendation, VM } from '@/api/types'
 
 const $q = useQuasar()
 const route = useRoute()
@@ -68,6 +68,8 @@ const emptyForm = () => ({
   ova_directory: '',
   retention: { keep_last: 3, keep_hourly: 0, keep_daily: 7, keep_weekly: 4, keep_monthly: 6, keep_yearly: 0, max_age: 0 },
   quiesce: true,
+  consistency: 'filesystem' as Consistency,
+  require_consistency: false,
   verify_after: 'chain',
   verify_options: {
     boot_host_id: '',
@@ -334,6 +336,8 @@ function openEdit(job: BackupJob) {
     max_duration_minutes: job.max_duration ? Math.round(job.max_duration / 60_000_000_000) : 0,
     verify_after: job.verify_after ?? '',
     verify_options: { ...emptyForm().verify_options, ...(job.verify_options ?? {}) },
+    consistency: job.consistency || (job.quiesce ? 'filesystem' : 'crash'),
+    require_consistency: Boolean(job.require_consistency),
   }
   void loadVMs()
   jobStep.value = 1
@@ -397,6 +401,10 @@ async function save() {
       return
     }
   }
+  // Флаг заморозки ведомый: сервер выводит его из уровня, но прежние версии
+  // смотрят только на него, поэтому держим их согласованными и здесь.
+  form.value.quiesce = form.value.consistency !== 'crash'
+  if (!form.value.quiesce || isProxmoxJob.value) form.value.require_consistency = false
   saving.value = true
   try {
     if (editing.value) {
@@ -689,7 +697,10 @@ const columns = [
               селекторы: {{ (props.row.vm_ids?.length ?? 0) + (props.row.cluster_ids?.length ?? 0) + (props.row.tags?.length ?? 0) + (props.row.vm_name_regex ? 1 : 0) }}
             </template>
             <template v-else>все ВМ сервера</template>
-            <template v-if="props.row.quiesce"> · заморозка ФС</template>
+            <template v-if="props.row.consistency && props.row.consistency !== 'crash'">
+              · {{ consistencyLabel(props.row.consistency).toLowerCase() }}<template v-if="props.row.require_consistency"> (строго)</template>
+            </template>
+            <template v-else-if="!props.row.consistency && props.row.quiesce"> · заморозка ФС</template>
             <template v-if="props.row.encrypt"> · шифрование</template>
           </div>
         </q-td>
@@ -1093,13 +1104,49 @@ const columns = [
               <template #append><HelpButton article="verify" label="Режимы проверки" /></template>
             </q-select>
           </div>
-          <div class="col-12 col-sm-8 self-center">
+          <div v-if="!isProxmoxJob" class="col-12 col-sm-8">
+            <q-select
+              v-model="form.consistency"
+              :options="consistencyOptions"
+              emit-value
+              map-options
+              label="Согласованность копии"
+              outlined
+              dense
+              data-testid="job-consistency"
+            >
+              <template #option="scope">
+                <q-item v-bind="scope.itemProps">
+                  <q-item-section>
+                    <q-item-label>{{ scope.opt.label }}</q-item-label>
+                    <q-item-label caption>{{ scope.opt.caption }}</q-item-label>
+                  </q-item-section>
+                </q-item>
+              </template>
+              <template #append><HelpButton article="quiesce" label="Уровни согласованности" /></template>
+            </q-select>
+          </div>
+          <div v-if="!isProxmoxJob" class="col-12">
+            <q-toggle
+              v-model="form.require_consistency"
+              :disable="form.consistency === 'crash'"
+              label="Прервать запуск, если уровень не достигнут"
+            />
+            <div class="text-caption text-grey-7 q-ml-sm">
+              <template v-if="form.consistency === 'application'">
+                Нужны qemu-guest-agent и сценарии fsfreeze-hook для СУБД в каждой ВМ задания (Linux) или VSS (Windows) —
+                готовые сценарии лежат в deploy/guest-hooks.
+              </template>
+              <template v-else-if="form.consistency === 'filesystem'">
+                Нужен qemu-guest-agent в госте. Без флага выше копия при неудачной заморозке снимается как после сбоя
+                питания, а задание поднимает оповещение.
+              </template>
+              <template v-else>Гость не замораживается: копия как после выключения питания.</template>
+            </div>
+          </div>
+          <div class="col-12 self-center">
             <div class="row items-center q-gutter-md">
               <q-toggle v-model="form.enabled" label="Задание включено" />
-              <span v-if="!isProxmoxJob" class="items-center inline-block">
-                <q-toggle v-model="form.quiesce" label="Заморозка ФС гостя" />
-                <HelpButton article="quiesce" label="Что делает заморозка" />
-              </span>
               <q-toggle v-model="form.encrypt" label="Шифрование" />
 							<q-toggle
 								v-if="!isProxmoxJob && form.type !== 'ova' && form.type !== 'config'"

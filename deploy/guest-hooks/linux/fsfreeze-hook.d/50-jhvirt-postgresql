@@ -1,0 +1,85 @@
+#!/bin/sh
+# 50-jhvirt-postgresql — подготовка PostgreSQL к заморозке ФС (комплект jhvirt).
+#
+# Диспетчер fsfreeze-hook вызывает сценарий с freeze перед заморозкой и с thaw
+# после неё. Ненулевой код на freeze отменяет заморозку (при строгом
+# диспетчере из этого же комплекта), и служба копий записывает причину в точку.
+#
+# PostgreSQL переживает сбой питания: копия, снятая одновременной заморозкой
+# всех файловых систем, восстанавливается по WAL. Документация PostgreSQL для
+# таких снимков советует выполнить CHECKPOINT перед снимком — тогда
+# восстановление при старте копии проходит по короткому хвосту журнала.
+# Режим pg_backup_start здесь не нужен: он для копирования файлов по одному,
+# а заморозка фиксирует все файлы кластера в один момент.
+#
+# Паролей сценарий не использует: psql запускается от системного пользователя
+# postgres через Unix-сокет (peer). Настройки — в /etc/jhvirt/guest-hooks.conf.
+
+CONF=/etc/jhvirt/guest-hooks.conf
+
+log() { printf '%s jhvirt-postgresql: %s\n' "$(date '+%F %T')" "$*"; }
+
+load_conf() {
+    [ -r "$CONF" ] || return 0
+    # Файл выполняется от root: чужой или доступный на запись другим файл
+    # означал бы выполнение чужих команд при каждой заморозке.
+    if [ -n "$(find "$CONF" -maxdepth 0 \( ! -user root -o -perm /022 \) 2>/dev/null)" ]; then
+        log "$CONF должен принадлежать root и не быть доступным на запись другим"
+        return 1
+    fi
+    # shellcheck disable=SC1090
+    . "$CONF"
+}
+
+case "${1:-}" in
+freeze) ;;
+thaw) exit 0 ;;
+*)
+    log "неизвестная операция: ${1:-}"
+    exit 1
+    ;;
+esac
+
+load_conf || exit 1
+
+PG_OS_USER=${JHVIRT_PG_OS_USER:-postgres}
+PG_PORTS=${JHVIRT_PG_PORTS:-5432}
+PG_SOCKET_DIR=${JHVIRT_PG_SOCKET_DIR:-}
+TIMEOUT=${JHVIRT_HOOK_TIMEOUT:-30}
+
+if ! command -v psql >/dev/null 2>&1; then
+    log "psql не найден: установите клиент PostgreSQL или удалите этот сценарий"
+    exit 1
+fi
+
+if ! command -v runuser >/dev/null 2>&1; then
+    log "runuser не найден (util-linux): не от кого запустить psql"
+    exit 1
+fi
+
+as_postgres() {
+    timeout "$TIMEOUT" runuser -u "$PG_OS_USER" -- "$@"
+}
+
+status=0
+for port in $PG_PORTS; do
+    case "$port" in
+    '' | *[!0-9]*)
+        log "неверный порт в JHVIRT_PG_PORTS: $port"
+        status=1
+        continue
+        ;;
+    esac
+    set -- psql -X -q -A -t -v ON_ERROR_STOP=1 -p "$port" -d postgres -c CHECKPOINT
+    if [ -n "$PG_SOCKET_DIR" ]; then
+        set -- "$@" -h "$PG_SOCKET_DIR"
+    fi
+    started=$(date +%s)
+    if as_postgres "$@"; then
+        log "CHECKPOINT на порту $port выполнен за $(($(date +%s) - started)) с"
+    else
+        log "CHECKPOINT на порту $port не выполнен (тайм-аут ${TIMEOUT} с или ошибка подключения)"
+        status=1
+    fi
+done
+exit "$status"

@@ -1,0 +1,215 @@
+#!/usr/bin/env bash
+# jhvirt-db-dump — хелпер логических дампов СУБД для службы копий jhvirt.
+#
+# Ставится на хост СУБД и запускается только как forced command:
+#
+#   restrict,command="/usr/local/sbin/jhvirt-db-dump" ssh-ed25519 AAAA… jhvirt
+#
+# в ~/.ssh/authorized_keys отдельного системного пользователя (по умолчанию
+# jhvirt_dump). Root хелперу не нужен: в СУБД он входит от имени этого же
+# пользователя через Unix-сокет (peer в PostgreSQL, unix_socket/auth_socket в
+# MariaDB и MySQL), поэтому паролей СУБД нет ни здесь, ни в службе копий.
+#
+# Протокол jhvirt-db-dump/1 — фиксированный набор операций:
+#   probe                       версия протокола и доступные СУБД
+#   list ENGINE                 базы, по одной в строке
+#   dump ENGINE DB              дамп одной базы в stdout
+#   globals postgresql          роли и табличные пространства без хешей паролей
+#   restore ENGINE NEWDB        восстановление из stdin в НОВУЮ базу (выключено
+#                               по умолчанию, см. JHVIRT_DB_ALLOW_RESTORE)
+# ENGINE — postgresql или mysql (MySQL и MariaDB). Операции удаления или
+# перезаписи существующей базы в протоколе нет.
+set -Eeuo pipefail
+
+PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
+export PATH
+
+PROTOCOL=jhvirt-db-dump/1
+CONF=/etc/jhvirt/db-dump.conf
+NAME_RE='^[A-Za-z0-9_][A-Za-z0-9_.-]{0,62}$'
+
+fail() {
+    printf 'jhvirt-db-dump: %s\n' "$*" >&2
+    exit 64
+}
+
+# Со forced command sshd запускает хелпер без аргументов и кладёт запрос в
+# SSH_ORIGINAL_COMMAND. Слова разбираются только после проверки всей строки
+# на алфавит без пробелов внутри слов и метасимволов оболочки.
+if [[ $# -eq 0 && -n "${SSH_ORIGINAL_COMMAND:-}" ]]; then
+    [[ "$SSH_ORIGINAL_COMMAND" =~ ^(/usr/local/sbin/)?jhvirt-db-dump(\ [A-Za-z0-9_.=-]+)+$ ]] ||
+        fail "invalid forced command"
+    IFS=' ' read -r -a original <<<"$SSH_ORIGINAL_COMMAND"
+    set -- "${original[@]:1}"
+fi
+
+[[ ${EUID} -ne 0 ]] || fail "run the helper as a dedicated unprivileged user, not root"
+
+# Настройки — только из файла root, недоступного на запись другим: хелпер
+# выполняет его как shell-код.
+JHVIRT_DB_ALLOW_RESTORE=0
+JHVIRT_PG_HOST=
+JHVIRT_PG_PORT=
+JHVIRT_PG_MAINTENANCE_DB=postgres
+JHVIRT_MYSQL_DEFAULTS_FILE=
+JHVIRT_DB_EXCLUDE=
+if [[ -e "$CONF" ]]; then
+    [[ "$(stat -c '%u' "$CONF")" == 0 ]] || fail "$CONF must be owned by root"
+    (( (8#$(stat -c '%a' "$CONF") & 8#022) == 0 )) || fail "$CONF must not be writable by group or others"
+    # shellcheck disable=SC1090
+    . "$CONF"
+fi
+
+pg_args=()
+[[ -z "$JHVIRT_PG_HOST" ]] || pg_args+=(--host="$JHVIRT_PG_HOST")
+[[ -z "$JHVIRT_PG_PORT" ]] || pg_args+=(--port="$JHVIRT_PG_PORT")
+
+mysql_client() { command -v mariadb 2>/dev/null || command -v mysql 2>/dev/null || true; }
+mysql_dumper() { command -v mariadb-dump 2>/dev/null || command -v mysqldump 2>/dev/null || true; }
+my_args=()
+[[ -z "$JHVIRT_MYSQL_DEFAULTS_FILE" ]] || my_args+=(--defaults-extra-file="$JHVIRT_MYSQL_DEFAULTS_FILE")
+my_args+=(--protocol=socket)
+
+check_engine() {
+    [[ "$1" == postgresql || "$1" == mysql ]] || fail "unknown engine: $1"
+}
+
+check_name() {
+    [[ "$1" =~ $NAME_RE ]] || fail "invalid database name"
+}
+
+# system_db сообщает, что базу нельзя ни снимать как пользовательскую, ни
+# создавать при восстановлении.
+system_db() {
+    case "$1:$2" in
+    postgresql:template0 | postgresql:template1) return 0 ;;
+    mysql:information_schema | mysql:performance_schema | mysql:sys | mysql:mysql) return 0 ;;
+    esac
+    return 1
+}
+
+excluded() {
+    local item
+    for item in $JHVIRT_DB_EXCLUDE; do
+        [[ "$item" == "$1" ]] && return 0
+    done
+    return 1
+}
+
+psql_q() {
+    psql "${pg_args[@]}" --no-psqlrc --no-password --quiet --tuples-only --no-align \
+        --set=ON_ERROR_STOP=1 --dbname="$JHVIRT_PG_MAINTENANCE_DB" "$@"
+}
+
+mysql_q() {
+    local client
+    client=$(mysql_client)
+    [[ -n "$client" ]] || fail "mysql/mariadb client is not installed"
+    "$client" "${my_args[@]}" --batch --skip-column-names "$@" </dev/null
+}
+
+action="${1:-}"
+case "$action" in
+probe)
+    [[ $# -eq 1 ]] || fail "probe takes no arguments"
+    printf '%s\n' "$PROTOCOL"
+    if command -v pg_dump >/dev/null 2>&1; then
+        if version=$(psql_q --command='SHOW server_version' 2>&1); then
+            printf 'engine postgresql %s\n' "${version%%[[:space:]]*}"
+        else
+            printf 'error postgresql %s\n' "$(printf '%s' "$version" | head -n 1 | tr -c '[:print:]' ' ')"
+        fi
+    fi
+    if [[ -n "$(mysql_dumper)" ]]; then
+        if version=$(mysql_q --execute='SELECT VERSION()' 2>&1); then
+            printf 'engine mysql %s\n' "${version%%[[:space:]]*}"
+        else
+            printf 'error mysql %s\n' "$(printf '%s' "$version" | head -n 1 | tr -c '[:print:]' ' ')"
+        fi
+    fi
+    printf 'restore %s\n' "$([[ "$JHVIRT_DB_ALLOW_RESTORE" == 1 ]] && echo enabled || echo disabled)"
+    ;;
+
+list)
+    [[ $# -eq 2 ]] || fail "usage: list ENGINE"
+    check_engine "$2"
+    if [[ "$2" == postgresql ]]; then
+        names=$(psql_q --command='SELECT datname FROM pg_database WHERE datallowconn AND NOT datistemplate ORDER BY 1')
+    else
+        names=$(mysql_q --execute='SHOW DATABASES')
+    fi
+    while IFS= read -r name; do
+        [[ -n "$name" ]] || continue
+        system_db "$2" "$name" && continue
+        excluded "$name" && continue
+        # Базы с именами вне алфавита протокола пропускаются явно: служба не
+        # сможет запросить их дамп, и молча терять их из списка хуже.
+        if [[ "$name" =~ $NAME_RE ]]; then
+            printf '%s\n' "$name"
+        else
+            printf 'jhvirt-db-dump: skipping database with unsupported name\n' >&2
+        fi
+    done <<<"$names"
+    ;;
+
+dump)
+    [[ $# -eq 3 ]] || fail "usage: dump ENGINE DB"
+    check_engine "$2"
+    check_name "$3"
+    system_db "$2" "$3" && fail "system database cannot be dumped"
+    if [[ "$2" == postgresql ]]; then
+        # Формат custom: сжатие отключено, его сделает служба вместе с
+        # шифрованием; pg_restore умеет выборочное восстановление.
+        exec pg_dump "${pg_args[@]}" --no-password --format=custom --compress=0 --dbname="$3"
+    fi
+    dumper=$(mysql_dumper)
+    [[ -n "$dumper" ]] || fail "mysqldump/mariadb-dump is not installed"
+    # --single-transaction даёт согласованный снимок InnoDB без блокировки
+    # записи; таблицы MyISAM читаются без снимка.
+    exec "$dumper" "${my_args[@]}" --single-transaction --quick --routines --events --triggers \
+        --hex-blob --no-tablespaces --default-character-set=utf8mb4 "$3" </dev/null
+    ;;
+
+globals)
+    [[ $# -eq 2 && "$2" == postgresql ]] || fail "usage: globals postgresql"
+    # Без хешей паролей: восстановленные роли получают пароли заново.
+    exec pg_dumpall "${pg_args[@]}" --no-password --globals-only --no-role-passwords
+    ;;
+
+restore)
+    [[ $# -eq 3 ]] || fail "usage: restore ENGINE NEWDB"
+    check_engine "$2"
+    check_name "$3"
+    [[ "$JHVIRT_DB_ALLOW_RESTORE" == 1 ]] || fail "restore is disabled on this host (JHVIRT_DB_ALLOW_RESTORE=1 in $CONF)"
+    system_db "$2" "$3" && fail "cannot restore into a system database"
+    db="$3"
+    created=0
+    cleanup() {
+        [[ "$created" == 1 ]] || return 0
+        # Удаляется только база, созданная этим же вызовом.
+        if [[ "$2" == postgresql ]]; then
+            psql_q --command="DROP DATABASE IF EXISTS \"$db\"" >/dev/null 2>&1 || true
+        else
+            mysql_q --execute="DROP DATABASE IF EXISTS \`$db\`" >/dev/null 2>&1 || true
+        fi
+    }
+    trap 'cleanup "$@"' ERR HUP INT TERM
+    if [[ "$2" == postgresql ]]; then
+        # CREATE DATABASE завершится ошибкой, если база уже есть: существующая
+        # база никогда не перезаписывается.
+        psql_q --command="CREATE DATABASE \"$db\"" >/dev/null
+        created=1
+        pg_restore "${pg_args[@]}" --no-password --no-owner --no-privileges --exit-on-error --dbname="$db"
+    else
+        mysql_q --execute="CREATE DATABASE \`$db\`" >/dev/null
+        created=1
+        client=$(mysql_client)
+        "$client" "${my_args[@]}" --batch "$db"
+    fi
+    created=0
+    trap - ERR HUP INT TERM
+    printf 'restored %s\n' "$db"
+    ;;
+
+*) fail "unknown action" ;;
+esac

@@ -482,7 +482,21 @@ type BackupJob struct {
 
 	// Заморозка файловой системы гостя через qemu-guest-agent перед снятием
 	// точки согласованности. Без неё бэкап crash-consistent.
+	//
+	// Флаг ведомый: его выводит NormalizeConsistency из Consistency. Остался
+	// ради клиентов прежней версии API и заданий, сохранённых до уровней.
 	Quiesce bool `json:"quiesce"`
+	// Consistency — уровень, который задание обещает для работающей ВМ.
+	//
+	// application отличается от filesystem не вызовом, а тем, что в гостях
+	// установлены сценарии fsfreeze-hook для СУБД: агент вызывает их перед
+	// заморозкой. Служба команд в госте не выполняет и наличие сценариев
+	// проверить не может — уровень заявляет администратор.
+	Consistency Consistency `json:"consistency,omitempty"`
+	// RequireConsistency прерывает запуск, если заявленный уровень не
+	// достигнут. Иначе копия снимается crash-consistent, а понижение
+	// записывается в запуск и поднимает оповещение.
+	RequireConsistency bool `json:"require_consistency"`
 
 	// Проверка сразу после успешного бэкапа. Пусто — не проверять.
 	VerifyAfter VerifyMode `json:"verify_after,omitempty"`
@@ -544,6 +558,9 @@ func (j *BackupJob) Validate() error {
 	if err := j.Retention.Validate(); err != nil {
 		return err
 	}
+	if j.Consistency != "" && !j.Consistency.Valid() {
+		return fmt.Errorf("неизвестный уровень согласованности: %q", j.Consistency)
+	}
 	return nil
 }
 
@@ -578,6 +595,12 @@ type BackupRun struct {
 	SnapshotID       string `json:"snapshot_id,omitempty"`
 
 	DiskCount int `json:"disk_count"`
+	// Consistency — уровень, которого запуск достиг на самом деле. Пусто у
+	// точек, снятых до появления уровней: тогда он неизвестен, а не crash.
+	Consistency Consistency `json:"consistency,omitempty"`
+	// ConsistencyNote объясняет уровень ниже заявленного или особый случай
+	// (ВМ была выключена, нет агента, заморозка не удалась).
+	ConsistencyNote string `json:"consistency_note,omitempty"`
 	// SkippedDisks — что не попало в копию и почему.
 	//
 	// Пустой список означает «сохранено всё, что у ВМ есть». Непустой —
@@ -687,6 +710,26 @@ func (j *BackupJob) NormalizeStorageMode() {
 	}
 	// Флаг остаётся ведомым: на него смотрят оценка качества и разбор копий.
 	j.ReplicationEnabled = j.StorageMode == StorageModeCopy
+}
+
+// NormalizeConsistency выводит уровень из флага заморозки у заданий,
+// сохранённых до появления уровней, и делает флаг ведомым.
+//
+// Прежний API шлёт только quiesce; выводить уровень из него молча —
+// единственный способ не поменять поведение существующих заданий. Требовать
+// crash бессмысленно: его нельзя не достичь.
+func (j *BackupJob) NormalizeConsistency() {
+	if !j.Consistency.Valid() {
+		if j.Quiesce {
+			j.Consistency = ConsistencyFilesystem
+		} else {
+			j.Consistency = ConsistencyCrash
+		}
+	}
+	j.Quiesce = j.Consistency.NeedsFreeze()
+	if !j.Quiesce {
+		j.RequireConsistency = false
+	}
 }
 
 type BackupCopyRole string

@@ -18,6 +18,7 @@ import (
 
 	"github.com/Variel42k/ovirt-backup/internal/auditlog"
 	"github.com/Variel42k/ovirt-backup/internal/config"
+	"github.com/Variel42k/ovirt-backup/internal/dbdump"
 	"github.com/Variel42k/ovirt-backup/internal/dispatch"
 	drcheck "github.com/Variel42k/ovirt-backup/internal/dr"
 	"github.com/Variel42k/ovirt-backup/internal/events"
@@ -58,6 +59,7 @@ type Server struct {
 	notifications *notify.Manager
 	dr            *drcheck.Checker
 	fileBackup    *filebackup.Engine
+	dbDump        *dbdump.Engine
 	hostHelper    *hosthelper.Client
 	metricsToken  []byte
 	storageMounts func() []string
@@ -109,6 +111,7 @@ type Deps struct {
 	Notifications *notify.Manager
 	DR            *drcheck.Checker
 	FileBackup    *filebackup.Engine
+	DBDump        *dbdump.Engine
 	// StorageMounts supplies browsable mount roots for local repositories. Production
 	// uses repo.BrowsableStorageMounts; tests may provide isolated temporary roots.
 	StorageMounts func() []string
@@ -141,6 +144,7 @@ func New(d Deps) *Server {
 		notifications: d.Notifications,
 		dr:            d.DR, metricsToken: metricsToken,
 		fileBackup:    d.FileBackup,
+		dbDump:        d.DBDump,
 		hostHelper:    hosthelper.New(os.Getenv("JHV_HOST_HELPER_SOCKET")),
 		storageMounts: d.StorageMounts,
 		logins:        newLoginLimiter(),
@@ -204,6 +208,8 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /auth/me", s.handleMe)
 	mux.HandleFunc("GET /meta", s.handleMeta)
 	mux.HandleFunc("GET /help", s.handleHelp)
+	mux.HandleFunc("GET /docs", s.handleListGuides)
+	mux.HandleFunc("GET /docs/{slug}", s.handleGetGuide)
 
 	mux.HandleFunc("GET /dashboard", s.perm(model.PermMonitoringRead, s.handleDashboard))
 	mux.HandleFunc("GET /events", s.perm(model.PermMonitoringRead, s.handleEvents))
@@ -407,6 +413,27 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /file-backup/runs/{id}", s.perm(model.PermFileBackupsAdmin, s.handleDeleteFileBackupRun))
 	mux.HandleFunc("GET /file-backup/runs/{id}/tree", s.perm(model.PermFileBackupsRead, s.handleGetFileBackupTree))
 	mux.HandleFunc("POST /file-backup/runs/{id}/restore", s.perm(model.PermFileBackupsWrite, s.handleRestoreFiles))
+
+	// Логические дампы СУБД: хост — как подключение гипервизора, задания и
+	// точки — теми же правами, что задания и копии ВМ.
+	mux.HandleFunc("GET /db-dump/hosts", s.perm(model.PermServersRead, s.handleListDBHosts))
+	mux.HandleFunc("POST /db-dump/hosts", s.perm(model.PermServersAdmin, s.handleCreateDBHost))
+	mux.HandleFunc("PUT /db-dump/hosts/{id}", s.perm(model.PermServersAdmin, s.handleUpdateDBHost))
+	mux.HandleFunc("DELETE /db-dump/hosts/{id}", s.perm(model.PermServersAdmin, s.handleDeleteDBHost))
+	mux.HandleFunc("POST /db-dump/hosts/{id}/probe", s.perm(model.PermServersAdmin, s.handleProbeDBHost))
+	mux.HandleFunc("GET /db-dump/hosts/{id}/databases", s.perm(model.PermJobsWrite, s.handleListDBHostDatabases))
+	mux.HandleFunc("GET /db-dump/jobs", s.perm(model.PermJobsRead, s.handleListDBDumpJobs))
+	mux.HandleFunc("POST /db-dump/jobs", s.perm(model.PermJobsWrite, s.handleCreateDBDumpJob))
+	mux.HandleFunc("PUT /db-dump/jobs/{id}", s.perm(model.PermJobsWrite, s.handleUpdateDBDumpJob))
+	mux.HandleFunc("DELETE /db-dump/jobs/{id}", s.perm(model.PermJobsWrite, s.handleDeleteDBDumpJob))
+	mux.HandleFunc("POST /db-dump/jobs/{id}/run", s.perm(model.PermJobsWrite, s.handleRunDBDumpJob))
+	mux.HandleFunc("GET /db-dump/runs", s.perm(model.PermBackupsRead, s.handleListDBDumpRuns))
+	mux.HandleFunc("GET /db-dump/runs/{id}", s.perm(model.PermBackupsRead, s.handleGetDBDumpRun))
+	mux.HandleFunc("DELETE /db-dump/runs/{id}", s.perm(model.PermBackupsWrite,
+		s.guarded(model.GuardBackupDelete, s.dbDumpRunTarget, s.handleDeleteDBDumpRun)))
+	mux.HandleFunc("POST /db-dump/runs/{id}/verify", s.perm(model.PermBackupsWrite, s.handleVerifyDBDump))
+	mux.HandleFunc("POST /db-dump/runs/{id}/restore", s.perm(model.PermBackupsWrite, s.handleRestoreDBDump))
+	mux.HandleFunc("GET /db-dump/restores", s.perm(model.PermBackupsRead, s.handleListDBRestores))
 
 	// Права, роли, учётные записи и токены — всё под одним правом.
 	//

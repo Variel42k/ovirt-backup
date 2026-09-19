@@ -788,7 +788,9 @@ S3 endpoint не передаёт данные через сервис и пот
   "priority": 10,                      // больше — раньше в персистентной очереди
   "concurrency": 2,                    // предел только для этого задания
   "retention": { "keep_last": 3, "keep_daily": 7, "keep_weekly": 4, "keep_monthly": 6 },
-  "quiesce": true,
+  "consistency": "application",       // crash|filesystem|application; пусто — из quiesce
+  "require_consistency": true,         // не достигнут — запуск failed, копия не снимается
+  "quiesce": true,                     // ведомый: сервер выводит его из consistency
   "export_qcow2": true,
   "verify_after": "boot",
   "verify_options": {
@@ -833,7 +835,7 @@ S3 endpoint не передаёт данные через сервис и пот
 ```jsonc
 // POST /backups
 { "server_id": "…", "vm_id": "…", "type": "full",
-  "storage_target_id": "…", "quiesce": true, "verify_after": "boot",
+  "storage_target_id": "…", "consistency": "filesystem", "verify_after": "boot",
   "verify_options": { "boot_host_id": "…", "memory_mib": 0,
     "vcpus": 0, "timeout_sec": 300 },
   "retain_days": 30 }
@@ -958,6 +960,59 @@ Symlink хранится и восстанавливается как ссылк
 обходится; canonical path не может выйти из allowlist. Изменившийся во время
 чтения файл перечитывается один раз, затем точка завершается как `partial` со
 списком `unstable_paths`.
+
+## Логические дампы СУБД
+
+Дампы PostgreSQL и MySQL/MariaDB через хелпер `jhvirt-db-dump` на хосте СУБД.
+Паролей СУБД в API нет: хелпер входит через Unix-сокет. Права — существующие:
+хост как подключение (`servers.*`), задания — `jobs.*`, точки — `backups.*`.
+
+| Метод | Путь | Право | Описание |
+|---|---|---|---|
+| `GET` | `/db-dump/hosts` | `servers.read` | хосты; приватный ключ не возвращается, только `private_key_stored` |
+| `POST` | `/db-dump/hosts` | `servers.admin` | добавить хост |
+| `PUT/DELETE` | `/db-dump/hosts/{id}` | `servers.admin` | изменить (пустой ключ — оставить прежний) или удалить без заданий |
+| `POST` | `/db-dump/hosts/{id}/probe` | `servers.admin` | проверить хелпер: протокол, СУБД и версии, разрешено ли восстановление |
+| `GET` | `/db-dump/hosts/{id}/databases?engine=postgresql` | `jobs.write` | базы, которые хелпер готов снимать |
+| `GET/POST` | `/db-dump/jobs` | `jobs.read` / `jobs.write` | список и создание заданий |
+| `PUT/DELETE` | `/db-dump/jobs/{id}` | `jobs.write` | изменить или удалить задание без точек |
+| `POST` | `/db-dump/jobs/{id}/run` | `jobs.write` | запустить; ответ `202` с записью о запуске |
+| `GET` | `/db-dump/runs?job_id={id}&limit=100` | `backups.read` | точки; у каждой — список баз с размерами и ошибками |
+| `GET` | `/db-dump/runs/{id}` | `backups.read` | одна точка |
+| `DELETE` | `/db-dump/runs/{id}` | `backups.write` | удалить точку с данными; опасное действие `backup.delete` |
+| `POST` | `/db-dump/runs/{id}/verify` | `backups.write` | перечитать точку: расшифровка и SHA-256 каждого чанка; ответ `202`, итог — в `verify_status` точки |
+| `POST` | `/db-dump/runs/{id}/restore` | `backups.write` | восстановить базу в новую; ответ `202`, ход — в `/db-dump/restores` |
+| `GET` | `/db-dump/restores` | `backups.read` | последние восстановления (в памяти службы; итог — ещё и в аудите) |
+
+```jsonc
+// POST /db-dump/hosts
+{
+  "name": "db-prod", "address": "db.example.org", "port": 22,
+  "username": "jhvirt_dump",
+  "private_key": "-----BEGIN OPENSSH PRIVATE KEY-----\n…",
+  "host_key": "db.example.org ssh-ed25519 AAAA…"   // или "trust_any_host_key": true — с записью в аудит
+}
+
+// POST /db-dump/jobs
+{
+  "name": "Ночные дампы", "host_id": "…", "engine": "postgresql",
+  "databases": [],                     // пусто — все пользовательские базы
+  "include_globals": true,             // роли и табличные пространства, без хешей паролей
+  "storage_target_ids": ["…", "…"],    // первое — основное, в остальные — копия со сверкой SHA-256
+  "encrypt": true,                     // по умолчанию true
+  "verify_after": true,                // перечитать точку сразу после дампа; по умолчанию true
+  "schedule": "30 23 * * *",
+  "retention": { "keep_last": 3, "keep_daily": 14, "keep_monthly": 6 }
+}
+
+// POST /db-dump/runs/{id}/restore
+{ "database": "billing", "new_name": "billing_restored_20260919" }
+```
+
+Имена баз ограничены алфавитом `[A-Za-z0-9_][A-Za-z0-9_.-]{0,62}` — тем же,
+что проверяет хелпер. Существующая база при восстановлении не перезаписывается:
+хелпер создаёт новую и откажет, если имя занято. Восстановление должно быть
+разрешено на самом хосте (`JHVIRT_DB_ALLOW_RESTORE=1`).
 
 ## Ретенция
 

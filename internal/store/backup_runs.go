@@ -18,7 +18,7 @@ const runColumns = `id, job_run_id, job_id, job_name, server_id, vm_id, vm_name,
 	chain_id, chain_index, storage_target_id, repo_path, engine_backup_id, from_checkpoint_id,
 	to_checkpoint_id, snapshot_id, disk_count, logical_bytes, read_bytes, stored_bytes, progress,
 	encrypted, compression, verify_status, verified_at, error, started_at, ended_at, expires_at,
-	deleted, created_at, skipped_disks, manifest_sha256, imported`
+	deleted, created_at, skipped_disks, manifest_sha256, imported, consistency, consistency_note`
 
 // runSelectColumns — то же плюс срок карантина.
 //
@@ -45,13 +45,14 @@ func (s *Store) CreateBackupRun(ctx context.Context, r *model.BackupRun) error {
 	}
 
 	_, err := s.db.Exec(ctx, `INSERT INTO backup_runs (`+runColumns+`)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		r.ID, nullString(r.JobRunID), r.JobID, r.JobName, r.ServerID, r.VMID, r.VMName, string(r.Type), string(r.Status),
 		r.ParentRunID, r.ChainID, r.ChainIndex, r.StorageTargetID, r.RepoPath, r.EngineBackupID,
 		r.FromCheckpointID, r.ToCheckpointID, r.SnapshotID, r.DiskCount, r.LogicalBytes,
 		r.ReadBytes, r.StoredBytes, r.Progress, r.Encrypted, r.Compression, string(r.VerifyStatus),
 		r.VerifiedAt, r.Error, r.StartedAt, r.EndedAt,
-		r.ExpiresAt, r.Deleted, r.CreatedAt, encodeSkipped(r.SkippedDisks), r.ManifestSHA256, r.Imported)
+		r.ExpiresAt, r.Deleted, r.CreatedAt, encodeSkipped(r.SkippedDisks), r.ManifestSHA256, r.Imported,
+		string(r.Consistency), r.ConsistencyNote)
 	if err != nil {
 		return fmt.Errorf("insert backup run: %w", err)
 	}
@@ -93,14 +94,15 @@ func (s *Store) UpdateBackupRun(ctx context.Context, r *model.BackupRun) error {
 		engine_backup_id=?, from_checkpoint_id=?, to_checkpoint_id=?, snapshot_id=?, disk_count=?,
 		logical_bytes=?, read_bytes=?, stored_bytes=?, progress=?, encrypted=?, compression=?,
 		verify_status=?, verified_at=?, error=?, started_at=?, ended_at=?, expires_at=?, deleted=?,
-		skipped_disks=?, manifest_sha256=?, imported=?
+		skipped_disks=?, manifest_sha256=?, imported=?, consistency=?, consistency_note=?
 		WHERE id=?`,
 		string(r.Status), r.ParentRunID, r.ChainID, r.ChainIndex, r.StorageTargetID, r.RepoPath,
 		r.EngineBackupID, r.FromCheckpointID, r.ToCheckpointID, r.SnapshotID, r.DiskCount,
 		r.LogicalBytes, r.ReadBytes, r.StoredBytes, r.Progress, r.Encrypted, r.Compression,
 		string(r.VerifyStatus), r.VerifiedAt, r.Error, r.StartedAt,
 		r.EndedAt, r.ExpiresAt, r.Deleted,
-		encodeSkipped(r.SkippedDisks), r.ManifestSHA256, r.Imported, r.ID)
+		encodeSkipped(r.SkippedDisks), r.ManifestSHA256, r.Imported,
+		string(r.Consistency), r.ConsistencyNote, r.ID)
 	if err != nil {
 		return fmt.Errorf("update backup run: %w", err)
 	}
@@ -385,7 +387,7 @@ func scanRun(row rowScanner) (*model.BackupRun, error) {
 		verifiedAt, startedAt, endedAt, expiresAt sql.NullTime
 		purgeAfter                                sql.NullTime
 		createdAt                                 time.Time
-		skipped                                   string
+		skipped, consistency                      string
 	)
 	var jobRunID sql.NullString
 	err := row.Scan(&r.ID, &jobRunID, &r.JobID, &r.JobName, &r.ServerID, &r.VMID, &r.VMName, &typ, &status,
@@ -393,7 +395,7 @@ func scanRun(row rowScanner) (*model.BackupRun, error) {
 		&r.EngineBackupID, &r.FromCheckpointID, &r.ToCheckpointID, &r.SnapshotID, &r.DiskCount,
 		&r.LogicalBytes, &r.ReadBytes, &r.StoredBytes, &r.Progress, &r.Encrypted, &r.Compression,
 		&verifyStatus, &verifiedAt, &r.Error, &startedAt, &endedAt, &expiresAt, &r.Deleted, &createdAt,
-		&skipped, &r.ManifestSHA256, &r.Imported, &purgeAfter)
+		&skipped, &r.ManifestSHA256, &r.Imported, &consistency, &r.ConsistencyNote, &purgeAfter)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -412,6 +414,7 @@ func scanRun(row rowScanner) (*model.BackupRun, error) {
 	r.PurgeAfter = nullTime(purgeAfter)
 	r.CreatedAt = utc(createdAt)
 	r.SkippedDisks = decodeSkipped(skipped)
+	r.Consistency = model.Consistency(consistency)
 	return &r, nil
 }
 

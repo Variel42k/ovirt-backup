@@ -80,23 +80,22 @@ func TestLocalBackendRejectsSymlinkObjects(t *testing.T) {
 	}
 }
 
-func TestMountPointsFromIncludesReadableNonSystemMounts(t *testing.T) {
+func TestMountPointsFromExcludesSystemAndServiceMounts(t *testing.T) {
 	raw := []byte(strings.Join([]string{
 		"36 25 0:32 / / rw,relatime - overlay overlay rw",
 		"41 36 253:2 / /storage rw,relatime - xfs /dev/mapper/storage-data rw",
 		"42 36 8:1 / /backups rw,relatime - ext4 /dev/sda1 rw",
 		"43 36 0:50 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw",
 		"44 36 0:51 / /etc/hosts rw,relatime - tmpfs tmpfs rw",
+		// Внутренние mount'ы самой службы: их в выборе хранилища быть не должно.
 		"45 36 0:52 / /app/data rw,relatime - tmpfs tmpfs rw",
+		"46 36 0:53 / /app/config ro,relatime - tmpfs tmpfs ro",
+		"47 36 0:54 / /tmp rw,relatime - tmpfs tmpfs rw",
 	}, "\n"))
 
-	accepted := map[string]bool{
-		"/storage":  true,
-		"/backups":  true,
-		"/app/data": true,
-	}
-	got := mountPointsFrom(raw, func(path string) bool { return accepted[path] })
-	want := []string{"/app/data", "/backups", "/storage"}
+	// Проба принимает всё — отбор делает сам mountPointsFrom через isSystemPath.
+	got := mountPointsFrom(raw, func(string) bool { return true })
+	want := []string{"/backups", "/storage"}
 	if len(got) != len(want) {
 		t.Fatalf("mounts = %v, want %v", got, want)
 	}

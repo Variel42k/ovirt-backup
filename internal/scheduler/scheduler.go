@@ -17,6 +17,7 @@ import (
 
 	"github.com/Variel42k/ovirt-backup/internal/backup"
 	"github.com/Variel42k/ovirt-backup/internal/config"
+	"github.com/Variel42k/ovirt-backup/internal/dbdump"
 	"github.com/Variel42k/ovirt-backup/internal/dispatch"
 	"github.com/Variel42k/ovirt-backup/internal/events"
 	"github.com/Variel42k/ovirt-backup/internal/filebackup"
@@ -60,6 +61,7 @@ type Scheduler struct {
 	quality    *quality.Service
 	replicator *replication.Replicator
 	fileBackup *filebackup.Engine
+	dbDump     *dbdump.Engine
 
 	cron *cron.Cron
 	// scheduleMu serializes job reloads with a timezone change. robfig/cron can
@@ -92,6 +94,11 @@ func (s *Scheduler) SetReplicator(replicator *replication.Replicator) {
 
 func (s *Scheduler) SetFileBackupEngine(engine *filebackup.Engine) {
 	s.fileBackup = engine
+}
+
+// SetDBDumpEngine подключает задания логических дампов СУБД.
+func (s *Scheduler) SetDBDumpEngine(engine *dbdump.Engine) {
+	s.dbDump = engine
 }
 
 // SetQualityService connects the schedule-aware health evaluator. It is kept
@@ -339,6 +346,10 @@ func (s *Scheduler) reload(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("загрузка заданий снимков Engine: %w", err)
 	}
+	dbJobs, err := s.store.ListDBDumpJobs(ctx)
+	if err != nil {
+		return fmt.Errorf("загрузка заданий дампов СУБД: %w", err)
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -420,7 +431,29 @@ func (s *Scheduler) reload(ctx context.Context) error {
 		active++
 	}
 
-	s.log.Info().Int("активных заданий", active).Int("всего", len(jobs)+len(fileJobs)+len(engineJobs)).Msg("расписание перечитано")
+	for _, job := range dbJobs {
+		if !job.Enabled || job.Schedule == "" || s.dbDump == nil {
+			continue
+		}
+		if _, err := ValidateSchedule(job.Schedule, loc); err != nil {
+			s.log.Error().Err(err).Str("задание дампов", job.Name).
+				Msg("задание пропущено: не удалось разобрать расписание")
+			continue
+		}
+		jobID := job.ID
+		entryID, err := s.cron.AddFunc(cronSpecInTimezone(job.Schedule, timezone), func() {
+			s.runScheduledDBDump(jobID)
+		})
+		if err != nil {
+			s.log.Error().Err(err).Str("задание дампов", job.Name).Msg("не удалось зарегистрировать задание")
+			continue
+		}
+		s.entries["db:"+jobID] = entryID
+		active++
+	}
+
+	s.log.Info().Int("активных заданий", active).
+		Int("всего", len(jobs)+len(fileJobs)+len(engineJobs)+len(dbJobs)).Msg("расписание перечитано")
 	return nil
 }
 
@@ -469,6 +502,26 @@ func (s *Scheduler) runScheduledFile(jobID string) {
 	}
 	if _, err := s.fileBackup.Start(ctx, jobID); err != nil {
 		s.log.Error().Err(err).Str("файловое задание", jobID).Msg("не удалось запустить файловый бекап по расписанию")
+	}
+}
+
+func (s *Scheduler) runScheduledDBDump(jobID string) {
+	ctx := s.baseCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	busy, err := s.store.HasActiveDBDumpRun(ctx, jobID)
+	if err != nil {
+		s.log.Error().Err(err).Str("задание дампов", jobID).Msg("не удалось проверить активные запуски")
+		return
+	}
+	if busy {
+		s.log.Warn().Str("задание дампов", jobID).
+			Msg("точка расписания пропущена: предыдущий дамп ещё выполняется")
+		return
+	}
+	if _, err := s.dbDump.Start(ctx, jobID); err != nil {
+		s.log.Error().Err(err).Str("задание дампов", jobID).Msg("дамп СУБД по расписанию не запущен")
 	}
 }
 
@@ -636,26 +689,28 @@ func (s *Scheduler) TriggerJob(ctx context.Context, jobID, triggeredBy string, s
 				runType = model.BackupFull
 			}
 			req := backup.RunRequest{
-				JobRunID:        jobRun.ID,
-				ServerID:        job.ServerID,
-				VMID:            vm.ID,
-				Type:            runType,
-				JobID:           job.ID,
-				JobName:         job.Name,
-				FullEvery:       job.FullEvery,
-				FallbackType:    job.FallbackType,
-				StorageTargetID: targetID,
-				MirrorTargetIDs: mirrorIDs,
-				ExcludeDiskIDs:  job.ExcludeDiskIDs,
-				Quiesce:         job.Quiesce,
-				Encrypt:         job.Encrypt,
-				ExportQcow2:     job.ExportQcow2,
-				VerifyAfter:     job.VerifyAfter,
-				VerifyOptions:   job.VerifyOptions,
-				Retention:       job.Retention,
-				OVAHostID:       job.OVAHostID,
-				OVADirectory:    job.OVADirectory,
-				TriggeredBy:     triggeredBy,
+				JobRunID:           jobRun.ID,
+				ServerID:           job.ServerID,
+				VMID:               vm.ID,
+				Type:               runType,
+				JobID:              job.ID,
+				JobName:            job.Name,
+				FullEvery:          job.FullEvery,
+				FallbackType:       job.FallbackType,
+				StorageTargetID:    targetID,
+				MirrorTargetIDs:    mirrorIDs,
+				ExcludeDiskIDs:     job.ExcludeDiskIDs,
+				Quiesce:            job.Quiesce,
+				Consistency:        job.Consistency,
+				RequireConsistency: job.RequireConsistency,
+				Encrypt:            job.Encrypt,
+				ExportQcow2:        job.ExportQcow2,
+				VerifyAfter:        job.VerifyAfter,
+				VerifyOptions:      job.VerifyOptions,
+				Retention:          job.Retention,
+				OVAHostID:          job.OVAHostID,
+				OVADirectory:       job.OVADirectory,
+				TriggeredBy:        triggeredBy,
 			}
 			requests = append(requests, req)
 		}
@@ -957,6 +1012,7 @@ func (s *Scheduler) executeOne(ctx context.Context, req backup.RunRequest, job *
 
 	_ = s.store.ResolveAlert(ctx, run.ServerID, model.ScopeBackup,
 		backupAlertObjectID(run), model.AlertBackupFailed)
+	s.checkConsistency(ctx, run, req.ConsistencyTarget())
 
 	if job != nil && job.ReplicationEnabled && s.replicator != nil && run.Status != model.RunFailed {
 		if _, err := s.replicator.QueueRun(context.WithoutCancel(ctx), run.ID, job.StorageTargetIDs); err != nil {
@@ -1187,6 +1243,11 @@ func (s *Scheduler) runRetention(ctx context.Context) {
 			s.log.Warn().Err(err).Msg("ретенция файловых бекапов не отработала")
 		}
 	}
+	if s.dbDump != nil {
+		if err := s.dbDump.ApplyRetention(ctx); err != nil {
+			s.log.Warn().Err(err).Msg("ретенция дампов СУБД не отработала")
+		}
+	}
 }
 
 func (s *Scheduler) pruneExpired(ctx context.Context) {
@@ -1300,6 +1361,31 @@ func (s *Scheduler) raiseBackupAlert(ctx context.Context, run *model.BackupRun, 
 		Kind: model.AlertBackupFailed, Severity: model.SeverityCritical,
 		Message: fmt.Sprintf("бэкап ВМ %s не выполнен: %v", run.VMName, cause),
 		Details: run.Error,
+	})
+}
+
+// checkConsistency поднимает оповещение, если точка ниже заявленного уровня, и
+// снимает его, когда очередная точка того же задания уровень достигла.
+//
+// Такая копия пригодна — её не считают неудачей и не повторяют, — но
+// обещание задания не выполнено: копия СУБД без заморозки восстановится
+// только через разбор журнала, а причина обычно в госте (агент, сценарии) и
+// сама не пройдёт.
+func (s *Scheduler) checkConsistency(ctx context.Context, run *model.BackupRun, target model.Consistency) {
+	if run.Status == model.RunFailed || !run.Consistency.Valid() {
+		return
+	}
+	objectID := backupAlertObjectID(run)
+	if !run.Consistency.Below(target) {
+		_ = s.store.ResolveAlert(ctx, run.ServerID, model.ScopeBackup, objectID, model.AlertBackupConsistency)
+		return
+	}
+	_ = s.store.RaiseAlert(ctx, &model.Alert{
+		ServerID: run.ServerID, Scope: model.ScopeBackup, ObjectID: objectID, ObjectName: run.VMName,
+		Kind: model.AlertBackupConsistency, Severity: model.SeverityWarning,
+		Message: fmt.Sprintf("копия ВМ %s снята на уровне «%s» вместо заявленного «%s»",
+			run.VMName, run.Consistency.Title(), target.Title()),
+		Details: run.ConsistencyNote,
 	})
 }
 

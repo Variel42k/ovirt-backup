@@ -1,0 +1,130 @@
+#!/bin/sh
+# 50-jhvirt-mysql — блокировка записи MySQL/MariaDB на время заморозки ФС
+# (комплект jhvirt).
+#
+# На freeze сценарий открывает фоновую сессию и выполняет в ней
+# FLUSH TABLES WITH READ LOCK: таблицы сброшены на диск, запись остановлена, а
+# сама сессия удерживает блокировку, пока ФС заморожены. На thaw сессия
+# завершается командой KILL, и блокировка снимается.
+#
+# Блокировка ограничена жизнью сессии: после получения она ждёт SELECT
+# SLEEP(JHVIRT_MYSQL_HOLD) и затем закрывается сама. Если thaw не придёт —
+# служба упала или связь с агентом оборвалась, — запись не останется
+# остановленной дольше этого срока.
+#
+# FLUSH TABLES WITH READ LOCK ждёт завершения уже идущих длинных запросов.
+# Если блокировку не удалось получить за JHVIRT_HOOK_TIMEOUT секунд, сценарий
+# снимает попытку и завершается с ошибкой: строгий диспетчер отменит заморозку.
+#
+# Подключение — через Unix-сокет. Без файла параметров клиент входит так же,
+# как root из консоли (в MariaDB это unix_socket-аутентификация). Иначе
+# положите в /etc/jhvirt/mysql-freeze.cnf (root, 0600) раздел [client] с
+# учётной записью, которой выдано только RELOAD.
+
+CONF=/etc/jhvirt/guest-hooks.conf
+STATE=/run/jhvirt-mysql-freeze
+
+log() { printf '%s jhvirt-mysql: %s\n' "$(date '+%F %T')" "$*"; }
+
+load_conf() {
+    [ -r "$CONF" ] || return 0
+    if [ -n "$(find "$CONF" -maxdepth 0 \( ! -user root -o -perm /022 \) 2>/dev/null)" ]; then
+        log "$CONF должен принадлежать root и не быть доступным на запись другим"
+        return 1
+    fi
+    # shellcheck disable=SC1090
+    . "$CONF"
+}
+
+case "${1:-}" in
+freeze | thaw) ;;
+*)
+    log "неизвестная операция: ${1:-}"
+    exit 1
+    ;;
+esac
+
+load_conf || exit 1
+
+TIMEOUT=${JHVIRT_HOOK_TIMEOUT:-30}
+HOLD=${JHVIRT_MYSQL_HOLD:-120}
+DEFAULTS=${JHVIRT_MYSQL_DEFAULTS_FILE:-/etc/jhvirt/mysql-freeze.cnf}
+CLIENT=${JHVIRT_MYSQL_CLIENT:-}
+if [ -z "$CLIENT" ]; then
+    CLIENT=$(command -v mariadb 2>/dev/null || command -v mysql 2>/dev/null || true)
+fi
+
+case "$TIMEOUT$HOLD" in
+*[!0-9]*)
+    log "JHVIRT_HOOK_TIMEOUT и JHVIRT_MYSQL_HOLD должны быть числами секунд"
+    exit 1
+    ;;
+esac
+
+client() {
+    # --defaults-extra-file обязан стоять первым параметром.
+    if [ -r "$DEFAULTS" ]; then
+        "$CLIENT" --defaults-extra-file="$DEFAULTS" --protocol=socket "$@"
+    else
+        "$CLIENT" --protocol=socket "$@"
+    fi
+}
+
+# release снимает блокировку и убирает следы фоновой сессии. Вызывается и на
+# thaw, и перед новой попыткой: сессия от прерванной прошлой заморозки не
+# должна держать запись.
+release() {
+    id=$(sed -n '1{/^[0-9][0-9]*$/p;}' "$STATE/session.out" 2>/dev/null)
+    if [ -n "$id" ]; then
+        if client -N -B -e "KILL $id" >/dev/null 2>&1; then
+            log "сессия $id с блокировкой завершена"
+        fi
+    fi
+    pid=$(cat "$STATE/client.pid" 2>/dev/null)
+    if [ -n "$pid" ]; then
+        kill "$pid" 2>/dev/null
+    fi
+    rm -f "$STATE/session.out" "$STATE/client.pid"
+}
+
+if [ -z "$CLIENT" ]; then
+    log "клиент mysql/mariadb не найден"
+    [ "$1" = thaw ] && exit 0
+    exit 1
+fi
+
+if [ "$1" = thaw ]; then
+    release
+    exit 0
+fi
+
+release
+mkdir -p "$STATE" && chmod 0700 "$STATE" || exit 1
+: >"$STATE/session.out"
+
+# Результат каждого запроса печатается сразу (-n): первая строка —
+# номер сессии, «jhvirt-locked» — блокировка получена. Все потоки фоновой
+# сессии перенаправлены: агент ждёт закрытия вывода хука, и унаследованный
+# дескриптор задержал бы заморозку на весь срок блокировки.
+client -N -B -n -e "SELECT CONNECTION_ID(); FLUSH TABLES WITH READ LOCK; SELECT 'jhvirt-locked'; DO SLEEP($HOLD);" \
+    </dev/null >"$STATE/session.out" 2>&1 &
+echo $! >"$STATE/client.pid"
+
+waited=0
+while [ "$waited" -lt "$TIMEOUT" ]; do
+    if grep -qx 'jhvirt-locked' "$STATE/session.out"; then
+        log "блокировка записи получена за ${waited} с; удерживается до thaw, но не дольше ${HOLD} с"
+        exit 0
+    fi
+    if ! kill -0 "$(cat "$STATE/client.pid")" 2>/dev/null; then
+        log "сессия завершилась до блокировки: $(tr '\n' ' ' <"$STATE/session.out")"
+        release
+        exit 1
+    fi
+    sleep 1
+    waited=$((waited + 1))
+done
+
+log "FLUSH TABLES WITH READ LOCK не получен за ${TIMEOUT} с — вероятно, мешают длинные запросы"
+release
+exit 1

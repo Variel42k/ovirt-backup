@@ -24,6 +24,7 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/auditlog"
 	"github.com/Variel42k/ovirt-backup/internal/backup"
 	"github.com/Variel42k/ovirt-backup/internal/config"
+	"github.com/Variel42k/ovirt-backup/internal/dbdump"
 	"github.com/Variel42k/ovirt-backup/internal/dispatch"
 	drcheck "github.com/Variel42k/ovirt-backup/internal/dr"
 	"github.com/Variel42k/ovirt-backup/internal/events"
@@ -334,6 +335,8 @@ func run() error {
 	dispatcher := dispatch.New(engine, st, libvirtPool, cfg.Backup, cipher, log)
 	dispatcher.SetProxmoxPool(proxmoxPool)
 	fileBackupEngine := filebackup.New(st, *cfg, cipher, log)
+	dbDumpEngine := dbdump.New(st, *cfg, cipher, log)
+	dbDumpEngine.RecoverInterrupted(ctx)
 
 	if backup.QemuImgAvailable(cfg.Backup.QemuImgPath) {
 		log.Info().Msg("qemu-img найден: доступны экспорт в qcow2 и проверка qemu-img check")
@@ -382,6 +385,7 @@ func run() error {
 	sched.SetQualityService(qualityService)
 	sched.SetReplicator(replicator)
 	sched.SetFileBackupEngine(fileBackupEngine)
+	sched.SetDBDumpEngine(dbDumpEngine)
 
 	// The mode is stored, not configured: an operator halfway through observing
 	// the automation must not be dropped into live mode by a restart.
@@ -427,7 +431,7 @@ func run() error {
 		Scheduler: sched, Monitor: mon, Remediator: remediator, Bus: bus, Logger: log,
 		Logs: logs, Quality: qualityService, Replicator: replicator, Notifier: notifier,
 		Notifications: notificationManager, DR: drChecker,
-		FileBackup: fileBackupEngine, AuditFile: auditFile,
+		FileBackup: fileBackupEngine, DBDump: dbDumpEngine, AuditFile: auditFile,
 	})
 
 	// Сроки согласования: эскалация на резервную группу и закрытие заявок,

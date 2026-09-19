@@ -485,6 +485,7 @@ const NOTIFICATION_KIND_RU: Record<string, string> = {
   backup_verification_stale: 'Проверка бэкапа просрочена',
   backup_performance_degraded: 'Скорость бэкапа снизилась',
   backup_schedule_missed: 'Запуск по расписанию пропущен',
+  backup_consistency_degraded: 'Копия ниже заявленной согласованности',
   storage_capacity_low: 'Мало места в репозитории',
   storage_capacity_forecast: 'Репозиторий скоро заполнится',
   verify_failed: 'Ошибка проверки',

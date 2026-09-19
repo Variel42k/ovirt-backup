@@ -44,11 +44,15 @@ type jobPayload struct {
 	OVADirectory     string                `json:"ova_directory"`
 	Retention        model.RetentionPolicy `json:"retention"`
 
-	Quiesce       bool                `json:"quiesce"`
-	VerifyAfter   string              `json:"verify_after"`
-	VerifyOptions model.VerifyOptions `json:"verify_options"`
-	ExportQcow2   bool                `json:"export_qcow2"`
-	Encrypt       bool                `json:"encrypt"`
+	Quiesce bool `json:"quiesce"`
+	// Consistency — crash, filesystem или application; пусто — вывести из
+	// quiesce, как у клиентов прежней версии.
+	Consistency        string              `json:"consistency"`
+	RequireConsistency bool                `json:"require_consistency"`
+	VerifyAfter        string              `json:"verify_after"`
+	VerifyOptions      model.VerifyOptions `json:"verify_options"`
+	ExportQcow2        bool                `json:"export_qcow2"`
+	Encrypt            bool                `json:"encrypt"`
 
 	Priority    int `json:"priority"`
 	Concurrency int `json:"concurrency"`
@@ -75,6 +79,8 @@ func (p jobPayload) apply(dst *model.BackupJob) {
 	}
 	dst.Retention = p.Retention
 	dst.Quiesce = p.Quiesce
+	dst.Consistency = model.Consistency(strings.TrimSpace(p.Consistency))
+	dst.RequireConsistency = p.RequireConsistency
 	dst.VerifyAfter = model.VerifyMode(p.VerifyAfter)
 	dst.VerifyOptions = p.VerifyOptions
 	dst.ExportQcow2 = p.ExportQcow2
@@ -109,6 +115,10 @@ func (s *Server) validateJob(ctx context.Context, job *model.BackupJob) error {
 		}
 		if len(job.ExcludeDiskIDs) > 0 || job.ExportQcow2 {
 			return badRequest("нативный vzdump сохраняет гостя целиком; исключение дисков и экспорт qcow2 недоступны")
+		}
+		if job.RequireConsistency {
+			return badRequest("заморозку гостя Proxmox выполняет сам vzdump (agent=1 в настройках гостя): " +
+				"служба не видит её результата и не может требовать уровень согласованности")
 		}
 		if job.VerifyAfter != "" && job.VerifyAfter != model.VerifyQuick &&
 			job.VerifyAfter != model.VerifyManifest && job.VerifyAfter != model.VerifyChain {
@@ -343,14 +353,17 @@ func (s *Server) handlePreviewJob(w http.ResponseWriter, r *http.Request) {
 
 // adHocRequest starts one backup outside any job.
 type adHocRequest struct {
-	ServerID        string              `json:"server_id"`
-	VMID            string              `json:"vm_id"`
-	Type            string              `json:"type"`
-	StorageTargetID string              `json:"storage_target_id"`
-	Quiesce         bool                `json:"quiesce"`
-	Encrypt         bool                `json:"encrypt"`
-	VerifyAfter     string              `json:"verify_after"`
-	VerifyOptions   model.VerifyOptions `json:"verify_options"`
+	ServerID        string `json:"server_id"`
+	VMID            string `json:"vm_id"`
+	Type            string `json:"type"`
+	StorageTargetID string `json:"storage_target_id"`
+	Quiesce         bool   `json:"quiesce"`
+	// Consistency и RequireConsistency — как у задания; пусто — из quiesce.
+	Consistency        string              `json:"consistency"`
+	RequireConsistency bool                `json:"require_consistency"`
+	Encrypt            bool                `json:"encrypt"`
+	VerifyAfter        string              `json:"verify_after"`
+	VerifyOptions      model.VerifyOptions `json:"verify_options"`
 	// RetainDays ставит срок годности разовой копии; 0 — хранить бессрочно.
 	RetainDays   int      `json:"retain_days"`
 	ExcludeDisks []string `json:"exclude_disk_ids"`
@@ -390,6 +403,15 @@ func (s *Server) handleAdHocBackup(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	consistency := model.Consistency(strings.TrimSpace(req.Consistency))
+	if consistency != "" && !consistency.Valid() {
+		s.writeError(w, r, badRequest("неизвестный уровень согласованности: %q", req.Consistency))
+		return
+	}
+	if req.RequireConsistency && srv.Kind.UsesProxmoxAPI() {
+		s.writeError(w, r, badRequest("заморозку гостя Proxmox выполняет сам vzdump: требовать уровень нельзя"))
+		return
+	}
 	verifyMode := model.VerifyMode(req.VerifyAfter)
 	if verifyMode != "" {
 		if !knownVerifyMode(verifyMode) {
@@ -415,19 +437,21 @@ func (s *Server) handleAdHocBackup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	runReq := backup.RunRequest{
-		ServerID:        req.ServerID,
-		VMID:            req.VMID,
-		Type:            model.BackupType(req.Type),
-		FallbackType:    model.BackupSnapshot,
-		StorageTargetID: req.StorageTargetID,
-		ExcludeDiskIDs:  req.ExcludeDisks,
-		Quiesce:         req.Quiesce,
-		Encrypt:         req.Encrypt,
-		VerifyAfter:     verifyMode,
-		VerifyOptions:   req.VerifyOptions,
-		OVAHostID:       req.OVAHostID,
-		OVADirectory:    req.OVADirectory,
-		TriggeredBy:     actor,
+		ServerID:           req.ServerID,
+		VMID:               req.VMID,
+		Type:               model.BackupType(req.Type),
+		FallbackType:       model.BackupSnapshot,
+		StorageTargetID:    req.StorageTargetID,
+		ExcludeDiskIDs:     req.ExcludeDisks,
+		Quiesce:            req.Quiesce,
+		Consistency:        consistency,
+		RequireConsistency: req.RequireConsistency && consistency.NeedsFreeze(),
+		Encrypt:            req.Encrypt,
+		VerifyAfter:        verifyMode,
+		VerifyOptions:      req.VerifyOptions,
+		OVAHostID:          req.OVAHostID,
+		OVADirectory:       req.OVADirectory,
+		TriggeredBy:        actor,
 	}
 	if req.RetainDays > 0 {
 		runReq.Retention = model.RetentionPolicy{MaxAge: time.Duration(req.RetainDays) * 24 * time.Hour}

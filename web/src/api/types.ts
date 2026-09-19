@@ -321,7 +321,12 @@ export interface BackupJob {
   replication_enabled: boolean
   force_full_next: boolean
   retention: RetentionPolicy
+  /** Ведомый флаг: сервер выводит его из consistency. */
   quiesce: boolean
+  /** Уровень, который задание обещает для работающей ВМ. */
+  consistency: Consistency
+  /** Прервать запуск, если уровень не достигнут; иначе копия снимается как после сбоя. */
+  require_consistency: boolean
   verify_after?: string
   verify_options?: BootVerifyOptions
   export_qcow2: boolean
@@ -357,6 +362,13 @@ export interface SkippedDisk {
   excluded: boolean
 }
 
+/**
+ * Согласованность точки: crash — как после сбоя питания, filesystem — ФС
+ * заморожены агентом, application — перед заморозкой сценарии в госте
+ * перевели СУБД в согласованное состояние.
+ */
+export type Consistency = 'crash' | 'filesystem' | 'application'
+
 export interface BackupRun {
   id: string
   job_run_id?: string
@@ -375,6 +387,10 @@ export interface BackupRun {
   from_checkpoint_id?: string
   to_checkpoint_id?: string
   disk_count: number
+  /** Достигнутый уровень; пусто у точек, снятых до появления уровней. */
+  consistency?: Consistency
+  /** Почему уровень ниже заявленного или почему заморозка не понадобилась. */
+  consistency_note?: string
   logical_bytes: number
   read_bytes: number
   stored_bytes: number
@@ -1055,6 +1071,24 @@ export interface Help {
   articles: HelpArticle[]
 }
 
+/** Руководство из docs/, встроенное в бинарь этой версии. */
+export interface DocGuide {
+  /** Идентификатор в адресе: deploy, keycloak-ad… */
+  slug: string
+  /** Имя файла в репозитории — на него ссылаются другие руководства. */
+  file: string
+  title: string
+  summary: string
+  category: string
+  icon: string
+  /** Примерная длина в словах — для оценки времени чтения. */
+  words: number
+}
+
+export interface DocGuideContent extends DocGuide {
+  markdown: string
+}
+
 export interface Meta {
   backup_types: OptionDescriptor[]
   verify_modes: OptionDescriptor[]
@@ -1228,4 +1262,98 @@ export interface RestoreVMPlanDisk {
   boot_order?: number
   bootable: boolean
   virtual_size: number
+}
+
+/** СУБД, которую снимает хелпер jhvirt-db-dump; mysql покрывает и MariaDB. */
+export type DBEngine = 'postgresql' | 'mysql'
+
+export interface DBEngineInfo {
+  engine: DBEngine
+  version: string
+}
+
+/** Хост СУБД: SSH-ключ хранится зашифрованным и в браузер не возвращается. */
+export interface DBHost {
+  id: string
+  name: string
+  address: string
+  port: number
+  username: string
+  private_key_stored: boolean
+  host_key?: string
+  trust_any_host_key: boolean
+  engines?: DBEngineInfo[]
+  probed_at?: string
+  probe_error?: string
+  created_at: string
+  updated_at: string
+}
+
+export interface DBHostProbe {
+  host: DBHost
+  engines: DBEngineInfo[]
+  errors?: Partial<Record<DBEngine, string>>
+  restore_enabled: boolean
+}
+
+export interface DBDumpJob {
+  id: string
+  name: string
+  enabled: boolean
+  host_id: string
+  engine: DBEngine
+  /** Пусто — все базы, которые вернёт хелпер. */
+  databases: string[]
+  include_globals: boolean
+  storage_target_ids: string[]
+  encrypt: boolean
+  /** Перечитать точку сразу после дампа: расшифровка и сверка SHA-256 каждого чанка. */
+  verify_after: boolean
+  schedule?: string
+  retention: RetentionPolicy
+  created_at: string
+  updated_at: string
+}
+
+export interface DBDumpEntry {
+  database: string
+  kind: 'database' | 'globals'
+  format: 'custom' | 'sql'
+  logical_bytes: number
+  stored_bytes: number
+  error?: string
+}
+
+export interface DBDumpRun {
+  id: string
+  job_id: string
+  host_id: string
+  engine: DBEngine
+  storage_target_id: string
+  status: RunStatus
+  manifest_key?: string
+  server_version?: string
+  entries?: DBDumpEntry[]
+  logical_bytes: number
+  stored_bytes: number
+  encrypted: boolean
+  error?: string
+  /** Итог последней проверки; пусто — точка не проверялась. */
+  verify_status?: RunStatus
+  verify_error?: string
+  verified_at?: string
+  started_at?: string
+  ended_at?: string
+  created_at: string
+}
+
+export interface DBRestoreStatus {
+  id: string
+  run_id: string
+  database: string
+  new_name: string
+  status: 'running' | 'succeeded' | 'failed'
+  error?: string
+  started_at: string
+  ended_at?: string
 }

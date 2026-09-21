@@ -1135,7 +1135,7 @@ const columns = [
             <div class="text-caption text-grey-7 q-ml-sm">
               <template v-if="form.consistency === 'application'">
                 Нужны qemu-guest-agent и сценарии fsfreeze-hook для СУБД в каждой ВМ задания (Linux) или VSS (Windows) —
-                готовые сценарии лежат в deploy/guest-hooks.
+                готовые сценарии лежат в каталоге guest-hooks установочного комплекта.
               </template>
               <template v-else-if="form.consistency === 'filesystem'">
                 Нужен qemu-guest-agent в госте. Без флага выше копия при неудачной заморозке снимается как после сбоя

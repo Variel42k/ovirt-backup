@@ -522,6 +522,58 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 
 // handleRunChain returns the chain a restore point depends on, which is what
 // the UI shows before a restore so the operator can see what has to be intact.
+// handleRunEvents отдаёт хронологию запуска: что и когда делала служба.
+//
+// Отдельным запросом, а не полем точки: список копий читают все страницы, а
+// хронология нужна только когда открыли конкретную точку.
+func (s *Server) handleRunEvents(w http.ResponseWriter, r *http.Request) {
+	if _, err := s.store.GetBackupRun(r.Context(), r.PathValue("id")); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	events, err := s.store.ListRunEvents(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeList(w, events)
+}
+
+type runTelemetryResponse struct {
+	Events    []*model.RunEvent      `json:"events"`
+	Databases []*model.DBStatsSample `json:"databases"`
+	Disks     []*model.DiskSample    `json:"disks"`
+}
+
+func (s *Server) handleRunTelemetry(w http.ResponseWriter, r *http.Request) {
+	run, err := s.store.GetBackupRun(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	events, err := s.store.ListRunEvents(r.Context(), run.ID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	databases, err := s.store.ListDBStatsSamples(r.Context(), run.ID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	since := run.CreatedAt.Add(-30 * time.Second)
+	until := time.Now().UTC()
+	if run.EndedAt != nil {
+		until = run.EndedAt.Add(30 * time.Second)
+	}
+	disks, err := s.store.ListDiskSamples(r.Context(), store.DiskSampleFilter{ServerID: run.ServerID, RunID: run.ID, VMID: run.VMID, Since: since, Until: until, Limit: 5000})
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, runTelemetryResponse{Events: events, Databases: databases, Disks: disks})
+}
+
 func (s *Server) handleRunChain(w http.ResponseWriter, r *http.Request) {
 	run, err := s.store.GetBackupRun(r.Context(), r.PathValue("id"))
 	if err != nil {

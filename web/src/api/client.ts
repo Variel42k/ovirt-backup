@@ -488,6 +488,7 @@ export const api = {
   listRuns: (params: Record<string, string | number | boolean> = {}) =>
     http.get<ListResponse<BackupRun>>('/backups', { params }).then((r) => unwrap(r.data)),
   getRun: (id: string) => http.get<BackupRun>(`/backups/${id}`).then((r) => r.data),
+	runTelemetry: (id: string) => http.get<import('./types').BackupTelemetry>(`/backups/${id}/telemetry`).then((r) => r.data),
   runChain: (id: string) => http.get<ListResponse<BackupRun>>(`/backups/${id}/chain`).then((r) => unwrap(r.data)),
   startBackup: (payload: Record<string, unknown>) => http.post('/backups', payload).then((r) => r.data),
   /**

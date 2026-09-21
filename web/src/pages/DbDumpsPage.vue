@@ -7,7 +7,7 @@ import { bytes, dateTime, runStatus, statusColor } from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import { useUnsavedChanges } from '@/composables/unsavedChanges'
-import type { DBDumpJob, DBDumpRun, DBEngine, DBHost, DBRestoreStatus, HostKeyScan } from '@/api/types'
+import type { DBDumpJob, DBDumpRun, DBEngine, DBHost, DBRestoreStatus, HostKeyScan, VM } from '@/api/types'
 
 const $q = useQuasar()
 const app = useAppStore()
@@ -22,6 +22,7 @@ const restores = ref<DBRestoreStatus[]>([])
 const busy = ref<string[]>([])
 let pollTimer: number | undefined
 let loadSequence = 0
+let monitorVMLoadSequence = 0
 
 /** Тот же алфавит, что проверяют служба и хелпер на хосте. */
 const DB_NAME = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,62}$/
@@ -92,6 +93,8 @@ const hostSaving = ref(false)
 const hostError = ref('')
 const hostScan = ref<HostKeyScan | null>(null)
 const hostScanning = ref(false)
+const monitorVMs = ref<VM[]>([])
+const monitorVMsLoading = ref(false)
 const emptyHost = () => ({
   name: '',
   address: '',
@@ -100,6 +103,9 @@ const emptyHost = () => ({
   private_key: '',
   host_key: '',
   trust_any_host_key: false,
+  server_id: '',
+  vm_id: '',
+  monitor_engine: '' as DBEngine | '',
 })
 const hostForm = ref(emptyHost())
 const hostBaseline = ref('')
@@ -107,16 +113,37 @@ const { confirmDiscard: confirmHostDiscard } = useUnsavedChanges(
   computed(() => hostDialog.value && JSON.stringify(hostForm.value) !== hostBaseline.value),
 )
 
+async function loadMonitorVMs(serverID: string, clear = true) {
+  const sequence = ++monitorVMLoadSequence
+  if (clear) hostForm.value.vm_id = ''
+  monitorVMs.value = []
+  if (!serverID) {
+    hostForm.value.monitor_engine = ''
+    return
+  }
+  monitorVMsLoading.value = true
+  try {
+    const value = await api.listVMs(serverID)
+    if (sequence === monitorVMLoadSequence) monitorVMs.value = value
+  } catch (err) {
+    if (sequence === monitorVMLoadSequence) hostError.value = errorMessage(err)
+  } finally {
+    if (sequence === monitorVMLoadSequence) monitorVMsLoading.value = false
+  }
+}
+
 function openHost(host?: DBHost) {
   hostEditing.value = host ?? null
   hostForm.value = host
     ? { name: host.name, address: host.address, port: host.port, username: host.username, private_key: '',
-        host_key: host.host_key ?? '', trust_any_host_key: host.trust_any_host_key }
+        host_key: host.host_key ?? '', trust_any_host_key: host.trust_any_host_key,
+        server_id: host.server_id ?? '', vm_id: host.vm_id ?? '', monitor_engine: host.monitor_engine ?? '' }
     : emptyHost()
   hostScan.value = null
   hostError.value = ''
   hostBaseline.value = JSON.stringify(hostForm.value)
   hostDialog.value = true
+  void loadMonitorVMs(hostForm.value.server_id, false)
 }
 
 async function closeHost() {
@@ -154,6 +181,10 @@ async function saveHost() {
   }
   if (!f.host_key.trim() && !f.trust_any_host_key) {
     hostError.value = 'Получите и сверьте ключ хоста или явно разрешите подключение без проверки'
+    return
+  }
+  if (Boolean(f.server_id) !== Boolean(f.vm_id) || (f.vm_id && !f.monitor_engine)) {
+    hostError.value = 'Для мониторинга выберите вместе виртуализацию, ВМ и СУБД'
     return
   }
   hostSaving.value = true
@@ -487,6 +518,7 @@ onBeforeUnmount(() => {
             <span v-else>ещё не проверялся</span>
           </q-item-label>
           <q-item-label v-if="host.probe_error" caption class="text-negative jhv-wrap">{{ host.probe_error }}</q-item-label>
+          <q-item-label v-if="host.vm_id" caption><q-icon name="monitor_heart" /> транзакции {{ engineTitle(host.monitor_engine!) }} привязаны к {{ app.serverName(host.server_id ?? '') }} / ВМ {{ host.vm_id }}</q-item-label>
         </q-item-section>
         <q-item-section v-if="auth.can('servers.admin')" side>
           <div class="row no-wrap">
@@ -624,6 +656,16 @@ onBeforeUnmount(() => {
             <div class="col-4 col-sm-2"><q-input v-model.number="hostForm.port" type="number" outlined dense label="Порт SSH" /></div>
             <div class="col-12 col-sm-6">
               <q-input v-model="hostForm.username" outlined dense label="Пользователь хелпера" hint="Отдельная непривилегированная учётка, не root" />
+            </div>
+            <div class="col-12"><div class="text-subtitle2">Мониторинг транзакций при бэкапе ВМ <span class="text-grey-7 text-weight-regular">(необязательно)</span></div><div class="jhv-reason">Служба читает накопительные счётчики каждые 2 секунды. Таблицы приложения не изменяются.</div></div>
+            <div class="col-12 col-sm-4">
+              <q-select v-model="hostForm.server_id" :options="[{ label: 'Не связывать с ВМ', value: '' }, ...app.servers.map((server) => ({ label: server.name, value: server.id }))]" emit-value map-options outlined dense label="Виртуализация" @update:model-value="(value) => loadMonitorVMs(String(value))" />
+            </div>
+            <div class="col-12 col-sm-5">
+              <q-select v-model="hostForm.vm_id" :options="monitorVMs.map((vm) => ({ label: vm.name, value: vm.id }))" emit-value map-options outlined dense label="Виртуальная машина" :loading="monitorVMsLoading" :disable="!hostForm.server_id" />
+            </div>
+            <div class="col-12 col-sm-3">
+              <q-select v-model="hostForm.monitor_engine" :options="[{ label: 'PostgreSQL', value: 'postgresql' }, { label: 'MySQL / MariaDB', value: 'mysql' }]" emit-value map-options outlined dense label="СУБД" :disable="!hostForm.server_id" />
             </div>
             <div class="col-12">
               <q-input

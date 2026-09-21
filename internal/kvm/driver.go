@@ -148,6 +148,20 @@ type Result struct {
 	DomainXML string
 	Profile   *backup.VMProfile
 	ConfigKey string
+
+	// Timeline — отметки этапов: заморозка, разморозка, передача. Драйвер их
+	// только собирает: базы у него нет, записывает вызывающий.
+	Timeline []model.RunEvent
+}
+
+// mark добавляет отметку в хронологию запуска.
+func (r *Result) mark(kind model.RunEventKind, took time.Duration, detail string) {
+	if r == nil {
+		return
+	}
+	r.Timeline = append(r.Timeline, model.RunEvent{
+		Kind: kind, At: time.Now().UTC(), Duration: took.Milliseconds(), Detail: detail,
+	})
 }
 
 // Plan is the resolved strategy for a request.
@@ -348,23 +362,27 @@ func (d *Driver) Backup(ctx context.Context, req Request) (*Result, error) {
 				"копия снимается полностью и на горячую")
 	}
 
-	q, err := d.quiesce(ctx, dom, info, req, log)
+	q, frozenAt, err := d.quiesce(ctx, dom, info, req, result, log)
 	result.Consistency, result.ConsistencyNote = q.Level, q.Note
 	if err != nil {
 		_ = d.conn.RemoveSocket(ctx, socketPath)
 		return result, err
 	}
-	frozen := q.Frozen
 
+	backupAsked := time.Now().UTC()
 	if err := d.conn.BeginBackup(ctx, dom, spec, checkpoint); err != nil {
-		d.thaw(ctx, dom, frozen, log)
+		if thawErr := d.thaw(ctx, dom, &frozenAt, result, log); thawErr != nil {
+			_ = d.thaw(ctx, dom, &frozenAt, result, log)
+		}
 		_ = d.conn.RemoveScratch(ctx, scratchFiles...)
 		_ = d.conn.RemoveSocket(ctx, socketPath)
-		return nil, err
+		return result, err
 	}
 	if checkpoint != nil {
 		result.Checkpoint = checkpointName
 	}
+	result.mark(model.RunEventCheckpoint, time.Since(backupAsked),
+		"с этого момента данные читаются из зафиксированной точки")
 
 	// From here the hypervisor holds a scratch file and an open job. Both must
 	// be released no matter how this function exits, including cancellation.
@@ -381,14 +399,23 @@ func (d *Driver) Backup(ctx context.Context, req Request) (*Result, error) {
 		}
 		_ = d.conn.RemoveSocket(cleanupCtx, socketPath)
 	}()
+	// Registered after backup cleanup so a failed first thaw is retried before
+	// closing a potentially slow hypervisor job during unwinding.
+	defer func() { _ = d.thaw(ctx, dom, &frozenAt, result, log) }()
 
 	// The point in time is fixed once the backup has begun; the guest can run
 	// normally again while we read the frozen view.
-	d.thaw(ctx, dom, frozen, log)
+	if err := d.thaw(ctx, dom, &frozenAt, result, log); err != nil {
+		return result, err
+	}
 
 	log.Info().Int("дисков", len(plan.Disks)).Str("сокет", socketPath).Msg("бэкап открыт, читаю данные")
 
+	transferStarted := time.Now().UTC()
 	manifests, stats, err := d.copyDisks(ctx, req, plan, socketPath, info, log)
+	result.mark(model.RunEventTransfer, time.Since(transferStarted),
+		fmt.Sprintf("дисков сохранено: %d из %d; прочитано %s, записано %s",
+			len(manifests), len(plan.Disks), humanBytes(stats.read), humanBytes(stats.stored)))
 	result.Manifests = manifests
 	result.DomainXML = info.XML
 	result.Profile = profileForDomain(info, manifests)
@@ -412,7 +439,7 @@ func (d *Driver) Backup(ctx context.Context, req Request) (*Result, error) {
 // reports the level reached. An error means the job demands a level that could
 // not be reached; nothing has been started on the hypervisor at that point.
 func (d *Driver) quiesce(ctx context.Context, dom golibvirt.Domain, info *libvirtx.Domain,
-	req Request, log zerolog.Logger) (backup.Quiesced, error) {
+	req Request, result *Result, log zerolog.Logger) (backup.Quiesced, time.Time, error) {
 	target := req.Consistency
 	if !target.Valid() {
 		target = model.ConsistencyCrash
@@ -420,6 +447,7 @@ func (d *Driver) quiesce(ctx context.Context, dom golibvirt.Domain, info *libvir
 			target = model.ConsistencyFilesystem
 		}
 	}
+	var frozenAt time.Time
 	q, err := backup.QuiesceGuest(ctx, target, req.RequireConsistency,
 		backup.GuestState{Running: info.State.Running(), Agent: info.GuestAgent},
 		func(ctx context.Context) error {
@@ -427,22 +455,36 @@ func (d *Driver) quiesce(ctx context.Context, dom golibvirt.Domain, info *libvir
 			// itself; a database flush has to fit into the same minute.
 			freezeCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 			defer cancel()
+			result.mark(model.RunEventFreezeRequested, 0, "уровень: "+target.Title())
+			asked := time.Now().UTC()
 			n, err := d.conn.FreezeFilesystems(freezeCtx, dom)
 			if err == nil {
+				frozenAt = time.Now().UTC()
+				result.mark(model.RunEventFrozen, frozenAt.Sub(asked),
+					fmt.Sprintf("файловых систем: %d", n))
 				log.Debug().Int("файловых систем", n).Msg("файловые системы гостя заморожены")
 			}
 			return err
 		})
-	if err == nil && q.Level.Below(target) {
-		log.Warn().Str("уровень", string(q.Level)).Msg(q.Note)
+	if q.Note != "" && q.Level.Below(target) {
+		result.mark(model.RunEventFreezeFailed, 0, q.Note)
+		if err == nil {
+			log.Warn().Str("уровень", string(q.Level)).Msg(q.Note)
+		}
 	}
-	return q, err
+	if !q.Frozen {
+		frozenAt = time.Time{}
+	}
+	return q, frozenAt, err
 }
 
-func (d *Driver) thaw(ctx context.Context, dom golibvirt.Domain, frozen bool, log zerolog.Logger) {
-	if !frozen {
-		return
+func (d *Driver) thaw(ctx context.Context, dom golibvirt.Domain, frozenAt *time.Time,
+	result *Result, log zerolog.Logger) error {
+
+	if frozenAt == nil || frozenAt.IsZero() {
+		return nil
 	}
+	held := time.Since(*frozenAt)
 	// Detached context: a guest must be thawed even if the backup was
 	// cancelled, or it stops serving anything at all.
 	thawCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 60*time.Second)
@@ -451,7 +493,12 @@ func (d *Driver) thaw(ctx context.Context, dom golibvirt.Domain, frozen bool, lo
 	if err := d.conn.ThawFilesystems(thawCtx, dom); err != nil {
 		log.Error().Err(err).
 			Msg("НЕ УДАЛОСЬ РАЗМОРОЗИТЬ файловые системы гостя — проверьте ВМ немедленно")
+		result.mark(model.RunEventThawFailed, held, "проверьте ВМ немедленно")
+		return fmt.Errorf("разморозка файловых систем гостя: %w", err)
 	}
+	*frozenAt = time.Time{}
+	result.mark(model.RunEventThawed, held, "столько запись в госте стояла")
+	return nil
 }
 
 func humanBytes(n int64) string {

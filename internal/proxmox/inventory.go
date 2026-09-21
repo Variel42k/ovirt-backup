@@ -131,6 +131,37 @@ func (c *Client) GuestNode(ctx context.Context, vmID string) (string, error) {
 	return "", fmt.Errorf("гость Proxmox %s не найден в актуальном инвентаре", vmID)
 }
 
+// GuestIO returns the cumulative bytes read and written by one guest since it
+// was started. The caller derives rates from two readings.
+func (c *Client) GuestIO(ctx context.Context, vmID string) (readBytes, writeBytes int64, err error) {
+	node, err := c.GuestNode(ctx, vmID)
+	if err != nil {
+		return 0, 0, err
+	}
+	return c.GuestIOOnNode(ctx, vmID, node)
+}
+
+// GuestIOOnNode avoids a cluster-wide owner lookup on each sample when the
+// caller already resolved the node for a locked backup operation.
+func (c *Client) GuestIOOnNode(ctx context.Context, vmID, node string) (readBytes, writeBytes int64, err error) {
+	kind, numericID, err := ParseVMID(vmID)
+	if err != nil {
+		return 0, 0, err
+	}
+	if err := pathSegment("узел", node); err != nil {
+		return 0, 0, err
+	}
+	var status struct {
+		DiskRead  Number `json:"diskread"`
+		DiskWrite Number `json:"diskwrite"`
+	}
+	path := fmt.Sprintf("/nodes/%s/%s/%s/status/current", node, kind, numericID)
+	if err := c.do(ctx, http.MethodGet, path, nil, &status); err != nil {
+		return 0, 0, err
+	}
+	return status.DiskRead.Int64(), status.DiskWrite.Int64(), nil
+}
+
 // FetchInventory uses Proxmox's cluster-wide resources endpoint. It works when
 // pointed at any healthy member of a PVE cluster.
 func (c *Client) FetchInventory(ctx context.Context, serverID string) (*Inventory, error) {

@@ -20,7 +20,9 @@ defineProps<{ article: HelpArticle }>()
         <li v-for="(item, j) in block.items ?? []" :key="j" class="jhv-wrap">{{ item }}</li>
       </ul>
 
-      <q-markup-table v-else-if="block.kind === 'table'" flat bordered dense class="q-my-sm">
+      <!-- wrap-cells: без него Quasar ставит ячейкам nowrap, и длинная третья
+           колонка уезжает за край окна справки под горизонтальную прокрутку. -->
+      <q-markup-table v-else-if="block.kind === 'table'" flat bordered dense wrap-cells class="q-my-sm">
         <thead>
           <tr>
             <th v-for="(col, j) in block.columns ?? []" :key="j" class="text-left">{{ col }}</th>

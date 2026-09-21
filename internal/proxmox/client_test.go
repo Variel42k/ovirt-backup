@@ -59,6 +59,8 @@ func TestFetchInventoryAndPowerAction(t *testing.T) {
 				"ide2":       "none,media=cdrom",
 				"cipassword": "must-never-enter-the-manifest",
 			}
+		case r.Method == http.MethodGet && r.URL.Path == "/api2/json/nodes/pve01/qemu/101/status/current":
+			data = map[string]any{"diskread": "123456", "diskwrite": 789012}
 		case r.Method == http.MethodGet && r.URL.Path == "/api2/json/cluster/nextid":
 			data = "107"
 		case r.Method == http.MethodPost && r.URL.Path == "/api2/json/nodes/pve01/qemu/101/migrate":
@@ -97,6 +99,10 @@ func TestFetchInventoryAndPowerAction(t *testing.T) {
 	node, err := client.GuestNode(t.Context(), "qemu/101")
 	if err != nil || node != "pve01" {
 		t.Fatalf("unexpected current guest node %q: %v", node, err)
+	}
+	read, write, err := client.GuestIO(t.Context(), "qemu/101")
+	if err != nil || read != 123456 || write != 789012 {
+		t.Fatalf("unexpected guest IO: read=%d write=%d err=%v", read, write, err)
 	}
 	if err := client.VMAction(t.Context(), "qemu/101", "pve01", "migrate", "node/pve02"); err != nil {
 		t.Fatal(err)

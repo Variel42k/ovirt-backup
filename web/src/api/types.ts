@@ -810,6 +810,7 @@ export interface HealthSample {
 export interface DiskSample {
   id: number
   server_id: string
+  run_id?: string
   vm_id: string
   vm_name: string
   disk: string
@@ -1282,6 +1283,9 @@ export interface DBHost {
   private_key_stored: boolean
   host_key?: string
   trust_any_host_key: boolean
+  server_id?: string
+  vm_id?: string
+  monitor_engine?: DBEngine
   engines?: DBEngineInfo[]
   probed_at?: string
   probe_error?: string
@@ -1356,4 +1360,34 @@ export interface DBRestoreStatus {
   error?: string
   started_at: string
   ended_at?: string
+}
+
+export interface RunEvent {
+  id: string
+  run_id: string
+  kind: string
+  title: string
+  at: string
+  duration_ms: number
+  detail?: string
+}
+
+export interface DBStatsSample {
+  id: string
+  run_id: string
+  host_id: string
+  host_name: string
+  engine: DBEngine
+  at: string
+  commits: string
+  rollbacks: string
+  active: number
+  log_bytes: string
+  error?: string
+}
+
+export interface BackupTelemetry {
+  events: RunEvent[]
+  databases: DBStatsSample[]
+  disks: DiskSample[]
 }

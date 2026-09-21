@@ -537,8 +537,8 @@ type MonitorConfig struct {
 	HistoryRetention time.Duration `mapstructure:"history_retention"`
 	FailureThreshold int           `mapstructure:"failure_threshold"`
 	// CollectIOStats включает снятие метрик ввода-вывода дисков и здоровья
-	// монтирований NFS/iSCSI. Требует SSH-доступа к гипервизору, поэтому
-	// работает только для подключений типа kvm.
+	// монтирований NFS/iSCSI. Во время бэкапа дисковый I/O самой ВМ также
+	// снимается через API oVirt/Proxmox или libvirt.
 	CollectIOStats bool `mapstructure:"collect_io_stats"`
 	// IORetention — сколько хранить эти метрики. Они мельче проб состояния и
 	// копятся быстрее, поэтому срок отдельный.

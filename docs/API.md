@@ -821,6 +821,8 @@ S3 endpoint не передаёт данные через сервис и пот
 | `GET` | `/backups` | список; фильтры `server_id`, `vm_id`, `job_id`, `status`, `days`, `limit` |
 | `GET` | `/backups/{id}` | запуск вместе с дисками |
 | `GET` | `/backups/{id}/chain` | цепочка, от которой зависит эта точка |
+| `GET` | `/backups/{id}/events` | хронология этапов запуска и длительность заморозки |
+| `GET` | `/backups/{id}/telemetry` | хронология, счётчики СУБД и I/O ВМ за окно запуска |
 | `GET` | `/backups/{id}/copies` | физические копии точки и их состояние |
 | `GET` | `/backups/{id}/artifacts` | управляемые производные артефакты, включая QCOW2 |
 | `DELETE` | `/backups/{id}` | удалить данные из хранилища |

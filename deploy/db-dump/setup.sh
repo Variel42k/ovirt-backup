@@ -44,8 +44,11 @@ done
 [ -n "$PUBKEY" ] && [ -r "$PUBKEY" ] || die "укажите --pubkey с публичным ключом службы (его показывает интерфейс)"
 [ "$WANT_PG" -eq 1 ] || [ "$WANT_MY" -eq 1 ] || die "укажите --postgresql и/или --mysql"
 printf '%s' "$USER_NAME" | grep -Eq '^[a-z_][a-z0-9_]{0,31}$' || die "имя пользователя: строчная латиница, цифры и «_»"
-KEY=$(grep -Ev '^[[:space:]]*(#|$)' "$PUBKEY" | head -n 1)
-printf '%s' "$KEY" | grep -Eq '^(ssh-ed25519|ssh-rsa|ecdsa-sha2-[a-z0-9-]+) [A-Za-z0-9+/=]+' ||
+KEY_LINE=$(grep -Ev '^[[:space:]]*(#|$)' "$PUBKEY" | head -n 1)
+KEY_TYPE=$(printf '%s\n' "$KEY_LINE" | awk '{print $1}')
+KEY_DATA=$(printf '%s\n' "$KEY_LINE" | awk '{print $2}')
+KEY="$KEY_TYPE $KEY_DATA"
+printf '%s' "$KEY" | grep -Eq '^(ssh-ed25519|ssh-rsa|ecdsa-sha2-[a-z0-9-]+) [A-Za-z0-9+/=]+$' ||
     die "в $PUBKEY нет публичного ключа OpenSSH"
 
 # 1. Пользователь. Shell нужен: sshd выполняет forced command через него.
@@ -61,18 +64,27 @@ HOME_DIR=$(getent passwd "$USER_NAME" | cut -d: -f6)
 install -m 0755 -o root -g root "$HERE/jhvirt-db-dump" /usr/local/sbin/jhvirt-db-dump
 say "установлен /usr/local/sbin/jhvirt-db-dump"
 
-# 3. Ключ службы — только с forced command.
-install -d -m 0700 -o "$USER_NAME" -g "$(id -gn "$USER_NAME")" "$HOME_DIR/.ssh"
+# 3. Ключ службы — только с forced command. Каталог и файл
+# остаются у root: даже при компрометации непривилегированной учётки
+# она не сможет убрать restrict или заменить forced command.
+install -d -m 0755 -o root -g root "$HOME_DIR/.ssh"
 AUTH="$HOME_DIR/.ssh/authorized_keys"
+[ ! -L "$AUTH" ] || die "$AUTH не должен быть символической ссылкой"
 LINE="restrict,command=\"/usr/local/sbin/jhvirt-db-dump\" $KEY"
-if [ -f "$AUTH" ] && grep -qF "$KEY" "$AUTH"; then
-    say "ключ службы уже есть в $AUTH — проверьте, что строка начинается с restrict,command="
-else
-    printf '%s\n' "$LINE" >>"$AUTH"
-    say "ключ службы добавлен в $AUTH с restrict,command"
+# Rebuild the file on every run. An older/manual installation may contain the
+# same key without restrictions; merely noticing that line would leave shell
+# access enabled. Remove every occurrence of this key and add one canonical,
+# forced-command-only entry.
+AUTH_TMP=$(mktemp "${AUTH}.XXXXXX")
+trap 'rm -f "$AUTH_TMP"' EXIT HUP INT TERM
+if [ -f "$AUTH" ]; then
+    awk -v key="$KEY" 'index($0, key) == 0' "$AUTH" >"$AUTH_TMP"
 fi
-chown "$USER_NAME" "$AUTH"
-chmod 0600 "$AUTH"
+printf '%s\n' "$LINE" >>"$AUTH_TMP"
+install -m 0600 -o root -g root "$AUTH_TMP" "$AUTH"
+rm -f "$AUTH_TMP"
+trap - EXIT HUP INT TERM
+say "ключ службы установлен в $AUTH с restrict,command"
 if command -v restorecon >/dev/null 2>&1; then
     restorecon -R "$HOME_DIR/.ssh" /usr/local/sbin/jhvirt-db-dump 2>/dev/null || true
 fi
@@ -89,11 +101,12 @@ BEGIN
 END
 \$\$;
 GRANT pg_read_all_data TO $USER_NAME;
+GRANT pg_read_all_stats TO $USER_NAME;
 SQL
     if [ "$ALLOW_RESTORE" -eq 1 ]; then
         runuser -u postgres -- psql -X -q -v ON_ERROR_STOP=1 -d postgres -c "ALTER ROLE $USER_NAME CREATEDB"
     fi
-    say "роль PostgreSQL $USER_NAME: вход через сокет (peer), pg_read_all_data$([ "$ALLOW_RESTORE" -eq 1 ] && echo ', CREATEDB')"
+    say "роль PostgreSQL $USER_NAME: вход через сокет (peer), pg_read_all_data, pg_read_all_stats$([ "$ALLOW_RESTORE" -eq 1 ] && echo ', CREATEDB')"
     say "  pg_read_all_data есть с PostgreSQL 14; большие объекты (lo) требуют отдельного права"
 fi
 
@@ -113,9 +126,11 @@ if [ "$WANT_MY" -eq 1 ]; then
     say "учётная запись MySQL/MariaDB $USER_NAME@localhost: вход через сокет, права: $GRANTS"
 fi
 
-# 5. Настройки.
+# 5. Настройки. Каталог должен быть проходим для пользователя хелпера: иначе
+# хелпер не увидит db-dump.conf. Ранние версии guest-hooks/install.sh
+# закрывали его до 0700.
+install -d -m 0755 -o root -g root /etc/jhvirt
 if [ ! -e /etc/jhvirt/db-dump.conf ]; then
-    install -d -m 0755 -o root -g root /etc/jhvirt
     install -m 0644 -o root -g root "$HERE/db-dump.conf.example" /etc/jhvirt/db-dump.conf
     if [ "$ALLOW_RESTORE" -eq 1 ]; then
         sed -i 's/^#\{0,1\}JHVIRT_DB_ALLOW_RESTORE=.*/JHVIRT_DB_ALLOW_RESTORE=1/' /etc/jhvirt/db-dump.conf

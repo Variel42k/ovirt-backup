@@ -140,6 +140,63 @@ func (e *Engine) ListDatabases(ctx context.Context, hostID string, engine model.
 	return transport.List(ctx, engine)
 }
 
+// MonitorBackup samples linked databases until stop is called. Telemetry
+// failures are visible in history but never fail the backup itself.
+func (e *Engine) MonitorBackup(parent context.Context, run *model.BackupRun) func() {
+	hosts, err := e.store.ListDBHostsForVM(parent, run.ServerID, run.VMID)
+	if err != nil || len(hosts) == 0 {
+		return func() {}
+	}
+	ctx, cancel := context.WithCancel(context.WithoutCancel(parent))
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		sample := func() {
+			for _, host := range hosts {
+				probe := &model.DBStatsSample{RunID: run.ID, HostID: host.ID, HostName: host.Name, Engine: host.MonitorEngine}
+				transport, probeErr := e.dial(host)
+				if probeErr == nil {
+					if source, ok := transport.(StatsTransport); ok {
+						var stats Stats
+						stats, probeErr = source.Stats(ctx, host.MonitorEngine)
+						probe.Commits, probe.Rollbacks, probe.Active, probe.LogBytes = stats.Commits, stats.Rollbacks, stats.Active, stats.LogBytes
+					} else {
+						probeErr = errors.New("хелпер не поддерживает статистику")
+					}
+				}
+				// Cancellation is the normal end of a backup monitor. Do not turn it
+				// into a misleading final "database unavailable" sample.
+				if probeErr != nil && ctx.Err() != nil {
+					return
+				}
+				if probeErr != nil {
+					probe.Error = "статистика СУБД недоступна"
+					e.log.Debug().Err(probeErr).Str("хост", host.Name).Msg("не удалось получить статистику СУБД")
+				}
+				probe.At = time.Now().UTC()
+				saveCtx, saveCancel := context.WithTimeout(context.WithoutCancel(parent), 5*time.Second)
+				saveErr := e.store.AddDBStatsSample(saveCtx, probe)
+				saveCancel()
+				if saveErr != nil {
+					e.log.Debug().Err(saveErr).Msg("не удалось сохранить статистику СУБД")
+				}
+			}
+		}
+		sample()
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				sample()
+			}
+		}
+	}()
+	return func() { cancel(); <-done }
+}
+
 // Start запускает задание в фоне и сразу возвращает запись о запуске.
 func (e *Engine) Start(ctx context.Context, jobID string) (*model.DBDumpRun, error) {
 	job, err := e.store.GetDBDumpJob(ctx, jobID)

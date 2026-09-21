@@ -13,7 +13,7 @@ import (
 )
 
 const dbHostColumns = `id, name, address, port, username, private_key, host_key, trust_any_host_key,
-	engines, probed_at, probe_error, created_at, updated_at`
+	engines, probed_at, probe_error, created_at, updated_at, server_id, vm_id, monitor_engine`
 
 // CreateDBHost сохраняет подключение к хосту СУБД; ключ шифруется ключом службы.
 func (s *Store) CreateDBHost(ctx context.Context, h *model.DBHost) error {
@@ -29,9 +29,9 @@ func (s *Store) CreateDBHost(ctx context.Context, h *model.DBHost) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.db.Exec(ctx, `INSERT INTO db_hosts (`+dbHostColumns+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	_, err = s.db.Exec(ctx, `INSERT INTO db_hosts (`+dbHostColumns+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		h.ID, h.Name, h.Address, h.Port, h.Username, key, h.HostKey, h.TrustAnyHostKey,
-		encodeJSON(h.Engines), h.ProbedAt, h.ProbeErr, now, now)
+		encodeJSON(h.Engines), h.ProbedAt, h.ProbeErr, now, now, h.ServerID, h.VMID, string(h.MonitorEngine))
 	if err != nil {
 		if isUniqueViolation(err) {
 			return fmt.Errorf("%w: хост СУБД %q уже есть", ErrConflict, h.Name)
@@ -61,8 +61,9 @@ func (s *Store) UpdateDBHost(ctx context.Context, h *model.DBHost) error {
 	}
 	h.CreatedAt, h.UpdatedAt = existing.CreatedAt, time.Now().UTC()
 	_, err = s.db.Exec(ctx, `UPDATE db_hosts SET name=?, address=?, port=?, username=?, private_key=?,
-		host_key=?, trust_any_host_key=?, updated_at=? WHERE id=?`,
-		h.Name, h.Address, h.Port, h.Username, key, h.HostKey, h.TrustAnyHostKey, h.UpdatedAt, h.ID)
+		host_key=?, trust_any_host_key=?, updated_at=?, server_id=?, vm_id=?, monitor_engine=? WHERE id=?`,
+		h.Name, h.Address, h.Port, h.Username, key, h.HostKey, h.TrustAnyHostKey, h.UpdatedAt,
+		h.ServerID, h.VMID, string(h.MonitorEngine), h.ID)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return fmt.Errorf("%w: хост СУБД %q уже есть", ErrConflict, h.Name)
@@ -128,9 +129,11 @@ func (s *Store) scanDBHost(row rowScanner) (*model.DBHost, error) {
 		keyEnc, engines    string
 		probedAt           sql.NullTime
 		createdAt, updated time.Time
+		monitorEngine      string
 	)
 	err := row.Scan(&h.ID, &h.Name, &h.Address, &h.Port, &h.Username, &keyEnc, &h.HostKey,
-		&h.TrustAnyHostKey, &engines, &probedAt, &h.ProbeErr, &createdAt, &updated)
+		&h.TrustAnyHostKey, &engines, &probedAt, &h.ProbeErr, &createdAt, &updated,
+		&h.ServerID, &h.VMID, &monitorEngine)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -144,7 +147,25 @@ func (s *Store) scanDBHost(row rowScanner) (*model.DBHost, error) {
 	decodeJSON(engines, &h.Engines)
 	h.ProbedAt = nullTime(probedAt)
 	h.CreatedAt, h.UpdatedAt = utc(createdAt), utc(updated)
+	h.MonitorEngine = model.DBEngine(monitorEngine)
 	return &h, nil
+}
+
+func (s *Store) ListDBHostsForVM(ctx context.Context, serverID, vmID string) ([]*model.DBHost, error) {
+	rows, err := s.db.Query(ctx, `SELECT `+dbHostColumns+` FROM db_hosts WHERE server_id=? AND vm_id=? AND monitor_engine<>'' ORDER BY name`, serverID, vmID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []*model.DBHost{}
+	for rows.Next() {
+		h, err := s.scanDBHost(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, h)
+	}
+	return out, rows.Err()
 }
 
 const dbJobColumns = `id, name, enabled, host_id, engine, databases, include_globals, storage_target_ids,

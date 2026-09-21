@@ -301,6 +301,8 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /backups/{id}/undelete", s.perm(model.PermBackupsWrite, s.handleRestoreFromTrash))
 	mux.HandleFunc("POST /backups/{id}/cancel", s.perm(model.PermBackupsWrite, s.handleCancelRun))
 	mux.HandleFunc("GET /backups/{id}/chain", s.perm(model.PermBackupsRead, s.handleRunChain))
+	mux.HandleFunc("GET /backups/{id}/events", s.perm(model.PermBackupsRead, s.handleRunEvents))
+	mux.HandleFunc("GET /backups/{id}/telemetry", s.perm(model.PermBackupsRead, s.handleRunTelemetry))
 	mux.HandleFunc("GET /backups/{id}/copies", s.perm(model.PermBackupsRead, s.handleListBackupCopies))
 	mux.HandleFunc("GET /backups/{id}/artifacts", s.perm(model.PermBackupsRead, s.handleListRepositoryArtifacts))
 	mux.HandleFunc("POST /backups/{id}/copies", s.perm(model.PermBackupsWrite, s.handleCreateBackupCopy))

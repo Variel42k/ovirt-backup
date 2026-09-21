@@ -308,6 +308,8 @@ func (e *Engine) Execute(ctx context.Context, req RunRequest) (*model.BackupRun,
 		Int("дисков", len(disks)).
 		Str("родитель", run.ParentRunID).
 		Msg("бэкап запущен")
+	e.event(ctx, run, model.RunEventStarted, 0,
+		fmt.Sprintf("%s, дисков: %d, хранилище: %s", run.Type.Title(), len(disks), target.Name))
 
 	execCtx := ctx
 	var cancel context.CancelFunc
@@ -354,6 +356,7 @@ func (e *Engine) Execute(ctx context.Context, req RunRequest) (*model.BackupRun,
 	if err := e.writeRunManifest(execCtx, backend, srv, vm, run, manifests, vmConfig); err != nil {
 		return e.failRun(ctx, run, fmt.Errorf("запись манифеста запуска: %w", err))
 	}
+	e.event(execCtx, run, model.RunEventManifest, 0, "точка опубликована в хранилище")
 
 	ended := time.Now().UTC()
 	run.EndedAt = &ended
@@ -368,6 +371,9 @@ func (e *Engine) Execute(ctx context.Context, req RunRequest) (*model.BackupRun,
 	if err := e.store.UpdateBackupRun(ctx, run); err != nil {
 		log.Error().Err(err).Msg("бэкап выполнен, но запись о нём не обновлена")
 	}
+	e.event(ctx, run, model.RunEventFinished, ended.Sub(started),
+		fmt.Sprintf("прочитано %s, записано %s",
+			humanBytes(run.ReadBytes), humanBytes(run.StoredBytes)))
 
 	if mirror != nil {
 		for name, failed := range mirror.Failed() {
@@ -410,14 +416,20 @@ func (e *Engine) executeOVA(ctx context.Context, client *ovirt.Client, srv *mode
 	if err := e.store.UpdateBackupRun(ctx, run); err != nil {
 		e.log.Warn().Err(err).Str("run", run.ID).Msg("не удалось отметить OVA как выполняющийся")
 	}
+	e.event(ctx, run, model.RunEventStarted, 0, "экспорт OVA запущен на движке")
+	transferStarted := time.Now().UTC()
 	if err := e.runOVA(ctx, client, vm, run, req); err != nil {
 		return e.failRun(ctx, run, err)
 	}
+	e.event(ctx, run, model.RunEventTransfer, time.Since(transferStarted),
+		fmt.Sprintf("OVA создан: %s", humanBytes(run.StoredBytes)))
 	ended := time.Now().UTC()
 	run.EndedAt, run.Status, run.Progress = &ended, model.RunSucceeded, 100
 	if err := e.store.UpdateBackupRun(ctx, run); err != nil {
 		return run, fmt.Errorf("OVA создан, но запись о запуске не обновлена: %w", err)
 	}
+	e.event(ctx, run, model.RunEventFinished, ended.Sub(started),
+		fmt.Sprintf("OVA: %s", humanBytes(run.StoredBytes)))
 	e.log.Info().Str("run", run.ID).Str("vm", vm.Name).Str("path", run.RepoPath).
 		Msg("внешний OVA-артефакт создан")
 	return run, nil
@@ -656,15 +668,15 @@ func (e *Engine) runCBT(ctx context.Context, client *ovirt.Client, backend repo.
 		diskIDs = append(diskIDs, d.ID)
 	}
 
-	frozen, err := e.quiesce(ctx, client, vm, run, req)
+	frozenAt, err := e.quiesce(ctx, client, vm, run, req)
 	if err != nil {
 		return nil, err
 	}
-	thaw := func() {
-		if !frozen {
-			return
+	thaw := func() error {
+		if frozenAt.IsZero() {
+			return nil
 		}
-		frozen = false
+		held := time.Since(frozenAt)
 		// Use a detached context: the guest must be thawed even if the backup
 		// was cancelled.
 		thawCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 60*time.Second)
@@ -672,10 +684,16 @@ func (e *Engine) runCBT(ctx context.Context, client *ovirt.Client, backend repo.
 		if err := client.ThawFilesystems(thawCtx, vm.ID); err != nil {
 			e.log.Error().Err(err).Str("vm", vm.Name).
 				Msg("НЕ УДАЛОСЬ РАЗМОРОЗИТЬ файловые системы гостя — проверьте ВМ вручную")
+			e.event(ctx, run, model.RunEventThawFailed, held, "проверьте ВМ вручную")
+			return fmt.Errorf("разморозка файловых систем гостя: %w", err)
 		}
+		frozenAt = time.Time{}
+		e.event(ctx, run, model.RunEventThawed, held, "столько запись в госте стояла")
+		return nil
 	}
-	defer thaw()
+	defer func() { _ = thaw() }()
 
+	backupStarted := time.Now().UTC()
 	backup, err := client.StartBackup(ctx, vm.ID, diskIDs, p.FromCheckpointID)
 	if err != nil {
 		return nil, fmt.Errorf("запуск бэкапа на движке: %w", err)
@@ -702,13 +720,17 @@ func (e *Engine) runCBT(ctx context.Context, client *ovirt.Client, backend repo.
 		return nil, err
 	}
 	run.ToCheckpointID = ready.ToCheckpointID
+	e.event(ctx, run, model.RunEventCheckpoint, time.Since(backupStarted),
+		"с этого момента данные читаются из зафиксированной точки")
 	if err := e.store.UpdateBackupRun(ctx, run); err != nil {
 		e.log.Warn().Err(err).Msg("не удалось сохранить идентификатор checkpoint")
 	}
 
 	// The point in time is fixed once the backup is ready; the guest can run
 	// again while we read the frozen image.
-	thaw()
+	if err := thaw(); err != nil {
+		return nil, err
+	}
 
 	extentContext := imageio.ContextZero
 	if p.FromCheckpointID != "" {
@@ -727,20 +749,62 @@ func (e *Engine) runCBT(ctx context.Context, client *ovirt.Client, backend repo.
 }
 
 // quiesce prepares the guest for the point in time and records the level the
-// run actually reaches. true means the guest is frozen and must be thawed.
+// run actually reaches. A non-zero time means the guest is frozen since that
+// moment and must be thawed; the caller reports the window when it thaws.
 func (e *Engine) quiesce(ctx context.Context, client *ovirt.Client, vm *model.VM,
-	run *model.BackupRun, req RunRequest) (bool, error) {
-	q, err := QuiesceGuest(ctx, req.ConsistencyTarget(), req.RequireConsistency,
+	run *model.BackupRun, req RunRequest) (time.Time, error) {
+	target := req.ConsistencyTarget()
+	var frozenAt time.Time
+	q, err := QuiesceGuest(ctx, target, req.RequireConsistency,
 		GuestState{Running: vm.Running(), Agent: vm.GuestAgent},
-		func(ctx context.Context) error { return client.FreezeFilesystems(ctx, vm.ID) })
+		func(ctx context.Context) error {
+			e.event(ctx, run, model.RunEventFreezeRequested, 0, "уровень: "+target.Title())
+			asked := time.Now().UTC()
+			if err := client.FreezeFilesystems(ctx, vm.ID); err != nil {
+				return err
+			}
+			// Длительность здесь — подготовка гостя: агент и сценарии СУБД.
+			// Под нагрузкой CHECKPOINT занимает секунды, и это видно только тут.
+			frozenAt = time.Now().UTC()
+			e.event(ctx, run, model.RunEventFrozen, frozenAt.Sub(asked), "")
+			return nil
+		})
 	run.Consistency, run.ConsistencyNote = q.Level, q.Note
 	if err != nil {
-		return false, err
+		e.event(ctx, run, model.RunEventFreezeFailed, 0, q.Note)
+		return time.Time{}, err
 	}
-	if q.Note != "" && q.Level.Below(req.ConsistencyTarget()) {
+	if q.Note != "" && q.Level.Below(target) {
+		e.event(ctx, run, model.RunEventFreezeFailed, 0, q.Note)
 		e.log.Warn().Str("vm", vm.Name).Str("уровень", string(q.Level)).Msg(q.Note)
 	}
-	return q.Frozen, nil
+	if !q.Frozen {
+		return time.Time{}, nil
+	}
+	return frozenAt, nil
+}
+
+// event записывает отметку хронологии запуска.
+//
+// Хронология сопровождает бэкап, а не является им: потеря отметки не повод
+// ронять запуск. Контекст отвязан от отмены — последние отметки нужны как раз
+// тогда, когда запуск прерывают.
+func (e *Engine) event(ctx context.Context, run *model.BackupRun, kind model.RunEventKind,
+	took time.Duration, detail string) {
+
+	if run == nil || run.ID == "" {
+		return
+	}
+	saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	err := e.store.AddRunEvent(saveCtx, &model.RunEvent{
+		RunID: run.ID, Kind: kind, At: time.Now().UTC(),
+		Duration: took.Milliseconds(), Detail: detail,
+	})
+	if err != nil {
+		e.log.Debug().Err(err).Str("run", run.ID).Str("этап", string(kind)).
+			Msg("не удалось записать хронологию запуска")
+	}
 }
 
 // runSnapshot performs a hot backup through a temporary snapshot, for disks or
@@ -754,22 +818,33 @@ func (e *Engine) runSnapshot(ctx context.Context, client *ovirt.Client, backend 
 		diskIDs = append(diskIDs, d.ID)
 	}
 
-	frozen, err := e.quiesce(ctx, client, vm, run, req)
+	frozenAt, err := e.quiesce(ctx, client, vm, run, req)
 	if err != nil {
 		return nil, err
 	}
 
 	description := fmt.Sprintf("jhvirt backup %s", run.ID)
+	snapshotAsked := time.Now().UTC()
 	snap, err := client.CreateSnapshot(ctx, vm.ID, description, false, diskIDs)
-	if frozen {
+	thaw := func() error {
+		if frozenAt.IsZero() {
+			return nil
+		}
+		held := time.Since(frozenAt)
 		thawCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 60*time.Second)
+		defer cancel()
 		if thawErr := client.ThawFilesystems(thawCtx, vm.ID); thawErr != nil {
 			e.log.Error().Err(thawErr).Str("vm", vm.Name).
 				Msg("НЕ УДАЛОСЬ РАЗМОРОЗИТЬ файловые системы гостя — проверьте ВМ вручную")
+			e.event(ctx, run, model.RunEventThawFailed, held, "проверьте ВМ вручную")
+			return fmt.Errorf("разморозка файловых систем гостя: %w", thawErr)
 		}
-		cancel()
+		frozenAt = time.Time{}
+		e.event(ctx, run, model.RunEventThawed, held, "столько запись в госте стояла")
+		return nil
 	}
 	if err != nil {
+		_ = thaw()
 		return nil, fmt.Errorf("создание снапшота: %w", err)
 	}
 	run.SnapshotID = snap.ID
@@ -788,10 +863,20 @@ func (e *Engine) runSnapshot(ctx context.Context, client *ovirt.Client, backend 
 			e.log.Warn().Err(err).Str("snapshot", snap.ID).Msg("слияние снапшота ещё идёт")
 		}
 	}()
+	// Register after snapshot cleanup so a failed first thaw is retried before
+	// a potentially long snapshot merge starts during unwinding.
+	defer func() { _ = thaw() }()
+	if err := thaw(); err != nil {
+		return nil, err
+	}
 
 	if err := client.WaitSnapshotReady(ctx, vm.ID, snap.ID, 30*time.Minute); err != nil {
 		return nil, err
 	}
+	// Движок создаёт снапшот асинхронно: запрос возвращается сразу, а точка
+	// появляется здесь. Разница между этой отметкой и разморозкой показывает,
+	// сколько прошло между заморозкой гостя и самим снапшотом.
+	e.event(ctx, run, model.RunEventSnapshot, time.Since(snapshotAsked), "временный снапшот готов")
 
 	// The transfer must reference the disk *snapshot* (image_id), not the disk.
 	snapDisks, err := client.ListSnapshotDisks(ctx, vm.ID, snap.ID)
@@ -849,6 +934,7 @@ func (e *Engine) copyDisks(ctx context.Context, client *ovirt.Client, backend re
 		storeTotal int64
 	)
 
+	transferStarted := time.Now().UTC()
 	sem := make(chan struct{}, parallel)
 	var wg sync.WaitGroup
 
@@ -893,6 +979,9 @@ func (e *Engine) copyDisks(ctx context.Context, client *ovirt.Client, backend re
 			out = append(out, m)
 		}
 	}
+	e.event(ctx, run, model.RunEventTransfer, time.Since(transferStarted),
+		fmt.Sprintf("дисков сохранено: %d из %d; прочитано %s, записано %s",
+			len(out), len(disks), humanBytes(readTotal), humanBytes(storeTotal)))
 
 	switch {
 	case failed == len(disks):
@@ -1198,6 +1287,9 @@ func (e *Engine) failRun(ctx context.Context, run *model.BackupRun, err error) (
 		if updErr := e.store.UpdateBackupRun(saveCtx, run); updErr != nil {
 			e.log.Error().Err(updErr).Str("run", run.ID).Msg("не удалось записать неуспешный бэкап")
 		}
+		// Отметка пишется только для сохранённого запуска: до его создания
+		// ссылаться в хронологии не на что.
+		e.event(saveCtx, run, model.RunEventFailed, 0, run.Error)
 	}
 	return run, err
 }

@@ -42,6 +42,12 @@ type ProbeResult struct {
 	RestoreEnabled bool
 }
 
+type Stats struct{ Commits, Rollbacks, Active, LogBytes int64 }
+
+type StatsTransport interface {
+	Stats(context.Context, model.DBEngine) (Stats, error)
+}
+
 // ParseProbe разбирает ответ probe. Первая строка обязана быть версией
 // протокола: чужая программа на месте хелпера не должна сойти за него.
 func ParseProbe(out string) (*ProbeResult, error) {
@@ -118,6 +124,37 @@ func (t *SSHTransport) List(ctx context.Context, engine model.DBEngine) ([]strin
 		}
 	}
 	return names, nil
+}
+
+func (t *SSHTransport) Stats(ctx context.Context, engine model.DBEngine) (Stats, error) {
+	if !engine.Valid() {
+		return Stats{}, fmt.Errorf("неизвестная СУБД %q", engine)
+	}
+	var body bytes.Buffer
+	if err := t.run(ctx, fmt.Sprintf("%s stats %s", helper, engine), nil, &body); err != nil {
+		return Stats{}, err
+	}
+	return ParseStats(body.String(), engine)
+}
+
+// ParseStats validates the deliberately small helper response. Rejecting an
+// extra token keeps diagnostics or an unexpected program on the remote side
+// from being silently accepted as monitoring data.
+func ParseStats(body string, engine model.DBEngine) (Stats, error) {
+	var out Stats
+	var protocol, returned string
+	reader := strings.NewReader(body)
+	if _, err := fmt.Fscan(reader, &protocol, &returned, &out.Commits, &out.Rollbacks, &out.Active, &out.LogBytes); err != nil || protocol != "jhvirt-db-stats/1" || returned != string(engine) {
+		return Stats{}, errors.New("хост вернул некорректную статистику СУБД")
+	}
+	var extra string
+	if _, err := fmt.Fscan(reader, &extra); !errors.Is(err, io.EOF) {
+		return Stats{}, errors.New("хост вернул лишние данные после статистики СУБД")
+	}
+	if out.Commits < 0 || out.Rollbacks < 0 || out.Active < 0 || out.LogBytes < 0 {
+		return Stats{}, errors.New("хост вернул отрицательные счётчики СУБД")
+	}
+	return out, nil
 }
 
 func (t *SSHTransport) Dump(ctx context.Context, engine model.DBEngine, database string,

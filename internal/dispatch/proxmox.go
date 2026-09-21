@@ -88,6 +88,10 @@ func (d *Dispatcher) executeProxmox(ctx context.Context, srv *model.Server, req 
 	started := time.Now().UTC()
 	run.StartedAt, run.Status, run.Progress = &started, model.RunRunning, 3
 	_ = d.store.UpdateBackupRun(ctx, run)
+	// Заморозку на Proxmox выполняет сам vzdump внутри узла, поэтому отметок
+	// о ней здесь нет и быть не может — только границы запуска.
+	d.event(ctx, run, model.RunEventStarted, 0,
+		fmt.Sprintf("vzdump на узле %s, хранилище: %s", currentNode, target.Name))
 
 	provider := &backup.ProviderBackup{Name: "proxmox", GuestKind: metadata.GuestKind,
 		SourceNode: metadata.SourceNode, ProvisionedBytes: metadata.ProvisionedSize,
@@ -103,11 +107,14 @@ func (d *Dispatcher) executeProxmox(ctx context.Context, srv *model.Server, req 
 	if probeErr := plane.Probe(ctx, host); probeErr != nil {
 		return d.failRun(ctx, run, fmt.Errorf("проверка канала данных узла %s: %w", currentNode, probeErr))
 	}
+	transferStarted := time.Now().UTC()
 	artifact, artifactErr := d.writeProxmoxArtifact(ctx, backend, plane, host, srv, vm, run)
 	if artifactErr != nil {
 		return d.failRun(ctx, run, artifactErr)
 	}
 	run.ReadBytes, run.StoredBytes, run.Progress = artifact.SizeBytes, artifact.StoredBytes, 92
+	d.event(ctx, run, model.RunEventTransfer, time.Since(transferStarted),
+		fmt.Sprintf("архив vzdump сохранён: %s", humanBytes(run.StoredBytes)))
 
 	doc := &backup.RunManifest{
 		Format: backup.FormatName, Version: backup.FormatVersion, RunID: run.ID, JobID: run.JobID, JobName: run.JobName,
@@ -128,6 +135,7 @@ func (d *Dispatcher) executeProxmox(ctx context.Context, srv *model.Server, req 
 	if err := backup.WriteRunManifest(ctx, backend, run.RepoPath, doc); err != nil {
 		return d.failRun(ctx, run, fmt.Errorf("запись манифеста запуска: %w", err))
 	}
+	d.event(ctx, run, model.RunEventManifest, 0, "точка опубликована в хранилище")
 
 	ended := time.Now().UTC()
 	run.EndedAt, run.Progress, run.Status = &ended, 100, model.RunSucceeded
@@ -138,6 +146,8 @@ func (d *Dispatcher) executeProxmox(ctx context.Context, srv *model.Server, req 
 	if err := d.store.UpdateBackupRun(ctx, run); err != nil {
 		return run, err
 	}
+	d.event(ctx, run, model.RunEventFinished, ended.Sub(started),
+		fmt.Sprintf("архив vzdump: %s", humanBytes(run.StoredBytes)))
 	if mirror, ok := backend.(*repo.Mirror); ok {
 		for name, failed := range mirror.Failed() {
 			mirrorFailures[name] = failed

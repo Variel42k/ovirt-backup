@@ -19,13 +19,16 @@ import (
 // не закрыв ничего нового.
 
 type dbHostPayload struct {
-	Name            string `json:"name"`
-	Address         string `json:"address"`
-	Port            int    `json:"port"`
-	Username        string `json:"username"`
-	PrivateKey      string `json:"private_key"`
-	HostKey         string `json:"host_key"`
-	TrustAnyHostKey bool   `json:"trust_any_host_key"`
+	Name            string         `json:"name"`
+	Address         string         `json:"address"`
+	Port            int            `json:"port"`
+	Username        string         `json:"username"`
+	PrivateKey      string         `json:"private_key"`
+	HostKey         string         `json:"host_key"`
+	TrustAnyHostKey bool           `json:"trust_any_host_key"`
+	ServerID        string         `json:"server_id"`
+	VMID            string         `json:"vm_id"`
+	MonitorEngine   model.DBEngine `json:"monitor_engine"`
 }
 
 func (p dbHostPayload) apply(h *model.DBHost) {
@@ -38,6 +41,23 @@ func (p dbHostPayload) apply(h *model.DBHost) {
 	}
 	h.HostKey = strings.TrimSpace(p.HostKey)
 	h.TrustAnyHostKey = p.TrustAnyHostKey && h.HostKey == ""
+	h.ServerID, h.VMID, h.MonitorEngine = strings.TrimSpace(p.ServerID), strings.TrimSpace(p.VMID), p.MonitorEngine
+}
+
+func (s *Server) validateDBHost(ctx context.Context, host *model.DBHost) error {
+	if err := host.Validate(); err != nil {
+		return err
+	}
+	if host.VMID == "" {
+		return nil
+	}
+	if _, err := s.store.GetServer(ctx, host.ServerID); err != nil {
+		return fmt.Errorf("подключение виртуализации для мониторинга не найдено")
+	}
+	if _, err := s.store.GetVM(ctx, host.ServerID, host.VMID); err != nil {
+		return fmt.Errorf("ВМ для мониторинга не найдена в инвентаре")
+	}
+	return nil
 }
 
 func (s *Server) requireDBDump() error {
@@ -64,7 +84,7 @@ func (s *Server) handleCreateDBHost(w http.ResponseWriter, r *http.Request) {
 	}
 	host := &model.DBHost{}
 	payload.apply(host)
-	if err := host.Validate(); err != nil {
+	if err := s.validateDBHost(r.Context(), host); err != nil {
 		s.writeError(w, r, badRequest("%v", err))
 		return
 	}
@@ -90,7 +110,7 @@ func (s *Server) handleUpdateDBHost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	payload.apply(host)
-	if err := host.Validate(); err != nil {
+	if err := s.validateDBHost(r.Context(), host); err != nil {
 		s.writeError(w, r, badRequest("%v", err))
 		return
 	}

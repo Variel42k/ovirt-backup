@@ -9,7 +9,7 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
-const diskSampleColumns = `id, server_id, vm_id, vm_name, disk, read_bps, write_bps,
+const diskSampleColumns = `id, server_id, run_id, vm_id, vm_name, disk, read_bps, write_bps,
 	read_iops, write_iops, read_lat_us, write_lat_us, flush_lat_us, errors, errors_delta, at`
 
 const mountSampleColumns = `id, server_id, kind, target, source, healthy, state, operations,
@@ -23,14 +23,18 @@ func (s *Store) AddDiskSamples(ctx context.Context, samples []model.DiskSample) 
 	}
 	return s.db.InTx(ctx, func(tx *sql.Tx) error {
 		q := s.db.Rebind(`INSERT INTO disk_samples (` + diskSampleColumns +
-			`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+			`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 		for i := range samples {
 			sample := &samples[i]
 			if sample.At.IsZero() {
 				sample.At = time.Now().UTC()
 			}
+			var runID any
+			if sample.RunID != "" {
+				runID = sample.RunID
+			}
 			if _, err := tx.ExecContext(ctx, q, surrogateID(sample.At, i),
-				sample.ServerID, sample.VMID, sample.VMName, sample.Disk,
+				sample.ServerID, runID, sample.VMID, sample.VMName, sample.Disk,
 				sample.ReadBytesPerSec, sample.WriteBytesPerSec,
 				sample.ReadOpsPerSec, sample.WriteOpsPerSec,
 				sample.ReadLatencyUS, sample.WriteLatencyUS, sample.FlushLatencyUS,
@@ -80,9 +84,11 @@ func surrogateID(at time.Time, index int) int64 {
 // DiskSampleFilter narrows a query for the charts.
 type DiskSampleFilter struct {
 	ServerID string
+	RunID    string
 	VMID     string
 	Disk     string
 	Since    time.Time
+	Until    time.Time
 	Limit    int
 }
 
@@ -92,6 +98,10 @@ func (s *Store) ListDiskSamples(ctx context.Context, f DiskSampleFilter) ([]*mod
 	query := `SELECT ` + diskSampleColumns + ` FROM disk_samples WHERE server_id=?`
 	args := []any{f.ServerID}
 
+	if f.RunID != "" {
+		query += ` AND run_id=?`
+		args = append(args, f.RunID)
+	}
 	if f.VMID != "" {
 		query += ` AND vm_id=?`
 		args = append(args, f.VMID)
@@ -103,6 +113,10 @@ func (s *Store) ListDiskSamples(ctx context.Context, f DiskSampleFilter) ([]*mod
 	if !f.Since.IsZero() {
 		query += ` AND at >= ?`
 		args = append(args, f.Since)
+	}
+	if !f.Until.IsZero() {
+		query += ` AND at <= ?`
+		args = append(args, f.Until)
 	}
 	limit := f.Limit
 	if limit <= 0 {
@@ -119,19 +133,21 @@ func (s *Store) ListDiskSamples(ctx context.Context, f DiskSampleFilter) ([]*mod
 	}
 	defer rows.Close()
 
-	var out []*model.DiskSample
+	out := []*model.DiskSample{}
 	for rows.Next() {
 		var (
 			sample model.DiskSample
+			runID  sql.NullString
 			at     time.Time
 		)
-		if err := rows.Scan(&sample.ID, &sample.ServerID, &sample.VMID, &sample.VMName,
+		if err := rows.Scan(&sample.ID, &sample.ServerID, &runID, &sample.VMID, &sample.VMName,
 			&sample.Disk, &sample.ReadBytesPerSec, &sample.WriteBytesPerSec,
 			&sample.ReadOpsPerSec, &sample.WriteOpsPerSec, &sample.ReadLatencyUS,
 			&sample.WriteLatencyUS, &sample.FlushLatencyUS, &sample.Errors,
 			&sample.ErrorsDelta, &at); err != nil {
 			return nil, fmt.Errorf("scan disk sample: %w", err)
 		}
+		sample.RunID = runID.String
 		sample.At = utc(at)
 		out = append(out, &sample)
 	}

@@ -9,9 +9,11 @@ import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import { useOperationsStore } from '@/stores/operations'
 import HelpButton from '@/components/HelpButton.vue'
+import IOChart from '@/components/IOChart.vue'
+import type { IOPoint, TimeBand } from '@/components/IOChart.vue'
 import PageLoadError from '@/components/PageLoadError.vue'
 import { useUnsavedChanges } from '@/composables/unsavedChanges'
-import type { BackupCopy, BackupDisk, BackupRun, BootReport, Cluster, Host, ReplicationDetail, RepositoryArtifact, RestoreNetworkTarget, RestoreRun, RestoreVMPlan, StorageDomain, VerifyRun } from '@/api/types'
+import type { BackupCopy, BackupDisk, BackupRun, BackupTelemetry, BootReport, Cluster, DBStatsSample, Host, ReplicationDetail, RepositoryArtifact, RestoreNetworkTarget, RestoreRun, RestoreVMPlan, StorageDomain, VerifyRun } from '@/api/types'
 
 const $q = useQuasar()
 const route = useRoute()
@@ -59,6 +61,9 @@ const detailOpen = ref(false)
 const chain = ref<BackupRun[]>([])
 const verifications = ref<VerifyRun[]>([])
 const artifacts = ref<RepositoryArtifact[]>([])
+const telemetry = ref<BackupTelemetry>({ events: [], databases: [], disks: [] })
+const telemetryLoading = ref(false)
+const telemetryError = ref('')
 const replications = ref<BackupCopy[]>([])
 const replicationsLoading = ref(false)
 const replicationOpen = ref(false)
@@ -211,29 +216,173 @@ async function load(silent = false) {
 
 async function openDetail(run: BackupRun) {
   const sequence = ++detailLoadSequence
+  const changingRun = detail.value?.id !== run.id
   detailOpen.value = true
   detail.value = run
   chain.value = []
   verifications.value = []
 	artifacts.value = []
   runRestores.value = []
+  if (changingRun) telemetry.value = { events: [], databases: [], disks: [] }
+  telemetryLoading.value = true
+  telemetryError.value = ''
   try {
-    const [full, chainRuns, verifyRuns, restoreRuns, artifactRuns] = await Promise.all([
+    const [fullResult, chainResult, verifyResult, restoreResult, artifactResult, telemetryResult] = await Promise.allSettled([
       api.getRun(run.id),
       api.runChain(run.id),
       api.listVerifications(run.id),
       api.listRestores(run.id),
 			api.listRepositoryArtifacts(run.id),
+      api.runTelemetry(run.id),
     ])
     if (sequence !== detailLoadSequence || !detailOpen.value || detail.value?.id !== run.id) return
-    detail.value = full
-    chain.value = chainRuns
-    verifications.value = verifyRuns
-    runRestores.value = restoreRuns
-		artifacts.value = artifactRuns
+    const required = [fullResult, chainResult, verifyResult, restoreResult, artifactResult]
+    const failed = required.find((result) => result.status === 'rejected')
+    if (failed?.status === 'rejected') throw failed.reason
+    detail.value = fullResult.status === 'fulfilled' ? fullResult.value : run
+    chain.value = chainResult.status === 'fulfilled' ? chainResult.value : []
+    verifications.value = verifyResult.status === 'fulfilled' ? verifyResult.value : []
+    runRestores.value = restoreResult.status === 'fulfilled' ? restoreResult.value : []
+		artifacts.value = artifactResult.status === 'fulfilled' ? artifactResult.value : []
+    if (telemetryResult.status === 'fulfilled') telemetry.value = telemetryResult.value
+    else telemetryError.value = errorMessage(telemetryResult.reason)
   } catch (err) {
     if (sequence === detailLoadSequence && detailOpen.value) notifyError(err, 'Не удалось загрузить подробности')
+  } finally {
+    if (sequence === detailLoadSequence) telemetryLoading.value = false
   }
+}
+
+const freezeBands = computed<TimeBand[]>(() => {
+  const bands: TimeBand[] = []
+  let frozenAt = ''
+  let lastFailure = ''
+  for (const event of [...telemetry.value.events].sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime())) {
+    if (event.kind === 'frozen') {
+      frozenAt = event.at
+      lastFailure = ''
+      continue
+    }
+    if (!frozenAt) continue
+    if (event.kind === 'thaw_failed') {
+      lastFailure = event.at
+      continue
+    }
+    if (event.kind === 'thawed') {
+      const duration = Math.max(0, new Date(event.at).getTime() - new Date(frozenAt).getTime())
+      bands.push({ from: frozenAt, to: event.at, label: `Гость был заморожен ${durationLabel(duration)}` })
+      frozenAt = ''
+      lastFailure = ''
+    }
+  }
+  if (frozenAt && lastFailure) {
+    const duration = Math.max(0, new Date(lastFailure).getTime() - new Date(frozenAt).getTime())
+    bands.push({ from: frozenAt, to: lastFailure, label: `Разморозка не подтверждена после ${durationLabel(duration)}`, color: '#c10015' })
+  } else if (frozenAt) {
+    const running = ['pending', 'running'].includes(detail.value?.status ?? '')
+    const until = running ? new Date().toISOString() : (detail.value?.ended_at ?? new Date().toISOString())
+    const duration = Math.max(0, new Date(until).getTime() - new Date(frozenAt).getTime())
+    bands.push({
+      from: frozenAt,
+      to: until,
+      label: running
+        ? `Гость сейчас заморожен (${durationLabel(duration)})`
+        : `В истории нет подтверждённой разморозки (${durationLabel(duration)})`,
+      color: running ? '#ff9800' : '#c10015',
+    })
+  }
+  return bands
+})
+
+const frozenDuration = computed(() => freezeBands.value.reduce((total, band) =>
+  total + Math.max(0, new Date(band.to).getTime() - new Date(band.from).getTime()), 0))
+const lastGuestFreezeEvent = computed(() =>
+  [...telemetry.value.events].reverse().find((event) =>
+    event.kind === 'frozen' || event.kind === 'thawed' || event.kind === 'thaw_failed'))
+const guestCurrentlyFrozen = computed(() =>
+  lastGuestFreezeEvent.value?.kind === 'frozen' && ['pending', 'running'].includes(detail.value?.status ?? ''))
+const guestMayBeFrozen = computed(() => lastGuestFreezeEvent.value?.kind === 'thaw_failed'
+  || (lastGuestFreezeEvent.value?.kind === 'frozen' && !guestCurrentlyFrozen.value))
+
+const vmIOPoints = computed<IOPoint[]>(() => {
+  const points = new Map<string, IOPoint>()
+  for (const sample of telemetry.value.disks) {
+    const point = points.get(sample.at) ?? {
+      at: sample.at, read: 0, write: 0, readLatency: -1, writeLatency: -1,
+    }
+    point.read += sample.read_bytes_per_sec
+    point.write += sample.write_bytes_per_sec
+    point.readLatency = Math.max(point.readLatency ?? -1, sample.read_latency_us)
+    point.writeLatency = Math.max(point.writeLatency ?? -1, sample.write_latency_us)
+    point.bad = point.bad || sample.errors_delta > 0
+    points.set(sample.at, point)
+  }
+  return [...points.values()].sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime())
+})
+
+interface DatabaseSeries {
+  key: string
+  label: string
+  transactionPoints: IOPoint[]
+  logPoints: IOPoint[]
+  latest?: DBStatsSample
+  errors: number
+}
+
+function counterDelta(current: string, previous: string): number | null {
+  try {
+    const value = BigInt(current) - BigInt(previous)
+    return value < 0n ? null : Number(value)
+  } catch {
+    return null
+  }
+}
+
+const databaseSeries = computed<DatabaseSeries[]>(() => {
+  const groups = new Map<string, DBStatsSample[]>()
+  for (const sample of telemetry.value.databases) {
+    const key = `${sample.host_id}/${sample.engine}`
+    groups.set(key, [...(groups.get(key) ?? []), sample])
+  }
+  return [...groups.entries()].map(([key, raw]) => {
+    const samples = [...raw].sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime())
+    const transactionPoints: IOPoint[] = []
+    const logPoints: IOPoint[] = []
+    for (let index = 1; index < samples.length; index += 1) {
+      const previous = samples[index - 1]
+      const current = samples[index]
+      if (previous.error || current.error) continue
+      const seconds = (new Date(current.at).getTime() - new Date(previous.at).getTime()) / 1000
+      const commits = counterDelta(current.commits, previous.commits)
+      const rollbacks = counterDelta(current.rollbacks, previous.rollbacks)
+      const logBytes = counterDelta(current.log_bytes, previous.log_bytes)
+      if (seconds <= 0 || commits === null || rollbacks === null || logBytes === null) continue
+      transactionPoints.push({ at: current.at, read: commits / seconds, write: rollbacks / seconds, bad: rollbacks > 0 })
+      logPoints.push({ at: current.at, read: logBytes / seconds, write: 0 })
+    }
+    const latest = [...samples].reverse().find((sample) => !sample.error)
+    return {
+      key,
+      label: `${latest?.host_name || samples[0]?.host_name || samples[0]?.host_id || 'СУБД'} · ${samples[0]?.engine === 'postgresql' ? 'PostgreSQL' : 'MySQL / MariaDB'}`,
+      transactionPoints,
+      logPoints,
+      latest,
+      errors: samples.filter((sample) => Boolean(sample.error)).length,
+    }
+  })
+})
+
+function durationLabel(milliseconds: number): string {
+  if (milliseconds < 1000) return `${milliseconds} мс`
+  if (milliseconds < 60_000) return `${(milliseconds / 1000).toFixed(1)} с`
+  return `${Math.floor(milliseconds / 60_000)} мин ${Math.round((milliseconds % 60_000) / 1000)} с`
+}
+
+function eventColor(kind: string): string {
+  if (kind === 'run_failed' || kind === 'freeze_failed' || kind === 'thaw_failed') return 'negative'
+  if (kind === 'run_finished' || kind === 'manifest_written') return 'positive'
+  if (kind === 'frozen' || kind === 'thawed') return 'warning'
+  return 'primary'
 }
 
 const runRestores = ref<RestoreRun[]>([])
@@ -1227,7 +1376,7 @@ const replicationColumns = [
 
     <!-- Подробности запуска -->
     <q-dialog v-model="detailOpen">
-      <q-card style="width: 900px; max-width: 96vw">
+      <q-card style="width: 1100px; max-width: 96vw">
         <q-card-section class="text-h6">
           {{ detail?.vm_name }} — {{ app.backupTypeTitle(detail?.type) }}
           <div class="text-caption text-grey-7">{{ dateTime(detail?.created_at) }}</div>
@@ -1253,6 +1402,99 @@ const replicationColumns = [
               <div class="text-h6">{{ elapsed(detail?.started_at, detail?.ended_at) }}</div>
             </div>
           </div>
+
+          <div class="row items-center q-mb-xs">
+            <div class="text-subtitle2">Ход выполнения и влияние на ВМ</div>
+            <q-space />
+            <q-spinner v-if="telemetryLoading" color="primary" size="20px" />
+            <q-badge v-if="frozenDuration > 0" color="warning" outline>
+              запись в госте стояла {{ durationLabel(frozenDuration) }}
+            </q-badge>
+          </div>
+          <PageLoadError
+            v-if="telemetryError"
+            :message="telemetryError"
+            title="Телеметрия запуска недоступна"
+            class="q-mb-md"
+            @retry="detail && openDetail(detail)"
+          />
+          <q-banner v-if="guestMayBeFrozen" dense class="bg-red-1 text-negative q-mb-md">
+            <template #avatar><q-icon name="error" /></template>
+            Разморозка гостя не подтверждена. Немедленно проверьте файловые системы ВМ вручную.
+          </q-banner>
+          <q-banner v-else-if="guestCurrentlyFrozen" dense class="bg-orange-1 text-warning q-mb-md">
+            <template #avatar><q-spinner color="warning" size="24px" /></template>
+            Гость сейчас заморожен: служба фиксирует точку бэкапа. Карточка обновляется автоматически.
+          </q-banner>
+          <div class="row q-col-gutter-md q-mb-md">
+            <div class="col-12 col-md-5">
+              <q-timeline v-if="telemetry.events.length" layout="dense" color="primary" class="q-my-none">
+                <q-timeline-entry
+                  v-for="event in telemetry.events"
+                  :key="event.id"
+                  :title="event.title"
+                  :subtitle="`${dateTime(event.at)}${event.duration_ms ? ` · ${durationLabel(event.duration_ms)}` : ''}`"
+                  :color="eventColor(event.kind)"
+                  :icon="['run_failed', 'freeze_failed', 'thaw_failed'].includes(event.kind) ? 'error' : undefined"
+                >
+                  <div v-if="event.detail" class="text-caption jhv-wrap">{{ event.detail }}</div>
+                </q-timeline-entry>
+              </q-timeline>
+              <div v-else-if="!telemetryLoading" class="jhv-reason">
+                У старых запусков хронология отсутствует. Для текущего запуска этапы появляются по мере выполнения.
+              </div>
+            </div>
+            <div class="col-12 col-md-7">
+              <div class="text-caption text-weight-medium q-mb-xs">Ввод-вывод дисков ВМ</div>
+              <IOChart :points="vmIOPoints" :bands="freezeBands" :height="190" />
+              <div v-if="!vmIOPoints.length && !telemetryLoading" class="jhv-reason q-mt-xs">
+                За время запуска замеров I/O не получено. Проверьте, что сбор метрик включён, а учётная запись виртуализации может читать статистику дисков.
+              </div>
+            </div>
+          </div>
+
+          <template v-if="databaseSeries.length">
+            <div class="text-subtitle2 q-mb-xs">Транзакции СУБД</div>
+            <div class="jhv-reason q-mb-sm">
+              Накопительные счётчики читаются через защищённый SSH-хелпер без записи в пользовательские базы.
+              Оранжевая полоса — измеренный интервал заморозки гостя.
+            </div>
+            <q-card v-for="series in databaseSeries" :key="series.key" flat bordered class="q-mb-md">
+              <q-card-section class="q-pb-none">
+                <div class="row items-center">
+                  <div class="text-weight-medium">{{ series.label }}</div>
+                  <q-space />
+                  <div v-if="series.latest" class="text-caption text-grey-7">
+                    активных соединений: {{ series.latest.active }}
+                  </div>
+                </div>
+                <q-banner v-if="series.errors" dense class="bg-orange-1 q-mt-sm">
+                  {{ series.errors }} {{ series.errors === 1 ? 'замер не выполнен' : 'замеров не выполнено' }}. Проверьте хелпер и права чтения статистики.
+                </q-banner>
+              </q-card-section>
+              <q-card-section>
+                <div class="text-caption text-grey-7">Транзакции в секунду</div>
+                <IOChart
+                  :points="series.transactionPoints"
+                  :bands="freezeBands"
+                  unit="count"
+                  read-label="коммиты"
+                  write-label="откаты"
+                  :show-latency="false"
+                  :height="145"
+                />
+                <div class="text-caption text-grey-7 q-mt-md">Запись журнала транзакций</div>
+                <IOChart
+                  :points="series.logPoints"
+                  :bands="freezeBands"
+                  read-label="WAL / redo"
+                  write-label=""
+                  :show-latency="false"
+                  :height="120"
+                />
+              </q-card-section>
+            </q-card>
+          </template>
 
 			<div class="text-subtitle2 q-mb-xs">Физические копии</div>
 			<q-list dense bordered separator class="q-mb-md">

@@ -41,11 +41,22 @@ type Dispatcher struct {
 	cipher         *secret.Cipher
 	log            zerolog.Logger
 	proxmoxRestore sync.Mutex
+	telemetry      []interface {
+		MonitorBackup(context.Context, *model.BackupRun) func()
+	}
 }
 
 // SetProxmoxPool enables the native Proxmox data path while keeping New
 // source-compatible with tests and small embeddings that do not use it.
 func (d *Dispatcher) SetProxmoxPool(pool *proxmox.Pool) { d.proxmox = pool }
+
+func (d *Dispatcher) SetTelemetryMonitor(value interface {
+	MonitorBackup(context.Context, *model.BackupRun) func()
+}) {
+	if value != nil {
+		d.telemetry = append(d.telemetry, value)
+	}
+}
 
 // New builds a dispatcher over the existing engine.
 func New(engine *backup.Engine, st *store.Store, pool *libvirtx.Pool,
@@ -57,6 +68,23 @@ func New(engine *backup.Engine, st *store.Store, pool *libvirtx.Pool,
 
 // Execute performs one backup, choosing the driver by connection type.
 func (d *Dispatcher) Execute(ctx context.Context, req backup.RunRequest) (*model.BackupRun, error) {
+	originalCreated := req.OnRunCreated
+	var stops []func()
+	req.OnRunCreated = func(run *model.BackupRun) {
+		if originalCreated != nil {
+			originalCreated(run)
+		}
+		for _, telemetry := range d.telemetry {
+			if stop := telemetry.MonitorBackup(ctx, run); stop != nil {
+				stops = append(stops, stop)
+			}
+		}
+	}
+	defer func() {
+		for index := len(stops) - 1; index >= 0; index-- {
+			stops[index]()
+		}
+	}()
 	srv, err := d.store.GetServer(ctx, req.ServerID)
 	if err != nil {
 		return nil, fmt.Errorf("сервер: %w", err)
@@ -223,8 +251,14 @@ func (d *Dispatcher) executeLibvirt(ctx context.Context, srv *model.Server, req 
 	// there is nothing extra to wrap here.
 	execCtx := ctx
 
+	d.event(ctx, run, model.RunEventStarted, 0,
+		fmt.Sprintf("%s, хранилище: %s", run.Type.Title(), target.Name))
+
 	result, err := driver.Backup(execCtx, driverReq)
 	if result != nil {
+		// Хронологию собирает драйвер, а записать её может только диспетчер:
+		// базы у драйвера нет. Отметки идут и при неуспехе — тогда они и нужны.
+		d.saveTimeline(ctx, run, result.Timeline)
 		run.Type = result.Type
 		// Что не попало в копию — в запись о запуске, а не только в журнал:
 		// «успешный» бэкап с тихо выпавшим диском выглядит как защита,
@@ -291,6 +325,7 @@ func (d *Dispatcher) executeLibvirt(ctx context.Context, srv *model.Server, req 
 	if err := d.writeRunManifest(execCtx, backend, srv, vm, run, result); err != nil {
 		return d.failRun(ctx, run, fmt.Errorf("запись манифеста запуска: %w", err))
 	}
+	d.event(execCtx, run, model.RunEventManifest, 0, "точка опубликована в хранилище")
 
 	ended := time.Now().UTC()
 	run.EndedAt = &ended
@@ -303,6 +338,9 @@ func (d *Dispatcher) executeLibvirt(ctx context.Context, srv *model.Server, req 
 	if err := d.store.UpdateBackupRun(ctx, run); err != nil {
 		log.Error().Err(err).Msg("бэкап выполнен, но запись о нём не обновлена")
 	}
+	d.event(ctx, run, model.RunEventFinished, ended.Sub(started),
+		fmt.Sprintf("прочитано %s, записано %s",
+			humanBytes(run.ReadBytes), humanBytes(run.StoredBytes)))
 
 	log.Info().
 		Str("тип", string(run.Type)).
@@ -394,8 +432,36 @@ func (d *Dispatcher) failRun(ctx context.Context, run *model.BackupRun, cause er
 		if err := d.store.UpdateBackupRun(saveCtx, run); err != nil {
 			d.log.Error().Err(err).Str("run", run.ID).Msg("не удалось записать неуспешный бэкап")
 		}
+		d.event(saveCtx, run, model.RunEventFailed, 0, run.Error)
 	}
 	return run, cause
+}
+
+// event записывает отметку хронологии запуска; потеря отметки бэкап не роняет.
+func (d *Dispatcher) event(ctx context.Context, run *model.BackupRun, kind model.RunEventKind,
+	took time.Duration, detail string) {
+
+	d.saveTimeline(ctx, run, []model.RunEvent{{
+		Kind: kind, At: time.Now().UTC(), Duration: took.Milliseconds(), Detail: detail,
+	}})
+}
+
+// saveTimeline записывает отметки, собранные драйвером или самим диспетчером.
+func (d *Dispatcher) saveTimeline(ctx context.Context, run *model.BackupRun, events []model.RunEvent) {
+	if run == nil || run.ID == "" || len(events) == 0 {
+		return
+	}
+	saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	for i := range events {
+		event := events[i]
+		event.RunID = run.ID
+		if err := d.store.AddRunEvent(saveCtx, &event); err != nil {
+			d.log.Debug().Err(err).Str("run", run.ID).Str("этап", string(event.Kind)).
+				Msg("не удалось записать хронологию запуска")
+			return
+		}
+	}
 }
 
 // diskTargets converts stored disk identifiers to the libvirt target names the

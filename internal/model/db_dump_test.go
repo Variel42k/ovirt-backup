@@ -1,6 +1,10 @@
 package model
 
-import "testing"
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
 
 func TestValidDBName(t *testing.T) {
 	good := []string{"billing", "crm_2026", "app.prod", "a-b", "_tmp", "X"}
@@ -66,6 +70,52 @@ func TestDBDumpJobValidate(t *testing.T) {
 		mutate(&j)
 		if j.Validate() == nil {
 			t.Errorf("%s: задание принято", name)
+		}
+	}
+}
+
+func TestDBHostMonitoringLinkIsAllOrNothing(t *testing.T) {
+	base := DBHost{
+		Name: "database", Address: "db.example.org", Port: 22, Username: "jhvirt_dump",
+		PrivateKey: "key", HostKey: "ssh-ed25519 AAAA",
+	}
+	valid := base
+	valid.ServerID, valid.VMID, valid.MonitorEngine = "server", "vm", DBEnginePostgreSQL
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("valid monitoring link rejected: %v", err)
+	}
+	for name, mutate := range map[string]func(*DBHost){
+		"server only": func(host *DBHost) { host.ServerID = "server" },
+		"vm only":     func(host *DBHost) { host.VMID = "vm" },
+		"engine only": func(host *DBHost) { host.MonitorEngine = DBEnginePostgreSQL },
+		"no engine": func(host *DBHost) {
+			host.ServerID, host.VMID = "server", "vm"
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			host := base
+			mutate(&host)
+			if err := host.Validate(); err == nil {
+				t.Fatal("incomplete monitoring link accepted")
+			}
+		})
+	}
+}
+
+func TestDBStatsCumulativeCountersKeepJSONPrecision(t *testing.T) {
+	raw, err := json.Marshal(DBStatsSample{
+		Commits: 9007199254740993, Rollbacks: 9007199254740994, LogBytes: 9007199254740995,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`"commits":"9007199254740993"`,
+		`"rollbacks":"9007199254740994"`,
+		`"log_bytes":"9007199254740995"`,
+	} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("counter lost its string representation: %s", raw)
 		}
 	}
 }

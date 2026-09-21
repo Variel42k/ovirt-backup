@@ -22,6 +22,9 @@ import "time"
 type DiskSample struct {
 	ID       int64  `json:"id"`
 	ServerID string `json:"server_id"`
+	// RunID is set for high-frequency samples collected during one backup.
+	// General infrastructure monitoring leaves it empty.
+	RunID string `json:"run_id,omitempty"`
 	// VMID и Disk — чья это нагрузка; Disk — целевое имя (vda) или id диска.
 	VMID   string `json:"vm_id"`
 	VMName string `json:"vm_name"`

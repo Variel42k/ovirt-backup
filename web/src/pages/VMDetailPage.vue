@@ -2,14 +2,14 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useQuasar } from 'quasar'
 import { api, errorMessage, notifyError, notifyOk } from '@/api/client'
-import { ago, bytes, dateTime, runStatus, statusColor, vmStatus } from '@/api/format'
+import { ago, bytes, consistencyOptions, dateTime, runStatus, statusColor, vmStatus } from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import BackupOptionsPicker from '@/components/BackupOptionsPicker.vue'
 import BackupTypeHelpCard from '@/components/BackupTypeHelpCard.vue'
 import HelpButton from '@/components/HelpButton.vue'
 import PageLoadError from '@/components/PageLoadError.vue'
-import type { BackupOption, BackupRun, Disk, Recommendation, SchedulePreset, VM } from '@/api/types'
+import type { BackupOption, BackupRun, Consistency, Disk, Recommendation, SchedulePreset, VM } from '@/api/types'
 
 const props = defineProps<{ serverId: string; vmId: string }>()
 
@@ -31,7 +31,9 @@ let pageLoadSequence = 0
 
 const selectedStorage = ref<string | null>(null)
 const selectedType = ref<string>('')
-const quiesce = ref(false)
+const consistency = ref<Consistency>('crash')
+const requireConsistency = ref(false)
+let consistencyPicked = false
 const encrypt = ref(false)
 const verifyAfter = ref<string>('')
 const verifyOptions = ref({
@@ -55,6 +57,16 @@ const bootHosts = computed(() => app.servers.filter((s) => s.kind === 'kvm' && s
 const sourceServer = computed(() => app.servers.find((s) => s.id === props.serverId))
 const backupSupported = computed(() => Boolean(sourceServer.value && app.serverSupports(sourceServer.value, 'supports_backup')))
 const backupPlanningAvailable = computed(() => backupSupported.value && auth.can('jobs.read'))
+// Proxmox морозит гостя сам (vzdump при agent=1): требовать уровень там нельзя.
+const isProxmox = computed(() => sourceServer.value?.kind === 'proxmox')
+const consistencyChoices = computed(() => consistencyOptions.map((option) => ({
+  ...option,
+  disable: option.value !== 'crash' && !assessment.value?.guest_agent,
+})))
+
+function pickConsistency() {
+  consistencyPicked = true
+}
 
 async function load() {
   const sequence = ++pageLoadSequence
@@ -108,7 +120,11 @@ async function loadRecommendation() {
       selectedType.value = recommended?.type ?? ''
       verifyAfter.value = recommended?.suggested_verify ?? ''
     }
-    quiesce.value = result.assessment.guest_agent
+    // Без агента заморозка невозможна. С агентом — файловые системы по
+    // умолчанию, пока оператор не выбрал уровень сам: смена хранилища
+    // перечитывает рекомендации и не должна сбрасывать его выбор.
+    if (!result.assessment.guest_agent) consistency.value = 'crash'
+    else if (!consistencyPicked) consistency.value = 'filesystem'
     if (!verifyOptions.value.boot_host_id) {
       const source = app.servers.find((s) => s.id === props.serverId)
       verifyOptions.value.boot_host_id = source?.kind === 'kvm' ? source.id : ''
@@ -142,7 +158,10 @@ async function startBackup() {
       vm_id: props.vmId,
       type: selectedType.value,
       storage_target_id: selectedStorage.value,
-      quiesce: quiesce.value,
+      // quiesce — для служб прежней версии, которые уровня не знают.
+      quiesce: consistency.value !== 'crash',
+      consistency: consistency.value,
+      require_consistency: requireConsistency.value && consistency.value !== 'crash' && !isProxmox.value,
       encrypt: encrypt.value,
       verify_after: verifyAfter.value || undefined,
       verify_options: verifyAfter.value === 'boot' ? verifyOptions.value : undefined,
@@ -293,7 +312,7 @@ onMounted(load)
 
           <q-separator />
           <q-card-section class="row q-col-gutter-md items-end">
-            <div class="col-12 col-sm-5">
+            <div class="col-12 col-sm-4">
               <q-select
                 v-model="selectedStorage"
                 :options="app.enabledStorages.map((s) => ({ label: s.name, value: s.id }))"
@@ -317,14 +336,41 @@ onMounted(load)
                 <template #append><HelpButton article="verify" label="Режимы проверки" /></template>
               </q-select>
             </div>
-            <div class="col-6 col-sm-3">
-              <span class="inline-block">
-                <q-toggle v-model="quiesce" :disable="!assessment?.guest_agent" label="Заморозить ФС гостя" dense />
-                <HelpButton article="quiesce" label="Что делает заморозка" />
-              </span>
+            <div class="col-12 col-sm-4">
+              <q-select
+                v-model="consistency"
+                :options="consistencyChoices"
+                emit-value
+                map-options
+                option-disable="disable"
+                label="Согласованность копии"
+                outlined
+                dense
+                data-testid="adhoc-consistency"
+                @update:model-value="pickConsistency"
+              >
+                <template #option="scope">
+                  <q-item v-bind="scope.itemProps">
+                    <q-item-section>
+                      <q-item-label>{{ scope.opt.label }}</q-item-label>
+                      <q-item-label caption>{{ scope.opt.caption }}</q-item-label>
+                    </q-item-section>
+                  </q-item>
+                </template>
+                <template #append><HelpButton article="quiesce" label="Уровни согласованности" /></template>
+              </q-select>
               <q-tooltip v-if="!assessment?.guest_agent">
-                Гостевой агент не отвечает — заморозка невозможна
+                Гостевой агент не отвечает — заморозка невозможна, копия будет как после сбоя питания
               </q-tooltip>
+            </div>
+            <div class="col-12 row items-center q-gutter-md">
+              <q-toggle
+                v-if="!isProxmox"
+                v-model="requireConsistency"
+                :disable="consistency === 'crash'"
+                label="Прервать, если уровень не достигнут"
+                dense
+              />
               <q-toggle v-model="encrypt" label="Шифровать" dense />
             </div>
           </q-card-section>

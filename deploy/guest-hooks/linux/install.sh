@@ -142,7 +142,10 @@ if [ "$want_my" -eq 1 ]; then
     install -m 0700 -o root -g root "$HERE/fsfreeze-hook.d/50-jhvirt-mysql" "$HOOK_D/"
     say "установлен $HOOK_D/50-jhvirt-mysql"
 fi
-install -d -m 0700 -o root -g root /etc/jhvirt
+# Каталог общий с хелпером дампов (deploy/db-dump): его пользователь читает
+# /etc/jhvirt/db-dump.conf, поэтому права существующего каталога не трогаем.
+# Закрыт сам guest-hooks.conf (0600).
+[ -d /etc/jhvirt ] || install -d -m 0755 -o root -g root /etc/jhvirt
 if [ ! -e /etc/jhvirt/guest-hooks.conf ]; then
     install -m 0600 -o root -g root "$HERE/guest-hooks.conf.example" /etc/jhvirt/guest-hooks.conf
     say "настройки: /etc/jhvirt/guest-hooks.conf (всё закомментировано — значения по умолчанию)"

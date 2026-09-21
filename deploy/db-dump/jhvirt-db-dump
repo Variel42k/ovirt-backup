@@ -13,6 +13,7 @@
 # Протокол jhvirt-db-dump/1 — фиксированный набор операций:
 #   probe                       версия протокола и доступные СУБД
 #   list ENGINE                 базы, по одной в строке
+#   stats ENGINE                read-only счётчики транзакций и журнала
 #   dump ENGINE DB              дамп одной базы в stdout
 #   globals postgresql          роли и табличные пространства без хешей паролей
 #   restore ENGINE NEWDB        восстановление из stdin в НОВУЮ базу (выключено
@@ -58,6 +59,11 @@ if [[ -e "$CONF" ]]; then
     (( (8#$(stat -c '%a' "$CONF") & 8#022) == 0 )) || fail "$CONF must not be writable by group or others"
     # shellcheck disable=SC1090
     . "$CONF"
+elif [[ -d "${CONF%/*}" && ! -x "${CONF%/*}" ]]; then
+    # Недоступный каталог выглядит как отсутствие файла: хелпер молча работал
+    # бы со значениями по умолчанию и, например, считал восстановление
+    # выключенным. Лучше явная ошибка.
+    fail "${CONF%/*} is not accessible to $(id -un): chmod 0755 ${CONF%/*}"
 fi
 
 pg_args=()
@@ -150,6 +156,19 @@ list)
             printf 'jhvirt-db-dump: skipping database with unsupported name\n' >&2
         fi
     done <<<"$names"
+    ;;
+
+stats)
+    [[ $# -eq 2 ]] || fail "usage: stats ENGINE"
+    check_engine "$2"
+    if [[ "$2" == postgresql ]]; then
+        values=$(psql_q --field-separator=' ' --command="SELECT COALESCE(sum(xact_commit),0), COALESCE(sum(xact_rollback),0), COALESCE(sum(numbackends),0), pg_wal_lsn_diff(pg_current_wal_lsn(),'0/0')::bigint FROM pg_stat_database")
+    else
+        values=$(mysql_q --execute="SELECT COALESCE(MAX(CASE WHEN VARIABLE_NAME='Com_commit' THEN VARIABLE_VALUE END),0), COALESCE(MAX(CASE WHEN VARIABLE_NAME='Com_rollback' THEN VARIABLE_VALUE END),0), COALESCE(MAX(CASE WHEN VARIABLE_NAME='Threads_running' THEN VARIABLE_VALUE END),0), COALESCE(MAX(CASE WHEN VARIABLE_NAME='Innodb_os_log_written' THEN VARIABLE_VALUE END),0) FROM performance_schema.global_status")
+    fi
+    values=$(printf '%s' "$values" | tr '\t' ' ' | tr -s '[:space:]' ' ')
+    [[ "$values" =~ ^[[:space:]]*[0-9]+\ [0-9]+\ [0-9]+\ [0-9]+[[:space:]]*$ ]] || fail "database returned invalid counters"
+    printf 'jhvirt-db-stats/1 %s %s\n' "$2" "$values"
     ;;
 
 dump)

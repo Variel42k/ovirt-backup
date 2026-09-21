@@ -63,6 +63,11 @@ type DBHost struct {
 	// означает «подключения не будет», как у гипервизоров и SFTP.
 	HostKey         string `json:"host_key,omitempty"`
 	TrustAnyHostKey bool   `json:"trust_any_host_key"`
+	// ServerID/VMID связывают статистику этой СУБД с бэкапом ВМ. Пустые поля
+	// означают, что хост используется только для логических дампов.
+	ServerID      string   `json:"server_id,omitempty"`
+	VMID          string   `json:"vm_id,omitempty"`
+	MonitorEngine DBEngine `json:"monitor_engine,omitempty"`
 	// Engines — что ответил хелпер на probe: СУБД и версии клиентов.
 	Engines   []DBEngineInfo `json:"engines,omitempty"`
 	ProbedAt  *time.Time     `json:"probed_at,omitempty"`
@@ -100,7 +105,29 @@ func (h *DBHost) Validate() error {
 	if strings.TrimSpace(h.HostKey) == "" && !h.TrustAnyHostKey {
 		return fmt.Errorf("закрепите ключ SSH-сервера или явно разрешите подключение без проверки")
 	}
+	monitoringConfigured := h.ServerID != "" || h.VMID != "" || h.MonitorEngine != ""
+	if monitoringConfigured && (h.ServerID == "" || h.VMID == "" || !h.MonitorEngine.Valid()) {
+		return fmt.Errorf("для мониторинга выберите вместе виртуализацию, ВМ и СУБД")
+	}
 	return nil
+}
+
+// DBStatsSample — накопительные счётчики СУБД во время бэкапа ВМ.
+// Скорость вычисляется между пробами; запись в пользовательскую базу не нужна.
+type DBStatsSample struct {
+	ID       string    `json:"id"`
+	RunID    string    `json:"run_id"`
+	HostID   string    `json:"host_id"`
+	HostName string    `json:"host_name"`
+	Engine   DBEngine  `json:"engine"`
+	At       time.Time `json:"at"`
+	// Cumulative counters are encoded as decimal strings: WAL/redo can exceed
+	// JavaScript's exact integer range on a long-lived database host.
+	Commits   int64  `json:"commits,string"`
+	Rollbacks int64  `json:"rollbacks,string"`
+	Active    int64  `json:"active"`
+	LogBytes  int64  `json:"log_bytes,string"`
+	Error     string `json:"error,omitempty"`
 }
 
 // DBDumpJob — задание логических дампов одной СУБД на одном хосте.

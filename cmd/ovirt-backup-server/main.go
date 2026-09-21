@@ -336,6 +336,7 @@ func run() error {
 	dispatcher.SetProxmoxPool(proxmoxPool)
 	fileBackupEngine := filebackup.New(st, *cfg, cipher, log)
 	dbDumpEngine := dbdump.New(st, *cfg, cipher, log)
+	dispatcher.SetTelemetryMonitor(dbDumpEngine)
 	dbDumpEngine.RecoverInterrupted(ctx)
 
 	if backup.QemuImgAvailable(cfg.Backup.QemuImgPath) {
@@ -372,6 +373,7 @@ func run() error {
 	remediator := monitor.NewRemediator(st, pool, libvirtPool, cfg.Monitor.Remediation, bus, log)
 	remediator.SetProxmoxPool(proxmoxPool)
 	mon := monitor.New(st, pool, libvirtPool, proxmoxPool, remediator, cfg.Monitor, bus, log)
+	dispatcher.SetTelemetryMonitor(mon)
 	qualityService := quality.New(st, cfg.Monitor.BackupQuality, cfg.Location())
 	replicator := replication.New(st, cfg.Backup.ReplicationWorkers, bus, log)
 	replicator.SetVerifier(func(ctx context.Context, runID, copyID string, mode model.VerifyMode, opts model.VerifyOptions) error {

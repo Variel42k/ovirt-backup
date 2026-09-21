@@ -24,6 +24,8 @@ export interface IOPoint {
   bad?: boolean
 }
 
+export interface TimeBand { from: string; to: string; label?: string; color?: string }
+
 const props = defineProps<{
   points: IOPoint[]
   height?: number
@@ -32,11 +34,15 @@ const props = defineProps<{
   writeLabel?: string
   /** Показывать ли нижнюю полосу задержек. */
   showLatency?: boolean
+  unit?: 'bytes' | 'count'
+  bands?: TimeBand[]
 }>()
 
 const W = 1000
 const H = computed(() => props.height ?? 160)
 const withLatency = computed(() => props.showLatency !== false && hasLatency.value)
+const showRead = computed(() => props.readLabel !== '')
+const showWrite = computed(() => props.writeLabel !== '')
 
 const ordered = computed(() =>
   [...props.points].sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime()),
@@ -67,7 +73,18 @@ const rateBottom = computed(() => (withLatency.value ? H.value * 0.55 : H.value 
 const latTop = computed(() => H.value * 0.62)
 const latBottom = computed(() => H.value - 18)
 
-const stepX = computed(() => (ordered.value.length > 1 ? W / (ordered.value.length - 1) : W))
+const timeRange = computed(() => {
+  const values = [
+    ...ordered.value.map((point) => new Date(point.at).getTime()),
+    ...(props.bands ?? []).flatMap((band) => [new Date(band.from).getTime(), new Date(band.to).getTime()]),
+  ].filter(Number.isFinite)
+  if (!values.length) return { min: 0, max: 1 }
+  return { min: Math.min(...values), max: Math.max(...values) }
+})
+function xAt(value: string): number {
+  const span = timeRange.value.max - timeRange.value.min
+  return span > 0 ? ((new Date(value).getTime() - timeRange.value.min) / span) * W : W / 2
+}
 
 function path(pick: (p: IOPoint) => number, top: number, bottom: number, max: number): string {
   const pts = ordered.value
@@ -75,14 +92,14 @@ function path(pick: (p: IOPoint) => number, top: number, bottom: number, max: nu
   const span = bottom - top
   let out = ''
   let started = false
-  pts.forEach((p, i) => {
+  pts.forEach((p) => {
     const value = pick(p)
     if (value < 0) {
       // Не измерено — разрываем линию, а не тянем её через пропуск.
       started = false
       return
     }
-    const x = i * stepX.value
+    const x = xAt(p.at)
     const y = bottom - (Math.min(value, max) / max) * span
     out += `${started ? 'L' : 'M'}${x.toFixed(1)},${y.toFixed(1)} `
     started = true
@@ -100,7 +117,7 @@ const writeLatPath = computed(() =>
 )
 
 const badPoints = computed(() =>
-  ordered.value.map((p, i) => ({ p, i })).filter(({ p }) => p.bad),
+  ordered.value.filter((point) => point.bad),
 )
 
 const peakRead = computed(() => Math.max(...ordered.value.map((p) => p.read), 0))
@@ -115,6 +132,7 @@ function latencyLabel(us: number): string {
   if (us < 1000) return `${us} мкс`
   return `${(us / 1000).toFixed(1)} мс`
 }
+const rateLabel = (value: number) => props.unit === 'count' ? `${value.toFixed(value < 10 ? 1 : 0)}/с` : `${bytes(value)}/с`
 </script>
 
 <template>
@@ -125,24 +143,44 @@ function latencyLabel(us: number): string {
 
   <div v-else>
     <div class="row items-center q-gutter-md q-mb-xs text-caption">
-      <div><span class="jhv-swatch" style="background: #1976d2"></span> {{ readLabel ?? 'чтение' }}</div>
-      <div><span class="jhv-swatch" style="background: #21ba45"></span> {{ writeLabel ?? 'запись' }}</div>
+      <div v-if="showRead"><span class="jhv-swatch" style="background: #1976d2"></span> {{ readLabel ?? 'чтение' }}</div>
+      <div v-if="showWrite"><span class="jhv-swatch" style="background: #21ba45"></span> {{ writeLabel ?? 'запись' }}</div>
       <template v-if="withLatency">
         <div><span class="jhv-swatch jhv-swatch--dash" style="background: #1976d2"></span> задержка чтения</div>
         <div><span class="jhv-swatch jhv-swatch--dash" style="background: #21ba45"></span> задержка записи</div>
       </template>
       <q-space />
       <div class="text-grey-7">
-        пик {{ bytes(peakRead) }}/с чтение · {{ bytes(peakWrite) }}/с запись
+        пик <template v-if="showRead">{{ rateLabel(peakRead) }} {{ readLabel ?? 'чтение' }}</template><template v-if="showRead && showWrite"> · </template><template v-if="showWrite">{{ rateLabel(peakWrite) }} {{ writeLabel ?? 'запись' }}</template>
         <template v-if="worstLatency >= 0"> · худшая задержка {{ latencyLabel(worstLatency) }}</template>
       </div>
     </div>
 
     <svg :viewBox="`0 0 ${W} ${H}`" preserveAspectRatio="none" class="jhv-io-chart">
+      <g v-for="band in bands ?? []" :key="`${band.from}-${band.to}-${band.label}`">
+        <rect :x="xAt(band.from)" y="0" :width="Math.max(2, xAt(band.to) - xAt(band.from))" :height="H - 18" :fill="band.color ?? '#ff9800'" opacity="0.13" />
+        <title>{{ band.label ?? 'Интервал' }}</title>
+      </g>
       <!-- Полоса пропускной способности. -->
       <line :x1="0" :y1="rateBottom" :x2="W" :y2="rateBottom" stroke="#bdbdbd" stroke-width="1" />
-      <path :d="readPath" fill="none" stroke="#1976d2" stroke-width="2" vector-effect="non-scaling-stroke" />
-      <path :d="writePath" fill="none" stroke="#21ba45" stroke-width="2" vector-effect="non-scaling-stroke" />
+      <path v-if="showRead" :d="readPath" fill="none" stroke="#1976d2" stroke-width="2" vector-effect="non-scaling-stroke" />
+      <path v-if="showWrite" :d="writePath" fill="none" stroke="#21ba45" stroke-width="2" vector-effect="non-scaling-stroke" />
+      <circle
+        v-for="point in ordered"
+        :key="`read-${point.at}`"
+        v-show="showRead && point.read >= 0"
+        :cx="xAt(point.at)"
+        :cy="rateBottom - (Math.min(point.read, maxRate) / maxRate) * (rateBottom - rateTop)"
+        r="2.2" fill="#1976d2"
+      />
+      <circle
+        v-for="point in ordered"
+        :key="`write-${point.at}`"
+        v-show="showWrite && point.write >= 0"
+        :cx="xAt(point.at)"
+        :cy="rateBottom - (Math.min(point.write, maxRate) / maxRate) * (rateBottom - rateTop)"
+        r="2.2" fill="#21ba45"
+      />
 
       <!-- Полоса задержек: пунктиром, чтобы не путать с объёмом. -->
       <template v-if="withLatency">
@@ -155,11 +193,11 @@ function latencyLabel(us: number): string {
 
       <!-- Проблемные моменты: вертикальная отметка через весь график. -->
       <line
-        v-for="{ p, i } in badPoints"
+        v-for="p in badPoints"
         :key="p.at"
-        :x1="i * stepX"
+        :x1="xAt(p.at)"
         :y1="0"
-        :x2="i * stepX"
+        :x2="xAt(p.at)"
         :y2="H - 18"
         stroke="#c10015"
         stroke-width="2"
@@ -170,9 +208,9 @@ function latencyLabel(us: number): string {
     </svg>
 
     <div class="row justify-between text-caption text-grey-7">
-      <div>{{ dateTime(ordered[0].at) }}</div>
-      <div>шкала до {{ bytes(maxRate) }}/с<template v-if="withLatency"> · {{ latencyLabel(maxLatency) }}</template></div>
-      <div>{{ dateTime(ordered[ordered.length - 1].at) }}</div>
+      <div>{{ dateTime(new Date(timeRange.min).toISOString()) }}</div>
+      <div>шкала до {{ rateLabel(maxRate) }}<template v-if="withLatency"> · {{ latencyLabel(maxLatency) }}</template></div>
+      <div>{{ dateTime(new Date(timeRange.max).toISOString()) }}</div>
     </div>
   </div>
 </template>

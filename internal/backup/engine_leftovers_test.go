@@ -69,7 +69,7 @@ func TestEngineUnlockStepsAreReadyToRun(t *testing.T) {
 	srv := &model.Server{EngineURL: "https://engine.example.org", Username: "admin@internal",
 		Password: "секрет", CACert: "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----"}
 	backups := []ovirt.Backup{
-		engineBackup(t, `{"id":"b-ours","phase":"ready","description":"jhvirt run r1"}`),
+		engineBackup(t, `{"id":"b-ours","phase":"ready","description":"jhvirt run r1","host":{"id":"node-01-id"}}`),
 		engineBackup(t, `{"id":"b-foreign","phase":"ready","description":"Veeam"}`),
 	}
 	transfers := []ovirt.ImageTransfer{{ID: "t-1", Phase: "paused_system", Disk: ovirt.Ref{ID: "d-1"}}}
@@ -90,6 +90,8 @@ func TestEngineUnlockStepsAreReadyToRun(t *testing.T) {
 		"'https://engine.example.org/ovirt-engine/api/vms/vm-1/backups/b-ours/finalize'",
 		"'https://engine.example.org/ovirt-engine/api/vms/vm-1/backups/b-foreign/finalize'",
 		"unlock_entity.sh -t disk 'd-1' 'd-2'",
+		"'https://engine.example.org/ovirt-engine/api/hosts/node-01-id'",
+		"sudo grep -E 'b-ours|b-foreign' /var/log/ovirt-engine/engine.log",
 	} {
 		if !strings.Contains(all, want) {
 			t.Errorf("нет команды с %q", want)

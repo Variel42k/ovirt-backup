@@ -3,6 +3,7 @@ package backup
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -136,7 +137,12 @@ func (e *Engine) releaseEngineLeftovers(ctx context.Context, client *ovirt.Clien
 		default:
 			if err := e.closeLeftover(ctx, client, vm, b, transfers); err != nil {
 				blocking = append(blocking, b)
-				reasons = append(reasons, fmt.Sprintf("свой бэкап %s закрыть не удалось: %v", b.ID, err))
+				reason := fmt.Sprintf("свой бэкап %s закрыть не удалось: %v", b.ID, err)
+				if b.Host.ID != "" {
+					// Закрытие застревает на хосте: обычно он недоступен движку.
+					reason += fmt.Sprintf(" — движок закрывает бэкап через хост %s, проверьте его состояние", b.Host.ID)
+				}
+				reasons = append(reasons, reason)
 				continue
 			}
 			e.event(ctx, run, model.RunEventLeftoverClosed, 0,
@@ -304,8 +310,9 @@ func EngineUnlockSteps(srv *model.Server, vmID string, backups []ovirt.Backup,
 			created = ", создан " + t.Local().Format("02.01.2006 15:04")
 		}
 		if ours {
-			step.Detail = fmt.Sprintf("Фаза %s%s. Бэкап открыт службой (%s); служба не смогла закрыть его сама.",
-				b.Phase, created, b.Description)
+			step.Detail = fmt.Sprintf("Фаза %s%s. Бэкап открыт службой (%s); служба не смогла закрыть его сама. "+
+				"Если после команды бэкап не уходит из ready за несколько минут, движок не может выполнить "+
+				"закрытие на хосте — смотрите следующие шаги.", b.Phase, created, b.Description)
 		} else {
 			step.Risky = true
 			step.Detail = fmt.Sprintf("Фаза %s%s, описание %q. Служба не опознала этот бэкап как свой: "+
@@ -313,6 +320,36 @@ func EngineUnlockSteps(srv *model.Server, vmID string, backups []ovirt.Backup,
 				"иначе сорвёте чужую копию.", b.Phase, created, b.Description)
 		}
 		steps = append(steps, step)
+	}
+
+	// Закрытие бэкапа движок выполняет через VDSM на хосте бэкапа: если хост
+	// недоступен, команда принимается, а бэкап висит в ready. Это первое, что
+	// стоит проверить, и ID хоста известен — движок сообщает его в бэкапе.
+	var hosts, backupIDs []string
+	for _, b := range backups {
+		backupIDs = append(backupIDs, b.ID)
+		if b.Host.ID != "" && !slices.Contains(hosts, b.Host.ID) {
+			hosts = append(hosts, b.Host.ID)
+		}
+	}
+	for _, host := range hosts {
+		steps = append(steps, model.ManualStep{
+			Title: "Проверить хост, на котором идёт бэкап",
+			Where: anywhere,
+			Detail: "Движок закрывает бэкап через VDSM на этом хосте. Статус должен быть up; при non_responsive, " +
+				"connecting или maintenance бэкап закроется только после того, как хост вернётся — " +
+				"восстановите связь движка с хостом (сеть, служба vdsmd).",
+			Command: curl + " " + shellQuote(api+"/hosts/"+host) +
+				` | grep -oE '"(name|status|external_status)" *: *"[^"]*"'`,
+		})
+	}
+	if len(backupIDs) > 0 {
+		steps = append(steps, model.ManualStep{
+			Title:   "Посмотреть, что движок делал с бэкапом",
+			Where:   "хост движка",
+			Detail:  "Журнал движка по этим бэкапам: почему закрытие не выполнено и на каком хосте оно застряло.",
+			Command: "sudo grep -E " + shellQuote(strings.Join(backupIDs, "|")) + " /var/log/ovirt-engine/engine.log | tail -40",
+		})
 	}
 
 	steps = append(steps, model.ManualStep{

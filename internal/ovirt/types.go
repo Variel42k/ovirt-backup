@@ -513,7 +513,10 @@ type Backup struct {
 	CreationDate Timestamp `json:"creation_date"`
 	Description  string    `json:"description"`
 	VM           Ref       `json:"vm"`
-	Disks        *diskList `json:"disks,omitempty"`
+	// Host — хост, на котором идёт бэкап. Закрыть бэкап движок может только
+	// через VDSM на этом хосте: пока хост недоступен, бэкап висит в ready.
+	Host  Ref       `json:"host"`
+	Disks *diskList `json:"disks,omitempty"`
 }
 
 type backupList struct {

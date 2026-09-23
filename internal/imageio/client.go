@@ -18,13 +18,26 @@ import (
 
 // Client talks to one imageio ticket.
 type Client struct {
-	base string
-	http *http.Client
-	// request — предел обычного запроса (чтение и запись диапазона,
-	// OPTIONS); long — запросов, время которых растёт с размером диска: карта
-	// экстентов, контрольная сумма, обнуление диапазона. Ноль — без предела,
-	// кроме контекста вызывающего.
-	request, long time.Duration
+	base   string
+	http   *http.Client
+	limits Timeouts
+}
+
+// Timeouts — пределы запросов к imageio по их природе. Ноль — без предела,
+// кроме контекста вызывающего.
+//
+// Пока бэкап открыт, диски ВМ заблокированы, а записи гостя копируются в
+// scratch-диск. Поэтому предел — это ещё и то, сколько зависший демон может
+// держать бэкап открытым: он должен быть не больше, чем нужно операции.
+type Timeouts struct {
+	// Block — чтение и запись диапазона, OPTIONS: секунды.
+	Block time.Duration
+	// Map — карта экстентов: обход метаданных образа, минуты даже для
+	// терабайтного диска, от объёма данных почти не зависит.
+	Map time.Duration
+	// Scan — контрольная сумма и обнуление: проходят по данным всего диска,
+	// время растёт с размером.
+	Scan time.Duration
 }
 
 // New wraps a transfer URL. The HTTP client should carry the engine CA, which
@@ -40,8 +53,8 @@ func New(transferURL string, httpClient *http.Client) *Client {
 // imageio не годится: карта экстентов и контрольная сумма терабайтного диска
 // считаются минутами, а чтение 4 МиБ — секундами, и один предел либо рвёт
 // первые, либо не замечает зависания вторых.
-func (c *Client) WithTimeouts(request, long time.Duration) *Client {
-	c.request, c.long = request, long
+func (c *Client) WithTimeouts(limits Timeouts) *Client {
+	c.limits = limits
 	return c
 }
 
@@ -78,7 +91,7 @@ func (f *Features) Has(name string) bool {
 // OPTIONS on the ticket path; that is reported as "no optional features"
 // rather than as an error, because plain ranged reads still work.
 func (c *Client) Options(ctx context.Context) (*Features, error) {
-	ctx, cancel := bound(ctx, c.request)
+	ctx, cancel := bound(ctx, c.limits.Block)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodOptions, c.base, nil)
 	if err != nil {
@@ -135,7 +148,7 @@ const (
 
 // Extents fetches the extent map for the requested context.
 func (c *Client) Extents(ctx context.Context, extentContext string) ([]Extent, error) {
-	ctx, cancel := bound(ctx, c.long)
+	ctx, cancel := bound(ctx, c.limits.Map)
 	defer cancel()
 	q := url.Values{}
 	if extentContext != "" {
@@ -172,7 +185,7 @@ func (c *Client) Extents(ctx context.Context, extentContext string) ([]Extent, e
 // ReadRange copies [offset, offset+length) into w and returns how many bytes
 // were written.
 func (c *Client) ReadRange(ctx context.Context, offset, length int64, w io.Writer) (int64, error) {
-	ctx, cancel := bound(ctx, c.request)
+	ctx, cancel := bound(ctx, c.limits.Block)
 	defer cancel()
 	if length <= 0 {
 		return 0, nil
@@ -206,7 +219,7 @@ func (c *Client) ReadRange(ctx context.Context, offset, length int64, w io.Write
 
 // WriteRange uploads length bytes from r at the given offset.
 func (c *Client) WriteRange(ctx context.Context, offset int64, r io.Reader, length int64, flush bool) error {
-	ctx, cancel := bound(ctx, c.request)
+	ctx, cancel := bound(ctx, c.limits.Block)
 	defer cancel()
 	if length <= 0 {
 		return nil
@@ -266,7 +279,7 @@ func (c *Client) Flush(ctx context.Context) error {
 }
 
 func (c *Client) patch(ctx context.Context, body []byte) error {
-	ctx, cancel := bound(ctx, c.long)
+	ctx, cancel := bound(ctx, c.limits.Scan)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, c.base, bytes.NewReader(body))
 	if err != nil {
@@ -300,7 +313,7 @@ type Checksum struct {
 // The digest is block-based, so it is only comparable against a digest computed
 // with the same algorithm and block size.
 func (c *Client) ChecksumOf(ctx context.Context, algorithm string, blockSize int64) (*Checksum, error) {
-	ctx, cancel := bound(ctx, c.long)
+	ctx, cancel := bound(ctx, c.limits.Scan)
 	defer cancel()
 	q := url.Values{}
 	if algorithm != "" {
@@ -339,7 +352,7 @@ func (c *Client) ChecksumOf(ctx context.Context, algorithm string, blockSize int
 
 // Algorithms lists the digests the daemon can compute.
 func (c *Client) Algorithms(ctx context.Context) ([]string, error) {
-	ctx, cancel := bound(ctx, c.request)
+	ctx, cancel := bound(ctx, c.limits.Block)
 	defer cancel()
 	endpoint := c.base + "/checksum/algorithms"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)

@@ -26,7 +26,8 @@ func TestLongRequestsOutliveRequestTimeout(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 
-	c := New(srv.URL+"/images/ticket", &http.Client{}).WithTimeouts(50*time.Millisecond, 5*time.Second)
+	c := New(srv.URL+"/images/ticket", &http.Client{}).
+		WithTimeouts(Timeouts{Block: 50 * time.Millisecond, Map: 5 * time.Second, Scan: 5 * time.Second})
 
 	extents, err := c.Extents(context.Background(), ContextZero)
 	if err != nil || len(extents) != 1 {

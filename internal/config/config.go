@@ -1183,7 +1183,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("disaster_recovery.check_interval", "1h")
 	v.SetDefault("backup.transfer.prefer_proxy", false)
 	v.SetDefault("backup.transfer.inactivity_timeout", "60s")
-	v.SetDefault("backup.transfer.request_timeout", "10m")
+	v.SetDefault("backup.transfer.request_timeout", "2m")
 	v.SetDefault("backup.transfer.max_parallel_disks", 2)
 	v.SetDefault("backup.transfer.range_retries", 3)
 

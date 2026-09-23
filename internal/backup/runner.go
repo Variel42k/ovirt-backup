@@ -680,21 +680,30 @@ func (e *Engine) selectDisks(ctx context.Context, client *ovirt.Client, vmID str
 
 // imageioTimeouts — пределы запросов к ovirt-imageio для диска размера size.
 //
-// Обычный запрос ограничен backup.transfer.request_timeout. Карта экстентов,
-// контрольная сумма и обнуление диапазона обходят весь диск, поэтому их
-// предел растёт с размером: полчаса плюс секунда на каждые 100 МиБ — для
-// 1 ТиБ около 3,3 часа. Это страховка от зависшего демона, а не ожидаемая
-// длительность.
-func (e *Engine) imageioTimeouts(size int64) (request, long time.Duration) {
-	request = e.cfg.Transfer.RequestTimeout
-	if request <= 0 {
-		request = 10 * time.Minute
+// Чтение и запись блока ограничены backup.transfer.request_timeout. Карта
+// экстентов — фиксированные полчаса: это обход метаданных, а зависший демон
+// всё это время держал бы бэкап открытым, диски — заблокированными, а
+// scratch-диск рос бы от записей гостя. Контрольная сумма и обнуление читают
+// или пишут весь диск, их предел растёт с размером: полчаса плюс секунда на
+// каждые 100 МиБ. Контрольную сумму при бэкапе запрашивает только явно
+// включённая сверка с источником, обнуление бывает только при восстановлении.
+func (e *Engine) imageioTimeouts(size int64) imageio.Timeouts {
+	block := e.cfg.Transfer.RequestTimeout
+	if block <= 0 {
+		block = 2 * time.Minute
 	}
-	long = 30*time.Minute + time.Duration(size/(100<<20))*time.Second
-	if long < request {
-		long = request
+	limits := imageio.Timeouts{
+		Block: block,
+		Map:   30 * time.Minute,
+		Scan:  30*time.Minute + time.Duration(size/(100<<20))*time.Second,
 	}
-	return request, long
+	if limits.Map < block {
+		limits.Map = block
+	}
+	if limits.Scan < limits.Map {
+		limits.Scan = limits.Map
+	}
+	return limits
 }
 
 // runCBT performs a hot backup through the oVirt Backup API.

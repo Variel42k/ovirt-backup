@@ -135,6 +135,7 @@ func (e *Engine) releaseEngineLeftovers(ctx context.Context, client *ovirt.Clien
 			blocking = append(blocking, b)
 			reasons = append(reasons, fmt.Sprintf("бэкап %s открыт не службой (описание %q)", b.ID, b.Description))
 		default:
+			e.rememberBackupSnapshot(ctx, owner, b)
 			if err := e.closeLeftover(ctx, client, vm, b, transfers); err != nil {
 				blocking = append(blocking, b)
 				reason := fmt.Sprintf("свой бэкап %s закрыть не удалось: %v", b.ID, err)
@@ -160,6 +161,73 @@ func (e *Engine) releaseEngineLeftovers(ctx context.Context, client *ovirt.Clien
 		"Готовые команды для ручной уборки — в карточке запуска", strings.Join(reasons, "; "))
 }
 
+// rememberBackupSnapshot записывает служебный снапшот брошенного бэкапа за
+// запуском-владельцем: движок сам удаляет его при закрытии бэкапа, но если
+// закрытие застряло, уборка снапшотов должна узнать его как свой.
+func (e *Engine) rememberBackupSnapshot(ctx context.Context, owner string, b ovirt.Backup) {
+	if b.Snapshot.ID == "" || owner == "" {
+		return
+	}
+	run, err := e.store.GetBackupRun(ctx, owner)
+	if err != nil || run.SnapshotID == b.Snapshot.ID {
+		return
+	}
+	if run.SnapshotID != "" {
+		// У запуска уже есть свой снапшот (бэкап через снапшот) — не затирать.
+		return
+	}
+	run.SnapshotID = b.Snapshot.ID
+	if err := e.store.UpdateBackupRun(ctx, run); err != nil {
+		e.log.Warn().Err(err).Str("run", owner).Msg("не удалось записать снапшот бэкапа за запуском")
+	}
+}
+
+// closeOwnBackups закрывает брошенные бэкапы службы на ВМ и возвращает, сколько
+// своих закрыть не удалось. Чужие и принадлежащие идущему запуску не считаются:
+// фоновая уборка их не ждёт.
+func (e *Engine) closeOwnBackups(ctx context.Context, client *ovirt.Client, srv *model.Server,
+	vm *model.VM, runID string) int {
+
+	backups, err := client.ListBackups(ctx, vm.ID)
+	if err != nil {
+		e.log.Warn().Err(err).Str("vm", vm.Name).Msg("фоновая уборка: не удалось получить бэкапы ВМ")
+		return 1
+	}
+	var open []ovirt.Backup
+	for _, b := range backups {
+		if b.Open() {
+			open = append(open, b)
+		}
+	}
+	if len(open) == 0 {
+		return 0
+	}
+	runs, err := e.store.ListBackupRuns(ctx, store.RunFilter{ServerID: srv.ID, VMID: vm.ID, IncludeDeleted: true, Limit: 500})
+	if err != nil {
+		return 1
+	}
+	transfers, _ := client.ListImageTransfers(ctx)
+	pending := 0
+	for _, b := range open {
+		owner, live := ownerOf(b, runs)
+		if owner == "" || live {
+			continue
+		}
+		e.rememberBackupSnapshot(ctx, owner, b)
+		if err := e.closeLeftover(ctx, client, vm, b, transfers); err != nil {
+			pending++
+			e.log.Info().Err(err).Str("vm", vm.Name).Str("backup", b.ID).
+				Msg("фоновая уборка: бэкап движка пока не закрыт, попробую позже")
+			continue
+		}
+		e.event(ctx, &model.BackupRun{ID: runID}, model.RunEventLeftoverClosed, 0,
+			fmt.Sprintf("закрыт бэкап движка %s, оставленный запуском %s", b.ID, owner))
+		e.log.Info().Str("vm", vm.Name).Str("backup", b.ID).Str("запуск", owner).
+			Msg("фоновая уборка: закрыт брошенный бэкап движка")
+	}
+	return pending
+}
+
 // closeLeftover отменяет передачи образов бэкапа и закрывает его.
 func (e *Engine) closeLeftover(ctx context.Context, client *ovirt.Client, vm *model.VM,
 	b ovirt.Backup, transfers []ovirt.ImageTransfer) error {
@@ -176,8 +244,11 @@ func (e *Engine) closeLeftover(ctx context.Context, client *ovirt.Client, vm *mo
 			return err
 		}
 	}
-	return client.WaitBackupFinalized(ctx, vm.ID, b.ID, 5*time.Minute)
+	return client.WaitBackupFinalized(ctx, vm.ID, b.ID, finalizeWait)
 }
+
+// finalizeWait — сколько ждать закрытия бэкапа движком; тесты укорачивают.
+var finalizeWait = 5 * time.Minute
 
 // relatedTransfers — незавершённые передачи, которые держат диски ВМ: по
 // бэкапу или по диску.

@@ -33,6 +33,8 @@ func TestLeftoverSnapshotRules(t *testing.T) {
 		{ID: "done", Status: model.RunFailed},
 		{ID: "live", Status: model.RunRunning},
 		{ID: "recorded", Status: model.RunSucceeded, SnapshotID: "snap-rec"},
+		{ID: "engine-backup", Status: model.RunFailed, SnapshotID: "snap-eng"},
+		{ID: "engine-live", Status: model.RunRunning, SnapshotID: "snap-eng-live"},
 	}
 	active := ovirt.Snapshot{ID: "a", Description: "Active VM", SnapshotType: "active", SnapshotStatus: "ok"}
 	cases := []struct {
@@ -49,11 +51,16 @@ func TestLeftoverSnapshotRules(t *testing.T) {
 		{"снапшот администратора", snapshotAt("s6", "перед обновлением", "ok", 30*24*time.Hour), false},
 		{"похоже, но без запуска", snapshotAt("s7", "jhvirt backup ", "ok", 30*24*time.Hour), false},
 		{"Active VM", active, false},
+		// Снапшот, который движок создал под бэкап, описан по-своему: узнаётся
+		// только по записи за запуском.
+		{"снапшот движка под бэкап", snapshotAt("snap-eng", "Auto-generated for Backup VM dtseven", "ok", time.Hour), true},
+		{"снапшот движка под идущий бэкап", snapshotAt("snap-eng-live", "Auto-generated for Backup VM dtseven", "ok", time.Hour), false},
+		{"снапшот движка, бэкап ещё закрывается", snapshotAt("snap-eng", "Auto-generated for Backup VM dtseven", "locked", time.Hour), false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, remove, why := leftoverSnapshot(tc.snap, runs, time.Now()); remove != tc.remove {
-				t.Fatalf("удалить=%v (%s), ожидалось %v", remove, why, tc.remove)
+			if _, verdict, why := leftoverSnapshot(tc.snap, runs, time.Now()); (verdict == snapshotRemove) != tc.remove {
+				t.Fatalf("решение %d (%s), удалить ожидалось=%v", verdict, why, tc.remove)
 			}
 		})
 	}

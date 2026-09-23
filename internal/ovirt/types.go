@@ -515,8 +515,11 @@ type Backup struct {
 	VM           Ref       `json:"vm"`
 	// Host — хост, на котором идёт бэкап. Закрыть бэкап движок может только
 	// через VDSM на этом хосте: пока хост недоступен, бэкап висит в ready.
-	Host  Ref       `json:"host"`
-	Disks *diskList `json:"disks,omitempty"`
+	Host Ref `json:"host"`
+	// Snapshot — служебный снапшот, который движок (4.5+) может создать под
+	// бэкап вместо scratch-дисков. После аварии он остаётся вместе с бэкапом.
+	Snapshot Ref       `json:"snapshot"`
+	Disks    *diskList `json:"disks,omitempty"`
 }
 
 type backupList struct {

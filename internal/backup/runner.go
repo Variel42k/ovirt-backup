@@ -53,8 +53,11 @@ type Engine struct {
 	// работы вытеснять другой.
 	heavy chan struct{}
 
-	// sweeping — ВМ, у которых сейчас идёт фоновая уборка снапшотов.
+	// sweeping — ВМ, у которых сейчас идёт фоновая уборка.
 	sweeping sync.Map
+	// snapshotFailures — снапшоты, о неудаче удаления которых уже сообщено:
+	// фоновая уборка повторяется, а отметка в хронологии нужна одна.
+	snapshotFailures sync.Map
 }
 
 // NewEngine builds the backup engine.
@@ -255,9 +258,9 @@ func (e *Engine) Execute(ctx context.Context, req RunRequest) (*model.BackupRun,
 	if err := e.store.CreateBackupRun(ctx, run); err != nil {
 		return nil, fmt.Errorf("сохранение записи о бэкапе: %w", err)
 	}
-	// После запуска — фоновая уборка брошенных снапшотов ВМ. Отложенный вызов
-	// выполняется последним, когда итог запуска уже записан.
-	defer e.startSnapshotSweep(client, srv, vm, run.ID)
+	// После запуска — фоновая уборка брошенных бэкапов движка и снапшотов ВМ.
+	// Отложенный вызов выполняется последним, когда итог запуска уже записан.
+	defer e.startCleanup(client, srv, vm, run.ID)
 	if req.OnRunCreated != nil {
 		req.OnRunCreated(run)
 	}
@@ -1019,6 +1022,11 @@ func (e *Engine) startEngineBackup(ctx context.Context, client *ovirt.Client, sr
 		return backup, err
 	}
 	run.ToCheckpointID = ready.ToCheckpointID
+	// Снапшот, который движок создал под бэкап, записывается за запуском: если
+	// бэкап оборвётся, уборка узнает этот снапшот как свой.
+	if ready.Snapshot.ID != "" {
+		run.SnapshotID = ready.Snapshot.ID
+	}
 	e.event(ctx, run, model.RunEventCheckpoint, time.Since(started),
 		"с этого момента данные читаются из зафиксированной точки")
 	if err := e.store.UpdateBackupRun(ctx, run); err != nil {

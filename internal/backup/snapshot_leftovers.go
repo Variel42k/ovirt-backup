@@ -36,36 +36,72 @@ const snapshotWaitLimit = time.Hour
 // укорачивают его.
 var snapshotPollInterval = 10 * time.Second
 
-// leftoverSnapshot решает, брошенный ли это снапшот службы, который можно
-// удалить. why объясняет решение для хронологии и журнала.
-func leftoverSnapshot(s ovirt.Snapshot, runs []*model.BackupRun, now time.Time) (owner string, remove bool, why string) {
+// snapshotVerdict — что уборке делать со снапшотом.
+type snapshotVerdict int
+
+const (
+	// snapshotNotOurs — снапшот не службы или свежий без записи в базе: не трогать.
+	snapshotNotOurs snapshotVerdict = iota
+	// snapshotRemove — брошенный снапшот службы: удалить.
+	snapshotRemove
+	// snapshotBusy — свой, но с ним идёт операция: вернуться к нему позже.
+	snapshotBusy
+	// snapshotLive — свой, запуск ещё идёт: это не остаток.
+	snapshotLive
+)
+
+// leftoverSnapshot решает, брошенный ли это снапшот службы. why объясняет
+// решение для хронологии и журнала.
+func leftoverSnapshot(s ovirt.Snapshot, runs []*model.BackupRun, now time.Time) (owner string, verdict snapshotVerdict, why string) {
 	if s.SnapshotType != "" && s.SnapshotType != "regular" {
-		return "", false, "не обычный снапшот"
+		return "", snapshotNotOurs, "не обычный снапшот"
 	}
-	if !strings.HasPrefix(s.Description, ovirt.SnapshotMarkerPrefix) {
-		return "", false, "снапшот не службы"
+	busy := s.SnapshotStatus != "" && s.SnapshotStatus != "ok"
+	busyWhy := fmt.Sprintf("снапшот в состоянии %s — с ним идёт операция", s.SnapshotStatus)
+	active := func(r *model.BackupRun) bool {
+		return r.Status == model.RunPending || r.Status == model.RunRunning
 	}
-	owner = strings.TrimSpace(strings.TrimPrefix(s.Description, ovirt.SnapshotMarkerPrefix))
-	if owner == "" || strings.ContainsAny(owner, " \t") {
-		return "", false, "описание похоже на метку службы, но не содержит запуска"
-	}
-	if s.SnapshotStatus != "" && s.SnapshotStatus != "ok" {
-		return owner, false, fmt.Sprintf("снапшот в состоянии %s — с ним идёт операция", s.SnapshotStatus)
-	}
+	// Снапшот записан за запуском — самый надёжный признак: так служба узнаёт
+	// и снапшот, который движок создал под бэкап со своим описанием.
 	for _, r := range runs {
-		if r.ID != owner && (r.SnapshotID == "" || r.SnapshotID != s.ID) {
+		if r.SnapshotID == "" || r.SnapshotID != s.ID {
 			continue
 		}
-		if r.Status == model.RunPending || r.Status == model.RunRunning {
-			return r.ID, false, "запуск ещё идёт"
+		switch {
+		case active(r):
+			return r.ID, snapshotLive, "запуск ещё идёт"
+		case busy:
+			return r.ID, snapshotBusy, busyWhy
 		}
-		return r.ID, true, "запуск завершён"
+		return r.ID, snapshotRemove, "снапшот записан за завершённым запуском"
+	}
+	if !strings.HasPrefix(s.Description, ovirt.SnapshotMarkerPrefix) {
+		return "", snapshotNotOurs, "снапшот не службы"
+	}
+	owner = strings.TrimSpace(strings.TrimPrefix(s.Description, ovirt.SnapshotMarkerPrefix))
+	if owner == "" || strings.ContainsAny(owner, " 	") {
+		return "", snapshotNotOurs, "описание похоже на метку службы, но не содержит запуска"
+	}
+	for _, r := range runs {
+		if r.ID != owner {
+			continue
+		}
+		switch {
+		case active(r):
+			return r.ID, snapshotLive, "запуск ещё идёт"
+		case busy:
+			return r.ID, snapshotBusy, busyWhy
+		}
+		return r.ID, snapshotRemove, "запуск завершён"
 	}
 	created := s.Date.Time()
 	if created.IsZero() || now.Sub(created) < unknownSnapshotAge {
-		return owner, false, "запуска нет в базе, а снапшот слишком свежий — его мог создать идущий запуск"
+		return owner, snapshotNotOurs, "запуска нет в базе, а снапшот слишком свежий — его мог создать идущий запуск"
 	}
-	return owner, true, "запуска нет в базе, снапшот старше " + unknownSnapshotAge.String()
+	if busy {
+		return owner, snapshotBusy, busyWhy
+	}
+	return owner, snapshotRemove, "запуска нет в базе, снапшот старше " + unknownSnapshotAge.String()
 }
 
 // waitSnapshotOperations ждёт, пока на ВМ не останется снапшотов в операции
@@ -111,52 +147,106 @@ func (e *Engine) waitSnapshotOperations(ctx context.Context, client *ovirt.Clien
 	}
 }
 
-// startSnapshotSweep запускает уборку брошенных снапшотов ВМ в фоне. Одна
-// уборка на ВМ за раз: второй запуск просто уходит.
-func (e *Engine) startSnapshotSweep(client *ovirt.Client, srv *model.Server, vm *model.VM, runID string) {
+// Фоновая уборка повторяется, пока не закроет всё своё: после аварии хоста
+// движок не может ни закрыть бэкап, ни удалить снапшот, пока хост не
+// вернётся, и ждать следующего запуска по расписанию незачем — диски ВМ всё
+// это время заблокированы. Тесты укорачивают оба срока.
+var (
+	cleanupRetryInterval = 10 * time.Minute
+	cleanupDeadline      = 6 * time.Hour
+)
+
+// startCleanup запускает фоновую уборку ВМ. Одна уборка на ВМ за раз: второй
+// вызов просто уходит.
+func (e *Engine) startCleanup(client *ovirt.Client, srv *model.Server, vm *model.VM, runID string) {
 	key := srv.ID + "/" + vm.ID
 	if _, busy := e.sweeping.LoadOrStore(key, struct{}{}); busy {
 		return
 	}
 	go func() {
 		defer e.sweeping.Delete(key)
-		// Слияние большого снапшота на загруженном хранилище идёт часами;
-		// служба при этом может перезапуститься — следующий бэкап продолжит.
-		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Hour)
+		// Контекст не связан с запуском: он уже закончился. Служба может
+		// перезапуститься посреди уборки — тогда её продолжит следующий бэкап.
+		ctx, cancel := context.WithTimeout(context.Background(), cleanupDeadline+time.Hour)
 		defer cancel()
-		e.sweepLeftoverSnapshots(ctx, client, srv, vm, runID)
+		e.cleanupVM(ctx, client, srv, vm, runID)
 	}()
 }
 
-// sweepLeftoverSnapshots удаляет брошенные снапшоты службы по одному. Отметки
-// пишутся в хронологию запуска runID, после которого уборка началась; если
-// снапшот удалить не удалось, туда же попадают команды для администратора.
+// cleanupVM закрывает брошенные бэкапы движка и удаляет брошенные снапшоты
+// ВМ, повторяя попытки, пока своего не останется или не выйдет срок. Если
+// начался новый бэкап ВМ, уборка уступает ему: он убирает за собой сам.
+func (e *Engine) cleanupVM(ctx context.Context, client *ovirt.Client, srv *model.Server, vm *model.VM, runID string) {
+	deadline := time.Now().Add(cleanupDeadline)
+	for {
+		if active, err := e.store.ListBackupRuns(ctx, store.RunFilter{ServerID: srv.ID, VMID: vm.ID,
+			Statuses: []model.RunStatus{model.RunPending, model.RunRunning}, Limit: 1}); err == nil && len(active) > 0 {
+			return
+		}
+		pending := e.closeOwnBackups(ctx, client, srv, vm, runID)
+		// Снапшот бэкапа удаляется только после закрытия самого бэкапа.
+		if pending == 0 {
+			pending += e.sweepLeftoverSnapshots(ctx, client, srv, vm, runID)
+		}
+		if pending == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			e.log.Warn().Str("vm", vm.Name).Int("осталось", pending).
+				Msg("фоновая уборка не закончила за отведённый срок — команды для администратора в карточке запуска")
+			lookCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+			if steps := e.engineLockSteps(lookCtx, client, srv, vm.ID, nil); len(steps) > 0 {
+				e.attachSteps(lookCtx, runID, steps)
+			}
+			cancel()
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(cleanupRetryInterval):
+		}
+	}
+}
+
+// sweepLeftoverSnapshots удаляет брошенные снапшоты службы по одному и
+// возвращает, сколько своих снапшотов осталось: не удалось удалить или с ними
+// ещё идёт операция. Отметки пишутся в хронологию запуска runID, после
+// которого уборка началась; если снапшот удалить не удалось, туда же
+// попадают команды для администратора.
 func (e *Engine) sweepLeftoverSnapshots(ctx context.Context, client *ovirt.Client, srv *model.Server,
-	vm *model.VM, runID string) {
+	vm *model.VM, runID string) int {
 
 	snaps, err := client.ListSnapshots(ctx, vm.ID)
 	if err != nil {
 		e.log.Warn().Err(err).Str("vm", vm.Name).Msg("уборка снапшотов: не удалось получить список")
-		return
+		return 1
 	}
 	for _, s := range snaps {
 		// ВМ в предпросмотре снапшота: оператор разбирается с ней руками,
 		// любое удаление сейчас может помешать ему.
 		if s.SnapshotStatus == "in_preview" {
 			e.log.Info().Str("vm", vm.Name).Msg("уборка снапшотов пропущена: ВМ в режиме предпросмотра снапшота")
-			return
+			return 0
 		}
 	}
 	runs, err := e.store.ListBackupRuns(ctx, store.RunFilter{ServerID: srv.ID, VMID: vm.ID, IncludeDeleted: true, Limit: 500})
 	if err != nil {
 		e.log.Warn().Err(err).Msg("уборка снапшотов: история запусков недоступна")
-		return
+		return 1
 	}
 	run := &model.BackupRun{ID: runID}
+	var transfers []ovirt.ImageTransfer
+	transfersLoaded := false
 
-	for _, s := range snaps {
-		owner, remove, why := leftoverSnapshot(s, runs, time.Now())
-		if !remove {
+	pending := 0
+	for i, s := range snaps {
+		owner, verdict, why := leftoverSnapshot(s, runs, time.Now())
+		if verdict != snapshotRemove {
+			if verdict == snapshotBusy {
+				// Свой, но пока занят операцией: фоновая уборка вернётся к нему.
+				pending++
+			}
 			if owner != "" {
 				e.log.Debug().Str("snapshot", s.ID).Str("причина", why).Msg("снапшот службы оставлен")
 			}
@@ -167,7 +257,21 @@ func (e *Engine) sweepLeftoverSnapshots(ctx context.Context, client *ovirt.Clien
 		if active, err := e.store.ListBackupRuns(ctx, store.RunFilter{ServerID: srv.ID, VMID: vm.ID,
 			Statuses: []model.RunStatus{model.RunPending, model.RunRunning}, Limit: 1}); err != nil || len(active) > 0 {
 			e.log.Info().Str("vm", vm.Name).Msg("уборка снапшотов отложена: идёт бэкап ВМ")
-			return
+			return 0
+		}
+		// Зависшая передача образа держит снапшот: движок не удалит его, пока
+		// она не закончена. Передача брошенного запуска никому не нужна.
+		if !transfersLoaded {
+			transfers, _ = client.ListImageTransfers(ctx)
+			transfersLoaded = true
+		}
+		for _, t := range transfers {
+			if t.Snapshot.ID == s.ID && !t.Terminal() {
+				if err := client.CancelTransfer(ctx, t.ID); err == nil {
+					e.log.Info().Str("transfer", t.ID).Str("snapshot", s.ID).
+						Msg("отменена зависшая передача брошенного снапшота")
+				}
+			}
 		}
 		started := time.Now()
 		err := client.DeleteSnapshotWhenReady(ctx, vm.ID, s.ID, 10*time.Minute)
@@ -177,18 +281,24 @@ func (e *Engine) sweepLeftoverSnapshots(ctx context.Context, client *ovirt.Clien
 		if err != nil {
 			e.log.Error().Err(err).Str("vm", vm.Name).Str("snapshot", s.ID).
 				Msg("не удалось удалить брошенный снапшот — команды для администратора в карточке запуска")
-			e.event(ctx, run, model.RunEventSnapshotRemoveFailed, time.Since(started),
-				fmt.Sprintf("снапшот %s (%s): %v", s.ID, s.Description, err))
-			e.attachSteps(ctx, runID, SnapshotCleanupSteps(srv, vm.ID, s))
+			// Фоновая уборка повторяется каждые несколько минут: отметка и
+			// команды — только при первой неудаче, иначе хронология утонет в
+			// одинаковых строках.
+			if _, reported := e.snapshotFailures.LoadOrStore(s.ID, struct{}{}); !reported {
+				e.event(ctx, run, model.RunEventSnapshotRemoveFailed, time.Since(started),
+					fmt.Sprintf("снапшот %s (%s): %v", s.ID, s.Description, err))
+				e.attachSteps(ctx, runID, SnapshotCleanupSteps(srv, vm.ID, s))
+			}
 			// Движок не справился с одним — остальные подождут следующего
 			// раза, чтобы не громоздить операции на проблемное хранилище.
-			return
+			return pending + len(snaps) - i
 		}
 		e.event(ctx, run, model.RunEventSnapshotRemoved, time.Since(started),
 			fmt.Sprintf("снапшот %s оставлен запуском %s (%s); слияние данных завершено", s.ID, owner, why))
 		e.log.Info().Str("vm", vm.Name).Str("snapshot", s.ID).Str("запуск", owner).
 			Msg("удалён брошенный снапшот")
 	}
+	return pending
 }
 
 // attachSteps дописывает команды к уже завершённому запуску. Запуск читается

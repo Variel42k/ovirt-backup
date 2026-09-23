@@ -152,7 +152,13 @@ func New(cfg Config) (*Client, error) {
 				TLSClientConfig:     tlsCfg,
 				MaxIdleConns:        32,
 				MaxIdleConnsPerHost: 8,
-				IdleConnTimeout:     90 * time.Second,
+				// Перед движком стоит Apache, и простаивающее соединение он
+				// закрывает через несколько секунд (KeepAliveTimeout, по
+				// умолчанию 5 с). Держать своё дольше — значит однажды
+				// отправить запрос в уже закрытое соединение и получить EOF
+				// без ответа; для DELETE и POST клиент такой запрос не
+				// повторяет сам. Поэтому пул отпускает соединение раньше.
+				IdleConnTimeout: 3 * time.Second,
 				DialContext: (&net.Dialer{
 					Timeout:   15 * time.Second,
 					KeepAlive: 30 * time.Second,
@@ -363,6 +369,9 @@ type requestOptions struct {
 	correlationID string
 	// retries — сколько раз повторить при сетевой ошибке или 5xx.
 	retries int
+	// idempotent разрешает клиенту Go переотправить запрос, если соединение
+	// из пула оказалось закрытым сервером (заголовок Idempotency-Key).
+	idempotent bool
 	// timeout переопределяет таймаут клиента для длинных операций.
 	timeout time.Duration
 }
@@ -395,8 +404,14 @@ func (c *Client) put(ctx context.Context, path string, body, out any, opts ...fu
 }
 
 // del performs a DELETE.
+//
+// DELETE по смыслу HTTP идемпотентен: повтор удалённого вернёт 404, а
+// удаляемого — 409. Поэтому при обрыве сети запрос повторяется, а клиенту Go
+// разрешено переотправить его сам, если соединение оказалось закрытым
+// (заголовок Idempotency-Key). POST так не повторяется: там повтор мог бы,
+// например, открыть второй бэкап.
 func (c *Client) del(ctx context.Context, path string, opts ...func(*requestOptions)) error {
-	o := requestOptions{correlationID: newCorrelationID()}
+	o := requestOptions{correlationID: newCorrelationID(), retries: 1, idempotent: true}
 	for _, fn := range opts {
 		fn(&o)
 	}
@@ -493,6 +508,9 @@ func (c *Client) doOnce(ctx context.Context, method, endpoint, path string, payl
 	}
 	if o.correlationID != "" {
 		req.Header.Set("Correlation-Id", o.correlationID)
+	}
+	if o.idempotent {
+		req.Header.Set("Idempotency-Key", o.correlationID)
 	}
 
 	resp, err := c.http.Do(req)

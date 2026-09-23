@@ -22,6 +22,10 @@ import (
 // leftoverEngine — движок после аварии: брошенный бэкап службы со служебным
 // снапшотом и зависшей передачей, плюс бэкап другой системы копирования.
 type leftoverEngine struct {
+	// dropDelete — движок принимает удаление снапшота, но соединение рвётся до
+	// ответа: клиент видит EOF.
+	dropDelete bool
+
 	mu        sync.Mutex
 	finalized []string
 	cancelled []string
@@ -75,10 +79,30 @@ func (f *leftoverEngine) start(t *testing.T) *httptest.Server {
 		}
 		_, _ = fmt.Fprintf(w, `{"snapshot":[%s]}`, strings.Join(out, ","))
 	})
+	// Удаляемый снапшот движок отдаёт в locked (идёт слияние), удалённый — 404.
+	mux.HandleFunc("GET /ovirt-engine/api/vms/vm-1/snapshots/{id}", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		deleting := slices.Contains(f.deleted, r.PathValue("id"))
+		f.mu.Unlock()
+		if deleting {
+			_, _ = fmt.Fprintf(w, `{"id":%q,"snapshot_status":"locked"}`, r.PathValue("id"))
+			return
+		}
+		_, _ = fmt.Fprintf(w, `{"id":%q,"snapshot_status":"ok"}`, r.PathValue("id"))
+	})
 	mux.HandleFunc("DELETE /ovirt-engine/api/vms/vm-1/snapshots/{id}", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
-		f.deleted = append(f.deleted, r.PathValue("id"))
+		if !slices.Contains(f.deleted, r.PathValue("id")) {
+			f.deleted = append(f.deleted, r.PathValue("id"))
+		}
+		drop := f.dropDelete
 		f.mu.Unlock()
+		if drop {
+			if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {
+				_ = conn.Close()
+			}
+			return
+		}
 		_, _ = w.Write([]byte(`{}`))
 	})
 	srv := httptest.NewServer(mux)
@@ -177,5 +201,23 @@ func TestLeftoversCleanupWaitsForRunningBackup(t *testing.T) {
 	}
 	if len(fake.finalized)+len(fake.deleted) != 0 {
 		t.Fatal("во время идущего бэкапа ничего трогать нельзя")
+	}
+}
+
+// Ответ на удаление снапшота потерялся (EOF), но движок удаление принял:
+// кнопка судит по самому снапшоту и не пишет «удаление не запущено».
+func TestLeftoversCleanupSurvivesLostDeleteResponse(t *testing.T) {
+	fake := &leftoverEngine{dropDelete: true}
+	engine := fake.start(t)
+	e := leftoverFixture(t, engine.URL, model.RunFailed)
+
+	res, err := e.CleanupLeftovers(context.Background(), "srv", "vm-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, action := range res.Actions {
+		if action.Kind == LeftoverSnapshot && !action.OK {
+			t.Fatalf("удаление принято движком, но отмечено как неудача: %+v", action)
+		}
 	}
 }

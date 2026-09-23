@@ -239,6 +239,19 @@ func (e *Engine) report(sc *leftoverScan) *LeftoverReport {
 	return rep
 }
 
+// snapshotNow — есть ли снапшот сейчас и в каком он состоянии. Ошибка
+// запроса считается как «есть, состояние неизвестно».
+func snapshotNow(ctx context.Context, client *ovirt.Client, vmID, snapshotID string) (gone bool, state string) {
+	snap, err := client.GetSnapshot(ctx, vmID, snapshotID)
+	if ovirt.IsNotFound(err) {
+		return true, ""
+	}
+	if err != nil {
+		return false, ""
+	}
+	return false, snap.SnapshotStatus
+}
+
 // InspectLeftovers показывает, что осталось на движке по ВМ, ничего не меняя.
 func (e *Engine) InspectLeftovers(ctx context.Context, serverID, vmID string) (*LeftoverReport, error) {
 	sc, err := e.scanLeftovers(ctx, serverID, vmID)
@@ -309,10 +322,14 @@ func (e *Engine) CleanupLeftovers(ctx context.Context, serverID, vmID string) (*
 						Detail: map[bool]string{true: "передача отменена", false: "передачу отменить не удалось"}[ok]})
 				}
 			}
-			if err := client.DeleteSnapshotWhenReady(ctx, vm.ID, s.ID, time.Minute); err != nil && !ovirt.IsNotFound(err) {
-				res.Actions = append(res.Actions, CleanupAction{Kind: LeftoverSnapshot, ID: s.ID,
-					Detail: fmt.Sprintf("удаление не запущено: %v", err)})
-				continue
+			if err := client.DeleteSnapshot(ctx, vm.ID, s.ID); err != nil && !ovirt.IsNotFound(err) {
+				// Ответ мог потеряться, а движок — принять удаление (или его уже
+				// начал повтор): судить по самому снапшоту, а не по ответу.
+				if gone, state := snapshotNow(ctx, client, vm.ID, s.ID); !gone && state != "locked" {
+					res.Actions = append(res.Actions, CleanupAction{Kind: LeftoverSnapshot, ID: s.ID,
+						Detail: fmt.Sprintf("удаление не запущено: %v", err)})
+					continue
+				}
 			}
 			res.Actions = append(res.Actions, CleanupAction{Kind: LeftoverSnapshot, ID: s.ID, OK: true,
 				Detail: fmt.Sprintf("удаление запущено (запуск %s); движок сливает слои — диски освободятся, когда снапшот исчезнет из списка", owner)})

@@ -2,14 +2,16 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useQuasar } from 'quasar'
 import { api, errorMessage, notifyError, notifyOk } from '@/api/client'
-import { ago, bytes, consistencyOptions, dateTime, runStatus, statusColor, vmStatus } from '@/api/format'
+import {
+  ago, bytes, consistencyOptions, dateTime, freezeByHint, freezeByOptions, runStatus, statusColor, usesOVirtAPI, vmStatus,
+} from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import BackupOptionsPicker from '@/components/BackupOptionsPicker.vue'
 import BackupTypeHelpCard from '@/components/BackupTypeHelpCard.vue'
 import HelpButton from '@/components/HelpButton.vue'
 import PageLoadError from '@/components/PageLoadError.vue'
-import type { BackupOption, BackupRun, Consistency, Disk, Recommendation, SchedulePreset, VM } from '@/api/types'
+import type { BackupOption, BackupRun, Consistency, Disk, FreezeBy, Recommendation, SchedulePreset, VM } from '@/api/types'
 
 const props = defineProps<{ serverId: string; vmId: string }>()
 
@@ -33,6 +35,10 @@ const selectedStorage = ref<string | null>(null)
 const selectedType = ref<string>('')
 const consistency = ref<Consistency>('crash')
 const requireConsistency = ref(false)
+// На oVirt по умолчанию замораживает движок: доли секунды на момент точки,
+// а не вся подготовка бэкапа.
+const freezeBy = ref<FreezeBy>('engine')
+const maxFreezeSeconds = ref(0)
 let consistencyPicked = false
 const encrypt = ref(false)
 const verifyAfter = ref<string>('')
@@ -59,6 +65,8 @@ const backupSupported = computed(() => Boolean(sourceServer.value && app.serverS
 const backupPlanningAvailable = computed(() => backupSupported.value && auth.can('jobs.read'))
 // Proxmox морозит гостя сам (vzdump при agent=1): требовать уровень там нельзя.
 const isProxmox = computed(() => sourceServer.value?.kind === 'proxmox')
+// Выбор «кто замораживает» есть только у oVirt: у KVM и Proxmox замораживает служба или vzdump.
+const isOVirt = computed(() => usesOVirtAPI(sourceServer.value?.kind))
 const consistencyChoices = computed(() => consistencyOptions.map((option) => ({
   ...option,
   disable: option.value !== 'crash' && !assessment.value?.guest_agent,
@@ -162,9 +170,8 @@ async function startBackup() {
       quiesce: consistency.value !== 'crash',
       consistency: consistency.value,
       require_consistency: requireConsistency.value && consistency.value !== 'crash' && !isProxmox.value,
-      // На oVirt гостя замораживает движок — доли секунды на момент точки,
-      // а не вся подготовка бэкапа.
-      freeze_by: ['ovirt', 'redvirt', 'olvm', 'rhv'].includes(sourceServer.value?.kind ?? '') ? 'engine' : 'service',
+      freeze_by: isOVirt.value ? freezeBy.value : 'service',
+      max_freeze_seconds: isOVirt.value && freezeBy.value === 'engine' ? 0 : maxFreezeSeconds.value,
       encrypt: encrypt.value,
       verify_after: verifyAfter.value || undefined,
       verify_options: verifyAfter.value === 'boot' ? verifyOptions.value : undefined,
@@ -365,6 +372,45 @@ onMounted(load)
               <q-tooltip v-if="!assessment?.guest_agent">
                 Гостевой агент не отвечает — заморозка невозможна, копия будет как после сбоя питания
               </q-tooltip>
+            </div>
+            <div v-if="isOVirt" class="col-12 col-sm-8">
+              <q-select
+                v-model="freezeBy"
+                :options="freezeByOptions"
+                :disable="consistency === 'crash'"
+                emit-value
+                map-options
+                label="Кто замораживает гостя"
+                :hint="consistency === 'crash' ? 'Не нужно: гость не замораживается' : freezeByHint(freezeBy)"
+                outlined
+                dense
+                data-testid="adhoc-freeze-by"
+              >
+                <template #option="scope">
+                  <q-item v-bind="scope.itemProps">
+                    <q-item-section>
+                      <q-item-label>{{ scope.opt.label }}</q-item-label>
+                      <q-item-label caption>{{ scope.opt.caption }}</q-item-label>
+                    </q-item-section>
+                  </q-item>
+                </template>
+              </q-select>
+            </div>
+            <div v-if="!isProxmox" class="col-12 col-sm-4">
+              <q-input
+                v-model.number="maxFreezeSeconds"
+                type="number"
+                min="0"
+                max="600"
+                :disable="consistency === 'crash' || (isOVirt && freezeBy === 'engine')"
+                label="Предел заморозки, с"
+                :hint="isOVirt && freezeBy === 'engine'
+                  ? 'Не нужен: движок держит заморозку доли секунды'
+                  : '0 — по умолчанию службы; узлам Kubernetes — 10–15 с'"
+                outlined
+                dense
+                data-testid="adhoc-max-freeze"
+              />
             </div>
             <div class="col-12 row items-center q-gutter-md">
               <q-toggle

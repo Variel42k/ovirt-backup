@@ -270,6 +270,47 @@ export const consistencyOptions = [
   { value: 'application', label: 'Приложения (СУБД)', caption: 'агент + сценарии fsfreeze-hook или VSS в госте' },
 ] as const
 
+/**
+ * Платформы с Backup API oVirt: только у них гостя может заморозить сам движок.
+ * Тот же список, что ServerKind.UsesOVirtAPI на сервере.
+ */
+export function usesOVirtAPI(kind?: string | null): boolean {
+  return ['ovirt', 'redvirt', 'olvm', 'rhv'].includes(kind ?? '')
+}
+
+/** Кто замораживает гостя — для выбора в задании и при разовом бэкапе. */
+export const freezeByOptions = [
+  {
+    label: 'Движок — только на момент фиксации точки',
+    value: 'engine',
+    caption: 'Доли секунды: движок сам замораживает гостя после подготовки бэкапа. Для узлов Kubernetes и нагруженных СУБД',
+  },
+  {
+    label: 'Смешанный — служба, при проблеме подключается движок',
+    value: 'mixed',
+    caption: 'Замораживает служба с пределом ниже; не смогла или не уложилась — заморозку перехватывает движок '
+      + 'и следующие 7 дней на этой ВМ сразу замораживает он',
+  },
+  {
+    label: 'Служба — до запроса бэкапа',
+    value: 'service',
+    caption: 'Гость стоит всю подготовку бэкапа на движке (на oVirt — десятки секунд), не дольше предела заморозки',
+  },
+] as const
+
+/** Подсказка под выбором «Кто замораживает гостя»: как работает режим. */
+export function freezeByHint(mode?: string | null): string {
+  switch (mode) {
+    case 'engine':
+      return 'Движок замораживает гостя сам, на доли секунды — только на момент фиксации точки'
+    case 'mixed':
+      return 'Замораживает служба, не дольше предела; не смогла или не уложилась — заморозку перехватывает движок'
+    default:
+      return 'Служба замораживает гостя до запроса бэкапа и держит заморозку, пока движок готовит точку, '
+        + 'но не дольше предела'
+  }
+}
+
 export function consistencyLabel(level?: string | null): string {
   return consistencyOptions.find((option) => option.value === level)?.label ?? 'неизвестно'
 }

@@ -3,7 +3,9 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useQuasar } from 'quasar'
 import { useRoute, useRouter } from 'vue-router'
 import { api, errorMessage, notify, notifyError, notifyOk } from '@/api/client'
-import { consistencyLabel, consistencyOptions, dateTime, runStatus, statusColor } from '@/api/format'
+import {
+  consistencyLabel, consistencyOptions, dateTime, freezeByHint, freezeByOptions, runStatus, statusColor, usesOVirtAPI,
+} from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import BackupOptionsPicker from '@/components/BackupOptionsPicker.vue'
@@ -115,7 +117,7 @@ const backupServers = computed(() => app.servers.filter((s) => s.enabled && app.
 const jobServer = computed(() => app.servers.find((server) => server.id === form.value.server_id))
 const isProxmoxJob = computed(() => jobServer.value?.kind === 'proxmox')
 // Заморозку силами движка умеет только Backup API oVirt и его производных.
-const isOVirtJob = computed(() => ['ovirt', 'redvirt', 'olvm', 'rhv'].includes(jobServer.value?.kind ?? ''))
+const isOVirtJob = computed(() => usesOVirtAPI(jobServer.value?.kind))
 // Что будет, если заявленный уровень не достигнут. Формулировка — об итоге для
 // копии: «прервать запуск» читалось так, будто служба оборвёт идущий бэкап.
 const requireConsistencyOptions = [
@@ -140,17 +142,7 @@ const consistencyHint = computed(() => {
   }
 })
 
-const freezeByHint = computed(() => {
-  switch (freezeMode.value) {
-    case 'engine':
-      return 'Движок замораживает гостя сам, на доли секунды — только на момент фиксации точки'
-    case 'mixed':
-      return 'Замораживает служба, не дольше предела; не смогла или не уложилась — заморозку перехватывает движок'
-    default:
-      return 'Служба замораживает гостя до запроса бэкапа и держит заморозку, пока движок готовит точку, '
-        + 'но не дольше предела'
-  }
-})
+const freezeHint = computed(() => freezeByHint(freezeMode.value))
 
 // Когда уровень не будет достигнут: причины зависят и от уровня (сценарии СУБД
 // есть только у «приложений»), и от того, кто замораживает (предел — только у службы).
@@ -169,24 +161,6 @@ const consistencyFailureHint = computed(() => {
   return `Это случится, если ${reasons.join(', ')}.`
 })
 
-const freezeByOptions = [
-  {
-    label: 'Движок — только на момент фиксации точки',
-    value: 'engine',
-    caption: 'Доли секунды: движок сам замораживает гостя после подготовки бэкапа. Для узлов Kubernetes и нагруженных СУБД',
-  },
-  {
-    label: 'Смешанный — служба, при проблеме подключается движок',
-    value: 'mixed',
-    caption: 'Замораживает служба с пределом ниже; не смогла или не уложилась — заморозку перехватывает движок '
-      + 'и следующие 7 дней на этой ВМ сразу замораживает он',
-  },
-  {
-    label: 'Служба — до запроса бэкапа',
-    value: 'service',
-    caption: 'Гость стоит всю подготовку бэкапа на движке (на oVirt — десятки секунд), не дольше предела заморозки',
-  },
-]
 const verifyModes = computed(() => (app.meta?.verify_modes ?? []).filter((mode) =>
   !isProxmoxJob.value || ['quick', 'manifest', 'chain'].includes(mode.value),
 ))
@@ -1236,7 +1210,7 @@ const columns = [
               emit-value
               map-options
               label="Кто замораживает гостя"
-              :hint="form.consistency === 'crash' ? 'Не нужно: гость не замораживается' : freezeByHint"
+              :hint="form.consistency === 'crash' ? 'Не нужно: гость не замораживается' : freezeHint"
               outlined
               dense
               data-testid="job-freeze-by"

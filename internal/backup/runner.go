@@ -384,9 +384,14 @@ func (e *Engine) Execute(ctx context.Context, req RunRequest) (*model.BackupRun,
 	if err := e.store.UpdateBackupRun(ctx, run); err != nil {
 		log.Error().Err(err).Msg("бэкап выполнен, но запись о нём не обновлена")
 	}
-	e.event(ctx, run, model.RunEventFinished, ended.Sub(started),
-		fmt.Sprintf("прочитано %s, записано %s",
-			humanBytes(run.ReadBytes), humanBytes(run.StoredBytes)))
+	finished := fmt.Sprintf("прочитано %s, записано %s", humanBytes(run.ReadBytes), humanBytes(run.StoredBytes))
+	if run.Status == model.RunPartial {
+		// Точка опубликована, но машину целиком она не восстановит — это
+		// должно читаться в последней строке хронологии, а не только в шапке.
+		finished = "частично: не все диски сохранены, машину целиком из этой точки не восстановить; " +
+			"следующий запуск будет полным; " + finished
+	}
+	e.event(ctx, run, model.RunEventFinished, ended.Sub(started), finished)
 
 	if mirror != nil {
 		for name, failed := range mirror.Failed() {
@@ -565,6 +570,22 @@ func (e *Engine) resolvePlan(ctx context.Context, client *ovirt.Client, srv *mod
 		return p, fmt.Errorf("поиск опорного бэкапа: %w", err)
 	}
 
+	// Инкремент копирует только изменения с точки основы, поэтому каждый диск
+	// должен иметь в ней свою копию. У частично успешной основы её может не
+	// быть — диск упал при копировании, — и такой инкремент дал бы диск из
+	// одних изменений, который не восстановить. То же для диска, подключённого
+	// к ВМ после основы.
+	missing, err := e.disksMissingIn(ctx, parent, disks)
+	if err != nil {
+		return p, fmt.Errorf("проверка дисков опорного бэкапа: %w", err)
+	}
+	if len(missing) > 0 {
+		p.Type = model.BackupFull
+		p.Note = fmt.Sprintf("в предыдущей точке нет копии дисков %s — инкремент от неё не восстановить, "+
+			"выполняется полный бэкап", strings.Join(missing, ", "))
+		return p, nil
+	}
+
 	if req.FullEvery > 0 && parent.ChainIndex+1 >= req.FullEvery {
 		p.Type = model.BackupFull
 		p.Note = fmt.Sprintf("длина цепочки достигла %d — выполняется полный бэкап", req.FullEvery)
@@ -590,6 +611,28 @@ func (e *Engine) resolvePlan(ctx context.Context, client *ovirt.Client, srv *mod
 	p.FromCheckpointID = parent.ToCheckpointID
 	p.ChunkSize = e.chainChunkSize(ctx, parent, p.ChunkSize)
 	return p, nil
+}
+
+// disksMissingIn — диски из disks, которых нет среди успешно сохранённых в
+// запуске parent.
+func (e *Engine) disksMissingIn(ctx context.Context, parent *model.BackupRun, disks []ovirt.Disk) ([]string, error) {
+	saved, err := e.store.ListBackupDisks(ctx, parent.ID)
+	if err != nil {
+		return nil, err
+	}
+	ok := map[string]bool{}
+	for _, d := range saved {
+		if d.Status == model.RunSucceeded {
+			ok[d.DiskID] = true
+		}
+	}
+	var missing []string
+	for _, d := range disks {
+		if !ok[d.ID] {
+			missing = append(missing, d.AliasOrName())
+		}
+	}
+	return missing, nil
 }
 
 // chainChunkSize keeps the whole chain on one grid: an incremental written on
@@ -678,6 +721,16 @@ func (e *Engine) selectDisks(ctx context.Context, client *ovirt.Client, vmID str
 		}
 	}
 	return out, skipped, nil
+}
+
+// transferInactivity — таймаут неактивности передачи, не короче longest:
+// самой долгой операции, которую служба выполнит на этой передаче одним
+// запросом. Иначе движок сочтёт передачу простаивающей и удалит билет.
+func (e *Engine) transferInactivity(longest time.Duration) time.Duration {
+	if e.cfg.Transfer.InactivityTimeout > longest {
+		return e.cfg.Transfer.InactivityTimeout
+	}
+	return longest
 }
 
 // imageioTimeouts — пределы запросов к ovirt-imageio для диска размера size.
@@ -1286,17 +1339,31 @@ func (e *Engine) copyOneDisk(ctx context.Context, client *ovirt.Client, backend 
 		return nil, 0, 0, fmt.Errorf("для диска %s не удалось определить источник передачи", disk.AliasOrName())
 	}
 
+	limits := e.imageioTimeouts(disk.ProvisionedSize.Int64())
+	// Движок закрывает передачу, по билету которой нет запросов дольше
+	// inactivity_timeout, а долгий запрос карты экстентов, судя по всему,
+	// активностью не считается: билет терабайтного диска пропадал посреди
+	// копирования. Поэтому таймаут не короче самой долгой операции на
+	// передаче: карты, а при сверке с источником — контрольной суммы.
+	longest := limits.Map
+	if req.VerifyAfter == model.VerifySource {
+		longest = limits.Scan
+	}
+	transferReq.InactivityTimeout = e.transferInactivity(longest)
+
 	transfer, err := client.CreateTransfer(ctx, transferReq)
 	if err != nil {
 		return nil, 0, 0, fmt.Errorf("открытие передачи: %w", err)
 	}
+	// transferID меняется, если передачу приходится открыть заново.
+	transferID := transfer.ID
 
 	success := false
 	defer func() {
 		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
 		defer cancel()
-		if err := client.CloseTransfer(closeCtx, transfer.ID, success); err != nil {
-			e.log.Warn().Err(err).Str("transfer", transfer.ID).Msg("не удалось корректно закрыть передачу")
+		if err := client.CloseTransfer(closeCtx, transferID, success); err != nil {
+			e.log.Warn().Err(err).Str("transfer", transferID).Msg("не удалось корректно закрыть передачу")
 		}
 	}()
 
@@ -1306,8 +1373,46 @@ func (e *Engine) copyOneDisk(ctx context.Context, client *ovirt.Client, backend 
 	}
 
 	dataURL := ovirt.DataURL(ready, e.cfg.Transfer.PreferProxy)
-	src := imageio.New(dataURL, client.DataHTTPClient()).
-		WithTimeouts(e.imageioTimeouts(disk.ProvisionedSize.Int64()))
+	src := imageio.New(dataURL, client.DataHTTPClient()).WithTimeouts(limits)
+
+	// reopen открывает новую передачу того же диска вместо потерянной. Движок
+	// держит одну передачу на диск, поэтому старая сначала закрывается.
+	reopen := func(ctx context.Context, cause error) (*imageio.Client, error) {
+		old := transferID
+		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+		_ = client.CancelTransfer(closeCtx, old)
+		_, _ = client.WaitTransferDone(closeCtx, old, 2*time.Minute)
+		cancel()
+
+		var next *ovirt.ImageTransfer
+		deadline := time.Now().Add(2 * time.Minute)
+		for {
+			next, err = client.CreateTransfer(ctx, transferReq)
+			if err == nil || !ovirt.IsConflict(err) || time.Now().After(deadline) {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(5 * time.Second):
+			}
+		}
+		if err != nil {
+			return nil, err
+		}
+		transferID = next.ID
+		ready, err := client.WaitTransferReady(ctx, next.ID, 10*time.Minute)
+		if err != nil {
+			return nil, err
+		}
+		e.event(ctx, run, model.RunEventTransferReopened, 0, fmt.Sprintf(
+			"диск %s: билет передачи %s потерян (%v) — открыта новая передача %s, копирование продолжено",
+			disk.AliasOrName(), old, cause, next.ID))
+		e.log.Warn().Err(cause).Str("диск", disk.AliasOrName()).Str("старая", old).Str("новая", next.ID).
+			Msg("передача потеряна — открыта новая")
+		return imageio.New(ovirt.DataURL(ready, e.cfg.Transfer.PreferProxy), client.DataHTTPClient()).
+			WithTimeouts(limits), nil
+	}
 
 	manifestKey := repo.DiskManifestKey(run.RepoPath, index, disk.ID)
 	dataKey := repo.DiskDataKey(run.RepoPath, index, disk.ID)
@@ -1360,8 +1465,9 @@ func (e *Engine) copyOneDisk(ctx context.Context, client *ovirt.Client, backend 
 		ExtentContext: extentContext,
 		RangeRetries:  e.cfg.Transfer.RangeRetries,
 		Pacer:         pacer,
+		Reopen:        reopen,
 		Keepalive: func(ctx context.Context) error {
-			return client.ExtendTransfer(ctx, transfer.ID)
+			return client.ExtendTransfer(ctx, transferID)
 		},
 		OnProgress: func(logical int64) {
 			if time.Since(lastReport) < 2*time.Second {

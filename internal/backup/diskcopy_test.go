@@ -118,3 +118,109 @@ func TestReadPacerKeepsAverageRate(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// imageTicket — imageio с данными и картой; loseAfter > 0 — после стольких
+// чтений билет «пропадает», как когда движок закрывает передачу.
+func imageTicket(t *testing.T, image []byte, extents string, loseAfter int) *imageio.Client {
+	t.Helper()
+	reads := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /images/ticket/extents", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(extents))
+	})
+	mux.HandleFunc("GET /images/ticket", func(w http.ResponseWriter, r *http.Request) {
+		reads++
+		if (loseAfter > 0 && reads > loseAfter) || loseAfter < 0 {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte("You are not allowed to access this resource: No such ticket 42"))
+			return
+		}
+		var from, to int
+		_, _ = fmt.Sscanf(r.Header.Get("Range"), "bytes=%d-%d", &from, &to)
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(image[from : to+1])
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return imageio.New(srv.URL+"/images/ticket", &http.Client{})
+}
+
+// Три несмежных области с данными — три отдельных чтения.
+func sparseImage() ([]byte, string) {
+	cs := testChunkSize
+	image := make([]byte, 6*cs)
+	copy(image[0:], pattern('A', cs))
+	copy(image[2*cs:], pattern('B', cs))
+	copy(image[4*cs:], pattern('C', cs))
+	extents := fmt.Sprintf(`[{"start":0,"length":%d,"zero":false},{"start":%d,"length":%d,"zero":true},`+
+		`{"start":%d,"length":%d,"zero":false},{"start":%d,"length":%d,"zero":true},`+
+		`{"start":%d,"length":%d,"zero":false},{"start":%d,"length":%d,"zero":true}]`,
+		cs, cs, cs, 2*cs, cs, 3*cs, cs, 4*cs, cs, 5*cs, cs)
+	return image, extents
+}
+
+// Движок закрыл передачу посреди копирования: служба открывает новую и
+// продолжает с того же блока — ничего не теряется и не читается дважды.
+func TestCopyReopensLostTransfer(t *testing.T) {
+	image, extents := sparseImage()
+	ctx := context.Background()
+	m := &DiskManifest{RunID: "r", ChainID: "r", DiskID: "d", VirtualSize: int64(len(image))}
+	w, err := NewDiskWriter(ctx, m, WriterOptions{Backend: testBackend(t), DataKey: "r.data",
+		ChunkSize: testChunkSize, Compression: CompressionNone})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reopened := 0
+	res, err := copyDisk(ctx, copyParams{
+		Source: imageTicket(t, image, extents, 1), Writer: w, RangeRetries: 3,
+		ChunkSize: testChunkSize, VirtualSize: int64(len(image)), ExtentContext: imageio.ContextZero,
+		Reopen: func(context.Context, error) (*imageio.Client, error) {
+			reopened++
+			return imageTicket(t, image, extents, 0), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("потеря билета должна переживаться: %v", err)
+	}
+	if reopened != 1 || res.Reopens != 1 {
+		t.Fatalf("передача открыта заново %d раз, ожидался 1", reopened)
+	}
+	final, err := w.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(final.Chunks) != 3 || final.Chunks[0].Index != 0 || final.Chunks[1].Index != 2 || final.Chunks[2].Index != 4 {
+		t.Fatalf("сохранены чанки %+v, ожидались 0, 2, 4", final.Chunks)
+	}
+}
+
+// Билет пропадает снова и снова — это уже не случайность: после maxReopens
+// попыток запуск завершается понятной ошибкой.
+func TestCopyGivesUpAfterRepeatedTicketLoss(t *testing.T) {
+	image, extents := sparseImage()
+	ctx := context.Background()
+	m := &DiskManifest{RunID: "r", ChainID: "r", DiskID: "d", VirtualSize: int64(len(image))}
+	w, err := NewDiskWriter(ctx, m, WriterOptions{Backend: testBackend(t), DataKey: "g.data",
+		ChunkSize: testChunkSize, Compression: CompressionNone})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = w.Close() }()
+
+	reopened := 0
+	_, err = copyDisk(ctx, copyParams{
+		Source: imageTicket(t, image, extents, 1), Writer: w,
+		ChunkSize: testChunkSize, VirtualSize: int64(len(image)), ExtentContext: imageio.ContextZero,
+		Reopen: func(context.Context, error) (*imageio.Client, error) {
+			reopened++
+			return imageTicket(t, image, extents, -1), nil // каждая новая передача сразу теряет билет
+		},
+	})
+	if err == nil || !imageio.IsTicketGone(err) {
+		t.Fatalf("ожидалась ошибка потерянного билета, получено %v", err)
+	}
+	if reopened != maxReopens {
+		t.Fatalf("передача открыта заново %d раз, предел %d", reopened, maxReopens)
+	}
+}

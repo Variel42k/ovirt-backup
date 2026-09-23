@@ -37,3 +37,18 @@ func TestLongRequestsOutliveRequestTimeout(t *testing.T) {
 		t.Fatal("чтение блока должно обрываться своим пределом, а не ждать как долгий запрос")
 	}
 }
+
+// Так отвечал node-01, когда движок закрыл передачу посреди копирования.
+func TestIsTicketGone(t *testing.T) {
+	gone := &Error{Status: http.StatusForbidden, Method: "GET", URL: "https://node-01:54322/images/t",
+		Body: "You are not allowed to access this resource: No such ticket b27e0406-94d2-4d1c-9014-819503f4b030"}
+	if !IsTicketGone(gone) {
+		t.Fatal("потерянный билет не распознан")
+	}
+	if IsTicketGone(&Error{Status: http.StatusForbidden, Body: "Permission denied"}) {
+		t.Fatal("отказ в доступе — не потерянный билет")
+	}
+	if IsTicketGone(&Error{Status: http.StatusInternalServerError, Body: "Server failed to perform the request"}) {
+		t.Fatal("500 — не потерянный билет")
+	}
+}

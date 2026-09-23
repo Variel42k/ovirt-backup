@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -393,6 +394,18 @@ func (e *Error) Error() string {
 		body = body[:300] + "…"
 	}
 	return fmt.Sprintf("imageio %s %s: HTTP %d: %s", e.Method, redactTicket(e.URL), e.Status, body)
+}
+
+// IsTicketGone сообщает, что билета передачи на хосте больше нет: движок
+// закрыл передачу (например, по таймауту неактивности) или imageio
+// перезапустился. Повторять запрос с тем же билетом бессмысленно — нужна
+// новая передача.
+func IsTicketGone(err error) bool {
+	var e *Error
+	if !errors.As(err, &e) {
+		return false
+	}
+	return e.Status == http.StatusForbidden && strings.Contains(strings.ToLower(e.Body), "no such ticket")
 }
 
 func errorFrom(resp *http.Response, method, endpoint string) error {

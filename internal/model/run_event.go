@@ -44,6 +44,9 @@ const (
 	// RunEventMapUnavailable — ovirt-imageio не отдал карту экстентов, и
 	// диск полного бэкапа читался целиком.
 	RunEventMapUnavailable RunEventKind = "extent_map_unavailable"
+	// RunEventTransferReopened — движок закрыл передачу образа посреди
+	// копирования, и служба открыла новую, продолжив с того же места.
+	RunEventTransferReopened RunEventKind = "transfer_reopened"
 )
 
 // Title возвращает название этапа для интерфейса.
@@ -87,6 +90,8 @@ func (k RunEventKind) Title() string {
 		return "Не удалось удалить брошенный снапшот"
 	case RunEventMapUnavailable:
 		return "Карта экстентов недоступна — диск прочитан целиком"
+	case RunEventTransferReopened:
+		return "Передача образа открыта заново"
 	}
 	return string(k)
 }

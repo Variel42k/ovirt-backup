@@ -30,6 +30,9 @@ type copyParams struct {
 	RangeRetries int
 	// Pacer ограничивает скорость чтения; nil — без ограничения.
 	Pacer *readPacer
+	// Reopen открывает новую передачу вместо потерянной и возвращает её
+	// источник. nil — переоткрывать нельзя.
+	Reopen func(ctx context.Context, cause error) (*imageio.Client, error)
 	// Keepalive продлевает передачу, пока идёт длинная запись в хранилище:
 	// движок отменяет неактивные передачи по таймауту.
 	Keepalive func(ctx context.Context) error
@@ -43,6 +46,11 @@ type copyParams struct {
 // extentsRetryDelay — пауза перед повторным запросом карты экстентов.
 var extentsRetryDelay = 10 * time.Second
 
+// maxReopens — сколько раз за диск можно переоткрыть потерянную передачу.
+// Разовая потеря билета не должна стоить многочасового бэкапа, а
+// повторяющаяся означает, что что-то не так с движком или хостом.
+const maxReopens = 3
+
 // copyResult reports what a disk copy transferred.
 type copyResult struct {
 	LogicalBytes int64
@@ -53,6 +61,8 @@ type copyResult struct {
 	// MapUnavailable — почему карта экстентов не получена и диск читался
 	// целиком; пусто — карта была.
 	MapUnavailable string
+	// Reopens — сколько раз передачу пришлось открыть заново.
+	Reopens int
 	// GridChunks — сколько чанков занимает весь образ; вместе с ChunkCount
 	// показывает, какую долю диска затронул этот запуск.
 	GridChunks int64
@@ -71,7 +81,29 @@ func copyDisk(ctx context.Context, p copyParams) (copyResult, error) {
 	}
 	res.GridChunks = (p.VirtualSize + p.ChunkSize - 1) / p.ChunkSize
 
-	extents, err := p.Source.Extents(ctx, p.ExtentContext)
+	src := p.Source
+	// reopen заменяет источник, если билет передачи потерян. Прочитанное к
+	// этому моменту уже записано: копирование продолжается с того же блока.
+	reopen := func(cause error) error {
+		if p.Reopen == nil || !imageio.IsTicketGone(cause) || res.Reopens >= maxReopens {
+			return cause
+		}
+		next, err := p.Reopen(ctx, cause)
+		if err != nil {
+			return fmt.Errorf("движок закрыл передачу (%v), а открыть новую не удалось: %w", cause, err)
+		}
+		src = next
+		res.Reopens++
+		return nil
+	}
+
+	extents, err := src.Extents(ctx, p.ExtentContext)
+	for err != nil && imageio.IsTicketGone(err) {
+		if reopenErr := reopen(err); reopenErr != nil {
+			break
+		}
+		extents, err = src.Extents(ctx, p.ExtentContext)
+	}
 	if err != nil && ctx.Err() == nil {
 		// imageio отвечает 500 и на разовые сбои: повтор стоит секунд, а
 		// без карты диск пришлось бы читать целиком.
@@ -80,7 +112,7 @@ func copyDisk(ctx context.Context, p copyParams) (copyResult, error) {
 			return res, ctx.Err()
 		case <-time.After(extentsRetryDelay):
 		}
-		extents, err = p.Source.Extents(ctx, p.ExtentContext)
+		extents, err = src.Extents(ctx, p.ExtentContext)
 	}
 	// Без карты изменённых блоков инкремент невозможен: неизвестно, что
 	// копировать. Полному же карта нужна лишь затем, чтобы не читать пустоту:
@@ -114,9 +146,12 @@ func copyDisk(ctx context.Context, p copyParams) (copyResult, error) {
 		if err := p.Pacer.Wait(ctx, group.Length); err != nil {
 			return res, err
 		}
-		buf, err := readWithRetry(ctx, p.Source, group.Offset, group.Length, p.RangeRetries)
-		if err != nil {
-			return res, err
+		buf, err := readWithRetry(ctx, src, group.Offset, group.Length, p.RangeRetries)
+		for err != nil {
+			if reopenErr := reopen(err); reopenErr != nil {
+				return res, reopenErr
+			}
+			buf, err = readWithRetry(ctx, src, group.Offset, group.Length, p.RangeRetries)
 		}
 		res.ReadBytes += group.Length
 
@@ -201,6 +236,10 @@ func readWithRetry(ctx context.Context, src *imageio.Client, offset, length int6
 			lastErr = err
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
+			}
+			// Билета нет — повтор с ним же ничего не даст; решает вызывающий.
+			if imageio.IsTicketGone(err) {
+				break
 			}
 			continue
 		}

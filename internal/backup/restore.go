@@ -372,10 +372,12 @@ func (e *Engine) restoreToEngine(ctx context.Context, set *ChainSet, reader *Cha
 	}
 
 	transfer, err := client.CreateTransfer(ctx, ovirt.TransferRequest{
-		DiskID:            targetDiskID,
-		Direction:         "upload",
-		Format:            "raw",
-		InactivityTimeout: e.cfg.Transfer.InactivityTimeout,
+		DiskID:    targetDiskID,
+		Direction: "upload",
+		Format:    "raw",
+		// Обнуление больших диапазонов — один долгий запрос: движок не должен
+		// закрыть передачу как простаивающую посреди него.
+		InactivityTimeout: e.transferInactivity(e.imageioTimeouts(leaf.VirtualSize).Scan),
 	})
 	if err != nil {
 		return fmt.Errorf("открытие передачи на запись: %w", err)

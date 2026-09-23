@@ -657,10 +657,12 @@ func (e *Engine) verifySource(ctx context.Context, set *ChainSet, report *Verify
 		}
 
 		transfer, err := client.CreateTransfer(ctx, ovirt.TransferRequest{
-			DiskID:            diskID,
-			Direction:         "download",
-			Format:            "raw",
-			InactivityTimeout: e.cfg.Transfer.InactivityTimeout,
+			DiskID:    diskID,
+			Direction: "download",
+			Format:    "raw",
+			// Контрольная сумма считается одним долгим запросом: движок не
+			// должен закрыть передачу как простаивающую посреди него.
+			InactivityTimeout: e.transferInactivity(e.imageioTimeouts(leaf.VirtualSize).Scan),
 		})
 		if err != nil {
 			return fmt.Errorf("открытие передачи для сверки диска %s: %w", leaf.Alias, err)

@@ -167,8 +167,11 @@ function removeNotification(key: string, entry: ActiveNotification): void {
  * Крестик на плашке ставит конфигурация Quasar в main.ts — общая и для этого
  * вызова, и для тех, что появятся мимо него.
  */
-export function notify(options: QNotifyCreateOptions | string): void {
-  if (!popupNotificationsEnabled.value) return
+export function notify(options: QNotifyCreateOptions | string, { always = false } = {}): void {
+  // always — прямой ответ на нажатие кнопки: без него действие, которое
+  // ничего не сделало, выглядит как сломанная кнопка. Выключатель глушит
+  // фоновые уведомления, а не ответы на действия оператора.
+  if (!popupNotificationsEnabled.value && !always) return
 
   const resolved: QNotifyCreateOptions = typeof options === 'object' ? options : { message: options }
   const timeout = resolved.timeout ?? DEFAULT_TIMEOUT

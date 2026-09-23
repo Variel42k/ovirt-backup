@@ -331,10 +331,15 @@ type Disk struct {
 	Description     string `json:"description"`
 	ProvisionedSize Num    `json:"provisioned_size"`
 	ActualSize      Num    `json:"actual_size"`
-	Format          string `json:"format"` // cow | raw
-	Sparse          Bool   `json:"sparse"`
-	Shareable       Bool   `json:"shareable"`
-	Bootable        Bool   `json:"bootable"`
+	// TotalSize — место всей цепочки томов диска. actual_size описывает
+	// только активный том: у диска со снапшотами (в том числе оставшимися от
+	// прерванных бэкапов) он показывает лишь то, что записано после
+	// последнего снапшота, — гигабайты вместо сотен.
+	TotalSize Num    `json:"total_size"`
+	Format    string `json:"format"` // cow | raw
+	Sparse    Bool   `json:"sparse"`
+	Shareable Bool   `json:"shareable"`
+	Bootable  Bool   `json:"bootable"`
 	// Interface comes from the VM attachment (virtio, virtio_scsi, ide,
 	// sata). It is needed to reconnect a restored image with the same guest
 	// driver during a boot verification.
@@ -351,6 +356,35 @@ type Disk struct {
 	VMs *struct {
 		VM []Ref `json:"vm"`
 	} `json:"vms,omitempty"`
+	// LunStorage есть только у Direct LUN: размер такого диска движок отдаёт
+	// здесь, а provisioned_size и actual_size у него пустые.
+	LunStorage *struct {
+		LogicalUnits *struct {
+			LogicalUnit []struct {
+				ID   string `json:"id"`
+				Size Num    `json:"size"`
+			} `json:"logical_unit"`
+		} `json:"logical_units"`
+	} `json:"lun_storage,omitempty"`
+}
+
+// IsDirectLUN сообщает, что диск — LUN СХД, подключённый к ВМ напрямую, а не
+// образ в домене хранения. Backup API и ovirt-imageio работают только с
+// образами: такой диск движок не отдаёт ни целиком, ни по изменённым блокам.
+func (d *Disk) IsDirectLUN() bool {
+	return d.StorageType == "lun" || d.LunStorage != nil
+}
+
+// LUNSize — размер Direct LUN; 0 для обычного диска.
+func (d *Disk) LUNSize() int64 {
+	if d.LunStorage == nil || d.LunStorage.LogicalUnits == nil {
+		return 0
+	}
+	var total int64
+	for _, lu := range d.LunStorage.LogicalUnits.LogicalUnit {
+		total += lu.Size.Int64()
+	}
+	return total
 }
 
 type diskList struct {

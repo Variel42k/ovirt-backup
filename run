@@ -21,6 +21,25 @@ need() {
     command -v "$1" >/dev/null 2>&1 || die "не найден $1 — $2"
 }
 
+# web_deps ставит зависимости интерфейса, если их нет или они установлены по
+# другому package-lock.json. Проверять только наличие каталога мало: после
+# git pull с новой зависимостью старый node_modules остаётся на месте, и
+# сборка падает с «Cannot find module». Отметка — копия lock-файла, с которым
+# ставили; её нет у node_modules прежних сборок, и они переустановятся один раз.
+web_deps() {
+    stamp=web/node_modules/.jhvirt-package-lock.json
+    if [ -d web/node_modules ] && cmp -s web/package-lock.json "$stamp"; then
+        return 0
+    fi
+    if [ -d web/node_modules ]; then
+        say "    package-lock.json изменился — переустанавливаем зависимости интерфейса"
+    else
+        say "    зависимости интерфейса не установлены, ставим"
+    fi
+    (cd web && npm ci --no-audit --no-fund)
+    cp web/package-lock.json "$stamp"
+}
+
 # Файлы Go без веб-каталога: gofmt не должен трогать чужие зависимости.
 go_files() {
     find . -name '*.go' -not -path './web/*' -not -path './dist/*'
@@ -269,7 +288,7 @@ cmd_dev() {
 
 cmd_web() {
     need npm "нужен Node 20+"
-    [ -d web/node_modules ] || (cd web && npm ci --no-audit --no-fund)
+    web_deps
     step "интерфейс на :9000, /api проксируется на :8080"
     (cd web && npm run dev)
 }
@@ -555,10 +574,7 @@ cmd_build() {
 
     if [ "$SKIP_WEB" -eq 0 ]; then
         step "веб-интерфейс"
-        if [ ! -d web/node_modules ]; then
-            say "    зависимости не установлены, ставим"
-            (cd web && npm ci --no-audit --no-fund)
-        fi
+        web_deps
         (cd web && npm run build)
     else
         step "веб-интерфейс пропущен (--skip-web)"

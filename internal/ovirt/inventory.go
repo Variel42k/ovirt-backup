@@ -250,8 +250,20 @@ func (c *Client) listDisks(ctx context.Context, serverID string, attachments map
 			backup = "none"
 		}
 		storageType := d.StorageType
-		if storageType == "" && d.StorageDomains != nil {
-			storageType = ""
+		provisioned, actual := d.ProvisionedSize.Int64(), d.ActualSize.Int64()
+		if total := d.TotalSize.Int64(); total > actual {
+			actual = total
+		}
+		if d.IsDirectLUN() {
+			// Размер LUN целиком принадлежит ВМ; без этого диск на терабайт
+			// выглядел бы пустым и пропадал из оценок.
+			storageType = "lun"
+			if provisioned == 0 {
+				provisioned = d.LUNSize()
+			}
+			if actual == 0 {
+				actual = provisioned
+			}
 		}
 
 		out = append(out, &model.Disk{
@@ -260,8 +272,8 @@ func (c *Client) listDisks(ctx context.Context, serverID string, attachments map
 			Alias:           d.AliasOrName(),
 			Description:     d.Description,
 			VMIDs:           vmIDs,
-			ProvisionedSize: d.ProvisionedSize.Int64(),
-			ActualSize:      d.ActualSize.Int64(),
+			ProvisionedSize: provisioned,
+			ActualSize:      actual,
 			Format:          d.Format,
 			Sparse:          d.Sparse.Bool(),
 			Shareable:       d.Shareable.Bool(),

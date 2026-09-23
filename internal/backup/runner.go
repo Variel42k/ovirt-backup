@@ -646,6 +646,15 @@ func (e *Engine) selectDisks(ctx context.Context, client *ovirt.Client, vmID str
 				DiskID: d.ID, Name: name,
 				Reason: fmt.Sprintf("это не данные гостя (%s), восстанавливать нечего", d.ContentType),
 			})
+		case d.IsDirectLUN():
+			// Backup API и imageio работают только с образами в доменах
+			// хранения; отдать такой диск в бэкап значило бы уронить весь
+			// запуск на движке.
+			skipped = append(skipped, model.SkippedDisk{
+				DiskID: d.ID, Name: name,
+				Reason: "Direct LUN: движок отдаёт в бэкап только образы из доменов хранения, " +
+					"LUN СХД в копию ВМ не попадает — защищайте его средствами СХД или изнутри гостя",
+			})
 		case d.Shareable.Bool():
 			// A shared disk belongs to several VMs; backing it up once per VM
 			// would multiply the data and make restore ambiguous.

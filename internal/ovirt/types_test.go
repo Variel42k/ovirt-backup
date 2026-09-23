@@ -176,3 +176,41 @@ func TestCheckpointAndEventTimestamps(t *testing.T) {
 		t.Error("время события потеряно")
 	}
 }
+
+// Direct LUN отдаёт размер только внутри lun_storage: без его разбора диск на
+// терабайт выглядел пустым, и оценка бэкапа ВМ занижалась в сотни раз.
+func TestDirectLUNSize(t *testing.T) {
+	var d Disk
+	body := `{"id":"lun-1","storage_type":"lun","lun_storage":{"type":"iscsi",` +
+		`"logical_units":{"logical_unit":[{"id":"36001405abc","size":"1099511627776"}]}}}`
+	if err := json.Unmarshal([]byte(body), &d); err != nil {
+		t.Fatalf("разбор LUN: %v", err)
+	}
+	if !d.IsDirectLUN() {
+		t.Fatal("LUN не распознан")
+	}
+	if got := d.LUNSize(); got != 1<<40 {
+		t.Fatalf("размер LUN: %d", got)
+	}
+
+	var image Disk
+	if err := json.Unmarshal([]byte(`{"id":"img","storage_type":"image","provisioned_size":"96636764160"}`), &image); err != nil {
+		t.Fatal(err)
+	}
+	if image.IsDirectLUN() || image.LUNSize() != 0 {
+		t.Fatal("образ принят за LUN")
+	}
+}
+
+// actual_size описывает только активный том; у диска со снапшотами вся
+// цепочка — в total_size.
+func TestDiskTotalSizeParsed(t *testing.T) {
+	var d Disk
+	body := `{"id":"d","provisioned_size":"96636764160","actual_size":"2147483648","total_size":"80530636800"}`
+	if err := json.Unmarshal([]byte(body), &d); err != nil {
+		t.Fatal(err)
+	}
+	if d.TotalSize.Int64() != 80530636800 {
+		t.Fatalf("total_size: %d", d.TotalSize.Int64())
+	}
+}

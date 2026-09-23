@@ -1168,6 +1168,8 @@ export interface DiskFacts {
   storage_domain: string
   can_enable_cbt: boolean
   cbt_blocker?: string
+  /** Почему диск не попадёт в копию ВМ (Direct LUN); в оценки объёма он не входит. */
+  not_backed_up?: string
 }
 
 export interface Recommendation {

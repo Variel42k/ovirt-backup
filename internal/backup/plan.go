@@ -39,15 +39,28 @@ type Assessment struct {
 	// Наблюдаемая пропускная способность, байт/с. 0 — истории ещё нет.
 	ObservedThroughput int64 `json:"observed_throughput"`
 	// Средний объём инкремента по истории.
-	AverageIncrement int64            `json:"average_increment"`
-	LastBackupAt     *time.Time       `json:"last_backup_at,omitempty"`
-	LastBackupType   model.BackupType `json:"last_backup_type,omitempty"`
-	BackupCount      int              `json:"backup_count"`
+	AverageIncrement int64 `json:"average_increment"`
+	// LastFullBytes — сколько прочитал последний полный запуск. Это точнее
+	// любой оценки по инвентарю: движок отдаёт занятое место томов, а не то,
+	// что реально видит гость.
+	LastFullBytes  int64            `json:"last_full_bytes,omitempty"`
+	LastBackupAt   *time.Time       `json:"last_backup_at,omitempty"`
+	LastBackupType model.BackupType `json:"last_backup_type,omitempty"`
+	BackupCount    int              `json:"backup_count"`
 
 	QemuImgAvailable bool `json:"qemu_img_available"`
 
 	// Замечания — то, что стоит починить до настройки расписания.
 	Warnings []string `json:"warnings,omitempty"`
+}
+
+// FullBytes — ожидаемый объём полной копии: по последнему полному запуску,
+// пока его нет — по занятому месту из инвентаря.
+func (a Assessment) FullBytes() int64 {
+	if a.LastFullBytes > 0 {
+		return a.LastFullBytes
+	}
+	return a.TotalUsed
 }
 
 // DiskFacts is what matters about one disk when choosing a strategy.
@@ -64,6 +77,9 @@ type DiskFacts struct {
 	// CanEnableCBT — можно ли включить инкрементальный режим прямо сейчас.
 	CanEnableCBT bool   `json:"can_enable_cbt"`
 	CBTBlocker   string `json:"cbt_blocker,omitempty"`
+	// NotBackedUp — почему диск не попадёт в копию ВМ вовсе. Такой диск не
+	// входит в оценки объёма: иначе они обещали бы данные, которых в копии не будет.
+	NotBackedUp string `json:"not_backed_up,omitempty"`
 }
 
 // Option is one offered backup strategy.
@@ -192,6 +208,15 @@ func (e *Engine) Recommend(ctx context.Context, serverID, vmID, storageTargetID 
 			Shareable:       d.Shareable,
 			StorageDomain:   d.StorageDomain,
 		}
+		if d.StorageType == "lun" {
+			f.NotBackedUp = "Direct LUN: движок отдаёт в бэкап только образы из доменов хранения — " +
+				"этот диск в копию ВМ не попадёт"
+			a.Disks = append(a.Disks, f)
+			a.Warnings = append(a.Warnings, fmt.Sprintf(
+				"диск %s (%s) подключён как Direct LUN и в копию ВМ не попадёт: защищайте его средствами СХД "+
+					"или изнутри гостя (например, логическим дампом СУБД)", d.Alias, humanBytes(d.ProvisionedSize)))
+			continue
+		}
 		switch {
 		case d.SupportsIncremental():
 			a.CBTEnabled++
@@ -215,9 +240,19 @@ func (e *Engine) Recommend(ctx context.Context, serverID, vmID, storageTargetID 
 		}
 		a.Disks = append(a.Disks, f)
 		a.TotalSize += d.ProvisionedSize
-		a.TotalUsed += d.ActualSize
+		// Цепочка qcow2 с метаданными бывает больше самого диска, а копия
+		// больше выделенного объёма не прочитает.
+		used := d.ActualSize
+		if d.ProvisionedSize > 0 && used > d.ProvisionedSize {
+			used = d.ProvisionedSize
+		}
+		a.TotalUsed += used
 	}
-	a.DiskCount = len(a.Disks)
+	for _, d := range a.Disks {
+		if d.NotBackedUp == "" {
+			a.DiskCount++
+		}
+	}
 
 	e.enrichFromHistory(ctx, &a, storageTargetID)
 
@@ -279,6 +314,11 @@ func (e *Engine) enrichFromHistory(ctx context.Context, a *Assessment, storageTa
 			incSum += r.ReadBytes
 			incN++
 		}
+		// Запуски идут от новых к старым: первый полный — самый свежий.
+		if a.LastFullBytes == 0 && r.ReadBytes > 0 &&
+			(r.Type == model.BackupFull || r.Type == model.BackupSnapshot) {
+			a.LastFullBytes = r.ReadBytes
+		}
 	}
 	if throughputN > 0 {
 		a.ObservedThroughput = throughputSum / throughputN
@@ -308,11 +348,13 @@ func buildOptions(a Assessment) []Option {
 	cbtReady := a.EngineSupportsCBT && a.CBTPossible > 0 && a.CBTEnabled == a.CBTPossible
 	hasHistory := a.BackupCount > 0
 
+	fullEstimate := a.FullBytes()
+
 	// Without measurements, assume a working day changes a few percent of the
 	// allocated data — the figure most storage teams plan around.
 	incrementEstimate := a.AverageIncrement
 	if incrementEstimate <= 0 {
-		incrementEstimate = a.TotalUsed / 20
+		incrementEstimate = fullEstimate / 20
 	}
 
 	options := []Option{
@@ -321,7 +363,7 @@ func buildOptions(a Assessment) []Option {
 			Title:           model.BackupFull.Title(),
 			Available:       cbtReady,
 			Impact:          "ВМ продолжает работать; движок держит точку согласованности на время чтения",
-			EstimatedBytes:  a.TotalUsed,
+			EstimatedBytes:  fullEstimate,
 			SuggestedVerify: model.VerifyManifest,
 		},
 		{
@@ -345,7 +387,7 @@ func buildOptions(a Assessment) []Option {
 			Title:           model.BackupSnapshot.Title(),
 			Available:       a.DiskCount > 0,
 			Impact:          "ВМ продолжает работать; после копирования снапшот сливается обратно — это нагружает СХД",
-			EstimatedBytes:  a.TotalUsed,
+			EstimatedBytes:  fullEstimate,
 			SuggestedVerify: model.VerifyManifest,
 		},
 		{
@@ -361,7 +403,7 @@ func buildOptions(a Assessment) []Option {
 			Title:           model.BackupOVA.Title(),
 			Available:       true,
 			Impact:          "самый долгий вариант; файл остаётся на хосте гипервизора, а не в хранилище бэкапов",
-			EstimatedBytes:  a.TotalUsed,
+			EstimatedBytes:  fullEstimate,
 			SuggestedVerify: model.VerifyQuick,
 		},
 	}
@@ -478,7 +520,7 @@ func buildPresets(a Assessment) []SchedulePreset {
 
 	increment := a.AverageIncrement
 	if increment <= 0 {
-		increment = a.TotalUsed / 20
+		increment = a.FullBytes() / 20
 	}
 
 	presets := []SchedulePreset{
@@ -493,7 +535,7 @@ func buildPresets(a Assessment) []SchedulePreset {
 			Quiesce:     a.GuestAgent,
 			Recommended: cbtReady,
 			// 7 инкрементов + полная копия в неделю, на горизонте месяца.
-			EstimatedFootprint: (increment*7 + a.TotalUsed) * 4,
+			EstimatedFootprint: (increment*7 + a.FullBytes()) * 4,
 		},
 		{
 			Name:               "Каждые 4 часа",
@@ -505,7 +547,7 @@ func buildPresets(a Assessment) []SchedulePreset {
 			VerifyAfter:        model.VerifyQuick,
 			Quiesce:            a.GuestAgent,
 			Recommended:        false,
-			EstimatedFootprint: (increment*6 + a.TotalUsed) * 7,
+			EstimatedFootprint: (increment*6 + a.FullBytes()) * 7,
 		},
 		{
 			Name:               "Еженедельная полная копия",
@@ -517,7 +559,7 @@ func buildPresets(a Assessment) []SchedulePreset {
 			VerifyAfter:        model.VerifyManifest,
 			Quiesce:            a.GuestAgent,
 			Recommended:        !cbtReady,
-			EstimatedFootprint: a.TotalUsed * 4,
+			EstimatedFootprint: a.FullBytes() * 4,
 		},
 		{
 			Name:               "Только конфигурация, ежедневно",

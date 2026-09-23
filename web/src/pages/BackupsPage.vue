@@ -514,9 +514,24 @@ async function submitVerify() {
 async function verifySelected() {
   if (bulkVerifyBusy.value) return
   const chosen = selectedRuns.value.filter((run) => !run.deleted && ['succeeded', 'partial'].includes(run.status))
+  // Упавший или незавершённый запуск копии не оставил: проверять нечего. Об
+  // этом надо сказать прямо, иначе кнопка выглядит так, будто не сработала.
+  const skipped = selectedRuns.value.length - chosen.length
   if (!chosen.length) {
-    notify({ type: 'warning', message: 'Среди выбранных строк нет завершённых доступных копий' })
+    notify({
+      type: 'warning',
+      timeout: 8000,
+      message: 'Проверять нечего: выбранные запуски не создали копий',
+      caption: 'Проверяются только успешно завершённые копии. Запуск с ошибкой данных не сохранил — '
+        + 'причина в его подробностях, после исправления запустите бэкап заново.',
+    }, { always: true })
     return
+  }
+  if (skipped) {
+    notify({
+      type: 'info',
+      message: `Будет проверено копий: ${chosen.length}; пропущено запусков без копии: ${skipped}`,
+    })
   }
   bulkVerifyBusy.value = true
   try {

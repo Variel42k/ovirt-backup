@@ -489,7 +489,10 @@ onMounted(load)
                   {{ bytes(disk.provisioned_size) }} ({{ bytes(disk.actual_size) }} занято) ·
                   {{ disk.format }} · {{ disk.storage_domain }}
                 </q-item-label>
-                <q-item-label v-if="disk.cbt_blocker" caption class="jhv-wrap">
+                <q-item-label v-if="disk.not_backed_up" caption class="jhv-wrap text-warning">
+                  {{ disk.not_backed_up }}
+                </q-item-label>
+                <q-item-label v-else-if="disk.cbt_blocker" caption class="jhv-wrap">
                   <!-- Не text-warning: диск защищён, ограничение касается только инкрементов. -->
                   <span class="text-grey-8">{{ disk.cbt_blocker }}</span>
                   <HelpButton article="raw-disks" label="Что это значит" />

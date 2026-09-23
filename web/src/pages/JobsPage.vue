@@ -115,6 +115,35 @@ const jobServer = computed(() => app.servers.find((server) => server.id === form
 const isProxmoxJob = computed(() => jobServer.value?.kind === 'proxmox')
 // Заморозку силами движка умеет только Backup API oVirt и его производных.
 const isOVirtJob = computed(() => ['ovirt', 'redvirt', 'olvm', 'rhv'].includes(jobServer.value?.kind ?? ''))
+// Что будет, если заявленный уровень не достигнут. Формулировка — об итоге для
+// копии: «прервать запуск» читалось так, будто служба оборвёт идущий бэкап.
+const requireConsistencyOptions = [
+  { label: 'Сохранить копию как после сбоя питания и поднять оповещение', value: false },
+  { label: 'Не сохранять копию — запуск завершится ошибкой', value: true },
+]
+
+// Пояснение зависит от того, кто замораживает гостя: у движка нет предела
+// заморозки, а у службы именно он чаще всего и не выдерживается.
+const freezeExplanation = computed(() => {
+  const consistency = form.value.consistency
+  if (consistency === 'crash') return 'Гость не замораживается: копия как после выключения питания.'
+  const needs = consistency === 'application'
+    ? 'Нужны qemu-guest-agent и сценарии fsfreeze-hook для СУБД в каждой ВМ задания (Linux) или VSS (Windows) — '
+      + 'готовые сценарии лежат в каталоге guest-hooks установочного комплекта.'
+    : 'Нужен qemu-guest-agent в госте.'
+  const mode = isOVirtJob.value ? form.value.freeze_by : 'service'
+  if (mode === 'engine') {
+    return `${needs} Гостя замораживает движок — на доли секунды при фиксации точки. Согласованность `
+      + 'не будет достигнута, если агент не отвечает или сценарий СУБД вернул ошибку.'
+  }
+  if (mode === 'mixed') {
+    return `${needs} Замораживает служба, не дольше предела; не смогла или не уложилась — заморозку `
+      + 'перехватывает движок. Согласованность не будет достигнута, только если не справился и движок.'
+  }
+  return `${needs} Замораживает служба, не дольше предела заморозки. Согласованность не будет достигнута, `
+    + 'если агент не отвечает, сценарий СУБД вернул ошибку или гипервизор не зафиксировал точку за предел.'
+})
+
 const freezeByOptions = [
   {
     label: 'Движок — только на момент фиксации точки',
@@ -726,7 +755,7 @@ const columns = [
             </template>
             <template v-else>все ВМ сервера</template>
             <template v-if="props.row.consistency && props.row.consistency !== 'crash'">
-              · {{ consistencyLabel(props.row.consistency).toLowerCase() }}<template v-if="props.row.require_consistency"> (строго)</template>
+              · {{ consistencyLabel(props.row.consistency).toLowerCase() }}<template v-if="props.row.require_consistency"> (без неё копия не сохраняется)</template>
             </template>
             <template v-else-if="!props.row.consistency && props.row.quiesce"> · заморозка ФС</template>
             <template v-if="props.row.encrypt"> · шифрование</template>
@@ -1195,26 +1224,17 @@ const columns = [
             />
           </div>
           <div v-if="!isProxmoxJob" class="col-12">
-            <q-toggle
-              v-model="form.require_consistency"
-              :disable="form.consistency === 'crash'"
-              label="Прервать запуск, если уровень не достигнут"
-            />
-            <div class="text-caption text-grey-7 q-ml-sm">
-              <template v-if="form.consistency === 'application'">
-                Нужны qemu-guest-agent и сценарии fsfreeze-hook для СУБД в каждой ВМ задания (Linux) или VSS (Windows) —
-                готовые сценарии лежат в каталоге guest-hooks установочного комплекта.
-              </template>
-              <template v-else-if="form.consistency === 'filesystem'">
-                Нужен qemu-guest-agent в госте. Без флага выше копия при неудачной заморозке снимается как после сбоя
-                питания, а задание поднимает оповещение.
-              </template>
-              <template v-else>Гость не замораживается: копия как после выключения питания.</template>
-              <template v-if="form.consistency !== 'crash'">
-                Если гипервизор не зафиксирует точку за предел заморозки, служба разморозит гостя сама, а копия
-                будет как после сбоя питания (со строгим флагом — запуск прервётся).
-              </template>
-            </div>
+            <div class="text-caption text-grey-7 q-mb-xs">{{ freezeExplanation }}</div>
+            <template v-if="form.consistency !== 'crash'">
+              <div class="text-body2 q-mt-sm">Если согласованность не достигнута</div>
+              <q-option-group
+                v-model="form.require_consistency"
+                :options="requireConsistencyOptions"
+                type="radio"
+                dense
+                data-testid="job-require-consistency"
+              />
+            </template>
           </div>
           <div class="col-12 self-center">
             <div class="row items-center q-gutter-md">

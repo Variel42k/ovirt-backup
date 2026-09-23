@@ -371,7 +371,7 @@ onMounted(load)
                 v-if="!isProxmox"
                 v-model="requireConsistency"
                 :disable="consistency === 'crash'"
-                label="Прервать, если уровень не достигнут"
+                label="Не сохранять копию без согласованности"
                 dense
               />
               <q-toggle v-model="encrypt" label="Шифровать" dense />

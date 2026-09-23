@@ -21,6 +21,10 @@ import (
 
 // StartBackup asks the engine to open a backup for the given disks.
 // fromCheckpointID selects the incremental base; an empty value means full.
+//
+// When the engine accepted the request but the answer did not decode cleanly,
+// the error comes back together with the backup whose ID is known: the engine
+// already holds the disks, and the caller must still finalize it.
 func (c *Client) StartBackup(ctx context.Context, vmID string, diskIDs []string, fromCheckpointID string) (*Backup, error) {
 	if len(diskIDs) == 0 {
 		return nil, fmt.Errorf("не выбран ни один диск для бэкапа ВМ %s", vmID)
@@ -38,6 +42,11 @@ func (c *Client) StartBackup(ctx context.Context, vmID string, diskIDs []string,
 
 	var backup Backup
 	if err := c.post(ctx, "/vms/"+vmID+"/backups", body, &backup); err != nil {
+		// encoding/json fills every field it can before reporting a type
+		// mismatch, so the ID survives a single badly typed field.
+		if backup.ID != "" {
+			return &backup, err
+		}
 		return nil, err
 	}
 	return &backup, nil

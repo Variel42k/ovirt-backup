@@ -2,6 +2,7 @@
 # Установка хелпера jhvirt-db-dump на хост СУБД.
 #
 #   sudo sh setup.sh --pubkey jhvirt.pub --postgresql [--mysql] [--allow-restore] [--user jhvirt_dump]
+#   sudo sh setup.sh --pubkey jhvirt.pub --kubernetes [--user jhvirt_dump_shop]
 #
 # Что делает:
 #   1. создаёт системного пользователя (по умолчанию jhvirt_dump) без пароля;
@@ -12,6 +13,11 @@
 #   4. создаёт роль в СУБД с правом только на чтение и входом через сокет;
 #   5. создаёт /etc/jhvirt/db-dump.conf (root, 0644), если его ещё нет.
 #
+# С --kubernetes СУБД работает в поде, а не на этом хосте: шаг 4 пропускается,
+# вместо него создаётся профиль /etc/jhvirt/db-dump.d/ПОЛЬЗОВАТЕЛЬ.conf, а
+# учётную запись kubectl с правами из k8s-rbac.yaml готовит администратор
+# кластера.
+#
 # Пароли СУБД не создаются и не запрашиваются.
 set -eu
 
@@ -21,6 +27,7 @@ PUBKEY=
 WANT_PG=0
 WANT_MY=0
 ALLOW_RESTORE=0
+WANT_K8S=0
 
 die() {
     printf 'ошибка: %s\n' "$*" >&2
@@ -35,14 +42,21 @@ while [ $# -gt 0 ]; do
     --postgresql) WANT_PG=1; shift ;;
     --mysql) WANT_MY=1; shift ;;
     --allow-restore) ALLOW_RESTORE=1; shift ;;
-    -h | --help) sed -n '2,17p' "$0"; exit 0 ;;
+    --kubernetes) WANT_K8S=1; shift ;;
+    -h | --help) sed -n '2,23p' "$0"; exit 0 ;;
     *) die "неизвестный параметр: $1" ;;
     esac
 done
 
 [ "$(id -u)" -eq 0 ] || die "запустите от root"
 [ -n "$PUBKEY" ] && [ -r "$PUBKEY" ] || die "укажите --pubkey с публичным ключом службы (его показывает интерфейс)"
-[ "$WANT_PG" -eq 1 ] || [ "$WANT_MY" -eq 1 ] || die "укажите --postgresql и/или --mysql"
+if [ "$WANT_K8S" -eq 1 ]; then
+    [ "$WANT_PG" -eq 0 ] && [ "$WANT_MY" -eq 0 ] ||
+        die "--kubernetes не сочетается с --postgresql/--mysql: СУБД в поде, вид СУБД хелпер определит сам"
+    command -v kubectl >/dev/null 2>&1 || die "kubectl не найден: хелпер запускает клиенты СУБД через kubectl exec"
+else
+    [ "$WANT_PG" -eq 1 ] || [ "$WANT_MY" -eq 1 ] || die "укажите --postgresql и/или --mysql (или --kubernetes)"
+fi
 printf '%s' "$USER_NAME" | grep -Eq '^[a-z_][a-z0-9_]{0,31}$' || die "имя пользователя: строчная латиница, цифры и «_»"
 KEY_LINE=$(grep -Ev '^[[:space:]]*(#|$)' "$PUBKEY" | head -n 1)
 KEY_TYPE=$(printf '%s\n' "$KEY_LINE" | awk '{print $1}')
@@ -136,6 +150,24 @@ if [ ! -e /etc/jhvirt/db-dump.conf ]; then
         sed -i 's/^#\{0,1\}JHVIRT_DB_ALLOW_RESTORE=.*/JHVIRT_DB_ALLOW_RESTORE=1/' /etc/jhvirt/db-dump.conf
     fi
     say "настройки: /etc/jhvirt/db-dump.conf"
+fi
+
+if [ "$WANT_K8S" -eq 1 ]; then
+    install -d -m 0755 -o root -g root /etc/jhvirt/db-dump.d
+    PROFILE=/etc/jhvirt/db-dump.d/$USER_NAME.conf
+    if [ ! -e "$PROFILE" ]; then
+        install -m 0644 -o root -g root "$HERE/db-dump-k8s.conf.example" "$PROFILE"
+        if [ "$ALLOW_RESTORE" -eq 1 ]; then
+            sed -i 's/^#\{0,1\}JHVIRT_DB_ALLOW_RESTORE=.*/JHVIRT_DB_ALLOW_RESTORE=1/' "$PROFILE"
+        fi
+        say "профиль Kubernetes: $PROFILE — заполните пространство имён, контейнер и селектор"
+    fi
+    install -d -m 0700 -o "$USER_NAME" -g "$(id -gn "$USER_NAME")" "$HOME_DIR/.kube"
+    say ""
+    say "Учётная запись kubectl (выполняет администратор кластера):"
+    say "  kubectl apply -f $HERE/k8s-rbac.yaml   # замените пространство имён"
+    say "  kubectl -n <ns> create token jhvirt-db-dump --duration=8760h"
+    say "Положите kubeconfig с этим токеном в $HOME_DIR/.kube/config (владелец $USER_NAME, 0600)."
 fi
 
 say ""

@@ -228,6 +228,7 @@ func (d *Dispatcher) executeLibvirt(ctx context.Context, srv *model.Server, req 
 		Quiesce:            req.Quiesce,
 		Consistency:        req.ConsistencyTarget(),
 		RequireConsistency: req.RequireConsistency,
+		MaxFreeze:          req.FreezeLimit(d.cfg.MaxFreeze),
 		Encrypt:            req.Encrypt,
 		OnProgress: func(target string, done, total int64) {
 			pct := 0

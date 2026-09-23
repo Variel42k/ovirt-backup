@@ -476,7 +476,7 @@ type Backup struct {
 	ToCheckpointID   string `json:"to_checkpoint_id"`
 	// initializing | starting | ready | finalizing | succeeded | failed
 	Phase        string    `json:"phase"`
-	CreationDate string    `json:"creation_date"`
+	CreationDate Timestamp `json:"creation_date"`
 	Description  string    `json:"description"`
 	VM           Ref       `json:"vm"`
 	Disks        *diskList `json:"disks,omitempty"`

@@ -9,9 +9,18 @@
 | `jhvirt-db-dump` | хелпер: `probe`, `list`, `stats`, `dump`, `globals`, `restore` в новую базу |
 | `setup.sh` | пользователь, ключ с `restrict,command`, роль в СУБД, настройки |
 | `db-dump.conf.example` | `/etc/jhvirt/db-dump.conf`: восстановление, сокет, исключения |
+| `db-dump-k8s.conf.example` | профиль `/etc/jhvirt/db-dump.d/ПОЛЬЗОВАТЕЛЬ.conf` для СУБД в поде |
+| `k8s-rbac.yaml` | учётная запись kubectl: только поиск пода и `exec` в одном пространстве имён |
 
 ```bash
 sudo sh setup.sh --pubkey jhvirt.pub --postgresql
+```
+
+СУБД в Kubernetes: хелпер ставится на машину с `kubectl` и запускает клиенты
+СУБД в контейнере пода через `kubectl exec`:
+
+```bash
+sudo sh setup.sh --pubkey jhvirt.pub --kubernetes --user jhvirt_dump_shop
 ```
 
 Публичный ключ — пара к приватному, который вводится в интерфейсе службы

@@ -12,8 +12,16 @@
 # Режим pg_backup_start здесь не нужен: он для копирования файлов по одному,
 # а заморозка фиксирует все файлы кластера в один момент.
 #
-# Паролей сценарий не использует: psql запускается от системного пользователя
-# postgres через Unix-сокет (peer). Настройки — в /etc/jhvirt/guest-hooks.conf.
+# Кластеры бывают двух видов, и сценарий обслуживает оба:
+#
+#   - на самой ВМ: psql запускается от системного пользователя postgres через
+#     Unix-сокет (peer), паролей нет;
+#   - в подах Kubernetes на этом узле (JHVIRT_PG_K8S_TARGETS): контейнер
+#     находится через crictl по меткам kubelet, и CHECKPOINT выполняется внутри
+#     него. Учётные данные Kubernetes не нужны. Под, работающий на другом
+#     узле, пропускается: его данных на дисках этой ВМ нет.
+#
+# Настройки — в /etc/jhvirt/guest-hooks.conf.
 
 CONF=/etc/jhvirt/guest-hooks.conf
 
@@ -43,43 +51,158 @@ esac
 load_conf || exit 1
 
 PG_OS_USER=${JHVIRT_PG_OS_USER:-postgres}
-PG_PORTS=${JHVIRT_PG_PORTS:-5432}
 PG_SOCKET_DIR=${JHVIRT_PG_SOCKET_DIR:-}
 TIMEOUT=${JHVIRT_HOOK_TIMEOUT:-30}
+K8S_TARGETS=${JHVIRT_PG_K8S_TARGETS:-}
+K8S_USER=${JHVIRT_PG_K8S_USER:-postgres}
+K8S_PASSWORD_ENV=${JHVIRT_PG_K8S_PASSWORD_ENV:-}
+CRICTL=${JHVIRT_CRICTL:-crictl}
 
-if ! command -v psql >/dev/null 2>&1; then
-    log "psql не найден: установите клиент PostgreSQL или удалите этот сценарий"
-    exit 1
+# Кластер на самой ВМ готовится, если его порты заданы явно или если целей
+# Kubernetes нет: на узле k8s обычно нет своего PostgreSQL, и прежнее
+# умолчание 5432 давало бы ошибку на каждой заморозке.
+if [ -n "${JHVIRT_PG_PORTS+x}" ] || [ -z "$K8S_TARGETS" ]; then
+    PG_PORTS=${JHVIRT_PG_PORTS:-5432}
+else
+    PG_PORTS=
 fi
 
-if ! command -v runuser >/dev/null 2>&1; then
-    log "runuser не найден (util-linux): не от кого запустить psql"
+case "$TIMEOUT" in
+'' | *[!0-9]*)
+    log "JHVIRT_HOOK_TIMEOUT должен быть числом секунд"
     exit 1
-fi
-
-as_postgres() {
-    timeout "$TIMEOUT" runuser -u "$PG_OS_USER" -- "$@"
-}
+    ;;
+esac
 
 status=0
-for port in $PG_PORTS; do
-    case "$port" in
-    '' | *[!0-9]*)
-        log "неверный порт в JHVIRT_PG_PORTS: $port"
-        status=1
-        continue
+
+# --- Кластеры на самой ВМ ---------------------------------------------------
+
+checkpoint_host() {
+    if ! command -v psql >/dev/null 2>&1; then
+        log "psql не найден: установите клиент PostgreSQL или удалите этот сценарий"
+        return 1
+    fi
+    if ! command -v runuser >/dev/null 2>&1; then
+        log "runuser не найден (util-linux): не от кого запустить psql"
+        return 1
+    fi
+    rc=0
+    for port in $PG_PORTS; do
+        case "$port" in
+        '' | *[!0-9]*)
+            log "неверный порт в JHVIRT_PG_PORTS: $port"
+            rc=1
+            continue
+            ;;
+        esac
+        set -- psql -X -q -A -t -v ON_ERROR_STOP=1 -p "$port" -d postgres -c CHECKPOINT
+        if [ -n "$PG_SOCKET_DIR" ]; then
+            set -- "$@" -h "$PG_SOCKET_DIR"
+        fi
+        started=$(date +%s)
+        if timeout "$TIMEOUT" runuser -u "$PG_OS_USER" -- "$@"; then
+            log "CHECKPOINT на порту $port выполнен за $(($(date +%s) - started)) с"
+        else
+            log "CHECKPOINT на порту $port не выполнен (тайм-аут ${TIMEOUT} с или ошибка подключения)"
+            rc=1
+        fi
+    done
+    return "$rc"
+}
+
+# --- Поды Kubernetes на этом узле ------------------------------------------
+
+valid_label() {
+    printf '%s' "$1" | grep -Eq '^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$'
+}
+
+# k8s_containers NS/CONTAINER печатает идентификаторы работающих контейнеров
+# цели на этом узле. kubelet ставит метки пространства имён и имени
+# контейнера любому контейнеру пода, поэтому поиск не зависит от меток
+# приложения.
+k8s_containers() {
+    case "$1" in
+    */*) ;;
+    *)
+        log "цель $1: ожидается пространство_имён/контейнер" >&2
+        return 1
         ;;
     esac
-    set -- psql -X -q -A -t -v ON_ERROR_STOP=1 -p "$port" -d postgres -c CHECKPOINT
-    if [ -n "$PG_SOCKET_DIR" ]; then
-        set -- "$@" -h "$PG_SOCKET_DIR"
+    ns=${1%%/*}
+    name=${1#*/}
+    if ! valid_label "$ns" || ! valid_label "$name"; then
+        log "цель $1: недопустимое имя" >&2
+        return 1
     fi
-    started=$(date +%s)
-    if as_postgres "$@"; then
-        log "CHECKPOINT на порту $port выполнен за $(($(date +%s) - started)) с"
-    else
-        log "CHECKPOINT на порту $port не выполнен (тайм-аут ${TIMEOUT} с или ошибка подключения)"
-        status=1
+    # shellcheck disable=SC2086 # JHVIRT_CRICTL может быть командой из двух слов (k3s crictl)
+    $CRICTL ps -q --state running \
+        --label "io.kubernetes.pod.namespace=$ns" \
+        --label "io.kubernetes.container.name=$name"
+}
+
+# checkpoint_container CID выполняет CHECKPOINT внутри контейнера. Пароль,
+# если он нужен, берётся из окружения самого контейнера: на узле он не
+# хранится и в командной строке не появляется.
+checkpoint_container() {
+    # shellcheck disable=SC2016,SC2086 # скрипт выполняется в контейнере
+    timeout "$TIMEOUT" $CRICTL exec "$1" sh -c '
+        if [ -n "$1" ]; then
+            PGPASSWORD=$(printenv "$1") || { echo "в контейнере нет переменной $1" >&2; exit 3; }
+            export PGPASSWORD
+        fi
+        exec psql -X -q -A -t -v ON_ERROR_STOP=1 -U "$2" -d postgres -c CHECKPOINT
+    ' jhvirt "$K8S_PASSWORD_ENV" "$K8S_USER"
+}
+
+checkpoint_k8s() {
+    crictl_bin=${CRICTL%% *}
+    if ! command -v "$crictl_bin" >/dev/null 2>&1; then
+        log "$crictl_bin не найден: задайте JHVIRT_CRICTL (для k3s — \"k3s crictl\")"
+        return 1
     fi
-done
+    case "$K8S_PASSWORD_ENV" in
+    '' | [A-Za-z_]*) ;;
+    *)
+        log "JHVIRT_PG_K8S_PASSWORD_ENV: недопустимое имя переменной"
+        return 1
+        ;;
+    esac
+    case "$K8S_PASSWORD_ENV$K8S_USER" in
+    *[!A-Za-z0-9_]*)
+        log "JHVIRT_PG_K8S_USER и JHVIRT_PG_K8S_PASSWORD_ENV: латиница, цифры и «_»"
+        return 1
+        ;;
+    esac
+
+    rc=0
+    for target in $K8S_TARGETS; do
+        if ! ids=$(k8s_containers "$target"); then
+            log "цель $target: контейнер не найден — см. сообщение выше"
+            rc=1
+            continue
+        fi
+        if [ -z "$ids" ]; then
+            log "цель $target: на этом узле не работает — готовить нечего"
+            continue
+        fi
+        for cid in $ids; do
+            started=$(date +%s)
+            if checkpoint_container "$cid"; then
+                log "CHECKPOINT в $target ($cid) выполнен за $(($(date +%s) - started)) с"
+            else
+                log "CHECKPOINT в $target ($cid) не выполнен (тайм-аут ${TIMEOUT} с или ошибка подключения)"
+                rc=1
+            fi
+        done
+    done
+    return "$rc"
+}
+
+if [ -n "$PG_PORTS" ]; then
+    checkpoint_host || status=1
+fi
+if [ -n "$K8S_TARGETS" ]; then
+    checkpoint_k8s || status=1
+fi
 exit "$status"

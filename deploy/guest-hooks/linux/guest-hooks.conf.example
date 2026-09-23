@@ -19,3 +19,31 @@
 #JHVIRT_MYSQL_CLIENT=
 #JHVIRT_MYSQL_DEFAULTS_FILE=/etc/jhvirt/mysql-freeze.cnf
 #JHVIRT_MYSQL_HOLD=120
+
+# --- Kubernetes: СУБД в подах на этом узле ---------------------------------
+#
+# Цели — пространство_имён/имя_контейнера через пробел. Контейнеры ищутся
+# через crictl по меткам kubelet только на этом узле: под, работающий на
+# другом узле, пропускается (его данных на дисках этой ВМ нет). Учётные
+# данные Kubernetes сценариям не нужны.
+#
+# Когда цели заданы, СУБД на самой ВМ не готовится, пока это не сказано явно:
+# JHVIRT_PG_PORTS для PostgreSQL, JHVIRT_MYSQL_ON_HOST=1 для MySQL.
+#
+# crictl: для k3s и RKE2 — "k3s crictl" или полный путь с CONTAINER_RUNTIME_ENDPOINT.
+#JHVIRT_CRICTL=crictl
+
+# PostgreSQL в подах: роль и имя переменной окружения КОНТЕЙНЕРА с её
+# паролем (пароль на узле не хранится). Официальный образ пускает postgres
+# через сокет без пароля; образам Bitnami нужен пароль, например
+# JHVIRT_PG_K8S_PASSWORD_ENV=POSTGRES_POSTGRES_PASSWORD.
+#JHVIRT_PG_K8S_TARGETS="shop/postgres"
+#JHVIRT_PG_K8S_USER=postgres
+#JHVIRT_PG_K8S_PASSWORD_ENV=
+
+# MySQL / MariaDB в подах: учётная запись с RELOAD и переменная окружения
+# контейнера с её паролем (например, MYSQL_ROOT_PASSWORD или MARIADB_ROOT_PASSWORD).
+#JHVIRT_MYSQL_K8S_TARGETS="shop/mysql"
+#JHVIRT_MYSQL_K8S_USER=root
+#JHVIRT_MYSQL_K8S_PASSWORD_ENV=MYSQL_ROOT_PASSWORD
+#JHVIRT_MYSQL_ON_HOST=0

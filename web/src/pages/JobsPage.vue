@@ -70,6 +70,7 @@ const emptyForm = () => ({
   quiesce: true,
   consistency: 'filesystem' as Consistency,
   require_consistency: false,
+  max_freeze_seconds: 0,
   verify_after: 'chain',
   verify_options: {
     boot_host_id: '',
@@ -338,6 +339,7 @@ function openEdit(job: BackupJob) {
     verify_options: { ...emptyForm().verify_options, ...(job.verify_options ?? {}) },
     consistency: job.consistency || (job.quiesce ? 'filesystem' : 'crash'),
     require_consistency: Boolean(job.require_consistency),
+    max_freeze_seconds: job.max_freeze ? Math.round(job.max_freeze / 1_000_000_000) : 0,
   }
   void loadVMs()
   jobStep.value = 1
@@ -1126,6 +1128,20 @@ const columns = [
               <template #append><HelpButton article="quiesce" label="Уровни согласованности" /></template>
             </q-select>
           </div>
+          <div v-if="!isProxmoxJob" class="col-12 col-sm-4">
+            <q-input
+              v-model.number="form.max_freeze_seconds"
+              type="number"
+              min="0"
+              max="600"
+              :disable="form.consistency === 'crash'"
+              label="Предел заморозки, с"
+              hint="0 — по умолчанию службы; узлам Kubernetes — 10–15 с"
+              outlined
+              dense
+              data-testid="job-max-freeze"
+            />
+          </div>
           <div v-if="!isProxmoxJob" class="col-12">
             <q-toggle
               v-model="form.require_consistency"
@@ -1142,6 +1158,10 @@ const columns = [
                 питания, а задание поднимает оповещение.
               </template>
               <template v-else>Гость не замораживается: копия как после выключения питания.</template>
+              <template v-if="form.consistency !== 'crash'">
+                Если гипервизор не зафиксирует точку за предел заморозки, служба разморозит гостя сама, а копия
+                будет как после сбоя питания (со строгим флагом — запуск прервётся).
+              </template>
             </div>
           </div>
           <div class="col-12 self-center">

@@ -6,6 +6,7 @@ package kvm
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	golibvirt "github.com/digitalocean/go-libvirt"
@@ -107,7 +108,9 @@ type Request struct {
 	// в backup.RunRequest.
 	Consistency        model.Consistency
 	RequireConsistency bool
-	Encrypt            bool
+	// MaxFreeze — предел окна заморозки; 0 — backup.DefaultMaxFreeze.
+	MaxFreeze time.Duration
+	Encrypt   bool
 
 	// SourceVerifyFraction — какую долю скопированных чанков перечитать с
 	// источника и сверить, пока экспорт ещё открыт. 0 — не проверять,
@@ -152,6 +155,8 @@ type Result struct {
 	// Timeline — отметки этапов: заморозка, разморозка, передача. Драйвер их
 	// только собирает: базы у него нет, записывает вызывающий.
 	Timeline []model.RunEvent
+	// timelineMu: сторож окна заморозки отмечает разморозку из своей горутины.
+	timelineMu sync.Mutex
 }
 
 // mark добавляет отметку в хронологию запуска.
@@ -159,6 +164,8 @@ func (r *Result) mark(kind model.RunEventKind, took time.Duration, detail string
 	if r == nil {
 		return
 	}
+	r.timelineMu.Lock()
+	defer r.timelineMu.Unlock()
 	r.Timeline = append(r.Timeline, model.RunEvent{
 		Kind: kind, At: time.Now().UTC(), Duration: took.Milliseconds(), Detail: detail,
 	})
@@ -369,10 +376,23 @@ func (d *Driver) Backup(ctx context.Context, req Request) (*Result, error) {
 		return result, err
 	}
 
+	// BeginBackup обычно укладывается в секунду, но зависший гипервизор не
+	// должен держать гостя замороженным: сторож разморозит его сам.
+	limit := req.MaxFreeze
+	if limit <= 0 {
+		limit = backup.DefaultMaxFreeze
+	}
+	window := backup.NewFreezeWindow(frozenAt, limit,
+		func() error { return d.thaw(ctx, dom, &frozenAt, result, log) },
+		func(err error) {
+			log.Warn().Err(err).Dur("окно", limit).
+				Msg("гипервизор не зафиксировал точку за окно заморозки — гость разморожен досрочно")
+		})
+
 	backupAsked := time.Now().UTC()
 	if err := d.conn.BeginBackup(ctx, dom, spec, checkpoint); err != nil {
-		if thawErr := d.thaw(ctx, dom, &frozenAt, result, log); thawErr != nil {
-			_ = d.thaw(ctx, dom, &frozenAt, result, log)
+		if thawErr := window.Thaw(); thawErr != nil {
+			_ = window.Thaw()
 		}
 		_ = d.conn.RemoveScratch(ctx, scratchFiles...)
 		_ = d.conn.RemoveSocket(ctx, socketPath)
@@ -401,12 +421,20 @@ func (d *Driver) Backup(ctx context.Context, req Request) (*Result, error) {
 	}()
 	// Registered after backup cleanup so a failed first thaw is retried before
 	// closing a potentially slow hypervisor job during unwinding.
-	defer func() { _ = d.thaw(ctx, dom, &frozenAt, result, log) }()
+	defer func() { _ = window.Thaw() }()
 
 	// The point in time is fixed once the backup has begun; the guest can run
 	// normally again while we read the frozen view.
-	if err := d.thaw(ctx, dom, &frozenAt, result, log); err != nil {
+	if err := window.Thaw(); err != nil {
 		return result, err
+	}
+	if window.Expired() {
+		level, note, err := window.Settle(result.Consistency, q.Level, req.RequireConsistency)
+		result.Consistency, result.ConsistencyNote = level, note
+		result.mark(model.RunEventFreezeFailed, 0, note)
+		if err != nil {
+			return result, err
+		}
 	}
 
 	log.Info().Int("дисков", len(plan.Disks)).Str("сокет", socketPath).Msg("бэкап открыт, читаю данные")

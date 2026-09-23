@@ -16,10 +16,16 @@
 # Если блокировку не удалось получить за JHVIRT_HOOK_TIMEOUT секунд, сценарий
 # снимает попытку и завершается с ошибкой: строгий диспетчер отменит заморозку.
 #
-# Подключение — через Unix-сокет. Без файла параметров клиент входит так же,
-# как root из консоли (в MariaDB это unix_socket-аутентификация). Иначе
-# положите в /etc/jhvirt/mysql-freeze.cnf (root, 0600) раздел [client] с
-# учётной записью, которой выдано только RELOAD.
+# Экземпляры бывают двух видов, и сценарий обслуживает оба:
+#
+#   - на самой ВМ: подключение через Unix-сокет. Без файла параметров клиент
+#     входит так же, как root из консоли (в MariaDB это unix_socket). Иначе
+#     положите в /etc/jhvirt/mysql-freeze.cnf (root, 0600) раздел [client] с
+#     учётной записью, которой выдано только RELOAD;
+#   - в подах Kubernetes на этом узле (JHVIRT_MYSQL_K8S_TARGETS): контейнер
+#     находится через crictl по меткам kubelet, сессия с блокировкой живёт
+#     внутри него. Пароль, если нужен, берётся из окружения контейнера.
+#     Под на другом узле пропускается: его данных на дисках этой ВМ нет.
 
 CONF=/etc/jhvirt/guest-hooks.conf
 STATE=/run/jhvirt-mysql-freeze
@@ -50,7 +56,19 @@ TIMEOUT=${JHVIRT_HOOK_TIMEOUT:-30}
 HOLD=${JHVIRT_MYSQL_HOLD:-120}
 DEFAULTS=${JHVIRT_MYSQL_DEFAULTS_FILE:-/etc/jhvirt/mysql-freeze.cnf}
 CLIENT=${JHVIRT_MYSQL_CLIENT:-}
-if [ -z "$CLIENT" ]; then
+K8S_TARGETS=${JHVIRT_MYSQL_K8S_TARGETS:-}
+K8S_USER=${JHVIRT_MYSQL_K8S_USER:-root}
+K8S_PASSWORD_ENV=${JHVIRT_MYSQL_K8S_PASSWORD_ENV:-}
+CRICTL=${JHVIRT_CRICTL:-crictl}
+
+# Экземпляр на самой ВМ готовится, если это не узел с целями Kubernetes или
+# если так сказано явно.
+if [ -z "$K8S_TARGETS" ]; then
+    ON_HOST=${JHVIRT_MYSQL_ON_HOST:-1}
+else
+    ON_HOST=${JHVIRT_MYSQL_ON_HOST:-0}
+fi
+if [ "$ON_HOST" = 1 ] && [ -z "$CLIENT" ]; then
     CLIENT=$(command -v mariadb 2>/dev/null || command -v mysql 2>/dev/null || true)
 fi
 
@@ -60,8 +78,31 @@ case "$TIMEOUT$HOLD" in
     exit 1
     ;;
 esac
+case "$K8S_PASSWORD_ENV$K8S_USER" in
+*[!A-Za-z0-9_]*)
+    log "JHVIRT_MYSQL_K8S_USER и JHVIRT_MYSQL_K8S_PASSWORD_ENV: латиница, цифры и «_»"
+    exit 1
+    ;;
+esac
+
+# CID — контейнер текущего экземпляра; пусто — экземпляр на самой ВМ.
+CID=
 
 client() {
+    if [ -n "$CID" ]; then
+        # shellcheck disable=SC2016,SC2086 # скрипт выполняется в контейнере
+        $CRICTL exec "$CID" sh -c '
+            if [ -n "$1" ]; then
+                MYSQL_PWD=$(printenv "$1") || { echo "в контейнере нет переменной $1" >&2; exit 3; }
+                export MYSQL_PWD
+            fi
+            user=$2
+            shift 2
+            c=$(command -v mariadb || command -v mysql) || { echo "в контейнере нет клиента mysql" >&2; exit 127; }
+            exec "$c" --user="$user" --protocol=socket "$@"
+        ' jhvirt "$K8S_PASSWORD_ENV" "$K8S_USER" "$@"
+        return
+    fi
     # --defaults-extra-file обязан стоять первым параметром.
     if [ -r "$DEFAULTS" ]; then
         "$CLIENT" --defaults-extra-file="$DEFAULTS" --protocol=socket "$@"
@@ -70,61 +111,135 @@ client() {
     fi
 }
 
-# release снимает блокировку и убирает следы фоновой сессии. Вызывается и на
-# thaw, и перед новой попыткой: сессия от прерванной прошлой заморозки не
-# должна держать запись.
+# release DIR снимает блокировку экземпляра и убирает следы его фоновой
+# сессии. Вызывается и на thaw, и перед новой попыткой: сессия от прерванной
+# прошлой заморозки не должна держать запись.
 release() {
-    id=$(sed -n '1{/^[0-9][0-9]*$/p;}' "$STATE/session.out" 2>/dev/null)
+    dir=$1
+    CID=$(cat "$dir/cid" 2>/dev/null)
+    id=$(sed -n '1{/^[0-9][0-9]*$/p;}' "$dir/session.out" 2>/dev/null)
     if [ -n "$id" ]; then
-        if client -N -B -e "KILL $id" >/dev/null 2>&1; then
-            log "сессия $id с блокировкой завершена"
+        if client -N -B -e "KILL $id" </dev/null >/dev/null 2>&1; then
+            log "сессия $id с блокировкой завершена${CID:+ (контейнер $CID)}"
         fi
     fi
-    pid=$(cat "$STATE/client.pid" 2>/dev/null)
+    pid=$(cat "$dir/client.pid" 2>/dev/null)
     if [ -n "$pid" ]; then
         kill "$pid" 2>/dev/null
     fi
-    rm -f "$STATE/session.out" "$STATE/client.pid"
+    rm -f "$dir/session.out" "$dir/client.pid" "$dir/cid"
+    [ "$dir" = "$STATE" ] || rmdir "$dir" 2>/dev/null
+    CID=
 }
 
-if [ -z "$CLIENT" ]; then
-    log "клиент mysql/mariadb не найден"
-    [ "$1" = thaw ] && exit 0
-    exit 1
-fi
+release_all() {
+    # Прежняя версия сценария держала состояние прямо в $STATE.
+    [ -e "$STATE/session.out" ] && release "$STATE"
+    for dir in "$STATE"/*/; do
+        [ -d "$dir" ] && release "${dir%/}"
+    done
+}
+
+# acquire DIR [CID] открывает сессию с блокировкой и ждёт её получения.
+acquire() {
+    dir=$1
+    CID=${2:-}
+    mkdir -p "$dir" && chmod 0700 "$dir" || return 1
+    : >"$dir/session.out"
+    printf '%s' "$CID" >"$dir/cid"
+    label=${CID:+контейнер $CID}
+    label=${label:-экземпляр на ВМ}
+
+    # Результат каждого запроса печатается сразу (-n): первая строка —
+    # номер сессии, «jhvirt-locked» — блокировка получена. Все потоки фоновой
+    # сессии перенаправлены: агент ждёт закрытия вывода хука, и унаследованный
+    # дескриптор задержал бы заморозку на весь срок блокировки.
+    client -N -B -n -e "SELECT CONNECTION_ID(); FLUSH TABLES WITH READ LOCK; SELECT 'jhvirt-locked'; DO SLEEP($HOLD);" \
+        </dev/null >"$dir/session.out" 2>&1 &
+    echo $! >"$dir/client.pid"
+
+    waited=0
+    while [ "$waited" -lt "$TIMEOUT" ]; do
+        if grep -qx 'jhvirt-locked' "$dir/session.out"; then
+            log "$label: блокировка записи получена за ${waited} с; удерживается до thaw, но не дольше ${HOLD} с"
+            return 0
+        fi
+        if ! kill -0 "$(cat "$dir/client.pid")" 2>/dev/null; then
+            log "$label: сессия завершилась до блокировки: $(tr '\n' ' ' <"$dir/session.out")"
+            return 1
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    log "$label: FLUSH TABLES WITH READ LOCK не получен за ${TIMEOUT} с — вероятно, мешают длинные запросы"
+    return 1
+}
+
+valid_label() {
+    printf '%s' "$1" | grep -Eq '^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$'
+}
+
+k8s_containers() {
+    case "$1" in
+    */*) ;;
+    *)
+        log "цель $1: ожидается пространство_имён/контейнер" >&2
+        return 1
+        ;;
+    esac
+    ns=${1%%/*}
+    name=${1#*/}
+    if ! valid_label "$ns" || ! valid_label "$name"; then
+        log "цель $1: недопустимое имя" >&2
+        return 1
+    fi
+    # shellcheck disable=SC2086 # JHVIRT_CRICTL может быть командой из двух слов (k3s crictl)
+    $CRICTL ps -q --state running \
+        --label "io.kubernetes.pod.namespace=$ns" \
+        --label "io.kubernetes.container.name=$name"
+}
 
 if [ "$1" = thaw ]; then
-    release
+    release_all
     exit 0
 fi
 
-release
+release_all
 mkdir -p "$STATE" && chmod 0700 "$STATE" || exit 1
-: >"$STATE/session.out"
 
-# Результат каждого запроса печатается сразу (-n): первая строка —
-# номер сессии, «jhvirt-locked» — блокировка получена. Все потоки фоновой
-# сессии перенаправлены: агент ждёт закрытия вывода хука, и унаследованный
-# дескриптор задержал бы заморозку на весь срок блокировки.
-client -N -B -n -e "SELECT CONNECTION_ID(); FLUSH TABLES WITH READ LOCK; SELECT 'jhvirt-locked'; DO SLEEP($HOLD);" \
-    </dev/null >"$STATE/session.out" 2>&1 &
-echo $! >"$STATE/client.pid"
+# Любая неудача снимает все уже полученные блокировки: строгий диспетчер
+# отменит заморозку, и запись не должна остаться остановленной.
+fail() {
+    release_all
+    exit 1
+}
 
-waited=0
-while [ "$waited" -lt "$TIMEOUT" ]; do
-    if grep -qx 'jhvirt-locked' "$STATE/session.out"; then
-        log "блокировка записи получена за ${waited} с; удерживается до thaw, но не дольше ${HOLD} с"
-        exit 0
+if [ "$ON_HOST" = 1 ]; then
+    if [ -z "$CLIENT" ]; then
+        log "клиент mysql/mariadb не найден"
+        fail
     fi
-    if ! kill -0 "$(cat "$STATE/client.pid")" 2>/dev/null; then
-        log "сессия завершилась до блокировки: $(tr '\n' ' ' <"$STATE/session.out")"
-        release
-        exit 1
-    fi
-    sleep 1
-    waited=$((waited + 1))
-done
+    acquire "$STATE/host" || fail
+fi
 
-log "FLUSH TABLES WITH READ LOCK не получен за ${TIMEOUT} с — вероятно, мешают длинные запросы"
-release
-exit 1
+if [ -n "$K8S_TARGETS" ]; then
+    crictl_bin=${CRICTL%% *}
+    if ! command -v "$crictl_bin" >/dev/null 2>&1; then
+        log "$crictl_bin не найден: задайте JHVIRT_CRICTL (для k3s — \"k3s crictl\")"
+        fail
+    fi
+    for target in $K8S_TARGETS; do
+        ids=$(k8s_containers "$target") || fail
+        if [ -z "$ids" ]; then
+            log "цель $target: на этом узле не работает — готовить нечего"
+            continue
+        fi
+        for cid in $ids; do
+            case "$cid" in
+            *[!0-9a-f]*) log "crictl вернул неожиданный идентификатор: $cid"; fail ;;
+            esac
+            acquire "$STATE/k8s-$cid" "$cid" || fail
+        done
+    done
+fi
+exit 0

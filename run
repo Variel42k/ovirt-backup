@@ -590,6 +590,7 @@ cmd_build() {
     cp -r deploy/guest-hooks/. "$OUT/guest-hooks/"
     # Хелпер дампов ставится на хосты СУБД, а не на сервер копий.
     cp deploy/db-dump/jhvirt-db-dump deploy/db-dump/setup.sh deploy/db-dump/db-dump.conf.example \
+        deploy/db-dump/db-dump-k8s.conf.example deploy/db-dump/k8s-rbac.yaml \
         deploy/db-dump/README.md "$OUT/db-dump/"
     chmod 0755 "$OUT/db-dump/jhvirt-db-dump" "$OUT/db-dump/setup.sh"
     chmod 0755 "$OUT/guest-hooks/linux/install.sh" "$OUT/guest-hooks/linux/fsfreeze-hook" \

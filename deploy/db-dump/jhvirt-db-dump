@@ -20,6 +20,19 @@
 #                               по умолчанию, см. JHVIRT_DB_ALLOW_RESTORE)
 # ENGINE — postgresql или mysql (MySQL и MariaDB). Операции удаления или
 # перезаписи существующей базы в протоколе нет.
+#
+# СУБД в Kubernetes. Если в настройках задано JHVIRT_K8S_NAMESPACE, клиенты
+# СУБД запускаются не на хосте, а в контейнере пода через kubectl exec: хост
+# хелпера — любая машина с kubectl (узел управления, бастион), под может
+# работать на любом узле. Пароль, если нужен, берётся из окружения самого
+# контейнера (JHVIRT_K8S_PASSWORD_ENV) и хелперу не передаётся. Права
+# учётной записи kubectl: get/list pods и create pods/exec в одном
+# пространстве имён — см. k8s-rbac.yaml рядом.
+#
+# Профили. Сначала читается /etc/jhvirt/db-dump.conf, затем
+# /etc/jhvirt/db-dump.d/ИМЯ_ПОЛЬЗОВАТЕЛЯ.conf. Профиль выбирает SSH-вход, а не
+# клиент: так один хост обслуживает несколько баз (например, на хосте и в
+# двух пространствах имён кластера) под разными ключами службы.
 set -Eeuo pipefail
 
 PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
@@ -54,27 +67,150 @@ JHVIRT_PG_PORT=
 JHVIRT_PG_MAINTENANCE_DB=postgres
 JHVIRT_MYSQL_DEFAULTS_FILE=
 JHVIRT_DB_EXCLUDE=
-if [[ -e "$CONF" ]]; then
-    [[ "$(stat -c '%u' "$CONF")" == 0 ]] || fail "$CONF must be owned by root"
-    (( (8#$(stat -c '%a' "$CONF") & 8#022) == 0 )) || fail "$CONF must not be writable by group or others"
+JHVIRT_K8S_NAMESPACE=
+JHVIRT_K8S_POD=
+JHVIRT_K8S_SELECTOR=
+JHVIRT_K8S_CONTAINER=
+JHVIRT_K8S_DB_USER=
+JHVIRT_K8S_PASSWORD_ENV=
+JHVIRT_KUBECTL=kubectl
+JHVIRT_KUBECONFIG=
+
+# load_conf FILE читает настройки, если файл принадлежит root и недоступен на
+# запись другим: хелпер выполняет его как shell-код.
+load_conf() {
+    [[ "$(stat -c '%u' "$1")" == 0 ]] || fail "$1 must be owned by root"
+    (( (8#$(stat -c '%a' "$1") & 8#022) == 0 )) || fail "$1 must not be writable by group or others"
     # shellcheck disable=SC1090
-    . "$CONF"
+    . "$1"
+}
+
+if [[ -e "$CONF" ]]; then
+    load_conf "$CONF"
 elif [[ -d "${CONF%/*}" && ! -x "${CONF%/*}" ]]; then
     # Недоступный каталог выглядит как отсутствие файла: хелпер молча работал
     # бы со значениями по умолчанию и, например, считал восстановление
     # выключенным. Лучше явная ошибка.
     fail "${CONF%/*} is not accessible to $(id -un): chmod 0755 ${CONF%/*}"
 fi
+PROFILE="${CONF%/*}/db-dump.d/$(id -un).conf"
+[[ ! -e "$PROFILE" ]] || load_conf "$PROFILE"
+
+K8S_NAME_RE='^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$'
+K8S_SELECTOR_RE='^[A-Za-z0-9_./=,!-]+$'
+ENV_RE='^[A-Za-z_][A-Za-z0-9_]{0,63}$'
+K8S=0
+if [[ -n "$JHVIRT_K8S_NAMESPACE" ]]; then
+    K8S=1
+    [[ "$JHVIRT_K8S_NAMESPACE" =~ $K8S_NAME_RE ]] || fail "JHVIRT_K8S_NAMESPACE is not a valid name"
+    [[ "$JHVIRT_K8S_CONTAINER" =~ $K8S_NAME_RE ]] || fail "JHVIRT_K8S_CONTAINER is required"
+    [[ -z "$JHVIRT_K8S_POD" || "$JHVIRT_K8S_POD" =~ $K8S_NAME_RE ]] || fail "JHVIRT_K8S_POD is not a valid name"
+    [[ -n "$JHVIRT_K8S_POD" || "$JHVIRT_K8S_SELECTOR" =~ $K8S_SELECTOR_RE ]] ||
+        fail "set JHVIRT_K8S_POD or JHVIRT_K8S_SELECTOR"
+    [[ -z "$JHVIRT_K8S_PASSWORD_ENV" || "$JHVIRT_K8S_PASSWORD_ENV" =~ $ENV_RE ]] ||
+        fail "JHVIRT_K8S_PASSWORD_ENV is not a valid variable name"
+    [[ -z "$JHVIRT_K8S_DB_USER" || "$JHVIRT_K8S_DB_USER" =~ $NAME_RE ]] || fail "JHVIRT_K8S_DB_USER is not a valid name"
+    read -r -a kubectl <<<"$JHVIRT_KUBECTL"
+    [[ -z "$JHVIRT_KUBECONFIG" ]] || kubectl+=(--kubeconfig="$JHVIRT_KUBECONFIG")
+    kubectl+=(--namespace="$JHVIRT_K8S_NAMESPACE")
+fi
+
+# k8s_pod находит под с СУБД: заданный явно или первый работающий по
+# селектору. Если экземпляров несколько, селектор должен выбирать ведущий
+# (например, cnpg.io/instanceRole=primary или role=master). Результат
+# запоминается в POD, поэтому первый вызов делается не в подоболочке.
+POD=
+k8s_pod() {
+    [[ -z "$POD" ]] || return 0
+    if [[ -n "$JHVIRT_K8S_POD" ]]; then
+        POD=$JHVIRT_K8S_POD
+        return 0
+    fi
+    POD=$("${kubectl[@]}" get pods --selector="$JHVIRT_K8S_SELECTOR" \
+        --field-selector=status.phase=Running \
+        --output='jsonpath={.items[0].metadata.name}' </dev/null) ||
+        fail "kubectl get pods failed in namespace $JHVIRT_K8S_NAMESPACE"
+    [[ -n "$POD" ]] || fail "no running pod matches $JHVIRT_K8S_SELECTOR in $JHVIRT_K8S_NAMESPACE"
+    [[ "$POD" =~ $K8S_NAME_RE ]] || fail "kubectl returned an unexpected pod name"
+}
+
+# Скрипт в контейнере: пароль — из окружения самого контейнера, затем
+# запуск клиента СУБД с переданными аргументами.
+# shellcheck disable=SC2016
+IN_POD='
+if [ -n "$1" ]; then
+    v=$(printenv "$1") || { echo "jhvirt-db-dump: no variable $1 in the container" >&2; exit 64; }
+    PGPASSWORD=$v MYSQL_PWD=$v
+    export PGPASSWORD MYSQL_PWD
+fi
+shift
+exec "$@"'
+
+# db TOOL ARGS... запускает клиент СУБД: на хосте или в контейнере пода.
+# Стандартный ввод уходит в контейнер только у db_stdin (restore): иначе
+# kubectl держал бы канал SSH открытым.
+db() {
+    if [[ "$K8S" == 0 ]]; then
+        "$@"
+        return
+    fi
+    k8s_pod
+    "${kubectl[@]}" exec "$POD" --container="$JHVIRT_K8S_CONTAINER" -- \
+        sh -c "$IN_POD" jhvirt "$JHVIRT_K8S_PASSWORD_ENV" "$@" </dev/null
+}
+
+db_stdin() {
+    if [[ "$K8S" == 0 ]]; then
+        "$@"
+        return
+    fi
+    k8s_pod
+    "${kubectl[@]}" exec --stdin "$POD" --container="$JHVIRT_K8S_CONTAINER" -- \
+        sh -c "$IN_POD" jhvirt "$JHVIRT_K8S_PASSWORD_ENV" "$@"
+}
+
+# has_tool NAME — есть ли программа там, где работает СУБД.
+has_tool() {
+    if [[ "$K8S" == 0 ]]; then
+        command -v "$1" >/dev/null 2>&1
+    else
+        # shellcheck disable=SC2016
+        db sh -c 'command -v "$0"' "$1" >/dev/null 2>&1
+    fi
+}
+
+# first_tool NAME... печатает первую найденную программу.
+first_tool() {
+    local tool
+    for tool in "$@"; do
+        if has_tool "$tool"; then
+            printf '%s\n' "$tool"
+            return 0
+        fi
+    done
+    return 0
+}
 
 pg_args=()
 [[ -z "$JHVIRT_PG_HOST" ]] || pg_args+=(--host="$JHVIRT_PG_HOST")
 [[ -z "$JHVIRT_PG_PORT" ]] || pg_args+=(--port="$JHVIRT_PG_PORT")
+# В контейнере peer-входа от пользователя хелпера нет: роль задаётся явно.
+[[ "$K8S" == 0 ]] || pg_args+=(--username="${JHVIRT_K8S_DB_USER:-postgres}")
 
-mysql_client() { command -v mariadb 2>/dev/null || command -v mysql 2>/dev/null || true; }
-mysql_dumper() { command -v mariadb-dump 2>/dev/null || command -v mysqldump 2>/dev/null || true; }
+mysql_client() { first_tool mariadb mysql; }
+mysql_dumper() { first_tool mariadb-dump mysqldump; }
 my_args=()
-[[ -z "$JHVIRT_MYSQL_DEFAULTS_FILE" ]] || my_args+=(--defaults-extra-file="$JHVIRT_MYSQL_DEFAULTS_FILE")
+if [[ "$K8S" == 0 ]]; then
+    [[ -z "$JHVIRT_MYSQL_DEFAULTS_FILE" ]] || my_args+=(--defaults-extra-file="$JHVIRT_MYSQL_DEFAULTS_FILE")
+else
+    # Файл параметров лежит на хосте хелпера и контейнеру не виден.
+    my_args+=(--user="${JHVIRT_K8S_DB_USER:-root}")
+fi
 my_args+=(--protocol=socket)
+
+# Под находится один раз до разбора операции: в подоболочках $(...) найденное
+# имя не сохранилось бы, и kubectl get pods выполнялся бы на каждый запрос.
+[[ "$K8S" == 0 ]] || k8s_pod
 
 check_engine() {
     [[ "$1" == postgresql || "$1" == mysql ]] || fail "unknown engine: $1"
@@ -103,7 +239,7 @@ excluded() {
 }
 
 psql_q() {
-    psql "${pg_args[@]}" --no-psqlrc --no-password --quiet --tuples-only --no-align \
+    db psql "${pg_args[@]}" --no-psqlrc --no-password --quiet --tuples-only --no-align \
         --set=ON_ERROR_STOP=1 --dbname="$JHVIRT_PG_MAINTENANCE_DB" "$@"
 }
 
@@ -111,7 +247,7 @@ mysql_q() {
     local client
     client=$(mysql_client)
     [[ -n "$client" ]] || fail "mysql/mariadb client is not installed"
-    "$client" "${my_args[@]}" --batch --skip-column-names "$@" </dev/null
+    db "$client" "${my_args[@]}" --batch --skip-column-names "$@" </dev/null
 }
 
 action="${1:-}"
@@ -119,7 +255,7 @@ case "$action" in
 probe)
     [[ $# -eq 1 ]] || fail "probe takes no arguments"
     printf '%s\n' "$PROTOCOL"
-    if command -v pg_dump >/dev/null 2>&1; then
+    if has_tool pg_dump; then
         if version=$(psql_q --command='SHOW server_version' 2>&1); then
             printf 'engine postgresql %s\n' "${version%%[[:space:]]*}"
         else
@@ -179,20 +315,21 @@ dump)
     if [[ "$2" == postgresql ]]; then
         # Формат custom: сжатие отключено, его сделает служба вместе с
         # шифрованием; pg_restore умеет выборочное восстановление.
-        exec pg_dump "${pg_args[@]}" --no-password --format=custom --compress=0 --dbname="$3"
+        db pg_dump "${pg_args[@]}" --no-password --format=custom --compress=0 --dbname="$3"
+        exit
     fi
     dumper=$(mysql_dumper)
     [[ -n "$dumper" ]] || fail "mysqldump/mariadb-dump is not installed"
     # --single-transaction даёт согласованный снимок InnoDB без блокировки
     # записи; таблицы MyISAM читаются без снимка.
-    exec "$dumper" "${my_args[@]}" --single-transaction --quick --routines --events --triggers \
+    db "$dumper" "${my_args[@]}" --single-transaction --quick --routines --events --triggers \
         --hex-blob --no-tablespaces --default-character-set=utf8mb4 "$3" </dev/null
     ;;
 
 globals)
     [[ $# -eq 2 && "$2" == postgresql ]] || fail "usage: globals postgresql"
     # Без хешей паролей: восстановленные роли получают пароли заново.
-    exec pg_dumpall "${pg_args[@]}" --no-password --globals-only --no-role-passwords
+    db pg_dumpall "${pg_args[@]}" --no-password --globals-only --no-role-passwords
     ;;
 
 restore)
@@ -218,12 +355,12 @@ restore)
         # база никогда не перезаписывается.
         psql_q --command="CREATE DATABASE \"$db\"" >/dev/null
         created=1
-        pg_restore "${pg_args[@]}" --no-password --no-owner --no-privileges --exit-on-error --dbname="$db"
+        db_stdin pg_restore "${pg_args[@]}" --no-password --no-owner --no-privileges --exit-on-error --dbname="$db"
     else
         mysql_q --execute="CREATE DATABASE \`$db\`" >/dev/null
         created=1
         client=$(mysql_client)
-        "$client" "${my_args[@]}" --batch "$db"
+        db_stdin "$client" "${my_args[@]}" --batch "$db"
     fi
     created=0
     trap - ERR HUP INT TERM

@@ -598,8 +598,14 @@ type BackupConfig struct {
 	//
 	// Цена — место: копия в карантине его занимает. Поэтому срок задаётся
 	// сутками, а не неделями.
-	PurgeDelay time.Duration  `mapstructure:"purge_delay"`
-	Transfer   TransferConfig `mapstructure:"transfer"`
+	PurgeDelay time.Duration `mapstructure:"purge_delay"`
+	// MaxFreeze — сколько гость может стоять с замороженными ФС, пока
+	// гипервизор фиксирует точку, если задание не задало свой предел. По
+	// истечении служба размораживает гостя сама, а копия становится
+	// crash-consistent: узел Kubernetes или нагруженная СУБД дольше не
+	// выдерживают остановки записи.
+	MaxFreeze time.Duration  `mapstructure:"max_freeze"`
+	Transfer  TransferConfig `mapstructure:"transfer"`
 
 	// RestoreDirs ограничивает каталоги, куда разрешено восстанавливать
 	// образы. Каталог приходит из запроса, а восстановленный образ — это
@@ -947,6 +953,10 @@ func (c *Config) Validate() error {
 	if c.Backup.ReplicationWorkers < 1 {
 		return fmt.Errorf("backup.replication_workers must be >= 1, got %d", c.Backup.ReplicationWorkers)
 	}
+	// Ноль — предел по умолчанию (backup.DefaultMaxFreeze).
+	if c.Backup.MaxFreeze != 0 && (c.Backup.MaxFreeze < time.Second || c.Backup.MaxFreeze > 10*time.Minute) {
+		return fmt.Errorf("backup.max_freeze must be between 1s and 10m, got %s", c.Backup.MaxFreeze)
+	}
 	seenFileRoots := map[string]bool{}
 	for _, root := range c.FileBackup.Roots {
 		if strings.TrimSpace(root.ID) == "" || strings.TrimSpace(root.Path) == "" {
@@ -1162,6 +1172,7 @@ func setDefaults(v *viper.Viper) {
 	// Трое суток: за меньший срок ошибочное удаление можно не заметить, за
 	// больший карантин начинает заметно держать место.
 	v.SetDefault("backup.purge_delay", "72h")
+	v.SetDefault("backup.max_freeze", "60s")
 	v.SetDefault("backup.restore_dirs", []string{})
 	v.SetDefault("backup.qemu_img_path", "")
 

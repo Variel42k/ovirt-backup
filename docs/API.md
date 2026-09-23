@@ -790,6 +790,7 @@ S3 endpoint не передаёт данные через сервис и пот
   "retention": { "keep_last": 3, "keep_daily": 7, "keep_weekly": 4, "keep_monthly": 6 },
   "consistency": "application",       // crash|filesystem|application; пусто — из quiesce
   "require_consistency": true,         // не достигнут — запуск failed, копия не снимается
+  "max_freeze_seconds": 15,            // предел заморозки гостя; 0 — backup.max_freeze
   "quiesce": true,                     // ведомый: сервер выводит его из consistency
   "export_qcow2": true,
   "verify_after": "boot",

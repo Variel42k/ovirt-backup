@@ -703,6 +703,7 @@ func (s *Scheduler) TriggerJob(ctx context.Context, jobID, triggeredBy string, s
 				Quiesce:            job.Quiesce,
 				Consistency:        job.Consistency,
 				RequireConsistency: job.RequireConsistency,
+				MaxFreeze:          job.MaxFreeze,
 				Encrypt:            job.Encrypt,
 				ExportQcow2:        job.ExportQcow2,
 				VerifyAfter:        job.VerifyAfter,

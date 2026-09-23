@@ -327,6 +327,8 @@ export interface BackupJob {
   consistency: Consistency
   /** Прервать запуск, если уровень не достигнут; иначе копия снимается как после сбоя. */
   require_consistency: boolean
+  /** Предел окна заморозки, нс; 0 — предел службы (backup.max_freeze). */
+  max_freeze?: number
   verify_after?: string
   verify_options?: BootVerifyOptions
   export_qcow2: boolean

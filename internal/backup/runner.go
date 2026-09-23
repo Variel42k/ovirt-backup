@@ -128,11 +128,14 @@ type RunRequest struct {
 	// ConsistencyTarget и QuiesceGuest.
 	Consistency        model.Consistency
 	RequireConsistency bool
-	Encrypt            bool
-	ExportQcow2        bool
-	VerifyAfter        model.VerifyMode
-	VerifyOptions      model.VerifyOptions
-	Retention          model.RetentionPolicy
+	// MaxFreeze — сколько гость может стоять замороженным; 0 — предел службы.
+	// См. FreezeWindow.
+	MaxFreeze     time.Duration
+	Encrypt       bool
+	ExportQcow2   bool
+	VerifyAfter   model.VerifyMode
+	VerifyOptions model.VerifyOptions
+	Retention     model.RetentionPolicy
 
 	// OVAHostID и OVADirectory нужны только для типа ova.
 	OVAHostID    string
@@ -672,36 +675,19 @@ func (e *Engine) runCBT(ctx context.Context, client *ovirt.Client, backend repo.
 	if err != nil {
 		return nil, err
 	}
-	thaw := func() error {
-		if frozenAt.IsZero() {
-			return nil
-		}
-		held := time.Since(frozenAt)
-		// Use a detached context: the guest must be thawed even if the backup
-		// was cancelled.
-		thawCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 60*time.Second)
-		defer cancel()
-		if err := client.ThawFilesystems(thawCtx, vm.ID); err != nil {
-			e.log.Error().Err(err).Str("vm", vm.Name).
-				Msg("НЕ УДАЛОСЬ РАЗМОРОЗИТЬ файловые системы гостя — проверьте ВМ вручную")
-			e.event(ctx, run, model.RunEventThawFailed, held, "проверьте ВМ вручную")
-			return fmt.Errorf("разморозка файловых систем гостя: %w", err)
-		}
-		frozenAt = time.Time{}
-		e.event(ctx, run, model.RunEventThawed, held, "столько запись в госте стояла")
-		return nil
-	}
-	defer func() { _ = thaw() }()
+	window := e.guardFreeze(ctx, client, vm, run, req, frozenAt)
+	defer func() { _ = window.Thaw() }()
 
 	backupStarted := time.Now().UTC()
 	backup, err := client.StartBackup(ctx, vm.ID, diskIDs, p.FromCheckpointID)
-	if err != nil {
+	if backup == nil {
 		return nil, fmt.Errorf("запуск бэкапа на движке: %w", err)
 	}
 	run.EngineBackupID = backup.ID
 
 	// From here on the engine holds a lock on the disks; it must be released
-	// no matter how this function exits.
+	// no matter how this function exits — including when the engine opened the
+	// backup but its answer did not decode.
 	defer func() {
 		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
 		defer cancel()
@@ -714,6 +700,9 @@ func (e *Engine) runCBT(ctx context.Context, client *ovirt.Client, backend repo.
 			e.log.Warn().Err(err).Str("backup", backup.ID).Msg("бэкап на движке закрывается дольше обычного")
 		}
 	}()
+	if err != nil {
+		return nil, fmt.Errorf("запуск бэкапа на движке: %w", err)
+	}
 
 	ready, err := client.WaitBackupReady(ctx, vm.ID, backup.ID, 30*time.Minute)
 	if err != nil {
@@ -728,7 +717,10 @@ func (e *Engine) runCBT(ctx context.Context, client *ovirt.Client, backend repo.
 
 	// The point in time is fixed once the backup is ready; the guest can run
 	// again while we read the frozen image.
-	if err := thaw(); err != nil {
+	if err := window.Thaw(); err != nil {
+		return nil, err
+	}
+	if err := e.settleFreeze(ctx, run, req, window); err != nil {
 		return nil, err
 	}
 
@@ -784,6 +776,50 @@ func (e *Engine) quiesce(ctx context.Context, client *ovirt.Client, vm *model.VM
 	return frozenAt, nil
 }
 
+// guardFreeze ставит сторожа на заморозку гостя oVirt: по истечении окна он
+// размораживает гостя, не дожидаясь движка. Нулевой frozenAt — гость не
+// заморожен, и Thaw ничего не делает.
+func (e *Engine) guardFreeze(ctx context.Context, client *ovirt.Client, vm *model.VM,
+	run *model.BackupRun, req RunRequest, frozenAt time.Time) *FreezeWindow {
+
+	thaw := func() error {
+		if frozenAt.IsZero() {
+			return nil
+		}
+		held := time.Since(frozenAt)
+		// Use a detached context: the guest must be thawed even if the backup
+		// was cancelled.
+		thawCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 60*time.Second)
+		defer cancel()
+		if err := client.ThawFilesystems(thawCtx, vm.ID); err != nil {
+			e.log.Error().Err(err).Str("vm", vm.Name).
+				Msg("НЕ УДАЛОСЬ РАЗМОРОЗИТЬ файловые системы гостя — проверьте ВМ вручную")
+			e.event(ctx, run, model.RunEventThawFailed, held, "проверьте ВМ вручную")
+			return fmt.Errorf("разморозка файловых систем гостя: %w", err)
+		}
+		frozenAt = time.Time{}
+		e.event(ctx, run, model.RunEventThawed, held, "столько запись в госте стояла")
+		return nil
+	}
+	limit := req.FreezeLimit(e.cfg.MaxFreeze)
+	return NewFreezeWindow(frozenAt, limit, thaw, func(err error) {
+		e.log.Warn().Err(err).Str("vm", vm.Name).Dur("окно", limit).
+			Msg("движок не зафиксировал точку за окно заморозки — гость разморожен досрочно")
+	})
+}
+
+// settleFreeze понижает уровень запуска, если гостя разморозил сторож, а при
+// строгом требовании прерывает запуск.
+func (e *Engine) settleFreeze(ctx context.Context, run *model.BackupRun, req RunRequest, window *FreezeWindow) error {
+	if !window.Expired() {
+		return nil
+	}
+	level, note, err := window.Settle(run.Consistency, req.ConsistencyTarget(), req.RequireConsistency)
+	run.Consistency, run.ConsistencyNote = level, note
+	e.event(ctx, run, model.RunEventFreezeFailed, 0, note)
+	return err
+}
+
 // event записывает отметку хронологии запуска.
 //
 // Хронология сопровождает бэкап, а не является им: потеря отметки не повод
@@ -824,27 +860,11 @@ func (e *Engine) runSnapshot(ctx context.Context, client *ovirt.Client, backend 
 	}
 
 	description := fmt.Sprintf("jhvirt backup %s", run.ID)
+	window := e.guardFreeze(ctx, client, vm, run, req, frozenAt)
 	snapshotAsked := time.Now().UTC()
 	snap, err := client.CreateSnapshot(ctx, vm.ID, description, false, diskIDs)
-	thaw := func() error {
-		if frozenAt.IsZero() {
-			return nil
-		}
-		held := time.Since(frozenAt)
-		thawCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 60*time.Second)
-		defer cancel()
-		if thawErr := client.ThawFilesystems(thawCtx, vm.ID); thawErr != nil {
-			e.log.Error().Err(thawErr).Str("vm", vm.Name).
-				Msg("НЕ УДАЛОСЬ РАЗМОРОЗИТЬ файловые системы гостя — проверьте ВМ вручную")
-			e.event(ctx, run, model.RunEventThawFailed, held, "проверьте ВМ вручную")
-			return fmt.Errorf("разморозка файловых систем гостя: %w", thawErr)
-		}
-		frozenAt = time.Time{}
-		e.event(ctx, run, model.RunEventThawed, held, "столько запись в госте стояла")
-		return nil
-	}
 	if err != nil {
-		_ = thaw()
+		_ = window.Thaw()
 		return nil, fmt.Errorf("создание снапшота: %w", err)
 	}
 	run.SnapshotID = snap.ID
@@ -865,8 +885,11 @@ func (e *Engine) runSnapshot(ctx context.Context, client *ovirt.Client, backend 
 	}()
 	// Register after snapshot cleanup so a failed first thaw is retried before
 	// a potentially long snapshot merge starts during unwinding.
-	defer func() { _ = thaw() }()
-	if err := thaw(); err != nil {
+	defer func() { _ = window.Thaw() }()
+	if err := window.Thaw(); err != nil {
+		return nil, err
+	}
+	if err := e.settleFreeze(ctx, run, req, window); err != nil {
 		return nil, err
 	}
 

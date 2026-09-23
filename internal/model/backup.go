@@ -497,6 +497,12 @@ type BackupJob struct {
 	// достигнут. Иначе копия снимается crash-consistent, а понижение
 	// записывается в запуск и поднимает оповещение.
 	RequireConsistency bool `json:"require_consistency"`
+	// MaxFreeze — сколько гость может стоять замороженным, пока гипервизор
+	// фиксирует точку; 0 — предел службы (backup.max_freeze). По истечении
+	// гость размораживается досрочно и уровень понижается до crash. Узлу
+	// Kubernetes нужен короткий предел: etcd и аренды компонентов не
+	// переживают долгой остановки записи.
+	MaxFreeze time.Duration `json:"max_freeze"`
 
 	// Проверка сразу после успешного бэкапа. Пусто — не проверять.
 	VerifyAfter VerifyMode `json:"verify_after,omitempty"`
@@ -561,8 +567,14 @@ func (j *BackupJob) Validate() error {
 	if j.Consistency != "" && !j.Consistency.Valid() {
 		return fmt.Errorf("неизвестный уровень согласованности: %q", j.Consistency)
 	}
+	if j.MaxFreeze < 0 || j.MaxFreeze > MaxFreezeLimit {
+		return fmt.Errorf("предел заморозки должен быть от 0 до %d с", int(MaxFreezeLimit.Seconds()))
+	}
 	return nil
 }
+
+// MaxFreezeLimit — верхняя граница предела заморозки в задании.
+const MaxFreezeLimit = 10 * time.Minute
 
 // BackupRun is one execution: one VM, one point in time, one repository.
 type BackupRun struct {

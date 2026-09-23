@@ -1,0 +1,31 @@
+# /etc/jhvirt/db-dump.d/ПОЛЬЗОВАТЕЛЬ.conf — профиль хелпера для СУБД в Kubernetes.
+#
+# Профиль читается после /etc/jhvirt/db-dump.conf для SSH-пользователя с тем
+# же именем. Один профиль — одна СУБД: для второй базы в кластере заведите
+# второго пользователя (setup.sh --user) со своим ключом службы.
+# Права: root:root 0644.
+
+# Пространство имён и контейнер с СУБД. Под задаётся именем или селектором;
+# селектор должен выбирать ведущий экземпляр, если реплик несколько:
+#   CloudNativePG   cnpg.io/cluster=main,cnpg.io/instanceRole=primary
+#   Zalando/Spilo   application=spilo,spilo-role=master
+#   Bitnami         app.kubernetes.io/name=postgresql,app.kubernetes.io/component=primary
+JHVIRT_K8S_NAMESPACE=
+JHVIRT_K8S_CONTAINER=postgres
+#JHVIRT_K8S_POD=postgres-0
+JHVIRT_K8S_SELECTOR=
+
+# Роль СУБД внутри контейнера (PostgreSQL — postgres, MySQL — root) и имя
+# переменной окружения КОНТЕЙНЕРА с её паролем. Пароль остаётся в кластере:
+# хелпер передаёт только имя переменной. Официальный образ PostgreSQL пускает
+# через сокет без пароля — оставьте пусто.
+#JHVIRT_K8S_DB_USER=postgres
+#JHVIRT_K8S_PASSWORD_ENV=POSTGRES_PASSWORD
+
+# kubectl и файл конфигурации учётной записи с правами из k8s-rbac.yaml.
+# По умолчанию — ~/.kube/config пользователя хелпера.
+#JHVIRT_KUBECTL=kubectl
+#JHVIRT_KUBECONFIG=/home/jhvirt_dump/.kube/config
+
+# Восстановление в новую базу — как в основном файле.
+#JHVIRT_DB_ALLOW_RESTORE=0

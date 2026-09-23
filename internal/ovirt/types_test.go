@@ -159,6 +159,15 @@ func TestCheckpointAndEventTimestamps(t *testing.T) {
 		t.Error("дата создания checkpoint потеряна")
 	}
 
+	// POST /vms/{id}/backups answers with creation_date as a JSON number.
+	var b Backup
+	if err := json.Unmarshal([]byte(`{"id":"b-1","phase":"initializing","creation_date":1754566800000}`), &b); err != nil {
+		t.Fatalf("разбор backup: %v", err)
+	}
+	if b.CreationDate.Time().IsZero() {
+		t.Error("дата создания backup потеряна")
+	}
+
 	var ev Event
 	if err := json.Unmarshal([]byte(`{"id":"9","severity":"error","time":1754566800000}`), &ev); err != nil {
 		t.Fatalf("разбор события: %v", err)

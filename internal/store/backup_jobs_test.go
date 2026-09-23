@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/Variel42k/ovirt-backup/internal/model"
 )
@@ -95,8 +96,12 @@ func TestBackupConsistencyRoundTrip(t *testing.T) {
 	if got.Consistency != model.ConsistencyFilesystem || !got.Quiesce || got.RequireConsistency {
 		t.Fatalf("уровень прежнего задания: %q quiesce=%v require=%v", got.Consistency, got.Quiesce, got.RequireConsistency)
 	}
+	if got.MaxFreeze != 0 {
+		t.Fatalf("прежнее задание получило свой предел заморозки: %s", got.MaxFreeze)
+	}
 
 	got.Consistency, got.RequireConsistency = model.ConsistencyApplication, true
+	got.MaxFreeze = 15 * time.Second
 	if err := st.UpdateBackupJob(ctx, got); err != nil {
 		t.Fatalf("обновление задания: %v", err)
 	}
@@ -106,6 +111,9 @@ func TestBackupConsistencyRoundTrip(t *testing.T) {
 	}
 	if again.Consistency != model.ConsistencyApplication || !again.RequireConsistency || !again.Quiesce {
 		t.Fatalf("уровень не сохранён: %q require=%v quiesce=%v", again.Consistency, again.RequireConsistency, again.Quiesce)
+	}
+	if again.MaxFreeze != 15*time.Second {
+		t.Fatalf("предел заморозки не сохранён: %s", again.MaxFreeze)
 	}
 
 	run := &model.BackupRun{

@@ -103,6 +103,7 @@ func TestBackupConsistencyRoundTrip(t *testing.T) {
 	got.Consistency, got.RequireConsistency = model.ConsistencyApplication, true
 	got.MaxFreeze = 15 * time.Second
 	got.FreezeBy = model.FreezeByMixed
+	got.MaxReadMBps = 80
 	if err := st.UpdateBackupJob(ctx, got); err != nil {
 		t.Fatalf("обновление задания: %v", err)
 	}
@@ -115,6 +116,9 @@ func TestBackupConsistencyRoundTrip(t *testing.T) {
 	}
 	if again.MaxFreeze != 15*time.Second {
 		t.Fatalf("предел заморозки не сохранён: %s", again.MaxFreeze)
+	}
+	if again.MaxReadMBps != 80 {
+		t.Fatalf("предел чтения не сохранён: %d", again.MaxReadMBps)
 	}
 	if again.FreezeBy != model.FreezeByMixed {
 		t.Fatalf("способ заморозки не сохранён: %q", again.FreezeBy)

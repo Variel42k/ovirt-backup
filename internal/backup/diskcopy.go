@@ -28,17 +28,31 @@ type copyParams struct {
 	ExtentContext string
 
 	RangeRetries int
+	// Pacer ограничивает скорость чтения; nil — без ограничения.
+	Pacer *readPacer
 	// Keepalive продлевает передачу, пока идёт длинная запись в хранилище:
 	// движок отменяет неактивные передачи по таймауту.
 	Keepalive func(ctx context.Context) error
 
-	OnProgress func(logicalDone int64)
+	// OnProgress получает, сколько прочитано с источника: при чтении без
+	// карты экстентов это больше сохранённого, а прогресс должен идти по
+	// прочитанному.
+	OnProgress func(readDone int64)
 }
+
+// extentsRetryDelay — пауза перед повторным запросом карты экстентов.
+var extentsRetryDelay = 10 * time.Second
 
 // copyResult reports what a disk copy transferred.
 type copyResult struct {
 	LogicalBytes int64
-	ChunkCount   int
+	// ReadBytes — сколько прочитано с источника; больше LogicalBytes, когда
+	// диск читался целиком и нулевые чанки не сохранялись.
+	ReadBytes  int64
+	ChunkCount int
+	// MapUnavailable — почему карта экстентов не получена и диск читался
+	// целиком; пусто — карта была.
+	MapUnavailable string
 	// GridChunks — сколько чанков занимает весь образ; вместе с ChunkCount
 	// показывает, какую долю диска затронул этот запуск.
 	GridChunks int64
@@ -58,8 +72,28 @@ func copyDisk(ctx context.Context, p copyParams) (copyResult, error) {
 	res.GridChunks = (p.VirtualSize + p.ChunkSize - 1) / p.ChunkSize
 
 	extents, err := p.Source.Extents(ctx, p.ExtentContext)
+	if err != nil && ctx.Err() == nil {
+		// imageio отвечает 500 и на разовые сбои: повтор стоит секунд, а
+		// без карты диск пришлось бы читать целиком.
+		select {
+		case <-ctx.Done():
+			return res, ctx.Err()
+		case <-time.After(extentsRetryDelay):
+		}
+		extents, err = p.Source.Extents(ctx, p.ExtentContext)
+	}
+	// Без карты изменённых блоков инкремент невозможен: неизвестно, что
+	// копировать. Полному же карта нужна лишь затем, чтобы не читать пустоту:
+	// диск читается целиком, а нулевые чанки не сохраняются — при
+	// восстановлении отсутствующий чанк и так нулевой.
+	skipZero := false
 	if err != nil {
-		return res, fmt.Errorf("получение карты экстентов (%s): %w", p.ExtentContext, err)
+		if p.ExtentContext == imageio.ContextDirty || ctx.Err() != nil {
+			return res, fmt.Errorf("получение карты экстентов (%s): %w", p.ExtentContext, err)
+		}
+		res.MapUnavailable = err.Error()
+		extents = []imageio.Extent{{Start: 0, Length: p.VirtualSize}}
+		skipZero = true
 	}
 
 	wanted := selectChunks(extents, p.ExtentContext, p.ChunkSize, p.VirtualSize)
@@ -77,15 +111,23 @@ func copyDisk(ctx context.Context, p copyParams) (copyResult, error) {
 			return res, err
 		}
 
+		if err := p.Pacer.Wait(ctx, group.Length); err != nil {
+			return res, err
+		}
 		buf, err := readWithRetry(ctx, p.Source, group.Offset, group.Length, p.RangeRetries)
 		if err != nil {
 			return res, err
 		}
+		res.ReadBytes += group.Length
 
 		for i, index := range group.Indices {
 			from := group.Starts[i] - group.Offset
 			length := group.Lengths[i]
-			if err := p.Writer.WriteChunk(index, buf[from:from+length]); err != nil {
+			chunk := buf[from : from+length]
+			if skipZero && allZero(chunk) {
+				continue
+			}
+			if err := p.Writer.WriteChunk(index, chunk); err != nil {
 				return res, err
 			}
 			res.LogicalBytes += length
@@ -93,7 +135,7 @@ func copyDisk(ctx context.Context, p copyParams) (copyResult, error) {
 		}
 
 		if p.OnProgress != nil {
-			p.OnProgress(res.LogicalBytes)
+			p.OnProgress(res.ReadBytes)
 		}
 		if p.Keepalive != nil && time.Since(lastKeepalive) > 20*time.Second {
 			// Ignore keepalive failures: the transfer may simply have moved on,

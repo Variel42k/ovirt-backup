@@ -519,6 +519,10 @@ type BackupJob struct {
 	// FreezeBy — кто замораживает гостя; пусто — служба. Движок держит
 	// заморозку доли секунды, и предел MaxFreeze для него не нужен.
 	FreezeBy FreezeBy `json:"freeze_by,omitempty"`
+	// MaxReadMBps — предел скорости чтения с хранилища ВМ, МиБ/с; 0 — предел
+	// службы (backup.transfer.max_read_mbps). Бэкап работающей ВМ читает её
+	// диски с того же хранилища, с которого работает она сама.
+	MaxReadMBps int `json:"max_read_mbps,omitempty"`
 
 	// Проверка сразу после успешного бэкапа. Пусто — не проверять.
 	VerifyAfter VerifyMode `json:"verify_after,omitempty"`
@@ -583,6 +587,9 @@ func (j *BackupJob) Validate() error {
 	if j.Consistency != "" && !j.Consistency.Valid() {
 		return fmt.Errorf("неизвестный уровень согласованности: %q", j.Consistency)
 	}
+	if j.MaxReadMBps < 0 || (j.MaxReadMBps > 0 && j.MaxReadMBps < MinReadLimitMBps) {
+		return fmt.Errorf("ограничение чтения — 0 (без ограничения) или не меньше %d МБ/с", MinReadLimitMBps)
+	}
 	if !j.FreezeBy.Valid() {
 		return fmt.Errorf("неизвестный способ заморозки: %q", j.FreezeBy)
 	}
@@ -591,6 +598,11 @@ func (j *BackupJob) Validate() error {
 	}
 	return nil
 }
+
+// MinReadLimitMBps — нижняя граница ограничения чтения: при меньшей скорости
+// пауза между блоками по 32 МиБ приближается к таймауту неактивности передачи
+// на движке, и он отменил бы её посреди копирования.
+const MinReadLimitMBps = 10
 
 // MaxFreezeLimit — верхняя граница предела заморозки в задании.
 const MaxFreezeLimit = 10 * time.Minute

@@ -11,7 +11,7 @@ import { useAuthStore } from '@/stores/auth'
 import { useOperationsStore } from '@/stores/operations'
 import HelpButton from '@/components/HelpButton.vue'
 import IOChart from '@/components/IOChart.vue'
-import type { IOPoint, TimeBand } from '@/components/IOChart.vue'
+import type { IOPoint, TimeBand, TimeMarker } from '@/components/IOChart.vue'
 import PageLoadError from '@/components/PageLoadError.vue'
 import { useUnsavedChanges } from '@/composables/unsavedChanges'
 import type { BackupCopy, BackupDisk, BackupRun, BackupTelemetry, BootReport, Cluster, DBStatsSample, Host, ReplicationDetail, RepositoryArtifact, RestoreNetworkTarget, RestoreRun, RestoreVMPlan, StorageDomain, VerifyRun } from '@/api/types'
@@ -305,6 +305,33 @@ const guestCurrentlyFrozen = computed(() =>
 const guestMayBeFrozen = computed(() => lastGuestFreezeEvent.value?.kind === 'thaw_failed'
   || (lastGuestFreezeEvent.value?.kind === 'frozen' && !guestCurrentlyFrozen.value))
 
+// Этапы запуска на графике: видно, что гость делал в момент фиксации точки
+// и пока служба читала диски.
+const runMarkers = computed<TimeMarker[]>(() => telemetry.value.events
+  .filter((event) => runMarkerKinds[event.kind])
+  .map((event) => ({ at: event.at, label: event.title, color: runMarkerKinds[event.kind] })))
+const runMarkerKinds: Record<string, string> = {
+  run_started: '#757575',
+  checkpoint_ready: '#1976d2',
+  snapshot_created: '#1976d2',
+  engine_frozen: '#f57c00',
+  engine_takeover: '#f57c00',
+  extent_map_unavailable: '#f57c00',
+  transfer_finished: '#21ba45',
+  run_finished: '#21ba45',
+  run_failed: '#c10015',
+}
+
+// Средняя скорость чтения самой службы. На графике её нет: служба читает
+// диски через ovirt-imageio на хосте, мимо гостя.
+const serviceReadRate = computed(() => {
+  const run = detail.value
+  if (!run?.started_at || !run.read_bytes) return null
+  const ended = run.ended_at ? new Date(run.ended_at).getTime() : Date.now()
+  const seconds = (ended - new Date(run.started_at).getTime()) / 1000
+  return seconds > 0 ? run.read_bytes / seconds : null
+})
+
 const vmIOPoints = computed<IOPoint[]>(() => {
   const points = new Map<string, IOPoint>()
   for (const sample of telemetry.value.disks) {
@@ -383,7 +410,8 @@ function eventColor(kind: string): string {
   if (kind === 'run_failed' || kind === 'freeze_failed' || kind === 'thaw_failed'
     || kind === 'leftover_snapshot_failed') return 'negative'
   if (kind === 'run_finished' || kind === 'manifest_written') return 'positive'
-  if (kind === 'frozen' || kind === 'thawed' || kind === 'engine_takeover') return 'warning'
+  if (kind === 'frozen' || kind === 'thawed' || kind === 'engine_takeover'
+    || kind === 'extent_map_unavailable') return 'warning'
   return 'primary'
 }
 
@@ -1468,8 +1496,14 @@ const replicationColumns = [
               </div>
             </div>
             <div class="col-12 col-md-7">
-              <div class="text-caption text-weight-medium q-mb-xs">Ввод-вывод дисков ВМ</div>
-              <IOChart :points="vmIOPoints" :bands="freezeBands" :height="190" />
+              <div class="text-caption text-weight-medium">Ввод-вывод гостя</div>
+              <div class="text-caption text-grey-7 q-mb-xs">
+                Что сама ВМ читала и писала на свои диски, по статистике движка. Чтение службы идёт через
+                ovirt-imageio на хосте, мимо гостя, и на графике не видно<template v-if="serviceReadRate !== null">:
+                служба прочитала {{ bytes(detail?.read_bytes) }}, в среднем {{ bytes(serviceReadRate) }}/с</template>.
+                Оранжевая полоса — заморозка, пунктир — этапы запуска.
+              </div>
+              <IOChart :points="vmIOPoints" :bands="freezeBands" :markers="runMarkers" :height="190" />
               <div v-if="!vmIOPoints.length && !telemetryLoading" class="jhv-reason q-mt-xs">
                 За время запуска замеров I/O не получено. Проверьте, что сбор метрик включён, а учётная запись виртуализации может читать статистику дисков.
               </div>

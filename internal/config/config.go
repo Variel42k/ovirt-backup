@@ -695,6 +695,9 @@ type TransferConfig struct {
 	RequestTimeout    time.Duration `mapstructure:"request_timeout"`
 	MaxParallelDisks  int           `mapstructure:"max_parallel_disks"`
 	RangeRetries      int           `mapstructure:"range_retries"`
+	// MaxReadMBps — предел чтения с хранилища ВМ по умолчанию, МиБ/с; 0 — без
+	// ограничения. Задание может задать свой.
+	MaxReadMBps int `mapstructure:"max_read_mbps"`
 }
 
 type SchedulerConfig struct {
@@ -953,6 +956,10 @@ func (c *Config) Validate() error {
 	if c.Backup.ReplicationWorkers < 1 {
 		return fmt.Errorf("backup.replication_workers must be >= 1, got %d", c.Backup.ReplicationWorkers)
 	}
+	if c.Backup.Transfer.MaxReadMBps < 0 || (c.Backup.Transfer.MaxReadMBps > 0 && c.Backup.Transfer.MaxReadMBps < 10) {
+		return fmt.Errorf("backup.transfer.max_read_mbps must be 0 (unlimited) or at least 10, got %d",
+			c.Backup.Transfer.MaxReadMBps)
+	}
 	// Ноль — предел по умолчанию (backup.DefaultMaxFreeze).
 	if c.Backup.MaxFreeze != 0 && (c.Backup.MaxFreeze < time.Second || c.Backup.MaxFreeze > 10*time.Minute) {
 		return fmt.Errorf("backup.max_freeze must be between 1s and 10m, got %s", c.Backup.MaxFreeze)
@@ -1186,6 +1193,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("backup.transfer.request_timeout", "2m")
 	v.SetDefault("backup.transfer.max_parallel_disks", 2)
 	v.SetDefault("backup.transfer.range_retries", 3)
+	v.SetDefault("backup.transfer.max_read_mbps", 0)
 
 	v.SetDefault("scheduler.enabled", true)
 	v.SetDefault("scheduler.timezone", "UTC")

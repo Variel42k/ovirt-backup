@@ -41,6 +41,9 @@ const (
 	// RunEventSnapshotRemoveFailed — брошенный снапшот удалить не удалось;
 	// команды для администратора — в карточке запуска.
 	RunEventSnapshotRemoveFailed RunEventKind = "leftover_snapshot_failed"
+	// RunEventMapUnavailable — ovirt-imageio не отдал карту экстентов, и
+	// диск полного бэкапа читался целиком.
+	RunEventMapUnavailable RunEventKind = "extent_map_unavailable"
 )
 
 // Title возвращает название этапа для интерфейса.
@@ -82,6 +85,8 @@ func (k RunEventKind) Title() string {
 		return "Удалён брошенный снапшот"
 	case RunEventSnapshotRemoveFailed:
 		return "Не удалось удалить брошенный снапшот"
+	case RunEventMapUnavailable:
+		return "Карта экстентов недоступна — диск прочитан целиком"
 	}
 	return string(k)
 }

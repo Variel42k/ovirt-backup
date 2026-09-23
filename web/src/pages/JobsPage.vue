@@ -62,6 +62,7 @@ const emptyForm = () => ({
   fallback_type: 'snapshot',
   schedule: '0 1 * * *',
   max_duration_minutes: 0,
+  max_read_mbps: 0,
   storage_target_ids: [] as string[],
   storage_mode: 'copy' as 'copy' | 'parallel' | 'separate',
   ova_host_id: '',
@@ -411,6 +412,7 @@ function openEdit(job: BackupJob) {
     exclude_vm_ids: job.exclude_vm_ids ?? [],
     exclude_disk_ids: job.exclude_disk_ids ?? [],
     max_duration_minutes: job.max_duration ? Math.round(job.max_duration / 60_000_000_000) : 0,
+    max_read_mbps: job.max_read_mbps ?? 0,
     verify_after: job.verify_after ?? '',
     verify_options: { ...emptyForm().verify_options, ...(job.verify_options ?? {}) },
     consistency: job.consistency || (job.quiesce ? 'filesystem' : 'crash'),
@@ -1063,6 +1065,24 @@ const columns = [
               outlined
               dense
             />
+          </div>
+          <div class="col-12 col-sm-2">
+            <q-input
+              v-model.number="form.max_read_mbps"
+              type="number"
+              min="0"
+              label="Предел чтения, МБ/с"
+              hint="0 — по умолчанию службы; иначе от 10"
+              :rules="[(v: number) => !v || v >= 10 || 'Не меньше 10 МБ/с или 0']"
+              outlined
+              dense
+              data-testid="job-max-read"
+            >
+              <q-tooltip>
+                Сколько бэкап может читать с хранилища ВМ, общий предел на все диски запуска.
+                Работающая ВМ пользуется тем же хранилищем, что и бэкап.
+              </q-tooltip>
+            </q-input>
           </div>
           <div class="col-6 col-sm-2">
             <q-input v-model.number="form.priority" type="number" min="-1000" max="1000"

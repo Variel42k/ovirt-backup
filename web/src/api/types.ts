@@ -331,6 +331,8 @@ export interface BackupJob {
   max_freeze?: number
   /** Кто замораживает гостя: служба до запроса бэкапа или движок oVirt на момент точки. */
   freeze_by?: FreezeBy
+  /** Предел чтения с хранилища ВМ, МиБ/с; 0 — предел службы. */
+  max_read_mbps?: number
   verify_after?: string
   verify_options?: BootVerifyOptions
   export_qcow2: boolean

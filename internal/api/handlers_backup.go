@@ -52,7 +52,9 @@ type jobPayload struct {
 	// MaxFreezeSeconds — предел окна заморозки; 0 — backup.max_freeze.
 	MaxFreezeSeconds int `json:"max_freeze_seconds"`
 	// FreezeBy — service или engine; пусто — служба.
-	FreezeBy      string              `json:"freeze_by"`
+	FreezeBy string `json:"freeze_by"`
+	// MaxReadMBps — предел чтения с хранилища ВМ, МиБ/с; 0 — предел службы.
+	MaxReadMBps   int                 `json:"max_read_mbps"`
 	VerifyAfter   string              `json:"verify_after"`
 	VerifyOptions model.VerifyOptions `json:"verify_options"`
 	ExportQcow2   bool                `json:"export_qcow2"`
@@ -87,6 +89,7 @@ func (p jobPayload) apply(dst *model.BackupJob) {
 	dst.RequireConsistency = p.RequireConsistency
 	dst.MaxFreeze = time.Duration(p.MaxFreezeSeconds) * time.Second
 	dst.FreezeBy = model.FreezeBy(strings.TrimSpace(p.FreezeBy))
+	dst.MaxReadMBps = p.MaxReadMBps
 	dst.VerifyAfter = model.VerifyMode(p.VerifyAfter)
 	dst.VerifyOptions = p.VerifyOptions
 	dst.ExportQcow2 = p.ExportQcow2

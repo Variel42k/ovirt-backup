@@ -134,6 +134,8 @@ type RunRequest struct {
 	// MaxFreeze — сколько гость может стоять замороженным; 0 — предел службы.
 	// См. FreezeWindow.
 	MaxFreeze time.Duration
+	// MaxReadMBps — предел чтения с хранилища ВМ, МиБ/с; 0 — предел службы.
+	MaxReadMBps int
 	// FreezeBy — кто замораживает гостя; см. model.FreezeBy.
 	FreezeBy      model.FreezeBy
 	Encrypt       bool
@@ -1207,6 +1209,10 @@ func (e *Engine) copyDisks(ctx context.Context, client *ovirt.Client, backend re
 		storeTotal int64
 	)
 
+	// Один ограничитель на запуск: диски читаются параллельно с одного
+	// хранилища, и предел скорости у них общий.
+	pacer := newReadPacer(req.ReadLimit(e.cfg.Transfer.MaxReadMBps))
+
 	transferStarted := time.Now().UTC()
 	sem := make(chan struct{}, parallel)
 	var wg sync.WaitGroup
@@ -1219,7 +1225,7 @@ func (e *Engine) copyDisks(ctx context.Context, client *ovirt.Client, backend re
 			defer func() { <-sem }()
 
 			manifest, read, stored, err := e.copyOneDisk(ctx, client, backend, srv, vm, run, req,
-				disk, index, chunkSize, factory(disk), extentContext)
+				disk, index, chunkSize, factory(disk), extentContext, pacer)
 
 			mu.Lock()
 			defer mu.Unlock()
@@ -1274,7 +1280,7 @@ func (e *Engine) copyDisks(ctx context.Context, client *ovirt.Client, backend re
 func (e *Engine) copyOneDisk(ctx context.Context, client *ovirt.Client, backend repo.Backend,
 	srv *model.Server, vm *model.VM, run *model.BackupRun, req RunRequest,
 	disk ovirt.Disk, index int, chunkSize int64, transferReq ovirt.TransferRequest,
-	extentContext string) (*DiskManifest, int64, int64, error) {
+	extentContext string, pacer *readPacer) (*DiskManifest, int64, int64, error) {
 
 	if transferReq.DiskID == "" && transferReq.SnapshotID == "" {
 		return nil, 0, 0, fmt.Errorf("для диска %s не удалось определить источник передачи", disk.AliasOrName())
@@ -1353,6 +1359,7 @@ func (e *Engine) copyOneDisk(ctx context.Context, client *ovirt.Client, backend 
 		VirtualSize:   disk.ProvisionedSize.Int64(),
 		ExtentContext: extentContext,
 		RangeRetries:  e.cfg.Transfer.RangeRetries,
+		Pacer:         pacer,
 		Keepalive: func(ctx context.Context) error {
 			return client.ExtendTransfer(ctx, transfer.ID)
 		},
@@ -1373,6 +1380,13 @@ func (e *Engine) copyOneDisk(ctx context.Context, client *ovirt.Client, backend 
 	if err != nil {
 		writer.Abort(ctx, backend, err)
 		return nil, 0, 0, fmt.Errorf("копирование диска %s: %w", disk.AliasOrName(), err)
+	}
+	if result.MapUnavailable != "" {
+		e.event(ctx, run, model.RunEventMapUnavailable, 0, fmt.Sprintf(
+			"диск %s: ovirt-imageio не отдал карту экстентов (%s) — диск прочитан целиком, "+
+				"нулевые области не сохранены", disk.AliasOrName(), result.MapUnavailable))
+		e.log.Warn().Str("диск", disk.AliasOrName()).Str("причина", result.MapUnavailable).
+			Msg("карта экстентов недоступна — диск прочитан целиком")
 	}
 
 	// The daemon-side checksum is expensive — it re-reads the whole disk — so
@@ -1429,7 +1443,7 @@ func (e *Engine) copyOneDisk(ctx context.Context, client *ovirt.Client, backend 
 		Int64("всего_чанков", result.GridChunks).
 		Msg("диск сохранён")
 
-	return final, result.LogicalBytes, final.StoredBytes, nil
+	return final, result.ReadBytes, final.StoredBytes, nil
 }
 
 func (e *Engine) storeVMConfig(ctx context.Context, client *ovirt.Client, backend repo.Backend,

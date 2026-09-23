@@ -310,6 +310,19 @@ func DefaultRetention() RetentionPolicy {
 }
 
 // SkippedDisk is a disk that was deliberately left out of a backup.
+// ManualStep — одно действие администратора. Command выполняется как есть:
+// всё, кроме пароля, уже подставлено; пароль команда спрашивает сама и нигде
+// не сохраняет.
+type ManualStep struct {
+	Title string `json:"title"`
+	// Where — где выполнять: любая машина с доступом к движку или сам хост движка.
+	Where   string `json:"where,omitempty"`
+	Detail  string `json:"detail,omitempty"`
+	Command string `json:"command,omitempty"`
+	// Risky — действие может повредить данные, если условия в Detail не выполнены.
+	Risky bool `json:"risky,omitempty"`
+}
+
 type SkippedDisk struct {
 	// DiskID — идентификатор в движке или целевое имя (vda) для libvirt.
 	DiskID string `json:"disk_id"`
@@ -639,11 +652,15 @@ type BackupRun struct {
 	VerifyStatus RunStatus  `json:"verify_status,omitempty"`
 	VerifiedAt   *time.Time `json:"verified_at,omitempty"`
 
-	Error     string     `json:"error,omitempty"`
-	StartedAt *time.Time `json:"started_at,omitempty"`
-	EndedAt   *time.Time `json:"ended_at,omitempty"`
-	ExpiresAt *time.Time `json:"expires_at,omitempty"`
-	Deleted   bool       `json:"deleted"`
+	Error string `json:"error,omitempty"`
+	// ManualSteps — что сделать администратору, если служба не справилась
+	// сама (например, не смогла закрыть бэкап на движке). Команды готовы к
+	// выполнению: адреса, идентификаторы и сертификат уже подставлены.
+	ManualSteps []ManualStep `json:"manual_steps,omitempty"`
+	StartedAt   *time.Time   `json:"started_at,omitempty"`
+	EndedAt     *time.Time   `json:"ended_at,omitempty"`
+	ExpiresAt   *time.Time   `json:"expires_at,omitempty"`
+	Deleted     bool         `json:"deleted"`
 	// PurgeAfter — момент, когда данные копии будут стёрты физически.
 	//
 	// Заполнен — копия в карантине: помечена удалённой, но данные на месте и её

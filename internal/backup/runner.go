@@ -680,6 +680,12 @@ func (e *Engine) runCBT(ctx context.Context, client *ovirt.Client, backend repo.
 		diskIDs = append(diskIDs, d.ID)
 	}
 
+	// Бэкап, брошенный прошлым запуском, держит диски: убрать его надо до
+	// заморозки, иначе гость простоит замороженным всю уборку.
+	if err := e.releaseEngineLeftovers(ctx, client, srv, vm, run, diskIDs); err != nil {
+		return nil, err
+	}
+
 	frozenAt, err := e.quiesce(ctx, client, vm, run, req)
 	if err != nil {
 		return nil, err
@@ -688,11 +694,24 @@ func (e *Engine) runCBT(ctx context.Context, client *ovirt.Client, backend repo.
 	defer func() { _ = window.Thaw() }()
 
 	backupStarted := time.Now().UTC()
-	backup, err := client.StartBackup(ctx, vm.ID, diskIDs, p.FromCheckpointID)
+	backup, err := client.StartBackup(ctx, vm.ID, diskIDs, p.FromCheckpointID, ovirt.BackupMarker(run.ID))
 	if backup == nil {
+		if ovirt.IsConflict(err) {
+			// Уборка перед заморозкой ничего не нашла, а диски заняты: их
+			// держит что-то другое — передача образа, снапшот, перенос диска.
+			lookCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+			run.ManualSteps = e.engineLockSteps(lookCtx, client, srv, vm.ID, diskIDs)
+			cancel()
+			return nil, fmt.Errorf("запуск бэкапа на движке: %w. Готовые команды для ручной уборки — в карточке запуска", err)
+		}
 		return nil, fmt.Errorf("запуск бэкапа на движке: %w", err)
 	}
 	run.EngineBackupID = backup.ID
+	// Идентификатор записывается сразу: если служба упадёт до finalize,
+	// следующий запуск опознает брошенный бэкап как свой.
+	if saveErr := e.store.UpdateBackupRun(ctx, run); saveErr != nil {
+		e.log.Warn().Err(saveErr).Msg("не удалось сохранить идентификатор бэкапа движка")
+	}
 
 	// From here on the engine holds a lock on the disks; it must be released
 	// no matter how this function exits — including when the engine opened the

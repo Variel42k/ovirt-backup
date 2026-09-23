@@ -22,6 +22,9 @@ const (
 	RunEventManifest        RunEventKind = "manifest_written"
 	RunEventFinished        RunEventKind = "run_finished"
 	RunEventFailed          RunEventKind = "run_failed"
+	// RunEventLeftoverClosed — служба закрыла на движке бэкап, брошенный
+	// прошлым запуском: без этого диски ВМ оставались бы заблокированными.
+	RunEventLeftoverClosed RunEventKind = "leftover_closed"
 )
 
 // Title возвращает название этапа для интерфейса.
@@ -51,6 +54,8 @@ func (k RunEventKind) Title() string {
 		return "Бэкап завершён"
 	case RunEventFailed:
 		return "Бэкап не выполнен"
+	case RunEventLeftoverClosed:
+		return "Закрыт брошенный бэкап движка"
 	}
 	return string(k)
 }

@@ -371,6 +371,15 @@ export interface SkippedDisk {
  */
 export type Consistency = 'crash' | 'filesystem' | 'application'
 
+/** Действие администратора: команда выполняется как есть, пароль спрашивает сама. */
+export interface ManualStep {
+  title: string
+  where?: string
+  detail?: string
+  command?: string
+  risky?: boolean
+}
+
 export interface BackupRun {
   id: string
   job_run_id?: string
@@ -402,6 +411,8 @@ export interface BackupRun {
   verify_status?: RunStatus
   verified_at?: string
   error?: string
+  /** Готовые команды для администратора, если служба не справилась сама. */
+  manual_steps?: ManualStep[]
   started_at?: string
   ended_at?: string
   expires_at?: string

@@ -108,6 +108,16 @@ func IsAuthError(err error) bool {
 		(apiErr.Status == http.StatusUnauthorized || apiErr.Status == http.StatusForbidden)
 }
 
+// APIURL — адрес REST API движка в том виде, в каком к нему ходит клиент.
+// Нужен, чтобы команды для администратора совпадали с запросами службы.
+func APIURL(engineURL string) (string, error) {
+	base, err := normalizeEngineURL(engineURL)
+	if err != nil {
+		return "", err
+	}
+	return base.String() + "/ovirt-engine/api", nil
+}
+
 // New builds a client. It does not contact the engine; call Info to verify.
 func New(cfg Config) (*Client, error) {
 	if cfg.EngineURL == "" {

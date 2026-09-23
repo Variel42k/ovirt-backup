@@ -25,7 +25,7 @@ import (
 // When the engine accepted the request but the answer did not decode cleanly,
 // the error comes back together with the backup whose ID is known: the engine
 // already holds the disks, and the caller must still finalize it.
-func (c *Client) StartBackup(ctx context.Context, vmID string, diskIDs []string, fromCheckpointID string) (*Backup, error) {
+func (c *Client) StartBackup(ctx context.Context, vmID string, diskIDs []string, fromCheckpointID, description string) (*Backup, error) {
 	if len(diskIDs) == 0 {
 		return nil, fmt.Errorf("не выбран ни один диск для бэкапа ВМ %s", vmID)
 	}
@@ -38,6 +38,9 @@ func (c *Client) StartBackup(ctx context.Context, vmID string, diskIDs []string,
 	}
 	if fromCheckpointID != "" {
 		body["from_checkpoint_id"] = fromCheckpointID
+	}
+	if description != "" {
+		body["description"] = description
 	}
 
 	var backup Backup
@@ -98,6 +101,36 @@ func (c *Client) WaitBackupReady(ctx context.Context, vmID, backupID string, tim
 		case <-time.After(2 * time.Second):
 		}
 	}
+}
+
+// BackupMarkerPrefix начинает описание каждого бэкапа, открытого службой.
+// По нему уборка узнаёт свой бэкап, даже если запуск не успел записать его
+// идентификатор: чужие бэкапы (другой системы копирования) не трогаются.
+const BackupMarkerPrefix = "jhvirt run "
+
+// BackupMarker — описание бэкапа движка для запуска runID.
+func BackupMarker(runID string) string { return BackupMarkerPrefix + runID }
+
+// Open сообщает, что движок ещё держит бэкап: диски ВМ заблокированы, пока он
+// не завершён.
+func (b *Backup) Open() bool {
+	switch b.Phase {
+	case "succeeded", "failed":
+		return false
+	}
+	return true
+}
+
+// ListImageTransfers возвращает все передачи образов движка. Фильтра по ВМ
+// у коллекции нет: передачи отбираются по бэкапу или диску на стороне вызывающего.
+func (c *Client) ListImageTransfers(ctx context.Context) ([]ImageTransfer, error) {
+	var list struct {
+		ImageTransfer []ImageTransfer `json:"image_transfer"`
+	}
+	if err := c.get(ctx, "/imagetransfers", &list); err != nil {
+		return nil, err
+	}
+	return list.ImageTransfer, nil
 }
 
 // FinalizeBackup closes a backup and commits its checkpoint. It must be called

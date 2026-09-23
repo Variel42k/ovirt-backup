@@ -4,6 +4,7 @@ import { useQuasar } from 'quasar'
 import { useRoute, useRouter } from 'vue-router'
 import { api, errorMessage, notify, notifyError, notifyOk } from '@/api/client'
 import DirectoryPicker from '@/components/DirectoryPicker.vue'
+import ManualSteps from '@/components/ManualSteps.vue'
 import { bytes, consistencyColor, consistencyLabel, dateTime, elapsed, runStatus, statusColor } from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
@@ -1417,6 +1418,12 @@ const replicationColumns = [
               <div class="text-h6">{{ elapsed(detail?.started_at, detail?.ended_at) }}</div>
             </div>
           </div>
+
+          <q-banner v-if="detail?.error" dense class="bg-red-1 q-mb-md">
+            <template #avatar><q-icon name="error" color="negative" /></template>
+            <div class="jhv-wrap">{{ detail.error }}</div>
+          </q-banner>
+          <ManualSteps v-if="detail?.manual_steps?.length" :steps="detail.manual_steps" class="q-mb-md" />
 
           <div class="row items-center q-mb-xs">
             <div class="text-subtitle2">Ход выполнения и влияние на ВМ</div>

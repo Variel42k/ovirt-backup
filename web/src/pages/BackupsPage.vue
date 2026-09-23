@@ -380,9 +380,10 @@ function durationLabel(milliseconds: number): string {
 }
 
 function eventColor(kind: string): string {
-  if (kind === 'run_failed' || kind === 'freeze_failed' || kind === 'thaw_failed') return 'negative'
+  if (kind === 'run_failed' || kind === 'freeze_failed' || kind === 'thaw_failed'
+    || kind === 'leftover_snapshot_failed') return 'negative'
   if (kind === 'run_finished' || kind === 'manifest_written') return 'positive'
-  if (kind === 'frozen' || kind === 'thawed') return 'warning'
+  if (kind === 'frozen' || kind === 'thawed' || kind === 'engine_takeover') return 'warning'
   return 'primary'
 }
 

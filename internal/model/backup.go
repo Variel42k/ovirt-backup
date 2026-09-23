@@ -516,6 +516,9 @@ type BackupJob struct {
 	// Kubernetes нужен короткий предел: etcd и аренды компонентов не
 	// переживают долгой остановки записи.
 	MaxFreeze time.Duration `json:"max_freeze"`
+	// FreezeBy — кто замораживает гостя; пусто — служба. Движок держит
+	// заморозку доли секунды, и предел MaxFreeze для него не нужен.
+	FreezeBy FreezeBy `json:"freeze_by,omitempty"`
 
 	// Проверка сразу после успешного бэкапа. Пусто — не проверять.
 	VerifyAfter VerifyMode `json:"verify_after,omitempty"`
@@ -579,6 +582,9 @@ func (j *BackupJob) Validate() error {
 	}
 	if j.Consistency != "" && !j.Consistency.Valid() {
 		return fmt.Errorf("неизвестный уровень согласованности: %q", j.Consistency)
+	}
+	if !j.FreezeBy.Valid() {
+		return fmt.Errorf("неизвестный способ заморозки: %q", j.FreezeBy)
 	}
 	if j.MaxFreeze < 0 || j.MaxFreeze > MaxFreezeLimit {
 		return fmt.Errorf("предел заморозки должен быть от 0 до %d с", int(MaxFreezeLimit.Seconds()))

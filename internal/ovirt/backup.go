@@ -2,10 +2,16 @@ package ovirt
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"time"
 )
+
+// ErrBackupFailed — движок сам перевёл бэкап в failed. При require_consistency
+// это обычно значит, что не удалась заморозка гостя; вызывающий отличает этот
+// случай от сетевых ошибок и 409.
+var ErrBackupFailed = errors.New("движок перевёл бэкап в состояние failed")
 
 // The oVirt Backup API (4.4+) is the mechanism behind hot, incremental
 // backups. The flow is:
@@ -25,7 +31,14 @@ import (
 // When the engine accepted the request but the answer did not decode cleanly,
 // the error comes back together with the backup whose ID is known: the engine
 // already holds the disks, and the caller must still finalize it.
-func (c *Client) StartBackup(ctx context.Context, vmID string, diskIDs []string, fromCheckpointID, description string) (*Backup, error) {
+//
+// requireConsistency передаёт движку require_consistency=true. Движок (4.4+)
+// замораживает гостя сам — только на момент фиксации точки, после подготовки
+// scratch-дисков или снапшота, — и с этим флагом проваливает бэкап, если
+// заморозка не удалась. Без флага он тоже пробует заморозить, но при неудаче
+// молча продолжает.
+func (c *Client) StartBackup(ctx context.Context, vmID string, diskIDs []string, fromCheckpointID, description string,
+	requireConsistency bool) (*Backup, error) {
 	if len(diskIDs) == 0 {
 		return nil, fmt.Errorf("не выбран ни один диск для бэкапа ВМ %s", vmID)
 	}
@@ -43,8 +56,13 @@ func (c *Client) StartBackup(ctx context.Context, vmID string, diskIDs []string,
 		body["description"] = description
 	}
 
+	var opts []func(*requestOptions)
+	if requireConsistency {
+		opts = append(opts, withQuery(url.Values{"require_consistency": {"true"}}))
+	}
+
 	var backup Backup
-	if err := c.post(ctx, "/vms/"+vmID+"/backups", body, &backup); err != nil {
+	if err := c.post(ctx, "/vms/"+vmID+"/backups", body, &backup, opts...); err != nil {
 		// encoding/json fills every field it can before reporting a type
 		// mismatch, so the ID survives a single badly typed field.
 		if backup.ID != "" {
@@ -86,7 +104,7 @@ func (c *Client) WaitBackupReady(ctx context.Context, vmID, backupID string, tim
 		case "ready":
 			return backup, nil
 		case "failed":
-			return backup, fmt.Errorf("движок перевёл бэкап %s в состояние failed", backupID)
+			return backup, fmt.Errorf("бэкап %s: %w", backupID, ErrBackupFailed)
 		case "succeeded":
 			// Already finalised by someone else; nothing left to read.
 			return backup, fmt.Errorf("бэкап %s уже завершён движком", backupID)
@@ -110,6 +128,13 @@ const BackupMarkerPrefix = "jhvirt run "
 
 // BackupMarker — описание бэкапа движка для запуска runID.
 func BackupMarker(runID string) string { return BackupMarkerPrefix + runID }
+
+// SnapshotMarkerPrefix начинает описание временного снапшота службы. По нему
+// уборка узнаёт брошенные снапшоты; чужие снапшоты она не трогает.
+const SnapshotMarkerPrefix = "jhvirt backup "
+
+// SnapshotMarker — описание временного снапшота для запуска runID.
+func SnapshotMarker(runID string) string { return SnapshotMarkerPrefix + runID }
 
 // Open сообщает, что движок ещё держит бэкап: диски ВМ заблокированы, пока он
 // не завершён.

@@ -329,6 +329,8 @@ export interface BackupJob {
   require_consistency: boolean
   /** Предел окна заморозки, нс; 0 — предел службы (backup.max_freeze). */
   max_freeze?: number
+  /** Кто замораживает гостя: служба до запроса бэкапа или движок oVirt на момент точки. */
+  freeze_by?: FreezeBy
   verify_after?: string
   verify_options?: BootVerifyOptions
   export_qcow2: boolean
@@ -379,6 +381,12 @@ export interface ManualStep {
   command?: string
   risky?: boolean
 }
+
+/**
+ * service — служба до запроса бэкапа; engine — движок oVirt на момент фиксации точки;
+ * mixed — служба, а при неудаче или превышении предела заморозку перехватывает движок.
+ */
+export type FreezeBy = '' | 'service' | 'engine' | 'mixed'
 
 export interface BackupRun {
   id: string

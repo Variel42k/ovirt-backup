@@ -221,40 +221,58 @@ func (e *Engine) engineLockSteps(ctx context.Context, client *ovirt.Client, srv 
 // должны выполняться без правки.
 const caFile = "/tmp/jhvirt-engine-ca.pem"
 
-// EngineUnlockSteps строит команды, которые освобождают диски ВМ на движке.
-//
-// Всё подставлено: адрес API, пользователь, идентификаторы, сертификат
-// движка. Пароль curl спрашивает сам (-u без пароля), поэтому он не попадает
-// ни в команду, ни в историю оболочки, ни в базу службы.
-func EngineUnlockSteps(srv *model.Server, vmID string, backups []ovirt.Backup,
-	transfers []ovirt.ImageTransfer, diskIDs []string) []model.ManualStep {
+// anywhere — где выполнять команды к REST API движка.
+const anywhere = "любая машина с доступом к движку (например, сервер службы)"
 
+// engineCommands — общее для команд к движку: адрес API, пользователь,
+// доверие к сертификату. Пароль curl спрашивает сам (-u без пароля), поэтому
+// он не попадает ни в команду, ни в историю оболочки, ни в базу службы.
+type engineCommands struct {
+	api, user, curl, post, delete string
+	// steps — подготовка, нужная всем командам (сохранить сертификат).
+	steps []model.ManualStep
+}
+
+func newEngineCommands(srv *model.Server) engineCommands {
+	c := engineCommands{user: srv.Username}
 	api, err := ovirt.APIURL(srv.EngineURL)
 	if err != nil {
 		api = strings.TrimRight(srv.EngineURL, "/") + "/ovirt-engine/api"
 	}
-	user := srv.Username
-	if user == "" {
-		user = "admin@internal"
+	c.api = api
+	if c.user == "" {
+		c.user = "admin@internal"
 	}
-	const anywhere = "любая машина с доступом к движку (например, сервер службы)"
-
-	var steps []model.ManualStep
 	tls := ""
 	switch {
 	case srv.InsecureTLS:
 		tls = "-k "
 	case strings.TrimSpace(srv.CACert) != "":
 		tls = "--cacert " + caFile + " "
-		steps = append(steps, model.ManualStep{
+		c.steps = append(c.steps, model.ManualStep{
 			Title:   "Сохранить сертификат движка",
 			Where:   anywhere,
 			Detail:  "Тот же сертификат, которому доверяет служба: команды ниже проверяют подлинность движка.",
 			Command: "cat > " + caFile + " <<'JHVIRT_CA'\n" + strings.TrimSpace(srv.CACert) + "\nJHVIRT_CA",
 		})
 	}
-	curl := "curl -sS " + tls + "-u " + shellQuote(user) + " -H 'Accept: application/json'"
-	post := curl + " -H 'Content-Type: application/json' -X POST -d '{}'"
+	c.curl = "curl -sS " + tls + "-u " + shellQuote(c.user) + " -H 'Accept: application/json'"
+	c.post = c.curl + " -H 'Content-Type: application/json' -X POST -d '{}'"
+	c.delete = c.curl + " -X DELETE"
+	return c
+}
+
+// url — адрес ресурса API в кавычках для sh.
+func (c engineCommands) url(path string) string { return shellQuote(c.api + path) }
+
+// EngineUnlockSteps строит команды, которые освобождают диски ВМ на движке.
+// Всё подставлено: адрес API, пользователь, идентификаторы, сертификат движка.
+func EngineUnlockSteps(srv *model.Server, vmID string, backups []ovirt.Backup,
+	transfers []ovirt.ImageTransfer, diskIDs []string) []model.ManualStep {
+
+	cmd := newEngineCommands(srv)
+	api, user, curl, post := cmd.api, cmd.user, cmd.curl, cmd.post
+	steps := append([]model.ManualStep(nil), cmd.steps...)
 
 	steps = append(steps, model.ManualStep{
 		Title: "Посмотреть бэкапы ВМ на движке",
@@ -296,6 +314,15 @@ func EngineUnlockSteps(srv *model.Server, vmID string, backups []ovirt.Backup,
 		}
 		steps = append(steps, step)
 	}
+
+	steps = append(steps, model.ManualStep{
+		Title: "Посмотреть снапшоты ВМ",
+		Where: anywhere,
+		Detail: "Снапшот в snapshot_status locked означает идущую операцию — создание или удаление " +
+			"со слиянием данных. Диски освободятся, когда она закончится; прерывать её нельзя.",
+		Command: curl + " " + shellQuote(api+"/vms/"+vmID+"/snapshots") +
+			` | grep -oE '"(id|description|snapshot_status|snapshot_type)" *: *"[^"]*"'`,
+	})
 
 	steps = append(steps, model.ManualStep{
 		Title:   "Проверить, что диски освободились",

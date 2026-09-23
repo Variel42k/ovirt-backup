@@ -52,6 +52,9 @@ type Engine struct {
 	// а не в хранилище копий, и смешивать пределы значило бы дать одному виду
 	// работы вытеснять другой.
 	heavy chan struct{}
+
+	// sweeping — ВМ, у которых сейчас идёт фоновая уборка снапшотов.
+	sweeping sync.Map
 }
 
 // NewEngine builds the backup engine.
@@ -130,7 +133,9 @@ type RunRequest struct {
 	RequireConsistency bool
 	// MaxFreeze — сколько гость может стоять замороженным; 0 — предел службы.
 	// См. FreezeWindow.
-	MaxFreeze     time.Duration
+	MaxFreeze time.Duration
+	// FreezeBy — кто замораживает гостя; см. model.FreezeBy.
+	FreezeBy      model.FreezeBy
 	Encrypt       bool
 	ExportQcow2   bool
 	VerifyAfter   model.VerifyMode
@@ -248,6 +253,9 @@ func (e *Engine) Execute(ctx context.Context, req RunRequest) (*model.BackupRun,
 	if err := e.store.CreateBackupRun(ctx, run); err != nil {
 		return nil, fmt.Errorf("сохранение записи о бэкапе: %w", err)
 	}
+	// После запуска — фоновая уборка брошенных снапшотов ВМ. Отложенный вызов
+	// выполняется последним, когда итог запуска уже записан.
+	defer e.startSnapshotSweep(client, srv, vm, run.ID)
 	if req.OnRunCreated != nil {
 		req.OnRunCreated(run)
 	}
@@ -680,75 +688,33 @@ func (e *Engine) runCBT(ctx context.Context, client *ovirt.Client, backend repo.
 		diskIDs = append(diskIDs, d.ID)
 	}
 
+	// Удаление брошенного снапшота после прошлого запуска сливает слои и
+	// держит диски; начать бэкап поверх него значит получить 409.
+	e.waitSnapshotOperations(ctx, client, vm, run)
+
 	// Бэкап, брошенный прошлым запуском, держит диски: убрать его надо до
 	// заморозки, иначе гость простоит замороженным всю уборку.
 	if err := e.releaseEngineLeftovers(ctx, client, srv, vm, run, diskIDs); err != nil {
 		return nil, err
 	}
 
-	frozenAt, err := e.quiesce(ctx, client, vm, run, req)
-	if err != nil {
-		return nil, err
+	var backup *ovirt.Backup
+	var err error
+	switch {
+	case req.FreezeBy.Engine():
+		backup, err = e.openBackupEngineFreeze(ctx, client, srv, vm, run, req, diskIDs, p, "")
+	case req.FreezeBy.Mixed():
+		backup, err = e.openBackupMixedFreeze(ctx, client, srv, vm, run, req, diskIDs, p)
+	default:
+		backup, err = e.openBackupServiceFreeze(ctx, client, srv, vm, run, req, diskIDs, p)
 	}
-	window := e.guardFreeze(ctx, client, vm, run, req, frozenAt)
-	defer func() { _ = window.Thaw() }()
-
-	backupStarted := time.Now().UTC()
-	backup, err := client.StartBackup(ctx, vm.ID, diskIDs, p.FromCheckpointID, ovirt.BackupMarker(run.ID))
-	if backup == nil {
-		if ovirt.IsConflict(err) {
-			// Уборка перед заморозкой ничего не нашла, а диски заняты: их
-			// держит что-то другое — передача образа, снапшот, перенос диска.
-			lookCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
-			run.ManualSteps = e.engineLockSteps(lookCtx, client, srv, vm.ID, diskIDs)
-			cancel()
-			return nil, fmt.Errorf("запуск бэкапа на движке: %w. Готовые команды для ручной уборки — в карточке запуска", err)
-		}
-		return nil, fmt.Errorf("запуск бэкапа на движке: %w", err)
-	}
-	run.EngineBackupID = backup.ID
-	// Идентификатор записывается сразу: если служба упадёт до finalize,
-	// следующий запуск опознает брошенный бэкап как свой.
-	if saveErr := e.store.UpdateBackupRun(ctx, run); saveErr != nil {
-		e.log.Warn().Err(saveErr).Msg("не удалось сохранить идентификатор бэкапа движка")
-	}
-
 	// From here on the engine holds a lock on the disks; it must be released
 	// no matter how this function exits — including when the engine opened the
 	// backup but its answer did not decode.
-	defer func() {
-		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
-		defer cancel()
-		if err := client.FinalizeBackup(closeCtx, vm.ID, backup.ID); err != nil {
-			e.log.Error().Err(err).Str("backup", backup.ID).
-				Msg("не удалось закрыть бэкап на движке — диски ВМ могут остаться заблокированными")
-			return
-		}
-		if err := client.WaitBackupFinalized(closeCtx, vm.ID, backup.ID, 5*time.Minute); err != nil {
-			e.log.Warn().Err(err).Str("backup", backup.ID).Msg("бэкап на движке закрывается дольше обычного")
-		}
-	}()
+	if backup != nil {
+		defer e.finalizeEngineBackup(ctx, client, vm, backup.ID)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("запуск бэкапа на движке: %w", err)
-	}
-
-	ready, err := client.WaitBackupReady(ctx, vm.ID, backup.ID, 30*time.Minute)
-	if err != nil {
-		return nil, err
-	}
-	run.ToCheckpointID = ready.ToCheckpointID
-	e.event(ctx, run, model.RunEventCheckpoint, time.Since(backupStarted),
-		"с этого момента данные читаются из зафиксированной точки")
-	if err := e.store.UpdateBackupRun(ctx, run); err != nil {
-		e.log.Warn().Err(err).Msg("не удалось сохранить идентификатор checkpoint")
-	}
-
-	// The point in time is fixed once the backup is ready; the guest can run
-	// again while we read the frozen image.
-	if err := window.Thaw(); err != nil {
-		return nil, err
-	}
-	if err := e.settleFreeze(ctx, run, req, window); err != nil {
 		return nil, err
 	}
 
@@ -766,6 +732,232 @@ func (e *Engine) runCBT(ctx context.Context, client *ovirt.Client, backend repo.
 			InactivityTimeout: e.cfg.Transfer.InactivityTimeout,
 		}
 	}, extentContext)
+}
+
+// openBackupServiceFreeze — прежний путь: служба замораживает гостя сама до
+// запроса бэкапа и держит заморозку, пока движок не зафиксирует точку; сторож
+// окна размораживает гостя, если движок не уложился.
+func (e *Engine) openBackupServiceFreeze(ctx context.Context, client *ovirt.Client, srv *model.Server,
+	vm *model.VM, run *model.BackupRun, req RunRequest, diskIDs []string, p plan) (*ovirt.Backup, error) {
+
+	frozenAt, err := e.quiesce(ctx, client, vm, run, req)
+	if err != nil {
+		return nil, err
+	}
+	window := e.guardFreeze(ctx, client, vm, run, req, frozenAt)
+	defer func() { _ = window.Thaw() }()
+
+	backup, err := e.startEngineBackup(ctx, client, srv, vm, run, diskIDs, p, false)
+	if err != nil {
+		return backup, err
+	}
+	// The point in time is fixed once the backup is ready; the guest can run
+	// again while we read the frozen image.
+	if err := window.Thaw(); err != nil {
+		return backup, err
+	}
+	return backup, e.settleFreeze(ctx, run, req, window)
+}
+
+// openBackupEngineFreeze — заморозку выполняет движок: служба передаёт
+// require_consistency, а движок замораживает гостя сам, на доли секунды
+// вокруг фиксации точки, уже после подготовки scratch-дисков или снапшота.
+// Гость не стоит всю фазу initializing, и предел окна здесь не нужен.
+//
+// Если движок провалил бэкап с require_consistency, почти всегда это
+// неудавшаяся заморозка: сценарий СУБД вернул ошибку или агент не ответил.
+// Строгое задание на этом прерывается, остальные повторяют бэкап без флага и
+// честно получают уровень crash.
+//
+// why — почему заморозку выполняет движок, для хронологии; пусто — так
+// выбрано в задании.
+func (e *Engine) openBackupEngineFreeze(ctx context.Context, client *ovirt.Client, srv *model.Server,
+	vm *model.VM, run *model.BackupRun, req RunRequest, diskIDs []string, p plan, why string) (*ovirt.Backup, error) {
+
+	target := req.ConsistencyTarget()
+	ask, q, err := EngineQuiesce(target, req.RequireConsistency,
+		GuestState{Running: vm.Running(), Agent: vm.GuestAgent})
+	run.Consistency, run.ConsistencyNote = q.Level, q.Note
+	if err != nil {
+		e.event(ctx, run, model.RunEventFreezeFailed, 0, q.Note)
+		return nil, err
+	}
+	if q.Note != "" && q.Level.Below(target) {
+		e.event(ctx, run, model.RunEventFreezeFailed, 0, q.Note)
+		e.log.Warn().Str("vm", vm.Name).Str("уровень", string(q.Level)).Msg(q.Note)
+	}
+	if ask {
+		if why == "" {
+			why = "заморозку выполнит движок на момент фиксации точки"
+		}
+		e.event(ctx, run, model.RunEventFreezeRequested, 0, "уровень: "+target.Title()+"; "+why)
+	}
+
+	backup, err := e.startEngineBackup(ctx, client, srv, vm, run, diskIDs, p, ask)
+	if err == nil {
+		if ask {
+			e.event(ctx, run, model.RunEventEngineFrozen, 0,
+				"движок подтвердил заморозку (require_consistency); длительность он не сообщает — обычно доли секунды")
+		}
+		return backup, nil
+	}
+	if !ask || !errors.Is(err, ovirt.ErrBackupFailed) {
+		return backup, err
+	}
+
+	reason := "движок не смог заморозить гостя: бэкап с require_consistency завершился ошибкой " +
+		"(сценарий fsfreeze-hook вернул ошибку или агент не ответил — см. события движка и журнал агента в госте)"
+	if req.RequireConsistency {
+		run.Consistency, run.ConsistencyNote = model.ConsistencyCrash, reason
+		e.event(ctx, run, model.RunEventFreezeFailed, 0, reason)
+		return backup, fmt.Errorf("задание требует согласованности уровня «%s», но %s; копия не снималась: %w",
+			target.Title(), reason, err)
+	}
+	// Неудачный бэкап закрывается до повтора: движок держит один бэкап на ВМ.
+	if backup != nil {
+		e.finalizeEngineBackup(ctx, client, vm, backup.ID)
+	}
+	note := reason + "; копия снята без заморозки, как после сбоя питания"
+	run.Consistency, run.ConsistencyNote = model.ConsistencyCrash, note
+	e.event(ctx, run, model.RunEventFreezeFailed, 0, note)
+	e.log.Warn().Err(err).Str("vm", vm.Name).Msg("движок не заморозил гостя — повтор бэкапа без require_consistency")
+	return e.startEngineBackup(ctx, client, srv, vm, run, diskIDs, p, false)
+}
+
+// mixedServiceRetry — сколько после перехвата движком смешанный режим не
+// пробует заморозку службой на этой ВМ. Раз служба не уложилась в предел,
+// следующая попытка почти наверняка кончится тем же: паузой записи и второй
+// подготовкой бэкапа. Но условия меняются (нагрузка на СХД, версия движка),
+// поэтому раз в неделю служба пробует снова.
+const mixedServiceRetry = 7 * 24 * time.Hour
+
+// openBackupMixedFreeze — замораживает служба, движок подстраховывает:
+//
+//   - служба не смогла заморозить гостя (ошибка вызова, сценарий СУБД) —
+//     заморозку сразу просят у движка;
+//   - служба заморозила, но движок не зафиксировал точку за предел — гость
+//     уже разморожен сторожем, бэкап службы закрывается, и открывается новый с
+//     заморозкой силами движка. Перехват запоминается: следующие запуски ВМ
+//     сразу отдают заморозку движку, пока не пройдёт mixedServiceRetry.
+//
+// Движок нельзя подключить к уже идущему бэкапу: require_consistency задаётся
+// только при создании. Поэтому перехват стоит второй подготовки бэкапа на
+// движке, но не второй паузы записи.
+func (e *Engine) openBackupMixedFreeze(ctx context.Context, client *ovirt.Client, srv *model.Server,
+	vm *model.VM, run *model.BackupRun, req RunRequest, diskIDs []string, p plan) (*ovirt.Backup, error) {
+
+	target := req.ConsistencyTarget()
+	// Заморозка не нужна или невозможна никем (ВМ выключена, агента нет) —
+	// обычные правила службы: понижение или прерывание строгого задания.
+	if !target.NeedsFreeze() || !vm.Running() || !vm.GuestAgent {
+		return e.openBackupServiceFreeze(ctx, client, srv, vm, run, req, diskIDs, p)
+	}
+
+	if last, err := e.store.LastRunEventAt(ctx, srv.ID, vm.ID, model.RunEventEngineTakeover); err != nil {
+		e.log.Warn().Err(err).Msg("не удалось проверить прошлые перехваты заморозки движком")
+	} else if last != nil && time.Since(*last) < mixedServiceRetry {
+		return e.openBackupEngineFreeze(ctx, client, srv, vm, run, req, diskIDs, p, fmt.Sprintf(
+			"служба не уложилась в предел заморозки на этой ВМ %s — заморозку сразу выполняет движок; "+
+				"служба попробует снова после %s",
+			last.Local().Format("02.01.2006 15:04"), last.Add(mixedServiceRetry).Local().Format("02.01.2006")))
+	}
+
+	e.event(ctx, run, model.RunEventFreezeRequested, 0,
+		"уровень: "+target.Title()+"; замораживает служба, при неудаче подключится движок")
+	asked := time.Now().UTC()
+	if err := client.FreezeFilesystems(ctx, vm.ID); err != nil {
+		e.event(ctx, run, model.RunEventFreezeFailed, 0,
+			fmt.Sprintf("служба не смогла заморозить гостя: %v — заморозку выполнит движок", err))
+		e.log.Warn().Err(err).Str("vm", vm.Name).Msg("заморозка службой не удалась — подключаю движок")
+		return e.openBackupEngineFreeze(ctx, client, srv, vm, run, req, diskIDs, p,
+			"служба не смогла заморозить гостя — заморозку выполнит движок")
+	}
+	frozenAt := time.Now().UTC()
+	e.event(ctx, run, model.RunEventFrozen, frozenAt.Sub(asked), "")
+	run.Consistency, run.ConsistencyNote = target, ""
+
+	window := e.guardFreeze(ctx, client, vm, run, req, frozenAt)
+	defer func() { _ = window.Thaw() }()
+	backup, err := e.startEngineBackup(ctx, client, srv, vm, run, diskIDs, p, false)
+	if err != nil {
+		return backup, err
+	}
+	if err := window.Thaw(); err != nil {
+		return backup, err
+	}
+	if !window.Expired() {
+		return backup, nil
+	}
+
+	// Точка зафиксирована уже после разморозки: такой бэкап согласованным не
+	// назовёшь. Закрыть его и открыть новый, где заморозкой займётся движок.
+	e.event(ctx, run, model.RunEventEngineTakeover, 0, fmt.Sprintf(
+		"движок не зафиксировал точку за %s заморозки службой; бэкап закрыт и открыт заново "+
+			"с заморозкой силами движка. Ближайшие %d дн. на этой ВМ заморозку сразу выполняет движок",
+		window.Limit().Round(time.Second), int(mixedServiceRetry.Hours()/24)))
+	e.log.Info().Str("vm", vm.Name).Msg("заморозку перехватил движок: служба не уложилась в предел")
+	e.finalizeEngineBackup(ctx, client, vm, backup.ID)
+	run.ToCheckpointID = ""
+	return e.openBackupEngineFreeze(ctx, client, srv, vm, run, req, diskIDs, p,
+		"служба не уложилась в предел заморозки — заморозку выполнит движок")
+}
+
+// startEngineBackup открывает бэкап на движке и ждёт, пока точка будет
+// зафиксирована. Бэкап возвращается и вместе с ошибкой, если движок его
+// открыл: закрыть его обязан вызывающий.
+func (e *Engine) startEngineBackup(ctx context.Context, client *ovirt.Client, srv *model.Server,
+	vm *model.VM, run *model.BackupRun, diskIDs []string, p plan, requireConsistency bool) (*ovirt.Backup, error) {
+
+	started := time.Now().UTC()
+	backup, err := client.StartBackup(ctx, vm.ID, diskIDs, p.FromCheckpointID, ovirt.BackupMarker(run.ID), requireConsistency)
+	if backup == nil {
+		if ovirt.IsConflict(err) {
+			// Уборка перед заморозкой ничего не нашла, а диски заняты: их
+			// держит что-то другое — передача образа, снапшот, перенос диска.
+			lookCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+			run.ManualSteps = e.engineLockSteps(lookCtx, client, srv, vm.ID, diskIDs)
+			cancel()
+			return nil, fmt.Errorf("запуск бэкапа на движке: %w. Готовые команды для ручной уборки — в карточке запуска", err)
+		}
+		return nil, fmt.Errorf("запуск бэкапа на движке: %w", err)
+	}
+	run.EngineBackupID = backup.ID
+	// Идентификатор записывается сразу: если служба упадёт до finalize,
+	// следующий запуск опознает брошенный бэкап как свой.
+	if saveErr := e.store.UpdateBackupRun(ctx, run); saveErr != nil {
+		e.log.Warn().Err(saveErr).Msg("не удалось сохранить идентификатор бэкапа движка")
+	}
+	if err != nil {
+		return backup, fmt.Errorf("запуск бэкапа на движке: %w", err)
+	}
+
+	ready, err := client.WaitBackupReady(ctx, vm.ID, backup.ID, 30*time.Minute)
+	if err != nil {
+		return backup, err
+	}
+	run.ToCheckpointID = ready.ToCheckpointID
+	e.event(ctx, run, model.RunEventCheckpoint, time.Since(started),
+		"с этого момента данные читаются из зафиксированной точки")
+	if err := e.store.UpdateBackupRun(ctx, run); err != nil {
+		e.log.Warn().Err(err).Msg("не удалось сохранить идентификатор checkpoint")
+	}
+	return backup, nil
+}
+
+// finalizeEngineBackup закрывает бэкап на движке и ждёт, пока диски
+// освободятся. Контекст отвязан от запуска: отменённый бэкап тоже обязан
+// отпустить диски.
+func (e *Engine) finalizeEngineBackup(ctx context.Context, client *ovirt.Client, vm *model.VM, backupID string) {
+	closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
+	defer cancel()
+	if err := client.FinalizeBackup(closeCtx, vm.ID, backupID); err != nil {
+		e.log.Error().Err(err).Str("backup", backupID).
+			Msg("не удалось закрыть бэкап на движке — диски ВМ могут остаться заблокированными")
+		return
+	}
+	if err := client.WaitBackupFinalized(closeCtx, vm.ID, backupID, 5*time.Minute); err != nil {
+		e.log.Warn().Err(err).Str("backup", backupID).Msg("бэкап на движке закрывается дольше обычного")
+	}
 }
 
 // quiesce prepares the guest for the point in time and records the level the
@@ -882,12 +1074,14 @@ func (e *Engine) runSnapshot(ctx context.Context, client *ovirt.Client, backend 
 		diskIDs = append(diskIDs, d.ID)
 	}
 
+	e.waitSnapshotOperations(ctx, client, vm, run)
+
 	frozenAt, err := e.quiesce(ctx, client, vm, run, req)
 	if err != nil {
 		return nil, err
 	}
 
-	description := fmt.Sprintf("jhvirt backup %s", run.ID)
+	description := ovirt.SnapshotMarker(run.ID)
 	window := e.guardFreeze(ctx, client, vm, run, req, frozenAt)
 	snapshotAsked := time.Now().UTC()
 	snap, err := client.CreateSnapshot(ctx, vm.ID, description, false, diskIDs)

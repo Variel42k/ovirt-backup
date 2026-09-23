@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"time"
 
@@ -32,6 +33,19 @@ func (s *Store) AddRunEvent(ctx context.Context, event *model.RunEvent) error {
 }
 
 // ListRunEvents возвращает хронологию запуска по возрастанию времени.
+// LastRunEventAt — когда в запусках ВМ последний раз встречалась отметка
+// kind; nil — ни разу.
+func (s *Store) LastRunEventAt(ctx context.Context, serverID, vmID string, kind model.RunEventKind) (*time.Time, error) {
+	var at sql.NullTime
+	err := s.db.QueryRow(ctx, `SELECT MAX(e.at) FROM backup_run_events e
+		JOIN backup_runs r ON r.id = e.run_id
+		WHERE r.server_id=? AND r.vm_id=? AND e.kind=?`, serverID, vmID, string(kind)).Scan(&at)
+	if err != nil {
+		return nil, fmt.Errorf("last run event: %w", err)
+	}
+	return nullTime(at), nil
+}
+
 func (s *Store) ListRunEvents(ctx context.Context, runID string) ([]*model.RunEvent, error) {
 	rows, err := s.db.Query(ctx, `SELECT `+runEventColumns+
 		` FROM backup_run_events WHERE run_id=? ORDER BY at, id`, runID)

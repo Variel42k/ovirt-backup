@@ -25,6 +25,22 @@ const (
 	// RunEventLeftoverClosed — служба закрыла на движке бэкап, брошенный
 	// прошлым запуском: без этого диски ВМ оставались бы заблокированными.
 	RunEventLeftoverClosed RunEventKind = "leftover_closed"
+	// RunEventEngineFrozen — точку зафиксировал движок на замороженном
+	// госте: заморозку он держал сам, доли секунды.
+	RunEventEngineFrozen RunEventKind = "engine_frozen"
+	// RunEventEngineTakeover — смешанный режим: служба не уложилась в предел
+	// заморозки, её бэкап закрыт, и заморозку перехватил движок. По этой
+	// отметке следующие запуски ВМ сразу отдают заморозку движку.
+	RunEventEngineTakeover RunEventKind = "engine_takeover"
+	// RunEventSnapshotWait — перед бэкапом на ВМ шла операция со снапшотом
+	// (обычно слияние при удалении): бэкап ждал её, чтобы не получить 409.
+	RunEventSnapshotWait RunEventKind = "snapshot_wait"
+	// RunEventSnapshotRemoved — после бэкапа служба удалила свой брошенный
+	// временный снапшот.
+	RunEventSnapshotRemoved RunEventKind = "leftover_snapshot_removed"
+	// RunEventSnapshotRemoveFailed — брошенный снапшот удалить не удалось;
+	// команды для администратора — в карточке запуска.
+	RunEventSnapshotRemoveFailed RunEventKind = "leftover_snapshot_failed"
 )
 
 // Title возвращает название этапа для интерфейса.
@@ -56,6 +72,16 @@ func (k RunEventKind) Title() string {
 		return "Бэкап не выполнен"
 	case RunEventLeftoverClosed:
 		return "Закрыт брошенный бэкап движка"
+	case RunEventEngineFrozen:
+		return "Движок заморозил гостя на момент фиксации точки"
+	case RunEventEngineTakeover:
+		return "Заморозку перехватил движок"
+	case RunEventSnapshotWait:
+		return "Ожидание операции со снапшотом"
+	case RunEventSnapshotRemoved:
+		return "Удалён брошенный снапшот"
+	case RunEventSnapshotRemoveFailed:
+		return "Не удалось удалить брошенный снапшот"
 	}
 	return string(k)
 }

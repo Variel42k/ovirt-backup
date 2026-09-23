@@ -10,7 +10,7 @@ import BackupOptionsPicker from '@/components/BackupOptionsPicker.vue'
 import HelpButton from '@/components/HelpButton.vue'
 import PageLoadError from '@/components/PageLoadError.vue'
 import { useUnsavedChanges } from '@/composables/unsavedChanges'
-import type { BackupJob, BackupOption, Consistency, Disk, Host, Recommendation, VM } from '@/api/types'
+import type { BackupJob, BackupOption, Consistency, Disk, FreezeBy, Host, Recommendation, VM } from '@/api/types'
 
 const $q = useQuasar()
 const route = useRoute()
@@ -71,6 +71,9 @@ const emptyForm = () => ({
   consistency: 'filesystem' as Consistency,
   require_consistency: false,
   max_freeze_seconds: 0,
+  // Новые задания на oVirt замораживает движок: доли секунды вместо всей фазы
+  // подготовки бэкапа. Для остальных платформ значение игнорируется при сохранении.
+  freeze_by: 'engine' as FreezeBy,
   verify_after: 'chain',
   verify_options: {
     boot_host_id: '',
@@ -110,6 +113,26 @@ const bootHosts = computed(() => app.servers.filter((s) => s.kind === 'kvm' && s
 const backupServers = computed(() => app.servers.filter((s) => s.enabled && app.serverSupports(s, 'supports_backup')))
 const jobServer = computed(() => app.servers.find((server) => server.id === form.value.server_id))
 const isProxmoxJob = computed(() => jobServer.value?.kind === 'proxmox')
+// Заморозку силами движка умеет только Backup API oVirt и его производных.
+const isOVirtJob = computed(() => ['ovirt', 'redvirt', 'olvm', 'rhv'].includes(jobServer.value?.kind ?? ''))
+const freezeByOptions = [
+  {
+    label: 'Движок — только на момент фиксации точки',
+    value: 'engine',
+    caption: 'Доли секунды: движок сам замораживает гостя после подготовки бэкапа. Для узлов Kubernetes и нагруженных СУБД',
+  },
+  {
+    label: 'Смешанный — служба, при проблеме подключается движок',
+    value: 'mixed',
+    caption: 'Замораживает служба с пределом ниже; не смогла или не уложилась — заморозку перехватывает движок '
+      + 'и следующие 7 дней на этой ВМ сразу замораживает он',
+  },
+  {
+    label: 'Служба — до запроса бэкапа',
+    value: 'service',
+    caption: 'Гость стоит всю подготовку бэкапа на движке (на oVirt — десятки секунд), не дольше предела заморозки',
+  },
+]
 const verifyModes = computed(() => (app.meta?.verify_modes ?? []).filter((mode) =>
   !isProxmoxJob.value || ['quick', 'manifest', 'chain'].includes(mode.value),
 ))
@@ -340,6 +363,8 @@ function openEdit(job: BackupJob) {
     consistency: job.consistency || (job.quiesce ? 'filesystem' : 'crash'),
     require_consistency: Boolean(job.require_consistency),
     max_freeze_seconds: job.max_freeze ? Math.round(job.max_freeze / 1_000_000_000) : 0,
+    // У заданий, созданных до выбора, замораживает служба — как и раньше.
+    freeze_by: (job.freeze_by || 'service') as FreezeBy,
   }
   void loadVMs()
   jobStep.value = 1
@@ -407,6 +432,7 @@ async function save() {
   // смотрят только на него, поэтому держим их согласованными и здесь.
   form.value.quiesce = form.value.consistency !== 'crash'
   if (!form.value.quiesce || isProxmoxJob.value) form.value.require_consistency = false
+  if (!isOVirtJob.value) form.value.freeze_by = 'service'
   saving.value = true
   try {
     if (editing.value) {
@@ -1128,15 +1154,41 @@ const columns = [
               <template #append><HelpButton article="quiesce" label="Уровни согласованности" /></template>
             </q-select>
           </div>
+          <div v-if="isOVirtJob" class="col-12 col-sm-8">
+            <q-select
+              v-model="form.freeze_by"
+              :options="freezeByOptions"
+              :disable="form.consistency === 'crash'"
+              emit-value
+              map-options
+              label="Кто замораживает гостя"
+              outlined
+              dense
+              data-testid="job-freeze-by"
+            >
+              <template #option="scope">
+                <q-item v-bind="scope.itemProps">
+                  <q-item-section>
+                    <q-item-label>{{ scope.opt.label }}</q-item-label>
+                    <q-item-label caption>{{ scope.opt.caption }}</q-item-label>
+                  </q-item-section>
+                </q-item>
+              </template>
+            </q-select>
+          </div>
           <div v-if="!isProxmoxJob" class="col-12 col-sm-4">
             <q-input
               v-model.number="form.max_freeze_seconds"
               type="number"
               min="0"
               max="600"
-              :disable="form.consistency === 'crash'"
+              :disable="form.consistency === 'crash' || (isOVirtJob && form.freeze_by === 'engine')"
               label="Предел заморозки, с"
-              hint="0 — по умолчанию службы; узлам Kubernetes — 10–15 с"
+              :hint="isOVirtJob && form.freeze_by === 'engine'
+                ? 'Не нужен: движок держит заморозку доли секунды'
+                : isOVirtJob && form.freeze_by === 'mixed'
+                  ? 'Сколько ждёт служба, прежде чем заморозку перехватит движок'
+                  : '0 — по умолчанию службы; узлам Kubernetes — 10–15 с'"
               outlined
               dense
               data-testid="job-max-freeze"

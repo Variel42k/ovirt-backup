@@ -162,6 +162,9 @@ async function startBackup() {
       quiesce: consistency.value !== 'crash',
       consistency: consistency.value,
       require_consistency: requireConsistency.value && consistency.value !== 'crash' && !isProxmox.value,
+      // На oVirt гостя замораживает движок — доли секунды на момент точки,
+      // а не вся подготовка бэкапа.
+      freeze_by: ['ovirt', 'redvirt', 'olvm', 'rhv'].includes(sourceServer.value?.kind ?? '') ? 'engine' : 'service',
       encrypt: encrypt.value,
       verify_after: verifyAfter.value || undefined,
       verify_options: verifyAfter.value === 'boot' ? verifyOptions.value : undefined,

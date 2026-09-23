@@ -17,7 +17,9 @@ func TestStartBackupKeepsIDWhenAnswerDoesNotDecode(t *testing.T) {
 		_, _ = w.Write([]byte(`{"access_token":"тестовый-токен","exp":"9999999999999"}`))
 	})
 	var sent map[string]any
+	var query string
 	mux.HandleFunc("/ovirt-engine/api/vms/вм-1/backups", func(w http.ResponseWriter, r *http.Request) {
+		query = r.URL.RawQuery
 		_ = json.NewDecoder(r.Body).Decode(&sent)
 		w.Header().Set("Content-Type", "application/json")
 		// description числом — поле, которое клиент ждёт строкой.
@@ -31,7 +33,7 @@ func TestStartBackupKeepsIDWhenAnswerDoesNotDecode(t *testing.T) {
 		t.Fatalf("клиент: %v", err)
 	}
 
-	backup, err := client.StartBackup(context.Background(), "вм-1", []string{"диск-1"}, "", BackupMarker("run-1"))
+	backup, err := client.StartBackup(context.Background(), "вм-1", []string{"диск-1"}, "", BackupMarker("run-1"), false)
 	if err == nil {
 		t.Fatal("ошибка разбора потеряна")
 	}
@@ -41,5 +43,14 @@ func TestStartBackupKeepsIDWhenAnswerDoesNotDecode(t *testing.T) {
 	// По метке уборка узнаёт свой бэкап, даже если запуск не записал его id.
 	if sent["description"] != "jhvirt run run-1" {
 		t.Fatalf("метка службы не отправлена: %v", sent["description"])
+	}
+	if query != "" {
+		t.Fatalf("без запроса согласованности параметров быть не должно: %q", query)
+	}
+
+	// Заморозку силами движка просит require_consistency в строке запроса.
+	_, _ = client.StartBackup(context.Background(), "вм-1", []string{"диск-1"}, "", BackupMarker("run-2"), true)
+	if query != "require_consistency=true" {
+		t.Fatalf("require_consistency не передан: %q", query)
 	}
 }

@@ -50,11 +50,13 @@ type jobPayload struct {
 	Consistency        string `json:"consistency"`
 	RequireConsistency bool   `json:"require_consistency"`
 	// MaxFreezeSeconds — предел окна заморозки; 0 — backup.max_freeze.
-	MaxFreezeSeconds int                 `json:"max_freeze_seconds"`
-	VerifyAfter      string              `json:"verify_after"`
-	VerifyOptions    model.VerifyOptions `json:"verify_options"`
-	ExportQcow2      bool                `json:"export_qcow2"`
-	Encrypt          bool                `json:"encrypt"`
+	MaxFreezeSeconds int `json:"max_freeze_seconds"`
+	// FreezeBy — service или engine; пусто — служба.
+	FreezeBy      string              `json:"freeze_by"`
+	VerifyAfter   string              `json:"verify_after"`
+	VerifyOptions model.VerifyOptions `json:"verify_options"`
+	ExportQcow2   bool                `json:"export_qcow2"`
+	Encrypt       bool                `json:"encrypt"`
 
 	Priority    int `json:"priority"`
 	Concurrency int `json:"concurrency"`
@@ -84,6 +86,7 @@ func (p jobPayload) apply(dst *model.BackupJob) {
 	dst.Consistency = model.Consistency(strings.TrimSpace(p.Consistency))
 	dst.RequireConsistency = p.RequireConsistency
 	dst.MaxFreeze = time.Duration(p.MaxFreezeSeconds) * time.Second
+	dst.FreezeBy = model.FreezeBy(strings.TrimSpace(p.FreezeBy))
 	dst.VerifyAfter = model.VerifyMode(p.VerifyAfter)
 	dst.VerifyOptions = p.VerifyOptions
 	dst.ExportQcow2 = p.ExportQcow2
@@ -108,6 +111,10 @@ func (s *Server) validateJob(ctx context.Context, job *model.BackupJob) error {
 	}
 	if !srv.Kind.SupportsBackup() {
 		return badRequest("резервное копирование %s в этой версии не поддерживается", srv.Kind.Title())
+	}
+	if job.FreezeBy.NeedsEngine() && !srv.Kind.UsesOVirtAPI() {
+		return badRequest("заморозку силами движка поддерживает только oVirt и его производные: "+
+			"у %s выберите заморозку службой", srv.Kind.Title())
 	}
 	if srv.Kind.UsesProxmoxAPI() {
 		if !srv.HasProxmoxDataPlane() {
@@ -365,6 +372,7 @@ type adHocRequest struct {
 	Consistency        string              `json:"consistency"`
 	RequireConsistency bool                `json:"require_consistency"`
 	MaxFreezeSeconds   int                 `json:"max_freeze_seconds"`
+	FreezeBy           string              `json:"freeze_by"`
 	Encrypt            bool                `json:"encrypt"`
 	VerifyAfter        string              `json:"verify_after"`
 	VerifyOptions      model.VerifyOptions `json:"verify_options"`
@@ -416,6 +424,15 @@ func (s *Server) handleAdHocBackup(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, badRequest("заморозку гостя Proxmox выполняет сам vzdump: требовать уровень нельзя"))
 		return
 	}
+	freezeBy := model.FreezeBy(strings.TrimSpace(req.FreezeBy))
+	if !freezeBy.Valid() {
+		s.writeError(w, r, badRequest("неизвестный способ заморозки: %q", req.FreezeBy))
+		return
+	}
+	if freezeBy.NeedsEngine() && !srv.Kind.UsesOVirtAPI() {
+		s.writeError(w, r, badRequest("заморозку силами движка поддерживает только oVirt и его производные"))
+		return
+	}
 	maxFreeze := time.Duration(req.MaxFreezeSeconds) * time.Second
 	if maxFreeze < 0 || maxFreeze > model.MaxFreezeLimit {
 		s.writeError(w, r, badRequest("предел заморозки должен быть от 0 до %d с", int(model.MaxFreezeLimit.Seconds())))
@@ -456,6 +473,7 @@ func (s *Server) handleAdHocBackup(w http.ResponseWriter, r *http.Request) {
 		Consistency:        consistency,
 		RequireConsistency: req.RequireConsistency && consistency.NeedsFreeze(),
 		MaxFreeze:          maxFreeze,
+		FreezeBy:           freezeBy,
 		Encrypt:            req.Encrypt,
 		VerifyAfter:        verifyMode,
 		VerifyOptions:      req.VerifyOptions,

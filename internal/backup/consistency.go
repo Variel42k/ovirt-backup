@@ -82,3 +82,31 @@ func QuiesceGuest(ctx context.Context, target model.Consistency, require bool, g
 	}
 	return Quiesced{Level: model.ConsistencyCrash, Note: reason + "; копия снята как после сбоя питания"}, nil
 }
+
+// EngineQuiesce решает, просить ли движок заморозить гостя (require_consistency),
+// и какой уровень получит точка, если движок справится.
+//
+// Правила те же, что у QuiesceGuest: без агента заморозки не будет, и строгое
+// задание прерывается до начала бэкапа. Разница в том, что сама заморозка
+// произойдёт позже, на движке, — её исход вызывающий узнает из бэкапа.
+func EngineQuiesce(target model.Consistency, require bool, guest GuestState) (bool, Quiesced, error) {
+	if !target.Valid() {
+		target = model.ConsistencyCrash
+	}
+	if !target.NeedsFreeze() {
+		return false, Quiesced{Level: model.ConsistencyCrash}, nil
+	}
+	if !guest.Running {
+		return false, Quiesced{Level: target, Note: "ВМ не работала: заморозка не требовалась"}, nil
+	}
+	if !guest.Agent {
+		reason := "гостевой агент не отвечает — заморозка невозможна"
+		if require {
+			return false, Quiesced{Level: model.ConsistencyCrash, Note: reason},
+				fmt.Errorf("задание требует согласованности уровня «%s», но %s; копия не снималась",
+					target.Title(), reason)
+		}
+		return false, Quiesced{Level: model.ConsistencyCrash, Note: reason + "; копия снята как после сбоя питания"}, nil
+	}
+	return true, Quiesced{Level: target}, nil
+}

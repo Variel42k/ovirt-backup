@@ -393,7 +393,8 @@ func (e *Engine) restoreToEngine(ctx context.Context, set *ChainSet, reader *Cha
 	if err != nil {
 		return err
 	}
-	dst := imageio.New(ovirt.DataURL(ready, e.cfg.Transfer.PreferProxy), client.HTTPClient())
+	dst := imageio.New(ovirt.DataURL(ready, e.cfg.Transfer.PreferProxy), client.DataHTTPClient()).
+		WithTimeouts(e.imageioTimeouts(leaf.VirtualSize))
 
 	features, err := dst.Options(ctx)
 	if err != nil {

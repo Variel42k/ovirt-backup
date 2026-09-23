@@ -678,6 +678,25 @@ func (e *Engine) selectDisks(ctx context.Context, client *ovirt.Client, vmID str
 	return out, skipped, nil
 }
 
+// imageioTimeouts — пределы запросов к ovirt-imageio для диска размера size.
+//
+// Обычный запрос ограничен backup.transfer.request_timeout. Карта экстентов,
+// контрольная сумма и обнуление диапазона обходят весь диск, поэтому их
+// предел растёт с размером: полчаса плюс секунда на каждые 100 МиБ — для
+// 1 ТиБ около 3,3 часа. Это страховка от зависшего демона, а не ожидаемая
+// длительность.
+func (e *Engine) imageioTimeouts(size int64) (request, long time.Duration) {
+	request = e.cfg.Transfer.RequestTimeout
+	if request <= 0 {
+		request = 10 * time.Minute
+	}
+	long = 30*time.Minute + time.Duration(size/(100<<20))*time.Second
+	if long < request {
+		long = request
+	}
+	return request, long
+}
+
 // runCBT performs a hot backup through the oVirt Backup API.
 func (e *Engine) runCBT(ctx context.Context, client *ovirt.Client, backend repo.Backend,
 	srv *model.Server, vm *model.VM, run *model.BackupRun, req RunRequest,
@@ -1272,7 +1291,8 @@ func (e *Engine) copyOneDisk(ctx context.Context, client *ovirt.Client, backend 
 	}
 
 	dataURL := ovirt.DataURL(ready, e.cfg.Transfer.PreferProxy)
-	src := imageio.New(dataURL, client.HTTPClient())
+	src := imageio.New(dataURL, client.DataHTTPClient()).
+		WithTimeouts(e.imageioTimeouts(disk.ProvisionedSize.Int64()))
 
 	manifestKey := repo.DiskManifestKey(run.RepoPath, index, disk.ID)
 	dataKey := repo.DiskDataKey(run.RepoPath, index, disk.ID)

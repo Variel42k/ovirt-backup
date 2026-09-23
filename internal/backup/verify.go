@@ -679,7 +679,8 @@ func (e *Engine) verifySource(ctx context.Context, set *ChainSet, report *Verify
 				dr.Problems = append(dr.Problems, err.Error())
 				return
 			}
-			src := imageio.New(ovirt.DataURL(ready, e.cfg.Transfer.PreferProxy), client.HTTPClient())
+			src := imageio.New(ovirt.DataURL(ready, e.cfg.Transfer.PreferProxy), client.DataHTTPClient()).
+				WithTimeouts(e.imageioTimeouts(leaf.VirtualSize))
 
 			sum, err := src.ChecksumOf(ctx, leaf.SourceChecksumAlgo, leaf.SourceBlockSize)
 			if err != nil {

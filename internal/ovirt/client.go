@@ -221,6 +221,14 @@ func (c *Client) BaseURL() string { return c.baseURL.String() }
 // the same CA trust and timeouts.
 func (c *Client) HTTPClient() *http.Client { return c.http }
 
+// DataHTTPClient — клиент для ovirt-imageio: те же TLS и доверие к
+// сертификату движка, но без общего тайм-аута. Он рассчитан на короткие
+// запросы REST API и рвал бы карту экстентов и контрольную сумму больших
+// дисков; пределы запросам к imageio задаёт imageio.Client.WithTimeouts.
+func (c *Client) DataHTTPClient() *http.Client {
+	return &http.Client{Transport: c.http.Transport, CheckRedirect: c.http.CheckRedirect}
+}
+
 // TLSConfig returns a clone of the TLS settings in use.
 func (c *Client) TLSConfig() *tls.Config {
 	tr, ok := c.http.Transport.(*http.Transport)

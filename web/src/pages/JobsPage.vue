@@ -122,26 +122,50 @@ const requireConsistencyOptions = [
   { label: 'Не сохранять копию — запуск завершится ошибкой', value: true },
 ]
 
-// Пояснение зависит от того, кто замораживает гостя: у движка нет предела
-// заморозки, а у службы именно он чаще всего и не выдерживается.
-const freezeExplanation = computed(() => {
-  const consistency = form.value.consistency
-  if (consistency === 'crash') return 'Гость не замораживается: копия как после выключения питания.'
-  const needs = consistency === 'application'
-    ? 'Нужны qemu-guest-agent и сценарии fsfreeze-hook для СУБД в каждой ВМ задания (Linux) или VSS (Windows) — '
-      + 'готовые сценарии лежат в каталоге guest-hooks установочного комплекта.'
-    : 'Нужен qemu-guest-agent в госте.'
-  const mode = isOVirtJob.value ? form.value.freeze_by : 'service'
-  if (mode === 'engine') {
-    return `${needs} Гостя замораживает движок — на доли секунды при фиксации точки. Согласованность `
-      + 'не будет достигнута, если агент не отвечает или сценарий СУБД вернул ошибку.'
+// Подсказки стоят у тех полей, от которых зависят, и меняются вместе с ними:
+// что нужно в госте — у уровня, как работает заморозка — у выбора «кто
+// замораживает», когда уровень не будет достигнут — у выбора исхода.
+const freezeMode = computed(() => (isOVirtJob.value ? form.value.freeze_by : 'service'))
+
+const consistencyHint = computed(() => {
+  switch (form.value.consistency) {
+    case 'application':
+      return 'Нужны qemu-guest-agent и сценарии fsfreeze-hook для СУБД в каждой ВМ задания (Linux) или VSS '
+        + '(Windows); готовые сценарии — в каталоге guest-hooks установочного комплекта'
+    case 'filesystem':
+      return 'Нужен qemu-guest-agent в госте'
+    default:
+      return 'Гость не замораживается: копия как после выключения питания'
   }
-  if (mode === 'mixed') {
-    return `${needs} Замораживает служба, не дольше предела; не смогла или не уложилась — заморозку `
-      + 'перехватывает движок. Согласованность не будет достигнута, только если не справился и движок.'
+})
+
+const freezeByHint = computed(() => {
+  switch (freezeMode.value) {
+    case 'engine':
+      return 'Движок замораживает гостя сам, на доли секунды — только на момент фиксации точки'
+    case 'mixed':
+      return 'Замораживает служба, не дольше предела; не смогла или не уложилась — заморозку перехватывает движок'
+    default:
+      return 'Служба замораживает гостя до запроса бэкапа и держит заморозку, пока движок готовит точку, '
+        + 'но не дольше предела'
   }
-  return `${needs} Замораживает служба, не дольше предела заморозки. Согласованность не будет достигнута, `
-    + 'если агент не отвечает, сценарий СУБД вернул ошибку или гипервизор не зафиксировал точку за предел.'
+})
+
+// Когда уровень не будет достигнут: причины зависят и от уровня (сценарии СУБД
+// есть только у «приложений»), и от того, кто замораживает (предел — только у службы).
+const consistencyFailureHint = computed(() => {
+  const reasons = ['гостевой агент не отвечает']
+  if (form.value.consistency === 'application') reasons.push('сценарий СУБД вернул ошибку')
+  switch (freezeMode.value) {
+    case 'engine':
+      reasons.push('движок не смог заморозить гостя')
+      break
+    case 'mixed':
+      return `Это случится, только если не справился и движок: ${reasons.join(', ')}.`
+    default:
+      reasons.push('движок не зафиксировал точку за предел заморозки')
+  }
+  return `Это случится, если ${reasons.join(', ')}.`
 })
 
 const freezeByOptions = [
@@ -1168,6 +1192,7 @@ const columns = [
               emit-value
               map-options
               label="Согласованность копии"
+              :hint="consistencyHint"
               outlined
               dense
               data-testid="job-consistency"
@@ -1191,6 +1216,7 @@ const columns = [
               emit-value
               map-options
               label="Кто замораживает гостя"
+              :hint="form.consistency === 'crash' ? 'Не нужно: гость не замораживается' : freezeByHint"
               outlined
               dense
               data-testid="job-freeze-by"
@@ -1223,18 +1249,16 @@ const columns = [
               data-testid="job-max-freeze"
             />
           </div>
-          <div v-if="!isProxmoxJob" class="col-12">
-            <div class="text-caption text-grey-7 q-mb-xs">{{ freezeExplanation }}</div>
-            <template v-if="form.consistency !== 'crash'">
-              <div class="text-body2 q-mt-sm">Если согласованность не достигнута</div>
-              <q-option-group
-                v-model="form.require_consistency"
-                :options="requireConsistencyOptions"
-                type="radio"
-                dense
-                data-testid="job-require-consistency"
-              />
-            </template>
+          <div v-if="!isProxmoxJob && form.consistency !== 'crash'" class="col-12">
+            <div class="text-body2">Если согласованность не достигнута</div>
+            <div class="text-caption text-grey-7">{{ consistencyFailureHint }}</div>
+            <q-option-group
+              v-model="form.require_consistency"
+              :options="requireConsistencyOptions"
+              type="radio"
+              dense
+              data-testid="job-require-consistency"
+            />
           </div>
           <div class="col-12 self-center">
             <div class="row items-center q-gutter-md">

@@ -49,6 +49,9 @@ function setJobBusy(id: string, busy: boolean) {
     : busyJobs.value.filter((candidate) => candidate !== id)
 }
 
+// Ключи пустой формы — ровно тело запроса на создание и изменение задания
+// (jobPayload на сервере). Сервер отклоняет неизвестные поля, поэтому при
+// сохранении отправляются только они: см. jobRequestBody.
 const emptyForm = () => ({
   name: '',
   enabled: true,
@@ -445,6 +448,15 @@ function nextJobStep() {
   maxJobStep.value = Math.max(maxJobStep.value, jobStep.value)
 }
 
+// Тело запроса — только поля формы. При изменении форма собирается из всего
+// задания (id, created_at, last_status, max_duration…), а сервер разбирает тело
+// строго и на любое лишнее поле отвечает 400: сохранить изменённое задание
+// было невозможно.
+function jobRequestBody(): Record<string, unknown> {
+  const current = form.value as Record<string, unknown>
+  return Object.fromEntries(Object.keys(emptyForm()).map((key) => [key, current[key]]))
+}
+
 async function save() {
   if (saving.value) return
   jobFormError.value = ''
@@ -465,16 +477,17 @@ async function save() {
   saving.value = true
   try {
     if (editing.value) {
-      await api.updateJob(editing.value.id, form.value)
+      await api.updateJob(editing.value.id, jobRequestBody())
       notifyOk('Задание обновлено')
     } else {
-      await api.createJob(form.value)
+      await api.createJob(jobRequestBody())
       notifyOk('Задание создано')
     }
     dialog.value = false
     await load()
   } catch (err) {
-    jobFormError.value = `Не удалось сохранить задание: ${err instanceof Error ? err.message : String(err)}`
+    // Причину пишет сервер; сообщение axios («status code 400») её не содержит.
+    jobFormError.value = `Не удалось сохранить задание: ${errorMessage(err)}`
     notifyError(err, 'Не удалось сохранить задание')
   } finally {
     saving.value = false

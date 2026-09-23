@@ -47,6 +47,9 @@ const (
 	// RunEventTransferReopened — движок закрыл передачу образа посреди
 	// копирования, и служба открыла новую, продолжив с того же места.
 	RunEventTransferReopened RunEventKind = "transfer_reopened"
+	// RunEventTransferViaProxy — хост с ovirt-imageio перестал отвечать
+	// напрямую, и чтение продолжилось через прокси движка.
+	RunEventTransferViaProxy RunEventKind = "transfer_via_proxy"
 )
 
 // Title возвращает название этапа для интерфейса.
@@ -92,6 +95,8 @@ func (k RunEventKind) Title() string {
 		return "Карта экстентов недоступна — диск прочитан целиком"
 	case RunEventTransferReopened:
 		return "Передача образа открыта заново"
+	case RunEventTransferViaProxy:
+		return "Чтение переключено на прокси движка"
 	}
 	return string(k)
 }

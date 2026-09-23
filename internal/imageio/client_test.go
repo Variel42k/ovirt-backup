@@ -52,3 +52,22 @@ func TestIsTicketGone(t *testing.T) {
 		t.Fatal("500 — не потерянный билет")
 	}
 }
+
+// Сетевая ошибка — не ответ демона: её стоит переждать или обойти через
+// прокси движка. Так выглядел обрыв связи с node-01 посреди копирования.
+func TestIsNetworkError(t *testing.T) {
+	srv := httptest.NewServer(http.NotFoundHandler())
+	url := srv.URL
+	srv.Close() // порт закрыт: соединение будет отклонено
+
+	_, err := New(url+"/images/t", &http.Client{}).ReadRange(context.Background(), 0, 16, &bytes.Buffer{})
+	if !IsNetworkError(err) {
+		t.Fatalf("недоступный хост не распознан как сетевая ошибка: %v", err)
+	}
+	if IsNetworkError(&Error{Status: http.StatusInternalServerError}) {
+		t.Fatal("ответ демона с ошибкой — не сетевая ошибка")
+	}
+	if IsNetworkError(context.Canceled) || IsNetworkError(nil) {
+		t.Fatal("отмена и отсутствие ошибки — не сетевые ошибки")
+	}
+}

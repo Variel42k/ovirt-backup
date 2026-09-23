@@ -1375,6 +1375,17 @@ func (e *Engine) copyOneDisk(ctx context.Context, client *ovirt.Client, backend 
 	dataURL := ovirt.DataURL(ready, e.cfg.Transfer.PreferProxy)
 	src := imageio.New(dataURL, client.DataHTTPClient()).WithTimeouts(limits)
 
+	// Запасной путь к тому же билету — прокси движка. Нужен, когда хост
+	// недоступен с сервера копий напрямую (нет маршрута, фильтр, обрыв), а
+	// движок до хоста достаёт. Если прокси выбран изначально, запасного нет.
+	proxyURL := ready.ProxyURL
+	alternate := func() *imageio.Client {
+		if e.cfg.Transfer.PreferProxy || proxyURL == "" || proxyURL == dataURL {
+			return nil
+		}
+		return imageio.New(proxyURL, client.DataHTTPClient()).WithTimeouts(limits)
+	}
+
 	// reopen открывает новую передачу того же диска вместо потерянной. Движок
 	// держит одну передачу на диск, поэтому старая сначала закрывается.
 	reopen := func(ctx context.Context, cause error) (*imageio.Client, error) {
@@ -1405,6 +1416,7 @@ func (e *Engine) copyOneDisk(ctx context.Context, client *ovirt.Client, backend 
 		if err != nil {
 			return nil, err
 		}
+		proxyURL = ready.ProxyURL
 		e.event(ctx, run, model.RunEventTransferReopened, 0, fmt.Sprintf(
 			"диск %s: билет передачи %s потерян (%v) — открыта новая передача %s, копирование продолжено",
 			disk.AliasOrName(), old, cause, next.ID))
@@ -1466,6 +1478,7 @@ func (e *Engine) copyOneDisk(ctx context.Context, client *ovirt.Client, backend 
 		RangeRetries:  e.cfg.Transfer.RangeRetries,
 		Pacer:         pacer,
 		Reopen:        reopen,
+		Alternate:     alternate,
 		Keepalive: func(ctx context.Context) error {
 			return client.ExtendTransfer(ctx, transferID)
 		},
@@ -1483,6 +1496,13 @@ func (e *Engine) copyOneDisk(ctx context.Context, client *ovirt.Client, backend 
 				run.ReadBytes+logical, run.StoredBytes+writer.StoredBytes())
 		},
 	})
+	if result.ViaProxy != "" {
+		e.event(ctx, run, model.RunEventTransferViaProxy, 0, fmt.Sprintf(
+			"диск %s: хост недоступен напрямую (%s) — чтение продолжено через прокси движка",
+			disk.AliasOrName(), result.ViaProxy))
+		e.log.Warn().Str("диск", disk.AliasOrName()).Str("причина", result.ViaProxy).
+			Msg("хост недоступен напрямую — чтение через прокси движка")
+	}
 	if err != nil {
 		writer.Abort(ctx, backend, err)
 		return nil, 0, 0, fmt.Errorf("копирование диска %s: %w", disk.AliasOrName(), err)

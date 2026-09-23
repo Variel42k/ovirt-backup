@@ -224,3 +224,94 @@ func TestCopyGivesUpAfterRepeatedTicketLoss(t *testing.T) {
 		t.Fatalf("передача открыта заново %d раз, предел %d", reopened, maxReopens)
 	}
 }
+
+// flakyImage обрывает соединение на первых drops запросах данных, как хост,
+// ненадолго пропавший из сети, и затем отдаёт данные.
+func flakyImage(t *testing.T, image []byte, extents string, drops int) *imageio.Client {
+	t.Helper()
+	dropped := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /images/ticket/extents", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(extents))
+	})
+	mux.HandleFunc("GET /images/ticket", func(w http.ResponseWriter, r *http.Request) {
+		if dropped < drops {
+			dropped++
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err == nil {
+				_ = conn.Close()
+			}
+			return
+		}
+		var from, to int
+		_, _ = fmt.Sscanf(r.Header.Get("Range"), "bytes=%d-%d", &from, &to)
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(image[from : to+1])
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return imageio.New(srv.URL+"/images/ticket", &http.Client{})
+}
+
+// Хост пропал на пару запросов: служба ждёт его, а не бросает бэкап после
+// нескольких секунд, как раньше.
+func TestCopyWaitsOutShortNetworkOutage(t *testing.T) {
+	image, extents := sparseImage()
+	ctx := context.Background()
+	m := &DiskManifest{RunID: "r", ChainID: "r", DiskID: "d", VirtualSize: int64(len(image))}
+	w, err := NewDiskWriter(ctx, m, WriterOptions{Backend: testBackend(t), DataKey: "n.data",
+		ChunkSize: testChunkSize, Compression: CompressionNone})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Ответов с ошибкой HTTP не было — предел range_retries к обрывам не относится.
+	res, err := copyDisk(ctx, copyParams{Source: flakyImage(t, image, extents, 2), Writer: w, RangeRetries: 0,
+		ChunkSize: testChunkSize, VirtualSize: int64(len(image)), ExtentContext: imageio.ContextZero})
+	if err != nil {
+		t.Fatalf("короткий обрыв сети должен пережидаться: %v", err)
+	}
+	if res.ChunkCount != 3 || res.ViaProxy != "" {
+		t.Fatalf("сохранено чанков %d, через прокси: %q", res.ChunkCount, res.ViaProxy)
+	}
+	_, _ = w.Close()
+}
+
+// Хост недоступен напрямую («no route to host»), а движок до него достаёт:
+// чтение продолжается через прокси движка тем же билетом.
+func TestCopySwitchesToEngineProxy(t *testing.T) {
+	previous := directRetryWindow
+	directRetryWindow = 0
+	t.Cleanup(func() { directRetryWindow = previous })
+
+	image, extents := sparseImage()
+	down := httptest.NewServer(http.NotFoundHandler())
+	hostURL := down.URL
+	down.Close()
+
+	ctx := context.Background()
+	m := &DiskManifest{RunID: "r", ChainID: "r", DiskID: "d", VirtualSize: int64(len(image))}
+	w, err := NewDiskWriter(ctx, m, WriterOptions{Backend: testBackend(t), DataKey: "p.data",
+		ChunkSize: testChunkSize, Compression: CompressionNone})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := imageTicket(t, image, extents, 0)
+	res, err := copyDisk(ctx, copyParams{
+		Source: imageio.New(hostURL+"/images/ticket", &http.Client{}), Writer: w,
+		ChunkSize: testChunkSize, VirtualSize: int64(len(image)), ExtentContext: imageio.ContextZero,
+		Alternate: func() *imageio.Client { return proxy },
+	})
+	if err != nil {
+		t.Fatalf("недоступный хост должен обходиться через прокси движка: %v", err)
+	}
+	if res.ViaProxy == "" || res.MapUnavailable != "" {
+		t.Fatalf("переключение не отмечено (%q) или карта потеряна (%q)", res.ViaProxy, res.MapUnavailable)
+	}
+	final, err := w.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(final.Chunks) != 3 {
+		t.Fatalf("сохранено чанков %d, ожидалось 3", len(final.Chunks))
+	}
+}

@@ -33,6 +33,10 @@ type copyParams struct {
 	// Reopen открывает новую передачу вместо потерянной и возвращает её
 	// источник. nil — переоткрывать нельзя.
 	Reopen func(ctx context.Context, cause error) (*imageio.Client, error)
+	// Alternate — тот же билет через прокси движка, когда хост недоступен
+	// напрямую; nil — другого пути нет (прокси выбран изначально или не
+	// предоставлен движком).
+	Alternate func() *imageio.Client
 	// Keepalive продлевает передачу, пока идёт длинная запись в хранилище:
 	// движок отменяет неактивные передачи по таймауту.
 	Keepalive func(ctx context.Context) error
@@ -45,6 +49,15 @@ type copyParams struct {
 
 // extentsRetryDelay — пауза перед повторным запросом карты экстентов.
 var extentsRetryDelay = 10 * time.Second
+
+// Сетевые сбои проходят, и многочасовой бэкап не должен умирать от
+// минутного. directRetryWindow — сколько ждать хост напрямую, прежде чем
+// пойти через прокси движка; networkRetryWindow — сколько ждать по последнему
+// доступному пути. Тесты укорачивают оба.
+var (
+	directRetryWindow  = time.Minute
+	networkRetryWindow = 5 * time.Minute
+)
 
 // maxReopens — сколько раз за диск можно переоткрыть потерянную передачу.
 // Разовая потеря билета не должна стоить многочасового бэкапа, а
@@ -63,6 +76,8 @@ type copyResult struct {
 	MapUnavailable string
 	// Reopens — сколько раз передачу пришлось открыть заново.
 	Reopens int
+	// ViaProxy — почему чтение ушло на прокси движка; пусто — шло напрямую.
+	ViaProxy string
 	// GridChunks — сколько чанков занимает весь образ; вместе с ChunkCount
 	// показывает, какую долю диска затронул этот запуск.
 	GridChunks int64
@@ -82,6 +97,19 @@ func copyDisk(ctx context.Context, p copyParams) (copyResult, error) {
 	res.GridChunks = (p.VirtualSize + p.ChunkSize - 1) / p.ChunkSize
 
 	src := p.Source
+	// toProxy переводит чтение на прокси движка, если хост недоступен напрямую.
+	toProxy := func(cause error) bool {
+		if p.Alternate == nil || res.ViaProxy != "" || !imageio.IsNetworkError(cause) {
+			return false
+		}
+		alt := p.Alternate()
+		if alt == nil {
+			return false
+		}
+		src = alt
+		res.ViaProxy = cause.Error()
+		return true
+	}
 	// reopen заменяет источник, если билет передачи потерян. Прочитанное к
 	// этому моменту уже записано: копирование продолжается с того же блока.
 	reopen := func(cause error) error {
@@ -94,12 +122,32 @@ func copyDisk(ctx context.Context, p copyParams) (copyResult, error) {
 		}
 		src = next
 		res.Reopens++
+		// Хост уже был недоступен напрямую — новая передача сразу через прокси.
+		if res.ViaProxy != "" && p.Alternate != nil {
+			if alt := p.Alternate(); alt != nil {
+				src = alt
+			}
+		}
 		return nil
+	}
+	// window — сколько ждать сеть на текущем пути: напрямую, пока есть куда
+	// переключиться, недолго; по последнему пути — дольше.
+	window := func() time.Duration {
+		if p.Alternate != nil && res.ViaProxy == "" {
+			return directRetryWindow
+		}
+		return networkRetryWindow
 	}
 
 	extents, err := src.Extents(ctx, p.ExtentContext)
-	for err != nil && imageio.IsTicketGone(err) {
-		if reopenErr := reopen(err); reopenErr != nil {
+	for err != nil && ctx.Err() == nil {
+		// Хост недоступен — карту спрашиваем через прокси, а не читаем
+		// весь диск: без сети чтение всё равно не пойдёт.
+		if imageio.IsTicketGone(err) {
+			if reopenErr := reopen(err); reopenErr != nil {
+				break
+			}
+		} else if !toProxy(err) {
 			break
 		}
 		extents, err = src.Extents(ctx, p.ExtentContext)
@@ -146,12 +194,19 @@ func copyDisk(ctx context.Context, p copyParams) (copyResult, error) {
 		if err := p.Pacer.Wait(ctx, group.Length); err != nil {
 			return res, err
 		}
-		buf, err := readWithRetry(ctx, src, group.Offset, group.Length, p.RangeRetries)
+		buf, err := readWithRetry(ctx, src, group.Offset, group.Length, p.RangeRetries, window())
 		for err != nil {
-			if reopenErr := reopen(err); reopenErr != nil {
-				return res, reopenErr
+			switch {
+			case ctx.Err() != nil:
+				return res, ctx.Err()
+			case imageio.IsTicketGone(err):
+				if reopenErr := reopen(err); reopenErr != nil {
+					return res, reopenErr
+				}
+			case !toProxy(err):
+				return res, err
 			}
-			buf, err = readWithRetry(ctx, src, group.Offset, group.Length, p.RangeRetries)
+			buf, err = readWithRetry(ctx, src, group.Offset, group.Length, p.RangeRetries, window())
 		}
 		res.ReadBytes += group.Length
 
@@ -214,17 +269,29 @@ func groupChunks(indices []int64, chunkSize, virtualSize int64) []ChunkGroup {
 	return GroupChunks(indices, chunkSize, virtualSize, maxReadBatch)
 }
 
-// readWithRetry pulls a byte range, retrying transient network failures.
+// readWithRetry pulls a byte range, retrying transient failures.
 // A backup that dies because one TCP connection was reset would be a poor
 // trade for the hours it takes to restart it.
-func readWithRetry(ctx context.Context, src *imageio.Client, offset, length int64, retries int) ([]byte, error) {
+//
+// Ответ HTTP с ошибкой повторяется retries раз: демон ответил, и если он
+// отвечает ошибкой снова и снова, ждать дольше незачем. Сетевая ошибка —
+// хост недоступен, соединение оборвалось — повторяется с нарастающей паузой,
+// пока не выйдет window: такие сбои проходят сами.
+func readWithRetry(ctx context.Context, src *imageio.Client, offset, length int64, retries int,
+	window time.Duration) ([]byte, error) {
+
 	if retries < 0 {
 		retries = 0
 	}
+	deadline := time.Now().Add(window)
 	var lastErr error
-	for attempt := 0; attempt <= retries; attempt++ {
+	httpFailures := 0
+	for attempt := 0; ; attempt++ {
 		if attempt > 0 {
-			delay := time.Duration(attempt) * time.Second
+			delay := time.Duration(1<<min(attempt-1, 5)) * time.Second
+			if delay > 30*time.Second {
+				delay = 30 * time.Second
+			}
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
@@ -232,20 +299,31 @@ func readWithRetry(ctx context.Context, src *imageio.Client, offset, length int6
 			}
 		}
 		buf := &fixedBuffer{data: make([]byte, 0, length)}
-		if _, err := src.ReadRange(ctx, offset, length, buf); err != nil {
-			lastErr = err
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
-			// Билета нет — повтор с ним же ничего не даст; решает вызывающий.
-			if imageio.IsTicketGone(err) {
-				break
+		_, err := src.ReadRange(ctx, offset, length, buf)
+		if err == nil {
+			return buf.data, nil
+		}
+		lastErr = err
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		// Билета нет — повтор с ним же ничего не даст; решает вызывающий.
+		if imageio.IsTicketGone(err) {
+			break
+		}
+		if imageio.IsNetworkError(err) {
+			if time.Now().After(deadline) {
+				return nil, fmt.Errorf("чтение диапазона %d+%d: хост недоступен дольше %s: %w",
+					offset, length, window.Round(time.Second), lastErr)
 			}
 			continue
 		}
-		return buf.data, nil
+		httpFailures++
+		if httpFailures > retries {
+			break
+		}
 	}
-	return nil, fmt.Errorf("чтение диапазона %d+%d после %d попыток: %w", offset, length, retries+1, lastErr)
+	return nil, fmt.Errorf("чтение диапазона %d+%d после %d попыток: %w", offset, length, httpFailures+1, lastErr)
 }
 
 // fixedBuffer accumulates into a preallocated slice, avoiding the repeated

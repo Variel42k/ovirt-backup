@@ -408,6 +408,19 @@ func IsTicketGone(err error) bool {
 	return e.Status == http.StatusForbidden && strings.Contains(strings.ToLower(e.Body), "no such ticket")
 }
 
+// IsNetworkError сообщает, что до imageio не удалось достучаться или ответ не
+// пришёл: соединение отклонено, нет маршрута, обрыв, тайм-аут запроса. В
+// отличие от ответа HTTP с ошибкой, это состояние сети или хоста — оно
+// проходит, и есть смысл подождать или пойти другим путём (через прокси
+// движка).
+func IsNetworkError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return false
+	}
+	var e *Error
+	return !errors.As(err, &e)
+}
+
 func errorFrom(resp *http.Response, method, endpoint string) error {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
 	return &Error{Status: resp.StatusCode, Method: method, URL: endpoint, Body: string(body)}

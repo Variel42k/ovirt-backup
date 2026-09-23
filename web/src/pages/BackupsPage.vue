@@ -318,6 +318,7 @@ const runMarkerKinds: Record<string, string> = {
   engine_takeover: '#f57c00',
   extent_map_unavailable: '#f57c00',
   transfer_reopened: '#f57c00',
+  transfer_via_proxy: '#f57c00',
   transfer_finished: '#21ba45',
   run_finished: '#21ba45',
   run_failed: '#c10015',
@@ -412,7 +413,8 @@ function eventColor(kind: string): string {
     || kind === 'leftover_snapshot_failed') return 'negative'
   if (kind === 'run_finished' || kind === 'manifest_written') return 'positive'
   if (kind === 'frozen' || kind === 'thawed' || kind === 'engine_takeover'
-    || kind === 'extent_map_unavailable' || kind === 'transfer_reopened') return 'warning'
+    || kind === 'extent_map_unavailable' || kind === 'transfer_reopened'
+    || kind === 'transfer_via_proxy') return 'warning'
   return 'primary'
 }
 
@@ -874,7 +876,7 @@ async function submitRestoreVM() {
     restoreOpen.value = false
     await loadRestores()
   } catch (err) {
-    restoreFormError.value = `Не удалось запустить восстановление: ${err instanceof Error ? err.message : String(err)}`
+    restoreFormError.value = `Не удалось запустить восстановление: ${errorMessage(err)}`
     notifyError(err, 'Не удалось запустить сборку машины')
   } finally {
     restoreBusy.value = false
@@ -909,7 +911,7 @@ async function submitRestore() {
     restoreOpen.value = false
     await loadRestores()
   } catch (err) {
-    restoreFormError.value = `Не удалось запустить восстановление: ${err instanceof Error ? err.message : String(err)}`
+    restoreFormError.value = `Не удалось запустить восстановление: ${errorMessage(err)}`
     notifyError(err, 'Не удалось запустить восстановление')
   } finally {
     restoreBusy.value = false

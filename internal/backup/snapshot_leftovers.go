@@ -147,66 +147,22 @@ func (e *Engine) waitSnapshotOperations(ctx context.Context, client *ovirt.Clien
 	}
 }
 
-// Фоновая уборка повторяется, пока не закроет всё своё: после аварии хоста
-// движок не может ни закрыть бэкап, ни удалить снапшот, пока хост не
-// вернётся, и ждать следующего запуска по расписанию незачем — диски ВМ всё
-// это время заблокированы. Тесты укорачивают оба срока.
-var (
-	cleanupRetryInterval = 10 * time.Minute
-	cleanupDeadline      = 6 * time.Hour
-)
-
-// startCleanup запускает фоновую уборку ВМ. Одна уборка на ВМ за раз: второй
-// вызов просто уходит.
-func (e *Engine) startCleanup(client *ovirt.Client, srv *model.Server, vm *model.VM, runID string) {
+// startSnapshotSweep запускает однократную уборку брошенных снапшотов ВМ в
+// фоне после запуска. Одна уборка на ВМ за раз: второй вызов просто уходит.
+// Повторять её служба не пытается: всё, что осталось, администратор убирает
+// кнопкой «Убрать остатки службы» (см. CleanupLeftovers).
+func (e *Engine) startSnapshotSweep(client *ovirt.Client, srv *model.Server, vm *model.VM, runID string) {
 	key := srv.ID + "/" + vm.ID
 	if _, busy := e.sweeping.LoadOrStore(key, struct{}{}); busy {
 		return
 	}
 	go func() {
 		defer e.sweeping.Delete(key)
-		// Контекст не связан с запуском: он уже закончился. Служба может
-		// перезапуститься посреди уборки — тогда её продолжит следующий бэкап.
-		ctx, cancel := context.WithTimeout(context.Background(), cleanupDeadline+time.Hour)
+		// Слияние большого снапшота на загруженном хранилище идёт часами.
+		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Hour)
 		defer cancel()
-		e.cleanupVM(ctx, client, srv, vm, runID)
+		e.sweepLeftoverSnapshots(ctx, client, srv, vm, runID)
 	}()
-}
-
-// cleanupVM закрывает брошенные бэкапы движка и удаляет брошенные снапшоты
-// ВМ, повторяя попытки, пока своего не останется или не выйдет срок. Если
-// начался новый бэкап ВМ, уборка уступает ему: он убирает за собой сам.
-func (e *Engine) cleanupVM(ctx context.Context, client *ovirt.Client, srv *model.Server, vm *model.VM, runID string) {
-	deadline := time.Now().Add(cleanupDeadline)
-	for {
-		if active, err := e.store.ListBackupRuns(ctx, store.RunFilter{ServerID: srv.ID, VMID: vm.ID,
-			Statuses: []model.RunStatus{model.RunPending, model.RunRunning}, Limit: 1}); err == nil && len(active) > 0 {
-			return
-		}
-		pending := e.closeOwnBackups(ctx, client, srv, vm, runID)
-		// Снапшот бэкапа удаляется только после закрытия самого бэкапа.
-		if pending == 0 {
-			pending += e.sweepLeftoverSnapshots(ctx, client, srv, vm, runID)
-		}
-		if pending == 0 {
-			return
-		}
-		if time.Now().After(deadline) {
-			e.log.Warn().Str("vm", vm.Name).Int("осталось", pending).
-				Msg("фоновая уборка не закончила за отведённый срок — команды для администратора в карточке запуска")
-			lookCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
-			if steps := e.engineLockSteps(lookCtx, client, srv, vm.ID, nil); len(steps) > 0 {
-				e.attachSteps(lookCtx, runID, steps)
-			}
-			cancel()
-			return
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(cleanupRetryInterval):
-		}
-	}
 }
 
 // sweepLeftoverSnapshots удаляет брошенные снапшоты службы по одному и

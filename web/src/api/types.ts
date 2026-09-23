@@ -375,6 +375,35 @@ export interface SkippedDisk {
  */
 export type Consistency = 'crash' | 'filesystem' | 'application'
 
+/** Остаток бэкапа на движке: открытый бэкап, передача образа или снапшот. */
+export interface Leftover {
+  kind: 'engine_backup' | 'image_transfer' | 'snapshot'
+  id: string
+  title: string
+  state: string
+  owner?: string
+  ours: boolean
+  removable: boolean
+  reason: string
+  created?: string
+}
+
+export interface LeftoverReport {
+  server_id: string
+  vm_id: string
+  vm_name: string
+  items: Leftover[]
+  removable: number
+  blocked?: string
+  manual_steps?: ManualStep[]
+  checked_at: string
+}
+
+export interface LeftoverCleanupResult {
+  actions: { kind: Leftover['kind']; id: string; ok: boolean; detail: string }[]
+  after?: LeftoverReport
+}
+
 /** Действие администратора: команда выполняется как есть, пароль спрашивает сама. */
 export interface ManualStep {
   title: string

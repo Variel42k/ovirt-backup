@@ -259,6 +259,9 @@ func (s *Server) routes(mux *http.ServeMux) {
 
 	// Планирование бэкапа для конкретной ВМ.
 	mux.HandleFunc("GET /servers/{id}/vms/{vmID}/backup-options", s.perm(model.PermJobsRead, s.handleBackupOptions))
+	// Остатки бэкапов на движке: проверка — чтение, уборка — по кнопке оператора.
+	mux.HandleFunc("GET /servers/{id}/vms/{vmID}/leftovers", s.perm(model.PermBackupsRead, s.handleVMLeftovers))
+	mux.HandleFunc("POST /servers/{id}/vms/{vmID}/leftovers/cleanup", s.perm(model.PermBackupsWrite, s.handleCleanupVMLeftovers))
 
 	// Хранилища бэкапов.
 	mux.HandleFunc("GET /storages", s.perm(model.PermStoragesRead, s.handleListStorages))

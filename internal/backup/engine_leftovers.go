@@ -182,52 +182,6 @@ func (e *Engine) rememberBackupSnapshot(ctx context.Context, owner string, b ovi
 	}
 }
 
-// closeOwnBackups закрывает брошенные бэкапы службы на ВМ и возвращает, сколько
-// своих закрыть не удалось. Чужие и принадлежащие идущему запуску не считаются:
-// фоновая уборка их не ждёт.
-func (e *Engine) closeOwnBackups(ctx context.Context, client *ovirt.Client, srv *model.Server,
-	vm *model.VM, runID string) int {
-
-	backups, err := client.ListBackups(ctx, vm.ID)
-	if err != nil {
-		e.log.Warn().Err(err).Str("vm", vm.Name).Msg("фоновая уборка: не удалось получить бэкапы ВМ")
-		return 1
-	}
-	var open []ovirt.Backup
-	for _, b := range backups {
-		if b.Open() {
-			open = append(open, b)
-		}
-	}
-	if len(open) == 0 {
-		return 0
-	}
-	runs, err := e.store.ListBackupRuns(ctx, store.RunFilter{ServerID: srv.ID, VMID: vm.ID, IncludeDeleted: true, Limit: 500})
-	if err != nil {
-		return 1
-	}
-	transfers, _ := client.ListImageTransfers(ctx)
-	pending := 0
-	for _, b := range open {
-		owner, live := ownerOf(b, runs)
-		if owner == "" || live {
-			continue
-		}
-		e.rememberBackupSnapshot(ctx, owner, b)
-		if err := e.closeLeftover(ctx, client, vm, b, transfers); err != nil {
-			pending++
-			e.log.Info().Err(err).Str("vm", vm.Name).Str("backup", b.ID).
-				Msg("фоновая уборка: бэкап движка пока не закрыт, попробую позже")
-			continue
-		}
-		e.event(ctx, &model.BackupRun{ID: runID}, model.RunEventLeftoverClosed, 0,
-			fmt.Sprintf("закрыт бэкап движка %s, оставленный запуском %s", b.ID, owner))
-		e.log.Info().Str("vm", vm.Name).Str("backup", b.ID).Str("запуск", owner).
-			Msg("фоновая уборка: закрыт брошенный бэкап движка")
-	}
-	return pending
-}
-
 // closeLeftover отменяет передачи образов бэкапа и закрывает его.
 func (e *Engine) closeLeftover(ctx context.Context, client *ovirt.Client, vm *model.VM,
 	b ovirt.Backup, transfers []ovirt.ImageTransfer) error {

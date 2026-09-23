@@ -258,9 +258,9 @@ func (e *Engine) Execute(ctx context.Context, req RunRequest) (*model.BackupRun,
 	if err := e.store.CreateBackupRun(ctx, run); err != nil {
 		return nil, fmt.Errorf("сохранение записи о бэкапе: %w", err)
 	}
-	// После запуска — фоновая уборка брошенных бэкапов движка и снапшотов ВМ.
-	// Отложенный вызов выполняется последним, когда итог запуска уже записан.
-	defer e.startCleanup(client, srv, vm, run.ID)
+	// После запуска — однократная уборка брошенных снапшотов ВМ. Отложенный
+	// вызов выполняется последним, когда итог запуска уже записан.
+	defer e.startSnapshotSweep(client, srv, vm, run.ID)
 	if req.OnRunCreated != nil {
 		req.OnRunCreated(run)
 	}

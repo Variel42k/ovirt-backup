@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"net/http"
 	"slices"
 	"strings"
@@ -1159,4 +1161,45 @@ func contains(list []string, v string) bool {
 		}
 	}
 	return false
+}
+
+// handleVMLeftovers показывает остатки бэкапов на движке по ВМ, ничего не меняя.
+func (s *Server) handleVMLeftovers(w http.ResponseWriter, r *http.Request) {
+	rep, err := s.engine.InspectLeftovers(r.Context(), r.PathValue("id"), r.PathValue("vmID"))
+	if errors.Is(err, backup.ErrLeftoversUnsupported) {
+		s.writeError(w, r, badRequest("%v", err))
+		return
+	}
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, rep)
+}
+
+// handleCleanupVMLeftovers убирает остатки службы по ВМ по команде оператора.
+// Чужое не трогается; блокировки в базе движка не снимаются.
+func (s *Server) handleCleanupVMLeftovers(w http.ResponseWriter, r *http.Request) {
+	vmID := r.PathValue("vmID")
+	res, err := s.engine.CleanupLeftovers(r.Context(), r.PathValue("id"), vmID)
+	if errors.Is(err, backup.ErrLeftoversUnsupported) {
+		s.writeError(w, r, badRequest("%v", err))
+		return
+	}
+	if err != nil {
+		s.audit(r, "backup.leftovers.cleanup", model.ScopeVM, vmID, false, err.Error())
+		s.writeError(w, r, badRequest("%v", err))
+		return
+	}
+	done, failed := 0, 0
+	for _, action := range res.Actions {
+		if action.OK {
+			done++
+		} else {
+			failed++
+		}
+	}
+	s.audit(r, "backup.leftovers.cleanup", model.ScopeVM, vmID, failed == 0,
+		fmt.Sprintf("выполнено действий: %d, не удалось: %d", done, failed))
+	writeJSON(w, http.StatusOK, res)
 }

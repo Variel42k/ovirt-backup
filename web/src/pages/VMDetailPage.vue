@@ -8,6 +8,7 @@ import {
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import BackupOptionsPicker from '@/components/BackupOptionsPicker.vue'
+import EngineLeftovers from '@/components/EngineLeftovers.vue'
 import BackupTypeHelpCard from '@/components/BackupTypeHelpCard.vue'
 import HelpButton from '@/components/HelpButton.vue'
 import PageLoadError from '@/components/PageLoadError.vue'
@@ -573,6 +574,19 @@ onMounted(load)
             Всего: {{ bytes(assessment.total_provisioned) }} выделено,
             {{ bytes(assessment.total_actual) }} занято.
             Инкрементальный режим на {{ assessment.cbt_enabled_disks }} из {{ assessment.cbt_possible_disks }} дисков.
+          </q-card-section>
+        </q-card>
+
+        <q-card v-if="isOVirt && backupSupported && auth.can('backups.read')" flat bordered class="q-mt-md">
+          <q-card-section class="q-pb-none">
+            <div class="text-subtitle1">Остатки бэкапов на движке</div>
+            <div class="text-caption text-grey-7">
+              Незакрытые бэкапы, зависшие передачи и брошенные снапшоты держат диски ВМ — следующий бэкап
+              получит «Disk is locked». Проверка ничего не меняет; убрать своё служба может по кнопке.
+            </div>
+          </q-card-section>
+          <q-card-section>
+            <EngineLeftovers :server-id="serverId" :vm-id="vmId" />
           </q-card-section>
         </q-card>
 

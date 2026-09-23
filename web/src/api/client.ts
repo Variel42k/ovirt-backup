@@ -4,6 +4,8 @@ import type { QNotifyCreateOptions } from 'quasar'
 import { ref } from 'vue'
 import { noteServerDate } from './format'
 import type {
+  LeftoverCleanupResult,
+  LeftoverReport,
   DirectoryListing,
   DocGuide,
   DocGuideContent,
@@ -429,6 +431,12 @@ export const api = {
     http.post(`/servers/${serverId}/hosts/${hostId}/action`, { action, ...extra }).then((r) => r.data),
   setDiskBackupMode: (serverId: string, diskId: string, incremental: boolean) =>
     http.put(`/servers/${serverId}/disks/${diskId}/backup-mode`, { incremental }).then((r) => r.data),
+
+  // Остатки бэкапов на движке: проверка ничего не меняет, уборка — по кнопке.
+  vmLeftovers: (serverId: string, vmId: string) =>
+    http.get<LeftoverReport>(`/servers/${serverId}/vms/${vmId}/leftovers`).then((r) => r.data),
+  cleanupVMLeftovers: (serverId: string, vmId: string) =>
+    http.post<LeftoverCleanupResult>(`/servers/${serverId}/vms/${vmId}/leftovers/cleanup`, {}).then((r) => r.data),
 
   // Планирование бэкапа
   backupOptions: (serverId: string, vmId: string, storageTargetId?: string) =>

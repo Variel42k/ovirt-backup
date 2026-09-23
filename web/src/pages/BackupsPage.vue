@@ -5,7 +5,8 @@ import { useRoute, useRouter } from 'vue-router'
 import { api, errorMessage, notify, notifyError, notifyOk } from '@/api/client'
 import DirectoryPicker from '@/components/DirectoryPicker.vue'
 import ManualSteps from '@/components/ManualSteps.vue'
-import { bytes, consistencyColor, consistencyLabel, dateTime, elapsed, runStatus, statusColor } from '@/api/format'
+import EngineLeftovers from '@/components/EngineLeftovers.vue'
+import { bytes, consistencyColor, consistencyLabel, dateTime, elapsed, runStatus, statusColor, usesOVirtAPI } from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import { useOperationsStore } from '@/stores/operations'
@@ -1456,6 +1457,16 @@ const replicationColumns = [
             <div class="jhv-wrap">{{ detail.error }}</div>
           </q-banner>
           <ManualSteps v-if="detail?.manual_steps?.length" :steps="detail.manual_steps" class="q-mb-md" />
+          <!-- Упавший запуск мог оставить на движке бэкап или снапшот, который держит
+               диски: здесь их можно проверить и убрать, не уходя со страницы. -->
+          <q-expansion-item
+            v-if="detail && ['failed', 'partial'].includes(detail.status) && usesOVirtAPI(app.servers.find((s) => s.id === detail?.server_id)?.kind)"
+            dense icon="cleaning_services" label="Остатки бэкапа на движке" class="q-mb-md"
+            header-class="text-subtitle2">
+            <div class="q-pa-sm">
+              <EngineLeftovers :server-id="detail.server_id" :vm-id="detail.vm_id" />
+            </div>
+          </q-expansion-item>
 
           <div class="row items-center q-mb-xs">
             <div class="text-subtitle2">Ход выполнения и влияние на ВМ</div>

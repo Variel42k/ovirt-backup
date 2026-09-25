@@ -81,6 +81,7 @@ KVM агенты не устанавливаются; Proxmox используе
 - Горячий бэкап: ВМ продолжает работать. Опциональная заморозка файловых систем
   гостя через qemu-guest-agent даёт filesystem-consistent копию; комплектные
   fsfreeze-hooks для PostgreSQL и MySQL/MariaDB поднимают уровень до application.
+  Как это устроено — [docs/GUEST-FREEZE.md](docs/GUEST-FREEZE.md).
 - Карточка запуска показывает хронологию, длительность заморозки, I/O дисков
   KVM/oVirt/Proxmox и, при привязке хоста СУБД к ВМ, read-only графики
   коммитов, откатов и WAL/redo.

@@ -605,8 +605,14 @@ func parseEngineTime(s string) time.Time {
 			return t.UTC()
 		}
 	}
-	if ms, err := strconv.ParseInt(s, 10, 64); err == nil {
-		return time.UnixMilli(ms).UTC()
+	if epoch, err := strconv.ParseInt(s, 10, 64); err == nil {
+		// oVirt SSO uses Unix seconds for exp, while several REST resources use
+		// Unix milliseconds. Distinguish them by magnitude (year 5138 in seconds
+		// is still below this threshold).
+		if epoch > -100_000_000_000 && epoch < 100_000_000_000 {
+			return time.Unix(epoch, 0).UTC()
+		}
+		return time.UnixMilli(epoch).UTC()
 	}
 	return time.Time{}
 }

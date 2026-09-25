@@ -44,7 +44,11 @@ type Client struct {
 	apiURL  string
 	http    *http.Client
 
-	mu       sync.Mutex
+	// tokenMu protects the cached bearer token. authMu serializes the slower
+	// password grant so concurrent inventory and backup requests don't create
+	// several engine sessions when the token is first needed or expires.
+	tokenMu  sync.RWMutex
+	authMu   sync.Mutex
 	token    string
 	tokenExp time.Time
 
@@ -246,13 +250,13 @@ func (c *Client) TLSConfig() *tls.Config {
 
 // ssoResponse is the payload of the token endpoint.
 type ssoResponse struct {
-	AccessToken      string `json:"access_token"`
-	TokenType        string `json:"token_type"`
-	Scope            string `json:"scope"`
-	Exp              string `json:"exp"`
-	Error            string `json:"error"`
-	ErrorCode        string `json:"error_code"`
-	ErrorDescription string `json:"error_description"`
+	AccessToken      string          `json:"access_token"`
+	TokenType        string          `json:"token_type"`
+	Scope            string          `json:"scope"`
+	Exp              json.RawMessage `json:"exp"`
+	Error            string          `json:"error"`
+	ErrorCode        string          `json:"error_code"`
+	ErrorDescription string          `json:"error_description"`
 }
 
 // authenticate obtains a fresh SSO token.
@@ -304,46 +308,91 @@ func (c *Client) authenticate(ctx context.Context) error {
 			Detail: redactSecrets(detail, c.cfg.Password), Body: redactSecrets(string(body), c.cfg.Password)}
 	}
 
-	exp := parseEngineTime(sso.Exp)
-	if exp.IsZero() {
-		// Engines that do not report an expiry use an 8-hour default; refresh
-		// well before that to avoid mid-backup re-authentication.
-		exp = time.Now().Add(4 * time.Hour)
-	}
+	exp := parseSSOExpiry(sso.Exp)
 
-	c.mu.Lock()
+	c.tokenMu.Lock()
 	c.token = sso.AccessToken
 	c.tokenExp = exp
-	c.mu.Unlock()
+	c.tokenMu.Unlock()
 
-	c.log.Debug().Str("engine", c.baseURL.Host).Time("expires", exp).Msg("получен SSO-токен oVirt")
+	event := c.log.Debug().Str("engine", c.baseURL.Host)
+	if !exp.IsZero() {
+		event = event.Time("expires", exp)
+	}
+	event.Msg("получен SSO-токен oVirt")
 	return nil
+}
+
+// parseSSOExpiry accepts both forms returned by supported engines: an epoch
+// number and the same value encoded as a JSON string.
+func parseSSOExpiry(raw json.RawMessage) time.Time {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return time.Time{}
+	}
+	if raw[0] != '"' {
+		return parseEngineTime(string(raw))
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return time.Time{}
+	}
+	return parseEngineTime(value)
 }
 
 // token returns a valid bearer token, authenticating or refreshing as needed.
 func (c *Client) bearer(ctx context.Context) (string, error) {
-	c.mu.Lock()
-	tok, exp := c.token, c.tokenExp
-	c.mu.Unlock()
+	if tok, ok := c.cachedBearer(time.Now()); ok {
+		return tok, nil
+	}
 
-	if tok != "" && time.Until(exp) > 5*time.Minute {
+	c.authMu.Lock()
+	defer c.authMu.Unlock()
+	// Another request may have refreshed the token while this request waited.
+	if tok, ok := c.cachedBearer(time.Now()); ok {
 		return tok, nil
 	}
 	if err := c.authenticate(ctx); err != nil {
 		return "", err
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.tokenMu.RLock()
+	defer c.tokenMu.RUnlock()
 	return c.token, nil
+}
+
+func (c *Client) cachedBearer(now time.Time) (string, bool) {
+	c.tokenMu.RLock()
+	defer c.tokenMu.RUnlock()
+	if c.token == "" {
+		return "", false
+	}
+	// Some engine versions omit exp. The official API contract permits using
+	// the token until the engine rejects it with 401, which doOnce handles.
+	if c.tokenExp.IsZero() || c.tokenExp.Sub(now) > 30*time.Second {
+		return c.token, true
+	}
+	return "", false
+}
+
+// invalidateBearer drops only the token that was actually rejected. A late
+// 401 for an older request must not erase a token refreshed by another one.
+func (c *Client) invalidateBearer(rejected string) {
+	c.tokenMu.Lock()
+	if c.token == rejected {
+		c.token, c.tokenExp = "", time.Time{}
+	}
+	c.tokenMu.Unlock()
 }
 
 // Logout revokes the current SSO token. Best effort: an engine that is already
 // unreachable does not need its token cleaned up.
 func (c *Client) Logout(ctx context.Context) {
-	c.mu.Lock()
+	c.authMu.Lock()
+	defer c.authMu.Unlock()
+	c.tokenMu.Lock()
 	tok := c.token
 	c.token, c.tokenExp = "", time.Time{}
-	c.mu.Unlock()
+	c.tokenMu.Unlock()
 	if tok == "" {
 		return
 	}
@@ -527,12 +576,7 @@ func (c *Client) doOnce(ctx context.Context, method, endpoint, path string, payl
 	if resp.StatusCode == http.StatusUnauthorized && retryAuth {
 		// The token was rejected — most likely it expired earlier than the
 		// engine told us. Drop it and let the caller's retry loop run again.
-		c.mu.Lock()
-		c.token, c.tokenExp = "", time.Time{}
-		c.mu.Unlock()
-		if err := c.authenticate(ctx); err != nil {
-			return err
-		}
+		c.invalidateBearer(token)
 		return c.doOnce(ctx, method, endpoint, path, payload, out, o, false)
 	}
 

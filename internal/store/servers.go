@@ -141,11 +141,10 @@ func (s *Store) UpdateServer(ctx context.Context, srv *model.Server) error {
 func (s *Store) UpdateServerState(ctx context.Context, srv *model.Server) error {
 	_, err := s.db.Exec(ctx, `UPDATE servers SET
 		state=?, state_message=?, engine_version=?, product_name=?, api_version=?,
-		supports_cbt=?, failure_count=?, last_seen_at=?, last_checked_at=?, updated_at=?
+		supports_cbt=?, failure_count=?, last_seen_at=?, last_checked_at=?
 		WHERE id=?`,
 		string(srv.State), srv.StateMessage, srv.EngineVersion, srv.ProductName, srv.APIVersion,
-		srv.SupportsCBT, srv.FailureCount, srv.LastSeenAt, srv.LastCheckedAt,
-		time.Now().UTC(), srv.ID)
+		srv.SupportsCBT, srv.FailureCount, srv.LastSeenAt, srv.LastCheckedAt, srv.ID)
 	if err != nil {
 		return fmt.Errorf("update server state: %w", err)
 	}

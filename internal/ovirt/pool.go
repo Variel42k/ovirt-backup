@@ -19,7 +19,8 @@ type ServerLoader func(ctx context.Context, serverID string) (*model.Server, err
 //
 // Re-authenticating on every call would be wasteful — the monitor polls every
 // half minute — but a cached client must not outlive a credential change, so
-// each entry remembers the server record it was built from.
+// each entry remembers only the connection fields it was built from. Runtime
+// state such as last_checked_at must not rotate the SSO token.
 type Pool struct {
 	load    ServerLoader
 	timeout time.Duration
@@ -30,8 +31,30 @@ type Pool struct {
 }
 
 type poolEntry struct {
-	client    *Client
-	updatedAt time.Time
+	client *Client
+	key    connectionKey
+}
+
+// connectionKey deliberately excludes state, inventory and display metadata.
+// It is kept private because it contains the already in-memory credential.
+type connectionKey struct {
+	kind        model.ServerKind
+	engineURL   string
+	username    string
+	password    string
+	caCert      string
+	insecureTLS bool
+}
+
+func connectionKeyFor(srv *model.Server) connectionKey {
+	return connectionKey{
+		kind:        srv.Kind,
+		engineURL:   srv.EngineURL,
+		username:    srv.Username,
+		password:    srv.Password,
+		caCert:      srv.CACert,
+		insecureTLS: srv.InsecureTLS,
+	}
 }
 
 // NewPool builds a pool. timeout applies to individual API calls.
@@ -73,7 +96,8 @@ func (p *Pool) ForServer(srv *model.Server) (*Client, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	if entry, ok := p.entries[srv.ID]; ok && !entry.updatedAt.Before(srv.UpdatedAt) {
+	key := connectionKeyFor(srv)
+	if entry, ok := p.entries[srv.ID]; ok && entry.key == key {
 		return entry.client, nil
 	}
 
@@ -94,7 +118,7 @@ func (p *Pool) ForServer(srv *model.Server) (*Client, error) {
 		// Drop the previous token so the engine does not accumulate sessions.
 		go old.client.Logout(context.Background())
 	}
-	p.entries[srv.ID] = &poolEntry{client: client, updatedAt: srv.UpdatedAt}
+	p.entries[srv.ID] = &poolEntry{client: client, key: key}
 	return client, nil
 }
 

@@ -229,6 +229,7 @@ func (d *Dispatcher) executeLibvirt(ctx context.Context, srv *model.Server, req 
 		Consistency:        req.ConsistencyTarget(),
 		RequireConsistency: req.RequireConsistency,
 		MaxFreeze:          req.FreezeLimit(d.cfg.MaxFreeze),
+		MaxReadMBps:        req.ReadLimit(d.cfg.Transfer.MaxReadMBps),
 		Encrypt:            req.Encrypt,
 		OnProgress: func(target string, done, total int64) {
 			pct := 0
@@ -354,7 +355,41 @@ func (d *Dispatcher) executeLibvirt(ctx context.Context, srv *model.Server, req 
 		log.Info().Int("чанков", result.SourceChecked).Int("расхождений", result.SourceMismatch).
 			Msg("сверка с источником выполнена")
 	}
+	d.pruneLibvirtCheckpoints(ctx, driver, srv, vm, run, log)
 	return run, nil
+}
+
+// pruneLibvirtCheckpoints удаляет на хосте свои checkpoint-ы домена, которые
+// основой следующего бэкапа уже не станут (см. backup.CheckpointsToDrop).
+//
+// Ротация сопровождает бэкап, а не является его частью: ошибка только
+// пишется в журнал. Если удалённый checkpoint всё же понадобится, следующий
+// бэкап не найдёт его и сделает полную копию.
+func (d *Dispatcher) pruneLibvirtCheckpoints(ctx context.Context, driver *kvm.Driver, srv *model.Server,
+	vm *model.VM, run *model.BackupRun, log zerolog.Logger) {
+
+	if run.ToCheckpointID == "" {
+		return
+	}
+	pruneCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
+	defer cancel()
+
+	keep, err := d.store.CheckpointsInUse(pruneCtx, srv.ID, vm.ID)
+	if err != nil {
+		log.Warn().Err(err).Msg("ротация checkpoint-ов пропущена: не удалось узнать, какие ещё нужны")
+		return
+	}
+	// Каталог мог ещё не записать точку этого запуска — она нужна в любом случае.
+	keep[run.ToCheckpointID] = true
+
+	removed, err := driver.PruneCheckpoints(pruneCtx, vm.Name, keep)
+	if err != nil {
+		log.Warn().Err(err).Int("удалено", removed).Msg("ротация checkpoint-ов прервана")
+		return
+	}
+	if removed > 0 {
+		log.Info().Int("удалено", removed).Msg("старые checkpoint-ы домена удалены")
+	}
 }
 
 func (d *Dispatcher) writeRunManifest(ctx context.Context, backend repo.Backend, srv *model.Server,

@@ -396,6 +396,9 @@ func (e *Engine) Execute(ctx context.Context, req RunRequest) (*model.BackupRun,
 	}
 	e.event(ctx, run, model.RunEventFinished, ended.Sub(started), finished)
 
+	// Бэкап на движке к этому моменту закрыт: runCBT закрывает его при выходе.
+	e.pruneCheckpoints(ctx, client, srv, vm, run)
+
 	if mirror != nil {
 		for name, failed := range mirror.Failed() {
 			mirrorFailures[name] = failed
@@ -1272,7 +1275,7 @@ func (e *Engine) copyDisks(ctx context.Context, client *ovirt.Client, backend re
 
 	// Один ограничитель на запуск: диски читаются параллельно с одного
 	// хранилища, и предел скорости у них общий.
-	pacer := newReadPacer(req.ReadLimit(e.cfg.Transfer.MaxReadMBps))
+	pacer := NewReadPacer(req.ReadLimit(e.cfg.Transfer.MaxReadMBps))
 
 	transferStarted := time.Now().UTC()
 	sem := make(chan struct{}, parallel)
@@ -1341,7 +1344,7 @@ func (e *Engine) copyDisks(ctx context.Context, client *ovirt.Client, backend re
 func (e *Engine) copyOneDisk(ctx context.Context, client *ovirt.Client, backend repo.Backend,
 	srv *model.Server, vm *model.VM, run *model.BackupRun, req RunRequest,
 	disk ovirt.Disk, index int, chunkSize int64, transferReq ovirt.TransferRequest,
-	extentContext string, pacer *readPacer) (*DiskManifest, int64, int64, error) {
+	extentContext string, pacer *ReadPacer) (*DiskManifest, int64, int64, error) {
 
 	if transferReq.DiskID == "" && transferReq.SnapshotID == "" {
 		return nil, 0, 0, fmt.Errorf("для диска %s не удалось определить источник передачи", disk.AliasOrName())

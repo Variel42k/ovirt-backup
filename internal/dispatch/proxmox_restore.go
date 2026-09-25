@@ -134,7 +134,7 @@ func (d *Dispatcher) planProxmoxRestoreVM(ctx context.Context, req *model.Restor
 			if host == "" {
 				host = selected.Name
 			}
-			if probeErr := plane.Probe(ctx, host); probeErr != nil {
+			if _, probeErr := plane.Probe(ctx, host); probeErr != nil {
 				plan.Blockers = append(plan.Blockers, "канал данных целевого узла недоступен: "+probeErr.Error())
 			}
 		} else {

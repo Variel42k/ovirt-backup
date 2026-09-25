@@ -110,7 +110,11 @@ type Request struct {
 	RequireConsistency bool
 	// MaxFreeze — предел окна заморозки; 0 — backup.DefaultMaxFreeze.
 	MaxFreeze time.Duration
-	Encrypt   bool
+	// MaxReadMBps — предел чтения с хранилища ВМ на весь запуск, МиБ/с;
+	// 0 — без ограничения. Общий на все диски: они читаются параллельно с
+	// одного хранилища.
+	MaxReadMBps int
+	Encrypt     bool
 
 	// SourceVerifyFraction — какую долю скопированных чанков перечитать с
 	// источника и сверить, пока экспорт ещё открыт. 0 — не проверять,
@@ -439,11 +443,28 @@ func (d *Driver) Backup(ctx context.Context, req Request) (*Result, error) {
 
 	log.Info().Int("дисков", len(plan.Disks)).Str("сокет", socketPath).Msg("бэкап открыт, читаю данные")
 
+	// Пока читаются диски, гость пишет, и scratch растёт. Сторож закроет
+	// бэкап раньше, чем на хосте кончится место и запись гостя начнёт
+	// получать ошибки.
+	copyCtx, stopCopy := context.WithCancelCause(ctx)
+	defer stopCopy(nil)
+	guard := startScratchGuard(copyCtx, scratchCheckInterval, scratchReserve(freeBytes),
+		d.scratchSampler(dom), stopCopy, log)
+
 	transferStarted := time.Now().UTC()
-	manifests, stats, err := d.copyDisks(ctx, req, plan, socketPath, info, log)
-	result.mark(model.RunEventTransfer, time.Since(transferStarted),
-		fmt.Sprintf("дисков сохранено: %d из %d; прочитано %s, записано %s",
-			len(manifests), len(plan.Disks), humanBytes(stats.read), humanBytes(stats.stored)))
+	manifests, stats, err := d.copyDisks(copyCtx, req, plan, socketPath, info, log)
+	peakScratch, scratchErr := guard.Stop()
+	if scratchErr != nil && err != nil {
+		// Все диски дочитаны до срабатывания — такой бэкап полон и остаётся
+		// успешным; иначе причина — место под scratch, а не отмена.
+		err = fmt.Errorf("%w; %v", scratchErr, err)
+	}
+	transferDetail := fmt.Sprintf("дисков сохранено: %d из %d; прочитано %s, записано %s",
+		len(manifests), len(plan.Disks), humanBytes(stats.read), humanBytes(stats.stored))
+	if peakScratch > 0 {
+		transferDetail += "; временные файлы бэкапа на хосте: пик " + humanBytes(peakScratch)
+	}
+	result.mark(model.RunEventTransfer, time.Since(transferStarted), transferDetail)
 	result.Manifests = manifests
 	result.DomainXML = info.XML
 	result.Profile = profileForDomain(info, manifests)
@@ -504,6 +525,53 @@ func (d *Driver) quiesce(ctx context.Context, dom golibvirt.Domain, info *libvir
 		frozenAt = time.Time{}
 	}
 	return q, frozenAt, err
+}
+
+// PruneCheckpoints удаляет свои checkpoint-ы домена, которые основой
+// следующего бэкапа уже не станут; keep — те, что ещё нужны. Правило — в
+// backup.CheckpointsToDrop. Каждый checkpoint держит битмап в заголовке qcow2
+// каждого диска, и без ротации они копятся там с каждым бэкапом.
+//
+// libvirt удаляет checkpoint из любого места цепочки, сливая его битмап с
+// соседним, поэтому остальные остаются пригодными. Возвращает, сколько
+// удалено до первой ошибки.
+func (d *Driver) PruneCheckpoints(ctx context.Context, domainName string, keep map[string]bool) (int, error) {
+	dom, _, err := d.conn.LookupDomain(ctx, domainName)
+	if err != nil {
+		return 0, err
+	}
+	checkpoints, err := d.conn.ListCheckpoints(ctx, dom)
+	if err != nil {
+		return 0, err
+	}
+	chain := make([]string, 0, len(checkpoints))
+	for _, cp := range checkpoints {
+		chain = append(chain, cp.Name)
+	}
+	removed := 0
+	for _, name := range backup.CheckpointsToDrop(chain, libvirtx.IsOwnCheckpoint, keep, false) {
+		if err := d.conn.DeleteCheckpoint(ctx, dom, name); err != nil {
+			return removed, fmt.Errorf("удаление checkpoint %s: %w", name, err)
+		}
+		removed++
+	}
+	return removed, nil
+}
+
+// scratchSampler замеряет свободное место на томе scratch и занятое
+// scratch-файлами бэкапа. Что не удалось узнать, остаётся помеченным как
+// неизвестное: сторож без замера ничего не решает.
+func (d *Driver) scratchSampler(dom golibvirt.Domain) func(context.Context) scratchSample {
+	return func(ctx context.Context) scratchSample {
+		var s scratchSample
+		if free, err := d.conn.ScratchFree(ctx, d.cfg.ScratchDir); err == nil {
+			s.free, s.freeKnown = free, true
+		} else if ctx.Err() == nil {
+			d.log.Debug().Err(err).Msg("не удалось замерить место под scratch")
+		}
+		s.used, s.usedKnown = d.conn.BackupScratchUsage(ctx, dom)
+		return s
+	}
 }
 
 func (d *Driver) thaw(ctx context.Context, dom golibvirt.Domain, frozenAt *time.Time,

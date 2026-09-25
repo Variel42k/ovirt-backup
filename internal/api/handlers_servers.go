@@ -57,6 +57,8 @@ type serverPayload struct {
 	// SSHTrustAnyHostKey — явный отказ проверять подлинность гипервизора.
 	SSHTrustAnyHostKey bool   `json:"ssh_trust_any_host_key"`
 	ScratchDir         string `json:"scratch_dir"`
+	// FleecingStorage — хранилище узлов Proxmox для fleecing; пусто — без него.
+	FleecingStorage string `json:"fleecing_storage"`
 }
 
 func (p serverPayload) apply(dst *model.Server) {
@@ -82,6 +84,7 @@ func (p serverPayload) apply(dst *model.Server) {
 	}
 	dst.SSHTrustAnyHostKey = p.SSHTrustAnyHostKey
 	dst.ScratchDir = p.ScratchDir
+	dst.FleecingStorage = strings.TrimSpace(p.FleecingStorage)
 	if p.SSHPort > 0 {
 		dst.SSHPort = p.SSHPort
 	}
@@ -118,6 +121,11 @@ func validateServer(srv *model.Server, isNew bool) error {
 			if _, err := proxmox.NewDataPlane(srv, 30*time.Second); err != nil {
 				return badRequest("%v", err)
 			}
+		}
+		// Тем же правилом проверяет помощник на узле: иначе ошибка всплыла бы
+		// только ночью, на первом бэкапе.
+		if srv.FleecingStorage != "" && !proxmox.ValidStorageID(srv.FleecingStorage) {
+			return badRequest("недопустимый идентификатор хранилища для fleecing: %q", srv.FleecingStorage)
 		}
 	}
 	// Новое подключение к гипервизору заводится только по ключу.
@@ -407,7 +415,7 @@ func (s *Server) probeProxmox(ctx context.Context, payload serverPayload) probeR
 				if address == "" {
 					address = host.Name
 				}
-				if probeErr := plane.Probe(ctx, address); probeErr != nil {
+				if _, probeErr := plane.Probe(ctx, address); probeErr != nil {
 					backupReady = false
 					hint = fmt.Sprintf("API доступен, но канал данных узла %s не готов: %v", host.Name, probeErr)
 					break

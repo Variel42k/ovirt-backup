@@ -19,9 +19,77 @@ import (
 )
 
 const (
-	DataPlaneProtocol = "jhvirt-pve-data-plane/1"
-	dataPlaneHelper   = "/usr/local/sbin/jhvirt-pve-data-plane"
+	// DataPlaneProtocol — версия протокола помощника из этого комплекта.
+	// Вторая добавила к backup необязательные bwlimit= и fleecing=; первую
+	// служба по-прежнему принимает, но передавать ей параметры нельзя.
+	DataPlaneProtocol   = "jhvirt-pve-data-plane/2"
+	dataPlaneProtocolV1 = "jhvirt-pve-data-plane/1"
+	dataPlaneHelper     = "/usr/local/sbin/jhvirt-pve-data-plane"
 )
+
+// DataPlaneCaps — что умеет помощник на узле.
+type DataPlaneCaps struct {
+	// Protocol — версия протокола: 1 или 2.
+	Protocol int
+	// Fleecing — vzdump узла поддерживает fleecing (Proxmox VE 8.2+).
+	Fleecing bool
+}
+
+// Options сообщает, принимает ли помощник параметры backup.
+func (c DataPlaneCaps) Options() bool { return c.Protocol >= 2 }
+
+// ParseProbe разбирает ответ probe: первая строка — протокол, дальше —
+// возможности узла по одной на строку.
+func ParseProbe(out string) (DataPlaneCaps, error) {
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	var caps DataPlaneCaps
+	switch strings.TrimSpace(lines[0]) {
+	case dataPlaneProtocolV1:
+		caps.Protocol = 1
+	case DataPlaneProtocol:
+		caps.Protocol = 2
+	default:
+		return caps, fmt.Errorf("несовместимый протокол канала данных %q", strings.TrimSpace(lines[0]))
+	}
+	for _, line := range lines[1:] {
+		if strings.TrimSpace(line) == "fleecing" {
+			caps.Fleecing = true
+		}
+	}
+	return caps, nil
+}
+
+// BackupOptions — параметры vzdump для одного бэкапа. Нулевое значение —
+// бэкап как раньше, без параметров.
+type BackupOptions struct {
+	// BandwidthKiB — предел чтения дисков гостя, КиБ/с (vzdump --bwlimit);
+	// 0 — без предела.
+	BandwidthKiB int64
+	// FleecingStorage — хранилище узла для fleecing (vzdump --fleecing);
+	// пусто — без fleecing. Только для ВМ QEMU.
+	FleecingStorage string
+}
+
+// args превращает параметры в слова протокола помощника.
+func (o BackupOptions) args(kind string) ([]string, error) {
+	var out []string
+	if o.BandwidthKiB < 0 || o.BandwidthKiB > 9_999_999_999 {
+		return nil, fmt.Errorf("недопустимый предел чтения: %d КиБ/с", o.BandwidthKiB)
+	}
+	if o.BandwidthKiB > 0 {
+		out = append(out, fmt.Sprintf("bwlimit=%d", o.BandwidthKiB))
+	}
+	if o.FleecingStorage != "" {
+		if kind != "qemu" {
+			return nil, fmt.Errorf("fleecing доступен только для ВМ QEMU, а не для %s", kind)
+		}
+		if !ValidStorageID(o.FleecingStorage) {
+			return nil, fmt.Errorf("недопустимый идентификатор хранилища для fleecing: %q", o.FleecingStorage)
+		}
+		out = append(out, "fleecing="+o.FleecingStorage)
+	}
+	return out, nil
+}
 
 var pveStorageID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
@@ -66,26 +134,37 @@ func NewDataPlane(srv *model.Server, timeout time.Duration) (*DataPlane, error) 
 }
 
 // Probe verifies authentication, host pinning and the helper protocol without
-// reading guest data or changing the node.
-func (d *DataPlane) Probe(ctx context.Context, host string) error {
+// reading guest data or changing the node, and reports what the helper can do.
+func (d *DataPlane) Probe(ctx context.Context, host string) (DataPlaneCaps, error) {
 	var stdout bytes.Buffer
 	if err := d.run(ctx, host, dataPlaneHelper+" probe", nil, &stdout); err != nil {
-		return err
+		return DataPlaneCaps{}, err
 	}
-	if strings.TrimSpace(stdout.String()) != DataPlaneProtocol {
-		return fmt.Errorf("узел %s вернул несовместимый протокол канала данных %q", host, strings.TrimSpace(stdout.String()))
+	caps, err := ParseProbe(stdout.String())
+	if err != nil {
+		return caps, fmt.Errorf("узел %s: %w", host, err)
 	}
-	return nil
+	return caps, nil
 }
 
 // Backup streams one native vzdump archive from the node that currently owns
 // the guest. No temporary archive is created on the Proxmox storage.
-func (d *DataPlane) Backup(ctx context.Context, host, vmID string, consume func(io.Reader) error) error {
+//
+// Non-zero opts need protocol 2 on the node; the caller learns it from Probe.
+func (d *DataPlane) Backup(ctx context.Context, host, vmID string, opts BackupOptions, consume func(io.Reader) error) error {
 	kind, numericID, err := ParseVMID(vmID)
 	if err != nil {
 		return err
 	}
-	return d.stream(ctx, host, fmt.Sprintf("%s backup %s %s", dataPlaneHelper, kind, numericID), consume)
+	extra, err := opts.args(kind)
+	if err != nil {
+		return err
+	}
+	command := fmt.Sprintf("%s backup %s %s", dataPlaneHelper, kind, numericID)
+	if len(extra) > 0 {
+		command += " " + strings.Join(extra, " ")
+	}
+	return d.stream(ctx, host, command, consume)
 }
 
 // Restore feeds a native archive to qmrestore/pct restore. The helper assigns

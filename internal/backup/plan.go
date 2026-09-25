@@ -515,6 +515,11 @@ func markRecommended(options []Option, typ model.BackupType, why string) {
 
 // buildPresets offers complete schedules rather than individual settings, so
 // an operator who does not want to think about retention does not have to.
+//
+// Готовые расписания гостя не замораживают: горячий бэкап идёт без остановки
+// записи, а копия получается как после сбоя питания — журналируемые ФС и СУБД
+// переживают это штатно. Заморозку и её цену администратор выбирает в задании
+// сам, когда она нужна.
 func buildPresets(a Assessment) []SchedulePreset {
 	cbtReady := a.EngineSupportsCBT && a.CBTPossible > 0 && a.CBTEnabled == a.CBTPossible
 
@@ -532,7 +537,6 @@ func buildPresets(a Assessment) []SchedulePreset {
 			FullEvery:   7,
 			Retention:   model.RetentionPolicy{KeepLast: 3, KeepDaily: 7, KeepWeekly: 4, KeepMonthly: 6},
 			VerifyAfter: model.VerifyChain,
-			Quiesce:     a.GuestAgent,
 			Recommended: cbtReady,
 			// 7 инкрементов + полная копия в неделю, на горизонте месяца.
 			EstimatedFootprint: (increment*7 + a.FullBytes()) * 4,
@@ -545,7 +549,6 @@ func buildPresets(a Assessment) []SchedulePreset {
 			FullEvery:          6,
 			Retention:          model.RetentionPolicy{KeepLast: 6, KeepHourly: 12, KeepDaily: 7, KeepWeekly: 4},
 			VerifyAfter:        model.VerifyQuick,
-			Quiesce:            a.GuestAgent,
 			Recommended:        false,
 			EstimatedFootprint: (increment*6 + a.FullBytes()) * 7,
 		},
@@ -557,7 +560,6 @@ func buildPresets(a Assessment) []SchedulePreset {
 			FullEvery:          1,
 			Retention:          model.RetentionPolicy{KeepLast: 2, KeepWeekly: 4, KeepMonthly: 3},
 			VerifyAfter:        model.VerifyManifest,
-			Quiesce:            a.GuestAgent,
 			Recommended:        !cbtReady,
 			EstimatedFootprint: a.FullBytes() * 4,
 		},

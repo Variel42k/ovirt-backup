@@ -6,29 +6,29 @@ import (
 	"time"
 )
 
-// readPacer ограничивает скорость чтения с хранилища ВМ.
+// ReadPacer ограничивает скорость чтения с хранилища ВМ.
 //
 // Один на запуск: диски ВМ читаются параллельно, а нагрузка ложится на одно и
 // то же хранилище, поэтому предел общий. Каждое чтение заранее резервирует
 // своё место в очереди, так что средняя скорость не превышает предела, а
 // всплеск ограничен одним блоком.
-type readPacer struct {
+type ReadPacer struct {
 	mu   sync.Mutex
 	rate float64 // байт в секунду
 	next time.Time
 }
 
-// newReadPacer возвращает nil для «без ограничения»: nil-ограничитель ничего
+// NewReadPacer возвращает nil для «без ограничения»: nil-ограничитель ничего
 // не ждёт.
-func newReadPacer(limitMBps int) *readPacer {
+func NewReadPacer(limitMBps int) *ReadPacer {
 	if limitMBps <= 0 {
 		return nil
 	}
-	return &readPacer{rate: float64(limitMBps) * (1 << 20)}
+	return &ReadPacer{rate: float64(limitMBps) * (1 << 20)}
 }
 
 // Wait резервирует n байт и ждёт своей очереди.
-func (p *readPacer) Wait(ctx context.Context, n int64) error {
+func (p *ReadPacer) Wait(ctx context.Context, n int64) error {
 	if p == nil || n <= 0 {
 		return nil
 	}

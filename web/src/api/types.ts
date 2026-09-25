@@ -132,6 +132,8 @@ export interface Server {
   /** Write-only command: удалить сохранённый приватный ключ SSH. */
   clear_ssh_private_key?: boolean
   scratch_dir?: string
+  /** Proxmox: хранилище узлов для fleecing при бэкапе ВМ; пусто — без него. */
+  fleecing_storage?: string
   enabled: boolean
   tags: string[]
   notes?: string

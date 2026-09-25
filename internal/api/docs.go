@@ -61,6 +61,7 @@ var guidePlacements = map[string]guidePlacement{
 	"TROUBLESHOOTING.md":   {"Эксплуатация", 20, "build_circle"},
 	"LIMITATIONS.md":       {"Эксплуатация", 30, "report"},
 	"ARCHITECTURE.md":      {"Архитектура", 10, "account_tree"},
+	"HOT-BACKUP.md":        {"Архитектура", 15, "local_fire_department"},
 	"DISK-ARCHITECTURE.md": {"Архитектура", 20, "storage"},
 	"GUEST-FREEZE.md":      {"Архитектура", 25, "ac_unit"},
 	"BACKUP-FORMAT.md":     {"Архитектура", 30, "inventory_2"},

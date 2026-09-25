@@ -73,8 +73,10 @@ const emptyForm = () => ({
   ova_host_id: '',
   ova_directory: '',
   retention: { keep_last: 3, keep_hourly: 0, keep_daily: 7, keep_weekly: 4, keep_monthly: 6, keep_yearly: 0, max_age: 0 },
-  quiesce: true,
-  consistency: 'filesystem' as Consistency,
+  // По умолчанию — горячий бэкап без остановок: гость не замораживается, копия
+  // как после сбоя питания. Заморозку администратор включает сам, когда она нужна.
+  quiesce: false,
+  consistency: 'crash' as Consistency,
   require_consistency: false,
   max_freeze_seconds: 0,
   // Новые задания на oVirt замораживает движок: доли секунды вместо всей фазы

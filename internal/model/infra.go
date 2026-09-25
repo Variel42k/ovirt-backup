@@ -181,6 +181,10 @@ type Server struct {
 	SSHTrustAnyHostKey bool `json:"ssh_trust_any_host_key"`
 	// ScratchDir — каталог на гипервизоре под scratch-файлы бэкапа и сокет NBD.
 	ScratchDir string `json:"scratch_dir,omitempty"`
+	// FleecingStorage — хранилище узлов Proxmox для fleecing при бэкапе ВМ
+	// (vzdump --fleecing, Proxmox VE 8.2+); пусто — без fleecing. Должно
+	// существовать на каждом узле; лучше быстрое локальное: LVM-thin, ZFS.
+	FleecingStorage string `json:"fleecing_storage,omitempty"`
 
 	// Наблюдаемое состояние, обновляется поллером.
 	State         ConnState  `json:"state"`

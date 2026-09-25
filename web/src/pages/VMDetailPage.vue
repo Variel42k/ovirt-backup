@@ -40,7 +40,6 @@ const requireConsistency = ref(false)
 // а не вся подготовка бэкапа.
 const freezeBy = ref<FreezeBy>('engine')
 const maxFreezeSeconds = ref(0)
-let consistencyPicked = false
 const encrypt = ref(false)
 const verifyAfter = ref<string>('')
 const verifyOptions = ref({
@@ -72,10 +71,6 @@ const consistencyChoices = computed(() => consistencyOptions.map((option) => ({
   ...option,
   disable: option.value !== 'crash' && !assessment.value?.guest_agent,
 })))
-
-function pickConsistency() {
-  consistencyPicked = true
-}
 
 async function load() {
   const sequence = ++pageLoadSequence
@@ -129,11 +124,10 @@ async function loadRecommendation() {
       selectedType.value = recommended?.type ?? ''
       verifyAfter.value = recommended?.suggested_verify ?? ''
     }
-    // Без агента заморозка невозможна. С агентом — файловые системы по
-    // умолчанию, пока оператор не выбрал уровень сам: смена хранилища
-    // перечитывает рекомендации и не должна сбрасывать его выбор.
+    // По умолчанию гость не замораживается: горячий бэкап без остановок.
+    // Без агента заморозка невозможна вовсе, поэтому выбранный раньше уровень
+    // сбрасывается; выбор оператора в остальном не трогаем.
     if (!result.assessment.guest_agent) consistency.value = 'crash'
-    else if (!consistencyPicked) consistency.value = 'filesystem'
     if (!verifyOptions.value.boot_host_id) {
       const source = app.servers.find((s) => s.id === props.serverId)
       verifyOptions.value.boot_host_id = source?.kind === 'kvm' ? source.id : ''
@@ -358,7 +352,6 @@ onMounted(load)
                 outlined
                 dense
                 data-testid="adhoc-consistency"
-                @update:model-value="pickConsistency"
               >
                 <template #option="scope">
                   <q-item v-bind="scope.itemProps">

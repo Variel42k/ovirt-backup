@@ -100,7 +100,7 @@ func TestIncrementalCopyWithoutMapFails(t *testing.T) {
 // Предел общий на запуск: три блока по 1 МиБ при 10 МиБ/с занимают не меньше
 // 0,2 с — первый сразу, остальные в свою очередь.
 func TestReadPacerKeepsAverageRate(t *testing.T) {
-	pacer := newReadPacer(10)
+	pacer := NewReadPacer(10)
 	started := time.Now()
 	for i := 0; i < 3; i++ {
 		if err := pacer.Wait(context.Background(), 1<<20); err != nil {
@@ -110,10 +110,10 @@ func TestReadPacerKeepsAverageRate(t *testing.T) {
 	if elapsed := time.Since(started); elapsed < 180*time.Millisecond || elapsed > 2*time.Second {
 		t.Fatalf("три блока заняли %s, ожидалось около 0,2 с", elapsed)
 	}
-	if newReadPacer(0) != nil {
+	if NewReadPacer(0) != nil {
 		t.Fatal("0 — без ограничения")
 	}
-	var unlimited *readPacer
+	var unlimited *ReadPacer
 	if err := unlimited.Wait(context.Background(), 1<<30); err != nil {
 		t.Fatal(err)
 	}

@@ -45,6 +45,10 @@ func (d *Driver) copyDisks(ctx context.Context, req Request, plan *Plan, socketP
 		failed    int
 	)
 
+	// Один ограничитель на запуск: диски читаются параллельно с одного
+	// хранилища, и предел скорости у них общий.
+	pacer := backup.NewReadPacer(req.MaxReadMBps)
+
 	sem := make(chan struct{}, parallel)
 	var wg sync.WaitGroup
 
@@ -55,7 +59,7 @@ func (d *Driver) copyDisks(ctx context.Context, req Request, plan *Plan, socketP
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			manifest, diskStats, err := d.copyOneDisk(ctx, req, plan, socketPath, info, disk, index, log)
+			manifest, diskStats, err := d.copyOneDisk(ctx, req, plan, socketPath, info, disk, index, pacer, log)
 
 			mu.Lock()
 			defer mu.Unlock()
@@ -96,7 +100,8 @@ func (d *Driver) copyDisks(ctx context.Context, req Request, plan *Plan, socketP
 }
 
 func (d *Driver) copyOneDisk(ctx context.Context, req Request, plan *Plan, socketPath string,
-	info *libvirtx.Domain, disk libvirtx.Disk, index int, log zerolog.Logger) (*backup.DiskManifest, copyStats, error) {
+	info *libvirtx.Domain, disk libvirtx.Disk, index int, pacer *backup.ReadPacer,
+	log zerolog.Logger) (*backup.DiskManifest, copyStats, error) {
 
 	var stats copyStats
 
@@ -183,6 +188,10 @@ func (d *Driver) copyOneDisk(ctx context.Context, req Request, plan *Plan, socke
 			return nil, stats, err
 		}
 
+		if err := pacer.Wait(ctx, group.Length); err != nil {
+			writer.Abort(ctx, req.Backend, err)
+			return nil, stats, err
+		}
 		buf, err := d.readWithRetry(ctx, client, group.Offset, group.Length)
 		if err != nil {
 			writer.Abort(ctx, req.Backend, err)
@@ -215,7 +224,7 @@ func (d *Driver) copyOneDisk(ctx context.Context, req Request, plan *Plan, socke
 	// point in time the backup was taken from is still readable. Once the job
 	// ends, that view is gone and nothing can be compared against it again.
 	if req.SourceVerifyFraction > 0 {
-		checked, mismatch, err := d.verifyAgainstSource(ctx, client, final, req.SourceVerifyFraction, cipher, log)
+		checked, mismatch, err := d.verifyAgainstSource(ctx, client, final, req.SourceVerifyFraction, cipher, pacer, log)
 		stats.checked, stats.mismatch = checked, mismatch
 		if err != nil {
 			return nil, stats, err
@@ -378,7 +387,7 @@ func (d *Driver) readWithRetry(ctx context.Context, client *nbd.Client, offset, 
 // the repository against the hypervisor itself, not against another copy of
 // our own metadata. It is only possible before the backup job ends.
 func (d *Driver) verifyAgainstSource(ctx context.Context, client *nbd.Client, manifest *backup.DiskManifest,
-	fraction float64, cipher *secret.Cipher, log zerolog.Logger) (checked, mismatch int, err error) {
+	fraction float64, cipher *secret.Cipher, pacer *backup.ReadPacer, log zerolog.Logger) (checked, mismatch int, err error) {
 
 	if len(manifest.Chunks) == 0 {
 		return 0, 0, nil
@@ -404,6 +413,10 @@ func (d *Driver) verifyAgainstSource(ctx context.Context, client *nbd.Client, ma
 		chunk := manifest.Chunks[i]
 		offset := chunk.Index * manifest.ChunkSize
 
+		// Сверка читает тот же диск ВМ, поэтому подчиняется тому же пределу.
+		if err := pacer.Wait(ctx, int64(chunk.Length)); err != nil {
+			return checked, mismatch, err
+		}
 		buf, err := d.readWithRetry(ctx, client, offset, int64(chunk.Length))
 		if err != nil {
 			return checked, mismatch, fmt.Errorf("повторное чтение для сверки: %w", err)

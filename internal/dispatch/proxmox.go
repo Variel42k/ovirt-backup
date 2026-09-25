@@ -104,17 +104,26 @@ func (d *Dispatcher) executeProxmox(ctx context.Context, srv *model.Server, req 
 	if hostErr != nil {
 		return d.failRun(ctx, run, hostErr)
 	}
-	if probeErr := plane.Probe(ctx, host); probeErr != nil {
+	caps, probeErr := plane.Probe(ctx, host)
+	if probeErr != nil {
 		return d.failRun(ctx, run, fmt.Errorf("проверка канала данных узла %s: %w", currentNode, probeErr))
 	}
+	opts, applied, skipped := proxmoxBackupOptions(srv.FleecingStorage, vm.ID,
+		req.ReadLimit(d.cfg.Transfer.MaxReadMBps), caps)
+	for _, reason := range skipped {
+		d.log.Warn().Str("run", run.ID).Str("vm", vm.Name).Str("узел", currentNode).Msg(reason)
+	}
 	transferStarted := time.Now().UTC()
-	artifact, artifactErr := d.writeProxmoxArtifact(ctx, backend, plane, host, srv, vm, run)
+	artifact, artifactErr := d.writeProxmoxArtifact(ctx, backend, plane, host, srv, vm, run, opts)
 	if artifactErr != nil {
 		return d.failRun(ctx, run, artifactErr)
 	}
 	run.ReadBytes, run.StoredBytes, run.Progress = artifact.SizeBytes, artifact.StoredBytes, 92
-	d.event(ctx, run, model.RunEventTransfer, time.Since(transferStarted),
-		fmt.Sprintf("архив vzdump сохранён: %s", humanBytes(run.StoredBytes)))
+	transferDetail := fmt.Sprintf("архив vzdump сохранён: %s", humanBytes(run.StoredBytes))
+	if notes := append(applied, skipped...); len(notes) > 0 {
+		transferDetail += "; " + strings.Join(notes, "; ")
+	}
+	d.event(ctx, run, model.RunEventTransfer, time.Since(transferStarted), transferDetail)
 
 	doc := &backup.RunManifest{
 		Format: backup.FormatName, Version: backup.FormatVersion, RunID: run.ID, JobID: run.JobID, JobName: run.JobName,
@@ -160,7 +169,7 @@ func (d *Dispatcher) executeProxmox(ctx context.Context, srv *model.Server, req 
 }
 
 func (d *Dispatcher) writeProxmoxArtifact(ctx context.Context, backend repo.Backend, plane *proxmox.DataPlane,
-	host string, srv *model.Server, vm *model.VM, run *model.BackupRun) (*model.RepositoryArtifact, error) {
+	host string, srv *model.Server, vm *model.VM, run *model.BackupRun, opts proxmox.BackupOptions) (*model.RepositoryArtifact, error) {
 	artifact := &model.RepositoryArtifact{RunID: run.ID, DiskID: vm.ID, DiskAlias: vm.Name + ".vzdump.zst",
 		Kind: backup.ArtifactProxmoxVZDUMP, StorageTargetID: run.StorageTargetID,
 		Status: model.RunPending, Encrypted: run.Encrypted, CreatedAt: time.Now().UTC()}
@@ -186,7 +195,7 @@ func (d *Dispatcher) writeProxmoxArtifact(ctx context.Context, backend repo.Back
 		return nil, err
 	}
 	plainHash := sha256.New()
-	copyErr := plane.Backup(ctx, host, vm.ID, func(source io.Reader) error {
+	copyErr := plane.Backup(ctx, host, vm.ID, opts, func(source io.Reader) error {
 		buf := make([]byte, max(d.cfg.ChunkSize, 1<<20))
 		var index int64
 		for {

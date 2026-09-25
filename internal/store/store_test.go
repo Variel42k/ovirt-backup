@@ -513,6 +513,69 @@ func TestBackupRunChainLookup(t *testing.T) {
 	}
 }
 
+// Ротация checkpoint-ов удаляет всё, чего нет в CheckpointsInUse, поэтому
+// набор обязан совпадать с правилом выбора основы: по каждому хранилищу
+// последняя пригодная копия и последняя пригодная полная.
+func TestCheckpointsInUseAndOwn(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	minute := 0
+	mk := func(target string, typ model.BackupType, checkpoint string, status model.RunStatus) *model.BackupRun {
+		minute++
+		r := &model.BackupRun{
+			ServerID: "srv", VMID: "vm-1", VMName: "db-01", Type: typ, Status: status,
+			ToCheckpointID: checkpoint, StorageTargetID: target,
+			CreatedAt: time.Now().UTC().Add(time.Duration(minute) * time.Minute),
+		}
+		if err := s.CreateBackupRun(ctx, r); err != nil {
+			t.Fatalf("create run: %v", err)
+		}
+		return r
+	}
+
+	mk("tgt-a", model.BackupFull, "cp-a-full-old", model.RunSucceeded)
+	mk("tgt-a", model.BackupFull, "cp-a-full", model.RunSucceeded)
+	mk("tgt-a", model.BackupIncremental, "cp-a-inc1", model.RunSucceeded)
+	mk("tgt-a", model.BackupIncremental, "cp-a-inc2", model.RunSucceeded)
+	// Неудачный запуск основой не бывает.
+	mk("tgt-a", model.BackupIncremental, "cp-a-failed", model.RunFailed)
+	// Второе хранилище ведёт свою цепочку.
+	mk("tgt-b", model.BackupFull, "cp-b-full", model.RunSucceeded)
+	// Удалённая копия основой не бывает, но checkpoint всё равно свой.
+	deleted := mk("tgt-b", model.BackupIncremental, "cp-b-deleted", model.RunSucceeded)
+	if err := s.MarkRunDeleted(ctx, deleted.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	keep, err := s.CheckpointsInUse(ctx, "srv", "vm-1")
+	if err != nil {
+		t.Fatalf("CheckpointsInUse: %v", err)
+	}
+	want := map[string]bool{"cp-a-inc2": true, "cp-a-full": true, "cp-b-full": true}
+	if len(keep) != len(want) {
+		t.Fatalf("нужные checkpoint-ы = %v, ожидалось %v", keep, want)
+	}
+	for id := range want {
+		if !keep[id] {
+			t.Errorf("checkpoint %s ещё может стать основой, но не попал в набор: %v", id, keep)
+		}
+	}
+
+	own, err := s.OwnCheckpoints(ctx, "srv", "vm-1")
+	if err != nil {
+		t.Fatalf("OwnCheckpoints: %v", err)
+	}
+	for _, id := range []string{"cp-a-full-old", "cp-a-failed", "cp-b-deleted", "cp-a-inc2"} {
+		if !own[id] {
+			t.Errorf("checkpoint %s создан службой, но не признан своим", id)
+		}
+	}
+	if own["cp-чужой"] {
+		t.Error("чужой checkpoint признан своим")
+	}
+}
+
 func TestRemediationRateLimitCounters(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)

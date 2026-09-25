@@ -266,6 +266,69 @@ func (s *Store) LatestUsableRun(ctx context.Context, serverID, vmID, targetID st
 	return scanRun(row)
 }
 
+// CheckpointsInUse — checkpoint-ы ВМ, от которых ещё может считаться
+// следующий бэкап: по каждому хранилищу точка последней пригодной копии
+// (основа инкремента) и последней пригодной полной (основа разностной).
+//
+// Правило то же, что у LatestUsableRun при выборе основы, поэтому ротация
+// не удалит checkpoint, который следующий запуск возьмёт за основу.
+func (s *Store) CheckpointsInUse(ctx context.Context, serverID, vmID string) (map[string]bool, error) {
+	rows, err := s.db.Query(ctx, `SELECT DISTINCT storage_target_id FROM backup_runs
+		WHERE server_id=? AND vm_id=? AND deleted=? AND to_checkpoint_id <> ''`, serverID, vmID, false)
+	if err != nil {
+		return nil, fmt.Errorf("хранилища копий ВМ: %w", err)
+	}
+	var targets []string
+	for rows.Next() {
+		var target string
+		if err := rows.Scan(&target); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("хранилища копий ВМ: %w", err)
+		}
+		targets = append(targets, target)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("хранилища копий ВМ: %w", err)
+	}
+
+	keep := map[string]bool{}
+	for _, target := range targets {
+		for _, onlyFull := range []bool{false, true} {
+			run, err := s.LatestUsableRun(ctx, serverID, vmID, target, onlyFull)
+			if errors.Is(err, ErrNotFound) {
+				continue
+			}
+			if err != nil {
+				return nil, err
+			}
+			keep[run.ToCheckpointID] = true
+		}
+	}
+	return keep, nil
+}
+
+// OwnCheckpoints — все checkpoint-ы, которые когда-либо создавали бэкапы
+// службы для этой ВМ, включая удалённые копии. Так служба отличает свои
+// checkpoint-ы от чужих там, где у них нет узнаваемого имени (oVirt).
+func (s *Store) OwnCheckpoints(ctx context.Context, serverID, vmID string) (map[string]bool, error) {
+	rows, err := s.db.Query(ctx, `SELECT DISTINCT to_checkpoint_id FROM backup_runs
+		WHERE server_id=? AND vm_id=? AND to_checkpoint_id <> ''`, serverID, vmID)
+	if err != nil {
+		return nil, fmt.Errorf("checkpoint-ы копий ВМ: %w", err)
+	}
+	defer rows.Close()
+	own := map[string]bool{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("checkpoint-ы копий ВМ: %w", err)
+		}
+		own[id] = true
+	}
+	return own, rows.Err()
+}
+
 // MarkRunDeleted flags a run whose data has been removed from the repository.
 func (s *Store) MarkRunDeleted(ctx context.Context, id string) error {
 	_, err := s.db.Exec(ctx, `UPDATE backup_runs SET deleted=? WHERE id=?`, true, id)

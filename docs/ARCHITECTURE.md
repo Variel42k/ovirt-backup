@@ -3,7 +3,8 @@
 Документ описывает, из чего собран ovirt-backup, как части связаны и
 почему сделано именно так. Формат хранения копий вынесен в
 [BACKUP-FORMAT.md](BACKUP-FORMAT.md), устройство дисков QEMU — в
-[DISK-ARCHITECTURE.md](DISK-ARCHITECTURE.md), заморозка гостя — в
+[DISK-ARCHITECTURE.md](DISK-ARCHITECTURE.md), горячий бэкап и защита
+работающей ВМ — в [HOT-BACKUP.md](HOT-BACKUP.md), заморозка гостя — в
 [GUEST-FREEZE.md](GUEST-FREEZE.md), внешний контракт — в
 [API.md](API.md).
 

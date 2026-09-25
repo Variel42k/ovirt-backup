@@ -71,6 +71,8 @@ const emptyForm = () => ({
   clear_ssh_host_key: false,
   ssh_trust_any_host_key: false,
   scratch_dir: '/var/lib/libvirt/qemu',
+  // Только для Proxmox: хранилище узлов для fleecing, пусто — без него.
+  fleecing_storage: '',
 })
 
 const form = ref(emptyForm())
@@ -443,6 +445,7 @@ function openEdit(server: Server) {
     clear_ssh_host_key: false,
     ssh_trust_any_host_key: server.ssh_trust_any_host_key ?? false,
     scratch_dir: server.scratch_dir ?? '/var/lib/libvirt/qemu',
+    fleecing_storage: server.fleecing_storage ?? '',
   }
   caUpload.value = null
   fetchedCAFingerprint.value = ''
@@ -1267,6 +1270,16 @@ onMounted(load)
               <div class="text-caption text-negative q-ml-sm">
                 Только для лаборатории. Этот режим позволяет подменить узел и перехватить архив ВМ.
               </div>
+            </div>
+            <div class="col-12 col-sm-8">
+              <q-input
+                v-model="form.fleecing_storage"
+                label="Хранилище для fleecing"
+                hint="Например local-lvm. Пока vzdump читает диск, запись ВМ не ждёт сеть до службы: старые блоки ложатся сюда. Нужны Proxmox VE 8.2+ и хранилище на каждом узле; пусто — без fleecing"
+                outlined
+                dense
+                data-testid="server-fleecing-storage"
+              />
             </div>
           </template>
 

@@ -312,13 +312,66 @@ func (c *Conn) PrepareScratchDir(ctx context.Context, dir string) (freeBytes int
 	if err != nil {
 		return 0, fmt.Errorf("подготовка каталога %s на %s: %w", dir, c.cfg.Host, err)
 	}
+	// Space is a nice-to-have diagnostic, not a reason to refuse the backup.
+	free, _ := parseStatFree(out)
+	return free, nil
+}
 
-	var blocks, blockSize int64
-	if _, scanErr := fmt.Sscanf(strings.TrimSpace(out), "%d %d", &blocks, &blockSize); scanErr != nil {
-		// Space is a nice-to-have diagnostic, not a reason to refuse the backup.
-		return 0, nil
+// ScratchFree reports how much space is left on the volume holding the
+// scratch directory. It is sampled while a backup runs: the scratch file grows
+// with every block the guest overwrites, and so does anything else sharing
+// that volume.
+func (c *Conn) ScratchFree(ctx context.Context, dir string) (int64, error) {
+	out, err := c.Run(ctx, fmt.Sprintf("stat -f -c '%%a %%S' %s", shellQuote(dir)))
+	if err != nil {
+		return 0, fmt.Errorf("свободное место в %s на %s: %w", dir, c.cfg.Host, err)
 	}
-	return blocks * blockSize, nil
+	free, ok := parseStatFree(out)
+	if !ok {
+		return 0, fmt.Errorf("свободное место в %s на %s: непонятный ответ stat: %q", dir, c.cfg.Host, out)
+	}
+	return free, nil
+}
+
+// parseStatFree разбирает «свободные_блоки размер_блока» из stat -f.
+func parseStatFree(out string) (int64, bool) {
+	var blocks, blockSize int64
+	if _, err := fmt.Sscanf(strings.TrimSpace(out), "%d %d", &blocks, &blockSize); err != nil {
+		return 0, false
+	}
+	return blocks * blockSize, true
+}
+
+// BackupScratchUsage reports how many bytes the running backup job keeps in
+// its scratch files. ok is false when libvirt does not report it: the job has
+// ended or the hypervisor is too old to count temporary space.
+func (c *Conn) BackupScratchUsage(ctx context.Context, dom libvirt.Domain) (used int64, ok bool) {
+	_, params, err := c.lv.DomainGetJobStats(dom, 0)
+	if err != nil {
+		return 0, false
+	}
+	return typedParamInt(params, libvirt.DomainJobDiskTempUsed)
+}
+
+// typedParamInt достаёт целое значение поля из статистики libvirt.
+func typedParamInt(params []libvirt.TypedParam, field string) (int64, bool) {
+	for _, p := range params {
+		if p.Field != field {
+			continue
+		}
+		switch v := p.Value.I.(type) {
+		case uint64:
+			return int64(v), true
+		case int64:
+			return v, true
+		case uint32:
+			return int64(v), true
+		case int32:
+			return int64(v), true
+		}
+		return 0, false
+	}
+	return 0, false
 }
 
 // RemoveScratch deletes scratch files left behind by a backup.
@@ -366,8 +419,15 @@ func ExportName(target string) string { return target }
 // BitmapName builds the exported dirty bitmap name for one disk.
 func BitmapName(target string) string { return "jhv-" + target }
 
+// checkpointPrefix отличает checkpoint-ы службы от чужих: ротация трогает
+// только свои.
+const checkpointPrefix = "jhv-"
+
 // CheckpointName builds a checkpoint name from a run identifier.
-func CheckpointName(runID string) string { return "jhv-" + shortID(runID) }
+func CheckpointName(runID string) string { return checkpointPrefix + shortID(runID) }
+
+// IsOwnCheckpoint сообщает, что checkpoint создан бэкапом службы.
+func IsOwnCheckpoint(name string) bool { return strings.HasPrefix(name, checkpointPrefix) }
 
 func shortID(id string) string {
 	clean := strings.ReplaceAll(id, "-", "")

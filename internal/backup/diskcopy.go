@@ -29,7 +29,7 @@ type copyParams struct {
 
 	RangeRetries int
 	// Pacer ограничивает скорость чтения; nil — без ограничения.
-	Pacer *readPacer
+	Pacer *ReadPacer
 	// Reopen открывает новую передачу вместо потерянной и возвращает её
 	// источник. nil — переоткрывать нельзя.
 	Reopen func(ctx context.Context, cause error) (*imageio.Client, error)

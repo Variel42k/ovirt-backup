@@ -20,7 +20,9 @@ Mermaid — он тоже читается.
   копии. Потом запись продолжается, а копия читается уже из зафиксированной
   точки.
 - **Замораживает агент внутри ВМ** — qemu-guest-agent. Служба только просит об
-  этом через libvirt или через движок oVirt.
+  этом через libvirt или через движок oVirt. Ни один сценарий из комплекта
+  файловые системы не замораживает, подробнее — в
+  [разделе 2](#кто-именно-замораживает).
 - **Перед заморозкой агент запускает сценарии.** Сценарий PostgreSQL выполняет
   `CHECKPOINT`, сценарий MySQL берёт блокировку записи: так СУБД успевает
   подготовиться к снимку.
@@ -90,8 +92,16 @@ flowchart LR
     A -->|"1. freeze"| H
     H --> MY
     H --> PG
-    A -->|"2. FIFREEZE"| FS
+    A -->|"2. FIFREEZE — заморозка"| FS
+
+    classDef freezer fill:#ffd7d7,stroke:#c62828,stroke-width:3px,color:#000
+    classDef prep stroke-dasharray:5 5
+    class A,FS freezer
+    class H,MY,PG prep
 ```
+
+Красным выделено то, что действительно замораживает: агент и файловые
+системы. Пунктиром — сценарии: они только готовят СУБД.
 
 - **Служба** решает, нужна ли заморозка, просит о ней гипервизор, следит за
   временем и записывает, что получилось. Команд в госте она не выполняет — так
@@ -108,6 +118,47 @@ flowchart LR
   другие), ставить ничего не нужно.
 - **Сценарии** из комплекта `deploy/guest-hooks` готовят СУБД. Их ставит
   администратор в каждую ВМ с базой данных.
+
+### Кто именно замораживает
+
+> [!IMPORTANT]
+> Файловые системы замораживает сама программа qemu-guest-agent внутри ВМ:
+> системным вызовом `ioctl(FIFREEZE)` на каждую файловую систему. В комплекте
+> нет ни одного скрипта, который замораживал бы ФС. Сценарии `fsfreeze-hook`
+> только готовят СУБД перед заморозкой и могут её отменить, вернув ошибку.
+
+| Шаг | Кто выполняет | Где это | Замораживает сам? |
+|---|---|---|---|
+| решить и попросить | служба | KVM — `Conn.FreezeFilesystems` в [internal/libvirtx/domain.go](../internal/libvirtx/domain.go); oVirt — `Client.FreezeFilesystems` в [internal/ovirt/actions.go](../internal/ovirt/actions.go); режим «Движок» — `Client.StartBackup` с `require_consistency` в [internal/ovirt/backup.go](../internal/ovirt/backup.go) | нет, только просит |
+| передать агенту | libvirt; на oVirt перед ним движок и VDSM; на Proxmox — `vzdump` | вне репозитория | нет |
+| подготовить СУБД | диспетчер `fsfreeze-hook`, сценарии `50-jhvirt-mysql` и `50-jhvirt-postgresql` | [deploy/guest-hooks/linux](../deploy/guest-hooks/linux) | нет: готовят СУБД и могут отменить заморозку |
+| **заморозить ФС** | **qemu-guest-agent** | сам агент, команда `guest-fsfreeze-freeze`; в исходниках QEMU — каталог `qga/` | **да** |
+| заморозить ФС в Windows | qemu-guest-agent с VSS-провайдером `qga-vss.dll` | ставится вместе с virtio-win guest tools | да, через VSS |
+
+Проверить каждое звено можно руками, без службы:
+
+- **Только сценарии, без заморозки** — в госте:
+
+  ```bash
+  sudo sh guest-hooks/linux/install.sh --check
+  ```
+
+- **Весь путь через агент на KVM** — на хосте. Пока гость заморожен, запись в
+  нём стоит, поэтому размораживайте сразу:
+
+  ```bash
+  virsh domfsfreeze <имя-ВМ>
+  ```
+
+  ```bash
+  virsh domfsthaw <имя-ВМ>
+  ```
+
+- **Заморожен ли гость сейчас** — ответ `frozen` или `thawed`:
+
+  ```bash
+  virsh qemu-agent-command <имя-ВМ> '{"execute":"guest-fsfreeze-status"}'
+  ```
 
 ---
 
@@ -130,6 +181,7 @@ sequenceDiagram
     PG-->>H: готово
     H-->>A: код 0
     A->>FS: FIFREEZE
+    Note right of A: замораживает сам агент, не сценарий
     A-->>G: заморожено N файловых систем
     rect rgba(220, 80, 80, 0.12)
         Note over G,FS: запись стоит — гипервизор фиксирует точку

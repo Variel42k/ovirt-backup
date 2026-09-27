@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Variel42k/ovirt-backup/internal/libvirtx"
 	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
@@ -72,6 +73,53 @@ func (s *Server) handleListVMDisks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeList(w, disks)
+}
+
+// guestFilesystemsTimeout — сколько ждать агента гостя: страница не должна
+// висеть на ВМ, где агент завис.
+const guestFilesystemsTimeout = 10 * time.Second
+
+// handleGuestFilesystems — смонтированные файловые системы гостя KVM по данным
+// агента: из них выбирают, что заморозить выборочно. Гость при этом не
+// замораживается. Выключенная ВМ или ВМ без агента дают пустой список: выбирать
+// не из чего, путь можно ввести вручную.
+func (s *Server) handleGuestFilesystems(w http.ResponseWriter, r *http.Request) {
+	srv, err := s.store.GetServer(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	if !srv.Kind.UsesLibvirt() {
+		s.writeError(w, r, badRequest("заморозить только выбранные файловые системы можно на KVM"))
+		return
+	}
+	vm, err := s.store.GetVM(r.Context(), srv.ID, r.PathValue("vmID"))
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	if !vm.Running() || !vm.GuestAgent {
+		writeList(w, []libvirtx.GuestFilesystem{})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), guestFilesystemsTimeout)
+	defer cancel()
+	conn, err := s.libvirt.ForServer(ctx, srv)
+	if err != nil {
+		s.writeError(w, r, badRequest("подключение к гипервизору: %v", err))
+		return
+	}
+	dom, _, err := conn.DomainByUUID(ctx, vm.ID)
+	if err != nil {
+		s.writeError(w, r, badRequest("ВМ на гипервизоре: %v", err))
+		return
+	}
+	filesystems, err := conn.GuestFilesystems(ctx, dom)
+	if err != nil {
+		s.writeError(w, r, badRequest("%v", err))
+		return
+	}
+	writeList(w, filesystems)
 }
 
 func (s *Server) handleListDisks(w http.ResponseWriter, r *http.Request) {

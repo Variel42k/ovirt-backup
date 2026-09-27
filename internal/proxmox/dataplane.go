@@ -15,6 +15,8 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/Variel42k/ovirt-backup/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/sshpool"
+	"github.com/Variel42k/ovirt-backup/internal/sshstats"
 	"github.com/Variel42k/ovirt-backup/internal/sshtrust"
 )
 
@@ -103,12 +105,18 @@ func ValidStorageID(value string) bool {
 // DataPlane is the SSH transport for bytes that the Proxmox REST API cannot
 // return. The key should be restricted to dataPlaneHelper in authorized_keys;
 // every command sent here is a fixed protocol operation with validated fields.
+//
+// Соединения к узлам берутся из общего пула (sshpool): перед каждым бэкапом
+// ВМ служба проверяет узел и затем читает архив, и соединение на каждую
+// операцию засоряло бы журнал узла входами по ключу.
 type DataPlane struct {
 	user            string
 	privateKey      string
 	hostKeyCallback ssh.HostKeyCallback
 	port            int
 	timeout         time.Duration
+	// trust — всё, что определяет проверку узла, для ключа пула.
+	trust string
 }
 
 func NewDataPlane(srv *model.Server, timeout time.Duration) (*DataPlane, error) {
@@ -130,7 +138,8 @@ func NewDataPlane(srv *model.Server, timeout time.Duration) (*DataPlane, error) 
 		return nil, fmt.Errorf("ключи узлов Proxmox: %w", err)
 	}
 	return &DataPlane{user: strings.TrimSpace(srv.SSHUsername), privateKey: srv.SSHPrivateKey,
-		hostKeyCallback: hostKeyCallback, port: port, timeout: timeout}, nil
+		hostKeyCallback: hostKeyCallback, port: port, timeout: timeout,
+		trust: sshpool.Key(srv.SSHHostKey, fmt.Sprint(srv.SSHTrustAnyHostKey))}, nil
 }
 
 // Probe verifies authentication, host pinning and the helper protocol without
@@ -197,17 +206,28 @@ func (d *DataPlane) Restore(ctx context.Context, host, kind, vmID, storage, name
 	return d.run(ctx, host, command, archive, io.Discard)
 }
 
+// session открывает сессию на соединении с узлом из пула.
+func (d *DataPlane) session(ctx context.Context, host string) (*ssh.Session, func(broken bool), error) {
+	key := sshpool.Key("proxmox-data-plane", strings.TrimSpace(host), fmt.Sprint(d.port), d.user, d.privateKey, d.trust)
+	session, done, err := sshpool.Shared().Session(ctx, key, func(ctx context.Context) (*ssh.Client, error) {
+		return d.connect(ctx, host)
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("SSH к узлу %s: %w", host, err)
+	}
+	return session, done, nil
+}
+
+// Прерывание — отмена или ошибка потребителя — закрывает сессию и помечает
+// соединение негодным: пул закроет его, как только им перестанут пользоваться
+// другие операции, и sshd завершит vzdump на узле.
 func (d *DataPlane) stream(ctx context.Context, host, command string, consume func(io.Reader) error) error {
-	client, err := d.connect(ctx, host)
+	session, release, err := d.session(ctx, host)
 	if err != nil {
 		return err
 	}
-	defer client.Close()
-	session, err := client.NewSession()
-	if err != nil {
-		return fmt.Errorf("открытие SSH-сессии на %s: %w", host, err)
-	}
-	defer session.Close()
+	broken := false
+	defer func() { release(broken) }()
 	stdout, err := session.StdoutPipe()
 	if err != nil {
 		return err
@@ -222,7 +242,7 @@ func (d *DataPlane) stream(ctx context.Context, host, command string, consume fu
 	go func() {
 		select {
 		case <-ctx.Done():
-			_ = client.Close()
+			_ = session.Close()
 		case <-cancelWatch:
 		}
 	}()
@@ -230,31 +250,33 @@ func (d *DataPlane) stream(ctx context.Context, host, command string, consume fu
 	go func() { done <- session.Wait() }()
 	consumeErr := consume(stdout)
 	if consumeErr != nil {
-		_ = client.Close()
+		broken = true
+		_ = session.Close()
 		<-done
 		return consumeErr
 	}
 	select {
 	case err := <-done:
+		if ctx.Err() != nil {
+			broken = true
+			return ctx.Err()
+		}
 		return commandError(host, err, stderr.String())
 	case <-ctx.Done():
-		_ = client.Close()
+		broken = true
+		_ = session.Close()
 		<-done
 		return ctx.Err()
 	}
 }
 
 func (d *DataPlane) run(ctx context.Context, host, command string, stdin io.Reader, stdout io.Writer) error {
-	client, err := d.connect(ctx, host)
+	session, release, err := d.session(ctx, host)
 	if err != nil {
 		return err
 	}
-	defer client.Close()
-	session, err := client.NewSession()
-	if err != nil {
-		return fmt.Errorf("открытие SSH-сессии на %s: %w", host, err)
-	}
-	defer session.Close()
+	broken := false
+	defer func() { release(broken) }()
 	stderr := &limitedBuffer{limit: 64 << 10}
 	session.Stdin, session.Stdout, session.Stderr = stdin, stdout, stderr
 	done := make(chan error, 1)
@@ -263,7 +285,8 @@ func (d *DataPlane) run(ctx context.Context, host, command string, stdin io.Read
 	case err := <-done:
 		return commandError(host, err, stderr.String())
 	case <-ctx.Done():
-		_ = client.Close()
+		broken = true
+		_ = session.Close()
 		<-done
 		return ctx.Err()
 	}
@@ -291,6 +314,7 @@ func (d *DataPlane) connect(ctx context.Context, host string) (*ssh.Client, erro
 	conn, channels, requests, err := ssh.NewClientConn(raw, addr, &ssh.ClientConfig{
 		User: d.user, Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)}, HostKeyCallback: d.hostKeyCallback, Timeout: d.timeout,
 	})
+	sshstats.Record(addr, sshstats.Proxmox, err)
 	if err != nil {
 		_ = raw.Close()
 		return nil, fmt.Errorf("SSH-аутентификация на %s: %w", addr, err)

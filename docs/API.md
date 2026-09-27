@@ -707,6 +707,7 @@ ovirt-aaa-jdbc-tool user password-reset jhvirt-backup
 | `GET` | `/servers/{id}/clusters` `\|hosts\|vms\|disks\|storage-domains` | кэш инвентаря |
 | `GET` | `/servers/{id}/vms/{vmID}` | одна ВМ |
 | `GET` | `/servers/{id}/vms/{vmID}/disks` | диски ВМ |
+| `GET` | `/servers/{id}/vms/{vmID}/filesystems` | тома гостя KVM по данным агента — для выборочной заморозки; гость не замораживается |
 | `GET` | `/servers/{id}/restore-networks` | доступные vNIC profiles oVirt или сети KVM для восстановления |
 | `POST` | `/servers/{id}/vms/{vmID}/action` | питание ВМ |
 | `PUT` | `/servers/{id}/vms/{vmID}/policy` | требуемое состояние |
@@ -728,6 +729,20 @@ ovirt-aaa-jdbc-tool user password-reset jhvirt-backup
 `GET /servers/{id}/vms/{vmID}/backup-options` возвращает оценку ситуации,
 варианты с обоснованием и готовые расписания — то, из чего строится экран выбора
 стратегии.
+
+Для oVirt и KVM в оценке есть `assessment.space_forecast` — прогноз места под
+горячий бэкап. `places` — домены хранения oVirt или каталог scratch на хосте
+KVM. У каждого места: `need` — пик записи гостя за один прошлый бэкап, `free` —
+свободно сейчас, `reserve` и `start_min` — пороги сторожа, `status` — `ok`,
+`tight`, `short`, `no_start` или `unknown`. Значение `-1` у `need` или `free`
+значит «неизвестно». Предупреждения прогноза попадают и в
+`assessment.warnings`. Прогноз только советует и запуск не блокирует.
+
+`GET /backups/{id}/telemetry` кроме хронологии и замеров возвращает `impact` —
+задержки гостя за время бэкапа (`write_during`, `read_during`) против обычных за
+сутки до него (`write_baseline`, `read_baseline`): `p50_us`, `p95_us`,
+`samples`. `level` — `none`, `noticeable`, `strong` или `unknown`, `note` —
+пояснение. Поля нет, если замеров за время запуска нет.
 
 ## Хранилища
 
@@ -792,6 +807,7 @@ S3 endpoint не передаёт данные через сервис и пот
   "require_consistency": true,         // не достигнут — запуск failed, копия не снимается
   "max_freeze_seconds": 15,            // предел заморозки гостя; 0 — backup.max_freeze
   "freeze_by": "engine",               // кто замораживает: service (служба) | engine (движок oVirt, require_consistency) | mixed (служба, движок подстраховывает)
+  "freeze_mountpoints": [],            // только KVM: какие ФС гостя замораживать, например ["/var/lib/postgresql"]; пусто — все
   "quiesce": true,                     // ведомый: сервер выводит его из consistency
   "export_qcow2": true,
   "verify_after": "boot",
@@ -824,7 +840,7 @@ S3 endpoint не передаёт данные через сервис и пот
 | `GET` | `/backups/{id}` | запуск вместе с дисками |
 | `GET` | `/backups/{id}/chain` | цепочка, от которой зависит эта точка |
 | `GET` | `/backups/{id}/events` | хронология этапов запуска и длительность заморозки |
-| `GET` | `/backups/{id}/telemetry` | хронология, счётчики СУБД и I/O ВМ за окно запуска |
+| `GET` | `/backups/{id}/telemetry` | хронология, счётчики СУБД, I/O ВМ за окно запуска и влияние бэкапа на ВМ |
 | `GET` | `/backups/{id}/copies` | физические копии точки и их состояние |
 | `GET` | `/backups/{id}/artifacts` | управляемые производные артефакты, включая QCOW2 |
 | `DELETE` | `/backups/{id}` | удалить данные из хранилища |

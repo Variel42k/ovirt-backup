@@ -41,6 +41,7 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/scheduler"
 	"github.com/Variel42k/ovirt-backup/internal/secret"
 	"github.com/Variel42k/ovirt-backup/internal/setup"
+	"github.com/Variel42k/ovirt-backup/internal/sshpool"
 	"github.com/Variel42k/ovirt-backup/internal/store"
 )
 
@@ -304,6 +305,9 @@ func run() error {
 	// hypervisor and redials when it dies.
 	libvirtPool := libvirtx.NewPool(loadServer, cfg.Monitor.Timeout, log)
 	defer libvirtPool.Close()
+	// Хосты СУБД и узлы Proxmox тоже получают соединения из пула, чтобы не
+	// входить на них заново на каждую операцию; при остановке он закрывается.
+	defer sshpool.Shared().Close()
 	proxmoxPool := proxmox.NewPool(loadServer, cfg.Monitor.Timeout)
 
 	bus := events.NewBus(128)

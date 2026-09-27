@@ -3,6 +3,7 @@ package backup
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/Variel42k/ovirt-backup/internal/model"
@@ -35,6 +36,10 @@ type Assessment struct {
 	// формата. Они бэкапятся полностью и на горячую; это не «незащищённые»
 	// диски, и интерфейс должен уметь сказать об этом прямо.
 	RawDisks int `json:"raw_disks"`
+	// Libvirt — ВМ на KVM. Там инкремент требует карты изменений на всех
+	// дисках ВМ: смешанного бэкапа, как в oVirt 4.4.5+, у libvirt нет, и один
+	// raw-диск делает каждый запуск полным.
+	Libvirt bool `json:"libvirt"`
 
 	// Наблюдаемая пропускная способность, байт/с. 0 — истории ещё нет.
 	ObservedThroughput int64 `json:"observed_throughput"`
@@ -50,8 +55,40 @@ type Assessment struct {
 
 	QemuImgAvailable bool `json:"qemu_img_available"`
 
+	// Space — хватит ли места под записи гостя, пока идёт горячий бэкап.
+	// Только совет: запуск по-прежнему решают сторожа места.
+	Space *SpaceForecast `json:"space_forecast,omitempty"`
+
 	// Замечания — то, что стоит починить до настройки расписания.
 	Warnings []string `json:"warnings,omitempty"`
+}
+
+// backupAPI — движок умеет горячую полную копию с точкой отсчёта: Backup API
+// в oVirt, pull-бэкап в libvirt.
+func (a Assessment) backupAPI() bool { return a.EngineSupportsCBT && a.DiskCount > 0 }
+
+// incrementalReady — инкременты возможны. В oVirt хватает одного диска с
+// режимом incremental: остальные движок отдаёт в том же бэкапе целиком. На
+// KVM карта изменений нужна на всех дисках, иначе драйвер снимает полную.
+func (a Assessment) incrementalReady() bool {
+	if !a.backupAPI() || a.CBTEnabled == 0 {
+		return false
+	}
+	return !a.Libvirt || a.CBTEnabled == a.DiskCount
+}
+
+// rawDiskNames — диски без карты изменений, для подсказок.
+func (a Assessment) rawDiskNames() (string, int64) {
+	var names []string
+	var used int64
+	for _, d := range a.Disks {
+		if d.CBTBlocker == "" || d.NotBackedUp != "" {
+			continue
+		}
+		names = append(names, d.Alias)
+		used += d.ActualSize
+	}
+	return strings.Join(names, ", "), used
 }
 
 // FullBytes — ожидаемый объём полной копии: по последнему полному запуску,
@@ -189,6 +226,7 @@ func (e *Engine) Recommend(ctx context.Context, serverID, vmID, storageTargetID 
 		VMStatus:          vm.Status,
 		VMRunning:         vm.Running(),
 		EngineSupportsCBT: srv.SupportsCBT,
+		Libvirt:           srv.Kind.UsesLibvirt(),
 		GuestAgent:        vm.GuestAgent,
 		QemuImgAvailable:  QemuImgAvailable(e.cfg.QemuImgPath),
 	}
@@ -265,8 +303,16 @@ func (e *Engine) Recommend(ctx context.Context, serverID, vmID, storageTargetID 
 	}
 	if a.CBTEnabled > 0 && a.CBTEnabled < a.CBTPossible {
 		a.Warnings = append(a.Warnings, fmt.Sprintf(
-			"инкрементальный режим включён только на %d дисках из %d — инкременты для этой ВМ работать не будут, пока не включён на всех",
+			"режим incremental включён на %d дисках из %d: остальные в каждом инкременте копируются целиком. "+
+				"Включите режим и на них, чтобы копировались только изменения",
 			a.CBTEnabled, a.CBTPossible))
+	}
+	if a.Libvirt && a.RawDisks > 0 && a.DiskCount > 0 {
+		names, used := a.rawDiskNames()
+		a.Warnings = append(a.Warnings, fmt.Sprintf(
+			"на KVM инкременты невозможны, пока у ВМ есть raw-диски (%s, занято %s): каждый запуск — полная "+
+				"копия на горячую. Переведите их в qcow2, чтобы копировались только изменения",
+			names, humanBytes(used)))
 	}
 	if a.VMRunning && !a.GuestAgent {
 		a.Warnings = append(a.Warnings,
@@ -277,6 +323,9 @@ func (e *Engine) Recommend(ctx context.Context, serverID, vmID, storageTargetID 
 			a.Warnings = append(a.Warnings, fmt.Sprintf(
 				"диск %s общий (shareable) и в бэкап не попадёт — такие диски нужно защищать отдельно", d.Alias))
 		}
+	}
+	if a.Space = e.forecastSpace(ctx, srv, vm, disks); a.Space != nil {
+		a.Warnings = append(a.Warnings, a.Space.Warnings...)
 	}
 
 	return &Recommendation{
@@ -345,8 +394,15 @@ func buildOptions(a Assessment) []Option {
 		return d.Round(time.Minute).String()
 	}
 
-	cbtReady := a.EngineSupportsCBT && a.CBTPossible > 0 && a.CBTEnabled == a.CBTPossible
+	// Backup API снимает полную копию любых дисков — raw и qcow2 — без
+	// временного снапшота. Инкремент нужен хотя бы одному диску с режимом
+	// incremental: остальные движок (4.4.5+) отдаёт в том же бэкапе целиком.
+	backupAPI := a.backupAPI()
+	incrementalReady := a.incrementalReady()
+	mixed := incrementalReady && !a.Libvirt && a.CBTEnabled < a.DiskCount
 	hasHistory := a.BackupCount > 0
+	rawNames, rawUsed := a.rawDiskNames()
+	kvmRaw := a.Libvirt && a.RawDisks > 0
 
 	fullEstimate := a.FullBytes()
 
@@ -361,7 +417,7 @@ func buildOptions(a Assessment) []Option {
 		{
 			Type:            model.BackupFull,
 			Title:           model.BackupFull.Title(),
-			Available:       cbtReady,
+			Available:       backupAPI,
 			Impact:          "ВМ продолжает работать; движок держит точку согласованности на время чтения",
 			EstimatedBytes:  fullEstimate,
 			SuggestedVerify: model.VerifyManifest,
@@ -369,7 +425,7 @@ func buildOptions(a Assessment) []Option {
 		{
 			Type:            model.BackupIncremental,
 			Title:           model.BackupIncremental.Title(),
-			Available:       cbtReady,
+			Available:       incrementalReady,
 			Impact:          "ВМ продолжает работать; читаются только изменённые блоки",
 			EstimatedBytes:  incrementEstimate,
 			SuggestedVerify: model.VerifyChain,
@@ -377,7 +433,7 @@ func buildOptions(a Assessment) []Option {
 		{
 			Type:            model.BackupDifferential,
 			Title:           model.BackupDifferential.Title(),
-			Available:       cbtReady,
+			Available:       incrementalReady,
 			Impact:          "ВМ продолжает работать; читается всё, что изменилось с последнего полного",
 			EstimatedBytes:  incrementEstimate * 5,
 			SuggestedVerify: model.VerifyChain,
@@ -417,31 +473,41 @@ func buildOptions(a Assessment) []Option {
 			switch {
 			case !a.EngineSupportsCBT:
 				o.Blocker = "движок не поддерживает Backup API — используйте полный через снапшот"
-			case a.CBTPossible == 0:
-				o.Blocker = fmt.Sprintf(
-					"все диски ВМ (%d) в формате, не поддерживающем отслеживание изменённых блоков. "+
-						"Это не мешает бэкапу: выберите «%s» — копия будет полной и снимется без остановки ВМ",
-					a.RawDisks, model.BackupSnapshot.Title())
-				o.Prerequisites = append(o.Prerequisites,
-					"для инкрементов диски нужно перевести в qcow2 (тонкое выделение)")
-			case a.CBTEnabled < a.CBTPossible:
-				o.Blocker = fmt.Sprintf("инкрементальный режим включён на %d дисках из %d", a.CBTEnabled, a.CBTPossible)
-				o.Prerequisites = append(o.Prerequisites, "включить режим incremental на всех дисках ВМ")
+			case a.DiskCount == 0:
+				o.Blocker = "у ВМ нет дисков с данными"
+			case kvmRaw:
+				o.Rationale = "полная копия на горячую через pull-бэкап libvirt; checkpoint не создаётся, " +
+					"пока у ВМ есть raw-диски, поэтому каждый запуск читает весь занятый объём"
+			case a.CBTEnabled == 0:
+				o.Rationale = "полная копия через Backup API без временного снапшота — для дисков любого формата, " +
+					"в том числе raw; ВМ продолжает работать"
 			default:
 				o.Rationale = "база для инкрементов: создаёт checkpoint, от которого считаются все последующие копии"
 			}
 		case model.BackupIncremental:
 			switch {
 			case o.Blocker != "":
+			case !a.EngineSupportsCBT:
+				o.Blocker = "движок не поддерживает Backup API"
 			case a.CBTPossible == 0:
 				o.Blocker = fmt.Sprintf(
 					"инкремент опирается на карту изменённых блоков, а её негде хранить: " +
 						"диски в формате, где нет заголовка qcow2. Полная копия при этом доступна и снимается на горячую")
 				o.Prerequisites = append(o.Prerequisites,
 					"перевести диски в qcow2 (тонкое выделение) — иначе инкременты невозможны в принципе")
-			case !cbtReady:
-				o.Blocker = "требуется включённое отслеживание изменённых блоков"
-				o.Prerequisites = append(o.Prerequisites, "включить режим incremental на всех дисках ВМ")
+			case kvmRaw:
+				o.Blocker = kvmRawBlocker(a.RawDisks, rawNames)
+				o.Prerequisites = append(o.Prerequisites, kvmRawPrerequisite(rawNames, rawUsed, incrementEstimate))
+			case a.CBTEnabled == 0:
+				o.Blocker = "ни на одном диске не включён режим incremental — каждый запуск был бы полным"
+				o.Prerequisites = append(o.Prerequisites, "включить режим incremental на qcow2-дисках ВМ")
+			case mixed:
+				o.Rationale = fmt.Sprintf("смешанный бэкап (oVirt 4.4.5+): %d из %d дисков копируются инкрементом, "+
+					"остальные — целиком в каждом запуске", a.CBTEnabled, a.DiskCount)
+				if a.CBTEnabled < a.CBTPossible {
+					o.Prerequisites = append(o.Prerequisites,
+						"включить режим incremental на остальных qcow2-дисках, чтобы и они копировались изменениями")
+				}
 			case !hasHistory:
 				o.Rationale = "первый запуск автоматически станет полным, дальше будут копироваться только изменения"
 			default:
@@ -449,28 +515,33 @@ func buildOptions(a Assessment) []Option {
 					humanBytes(incrementEstimate))
 			}
 		case model.BackupDifferential:
-			if a.CBTPossible == 0 {
+			switch {
+			case !a.EngineSupportsCBT:
+				o.Blocker = "движок не поддерживает Backup API"
+			case a.CBTPossible == 0:
 				o.Blocker = "разностный бэкап тоже опирается на карту изменённых блоков, " +
 					"а формат дисков её не поддерживает"
 				o.Prerequisites = append(o.Prerequisites,
 					"перевести диски в qcow2 (тонкое выделение)")
-			} else if !cbtReady {
-				o.Blocker = "требуется включённое отслеживание изменённых блоков"
-				o.Prerequisites = append(o.Prerequisites, "включить режим incremental на всех дисках ВМ")
-			} else {
+			case kvmRaw:
+				o.Blocker = kvmRawBlocker(a.RawDisks, rawNames)
+				o.Prerequisites = append(o.Prerequisites, kvmRawPrerequisite(rawNames, rawUsed, incrementEstimate))
+			case a.CBTEnabled == 0:
+				o.Blocker = "ни на одном диске не включён режим incremental — каждый запуск был бы полным"
+				o.Prerequisites = append(o.Prerequisites, "включить режим incremental на qcow2-дисках ВМ")
+			default:
 				o.Rationale = "компромисс: копий больше, чем при инкрементах, зато восстановление всегда из двух точек"
 			}
 		case model.BackupSnapshot:
-			if a.DiskCount == 0 {
+			switch {
+			case a.DiskCount == 0:
 				o.Blocker = "у ВМ нет дисков с данными"
-			} else if a.CBTPossible == 0 {
-				o.Rationale = "единственный способ для дисков без qcow2 — и полноценный: " +
-					"копия снимается без остановки ВМ и содержит все данные, " +
-					"платой идёт чтение всего занятого объёма при каждом запуске"
-			} else if !cbtReady {
-				o.Rationale = "работает всегда, независимо от формата дисков и версии движка"
-			} else {
-				o.Rationale = "запасной вариант: полная копия без отслеживания изменений, но каждый раз читается весь занятый объём"
+			case !a.EngineSupportsCBT:
+				o.Rationale = "единственный горячий способ на движке без Backup API: копия снимается без остановки ВМ, " +
+					"платой идёт чтение всего занятого объёма и слияние снапшота после каждого запуска"
+			default:
+				o.Rationale = "запасной вариант: «полный» через Backup API делает то же без временного снапшота " +
+					"и его слияния после копирования"
 			}
 		case model.BackupConfig:
 			o.Rationale = "секунды на выполнение; защищает от потери описания ВМ, но не от потери данных"
@@ -487,16 +558,39 @@ func buildOptions(a Assessment) []Option {
 	// Exactly one recommendation: a list where everything is recommended is a
 	// list where nothing is.
 	switch {
-	case cbtReady:
+	case incrementalReady:
 		markRecommended(options, model.BackupIncremental,
 			"ежедневные инкременты с периодическим полным — минимум нагрузки и минимум места")
+	case backupAPI && a.Libvirt:
+		markRecommended(options, model.BackupFull, "полная копия на горячую — ВМ продолжает работать")
+	case backupAPI:
+		markRecommended(options, model.BackupFull,
+			"полная копия через Backup API без временного снапшота — ВМ продолжает работать")
 	case a.DiskCount > 0:
 		markRecommended(options, model.BackupSnapshot,
-			"единственный способ снять полную копию этой ВМ без остановки")
+			"единственный способ снять полную копию этой ВМ без остановки на этом движке")
 	default:
 		markRecommended(options, model.BackupConfig, "у ВМ нет данных для копирования")
 	}
 	return options
+}
+
+// kvmRawBlocker — почему на KVM нет инкрементов, пока у ВМ есть raw-диски.
+func kvmRawBlocker(raw int, names string) string {
+	return fmt.Sprintf("на KVM инкремент требует qcow2 на всех дисках ВМ, а в raw — %d (%s): карту изменённых "+
+		"блоков хранит только заголовок qcow2, и libvirt снимает такую ВМ полной копией. "+
+		"Полная копия при этом доступна и снимается на горячую", raw, names)
+}
+
+// kvmRawPrerequisite — что сделать и что это даст.
+func kvmRawPrerequisite(names string, used, increment int64) string {
+	s := fmt.Sprintf("перевести в qcow2 диски %s (qemu-img convert на остановленной ВМ или перенос данных "+
+		"на новый qcow2-диск)", names)
+	if used > 0 && increment > 0 && increment < used {
+		s += fmt.Sprintf(": сейчас каждый запуск читает их целиком — около %s, "+
+			"а инкремент читал бы порядка %s", humanBytes(used), humanBytes(increment))
+	}
+	return s
 }
 
 func markRecommended(options []Option, typ model.BackupType, why string) {
@@ -521,7 +615,9 @@ func markRecommended(options []Option, typ model.BackupType, why string) {
 // переживают это штатно. Заморозку и её цену администратор выбирает в задании
 // сам, когда она нужна.
 func buildPresets(a Assessment) []SchedulePreset {
-	cbtReady := a.EngineSupportsCBT && a.CBTPossible > 0 && a.CBTEnabled == a.CBTPossible
+	// Когда возможны инкременты и горячая полная копия — см. incrementalReady.
+	backupAPI := a.backupAPI()
+	incrementalReady := a.incrementalReady()
 
 	increment := a.AverageIncrement
 	if increment <= 0 {
@@ -537,7 +633,7 @@ func buildPresets(a Assessment) []SchedulePreset {
 			FullEvery:   7,
 			Retention:   model.RetentionPolicy{KeepLast: 3, KeepDaily: 7, KeepWeekly: 4, KeepMonthly: 6},
 			VerifyAfter: model.VerifyChain,
-			Recommended: cbtReady,
+			Recommended: incrementalReady,
 			// 7 инкрементов + полная копия в неделю, на горизонте месяца.
 			EstimatedFootprint: (increment*7 + a.FullBytes()) * 4,
 		},
@@ -555,12 +651,12 @@ func buildPresets(a Assessment) []SchedulePreset {
 		{
 			Name:               "Еженедельная полная копия",
 			Description:        "Одна полная копия в неделю по воскресеньям в 02:00. Просто и предсказуемо, места занимает больше всего.",
-			Type:               pickFullType(cbtReady),
+			Type:               pickFullType(backupAPI),
 			Schedule:           "0 2 * * 0",
 			FullEvery:          1,
 			Retention:          model.RetentionPolicy{KeepLast: 2, KeepWeekly: 4, KeepMonthly: 3},
 			VerifyAfter:        model.VerifyManifest,
-			Recommended:        !cbtReady,
+			Recommended:        !incrementalReady,
 			EstimatedFootprint: a.FullBytes() * 4,
 		},
 		{
@@ -578,8 +674,10 @@ func buildPresets(a Assessment) []SchedulePreset {
 	return presets
 }
 
-func pickFullType(cbtReady bool) model.BackupType {
-	if cbtReady {
+// pickFullType — полная копия через Backup API, если он есть, иначе через
+// временный снапшот.
+func pickFullType(backupAPI bool) model.BackupType {
+	if backupAPI {
 		return model.BackupFull
 	}
 	return model.BackupSnapshot

@@ -345,7 +345,12 @@ type Disk struct {
 	// driver during a boot verification.
 	Interface string `json:"-"`
 	// backup: none | incremental — включает changed block tracking.
-	Backup         string `json:"backup"`
+	Backup string `json:"backup"`
+	// BackupMode есть только у дисков конкретного бэкапа (oVirt 4.4.5+):
+	// full — диск в этом бэкапе отдан целиком, incremental — только изменения
+	// с from_checkpoint. Движок решает сам: диск без режима incremental или
+	// подключённый после checkpoint отдаётся целиком.
+	BackupMode     string `json:"backup_mode"`
 	Status         string `json:"status"`
 	ContentType    string `json:"content_type"`
 	StorageType    string `json:"storage_type"`

@@ -15,6 +15,11 @@ Mermaid — он тоже читается.
 
 ## Коротко
 
+- **Горячему бэкапу заморозка не нужна.** ВМ и приложения в ней работают и
+  без неё: точку фиксирует гипервизор, а служба читает её, пока гость пишет.
+  Заморозка же останавливает запись в госте, поэтому новые задания её не
+  включают. Как не остановить приложения — в
+  [разделе 2](#2-горячий-бэкап-вм-и-приложения-продолжают-работать).
 - **Заморозка — это стоп-кадр для файловых систем.** Гость сбрасывает на диск
   всё, что держал в памяти, и перестаёт писать, пока гипервизор фиксирует точку
   копии. Потом запись продолжается, а копия читается уже из зафиксированной
@@ -22,7 +27,7 @@ Mermaid — он тоже читается.
 - **Замораживает агент внутри ВМ** — qemu-guest-agent. Служба только просит об
   этом через libvirt или через движок oVirt. Ни один сценарий из комплекта
   файловые системы не замораживает, подробнее — в
-  [разделе 2](#кто-именно-замораживает).
+  [разделе 3](#кто-именно-замораживает).
 - **Перед заморозкой агент запускает сценарии.** Сценарий PostgreSQL выполняет
   `CHECKPOINT`, сценарий MySQL берёт блокировку записи: так СУБД успевает
   подготовиться к снимку.
@@ -63,7 +68,143 @@ flowchart LR
 
 ---
 
-## 2. Кто участвует
+## 2. Горячий бэкап: ВМ и приложения продолжают работать
+
+Горячий бэкап не должен останавливать ни ВМ, ни приложения в ней. ВМ не
+выключается ни на одном пути: гипервизор фиксирует точку, и служба читает её,
+пока гость работает. Приложения страдают иначе — у них встаёт запись на диск.
+Заморозка как раз и останавливает запись, поэтому по умолчанию служба гостя не
+замораживает.
+
+### Что может остановить запись в госте
+
+| Причина | Сколько стоит запись | Когда бывает | Как избежать |
+|---|---|---|---|
+| заморозка службой | от заморозки до фиксации точки: на KVM меньше секунды, на oVirt в режиме «Служба» — вся подготовка бэкапа, но не дольше предела | уровень `filesystem` или `application` | уровень `crash`; на oVirt — режим «Движок»; на KVM — заморозка только нужных файловых систем |
+| заморозка движком oVirt | доли секунды | режим «Движок»; без него движок тоже пробует заморозить гостя с работающим агентом | служба это не отключает; приложения такую паузу обычно не замечают |
+| заморозка `vzdump` | доли секунды | Proxmox с `agent=1` | опция агента ВМ `freeze-fs-on-backup=0` |
+| блокировка MySQL | с `FLUSH TABLES WITH READ LOCK` до разморозки; если блокировку задерживают длинные запросы — до `JHVIRT_HOOK_TIMEOUT`, 30 с | уровень `application` со сценарием MySQL | уровень `crash` или логический дамп |
+| неснятая заморозка | пока гостя не разморозят | сбой вызова, связи или службы во время заморозки | сторож предела и разморозка после ошибки — [раздел 7](#7-предел-заморозки-и-сторож) |
+| место и нагрузка | от замедления до паузы ВМ | мало места на домене или под scratch, медленное хранилище | сторожа места и предел чтения — [HOT-BACKUP.md](HOT-BACKUP.md#3-чем-бэкап-может-помешать-работающей-вм) |
+
+> [!TIP]
+> Чтобы приложения не заметили бэкап:
+> - оставьте уровень `crash` — это умолчание для новых заданий, разового
+>   бэкапа и готовых расписаний;
+> - согласованные копии СУБД снимайте логическими дампами: они запись не
+>   останавливают вовсе, см.
+>   [OPERATIONS.md](OPERATIONS.md#логические-дампы-субд);
+> - если заморозка всё же нужна, на oVirt выбирайте режим «Движок», на KVM —
+>   заморозку только тома СУБД.
+
+> [!WARNING]
+> Задания oVirt, созданные до появления выбора режима, замораживают силами
+> службы. Запись в госте стоит всю подготовку бэкапа на движке: на oVirt 4.5
+> обычно 20 секунд и больше, но не дольше предела заморозки, по умолчанию 60 с.
+> Узлу Kubernetes или нагруженной СУБД этого хватит, чтобы упасть. Переведите
+> такие задания на уровень `crash` или режим «Движок». На странице заданий они
+> помечены «замораживает служба» и перечислены в предупреждении над таблицей;
+> сами задания служба не меняет.
+
+### Где заморозка в горячем запуске
+
+Заморозка — короткий эпизод в начале запуска. Всё долгое служба делает до неё
+или после разморозки.
+
+```mermaid
+sequenceDiagram
+    participant S as Служба
+    participant H as Гипервизор
+    participant G as Гость
+
+    S->>H: уборка остатков прошлого запуска
+    S->>H: проверка места на домене или под scratch
+    rect rgba(220, 80, 80, 0.12)
+        Note over S,G: запись может стоять только здесь и только при заморозке
+        opt уровень filesystem или application
+            S->>H: заморозь
+            H->>G: сценарии СУБД, затем FIFREEZE
+        end
+        S->>H: зафиксируй точку
+        H-->>S: точка готова
+        opt гость заморожен
+            S->>H: разморозь
+            H->>G: FITHAW
+        end
+    end
+    loop пока не прочитаны все диски
+        G->>H: пишет как обычно
+        S->>H: читает блоки точки
+    end
+    S->>H: закрыть бэкап
+```
+
+- **До заморозки** служба ждёт слияния брошенного снапшота, закрывает
+  брошенный бэкап и проверяет место. Эти шаги могут идти минутами, и гость в
+  это время работает. Если места мало, запуск останавливается ещё до
+  заморозки.
+- **Под заморозкой** остаётся только фиксация точки. На KVM это меньше
+  секунды. На oVirt в режиме «Движок» заморозка тоже укладывается в доли
+  секунды, потому что движок морозит уже после подготовки.
+- **Разморозка** идёт сразу после фиксации точки, до чтения дисков.
+- **Чтение дисков**, сторожа места и закрытие бэкапа идут на работающем госте.
+
+### Какой путь как замораживает
+
+| Путь | Когда используется | Кто замораживает | Что выбирается в задании | Сколько стоит запись при заморозке |
+|---|---|---|---|---|
+| oVirt, Backup API: полный, инкремент, смешанный | движок 4.4+ с любыми дисками: raw, qcow2, смешанные | служба, движок или оба | «Служба», «Движок», «Смешанный» | «Движок» — доли секунды, «Служба» — вся подготовка бэкапа |
+| oVirt, временный снапшот | движок без Backup API или тип «Полный через снапшот» | служба | режим не учитывается | время запроса снапшота |
+| KVM, pull-бэкап libvirt | всегда | служба через libvirt | можно выбрать файловые системы | меньше секунды |
+| Proxmox, `vzdump` | всегда | `vzdump` при `agent=1` | ничего | доли секунды, служба её не видит |
+| экспорт OVA | по заданию | никто | ничего | не стоит |
+
+### Смешанный бэкап и откат к полному
+
+Смешанный бэкап на oVirt снимает qcow2-диски изменениями, а raw-диски — целиком.
+Но это один бэкап на движке и одна точка. Значит, и заморозка одна на все
+диски: отдельной паузы для raw-диска нет.
+
+Движок старше 4.4.5 смешанный бэкап отклоняет, и служба открывает бэкап заново,
+уже полным. Что при этом переживает гость, зависит от режима:
+
+- **«Движок»** — отказ приходит раньше заморозки: движок проверяет запрос до
+  того, как обращается к гостю. Лишней паузы нет.
+- **«Служба» и «Смешанный»** — гость уже заморожен, когда приходит отказ.
+  Служба сразу размораживает его, а для полного бэкапа замораживает заново.
+  Первая пауза короткая: отказ приходит без подготовки бэкапа.
+
+```mermaid
+sequenceDiagram
+    participant S as Служба
+    participant E as Движок старше 4.4.5
+    participant G as Гость
+
+    S->>E: заморозь
+    E->>G: freeze
+    S->>E: инкремент от checkpoint, raw-диск целиком
+    E-->>S: 400, диск без режима incremental
+    S->>E: разморозь
+    E->>G: thaw
+    Note over S: событие «Инкремент снят полной копией»
+    S->>E: заморозь
+    E->>G: freeze
+    S->>E: полный бэкап
+    E-->>S: точка готова
+    S->>E: разморозь
+    E->>G: thaw
+```
+
+В хронологии такого запуска две пары отметок «Гость заморожен» и «Гость
+разморожен». Вторая заморозка случается один раз, а не каждую ночь: служба
+запоминает отказ, и следующие 7 дней инкременты этой ВМ сразу идут полными,
+с одной заморозкой. Через неделю служба пробует снова — движок могли
+обновить. Как устроен смешанный бэкап — в
+[HOT-BACKUP.md](HOT-BACKUP.md#2а-любая-вм-на-ovirt).
+
+---
+
+## 3. Кто участвует
 
 ```mermaid
 flowchart LR
@@ -162,7 +303,7 @@ flowchart LR
 
 ---
 
-## 3. Что происходит внутри ВМ
+## 4. Что происходит внутри ВМ
 
 ```mermaid
 sequenceDiagram
@@ -201,7 +342,7 @@ sequenceDiagram
 > [!NOTE]
 > Сам агент по таймеру гостя не размораживает. Файловые системы стоят, пока
 > кто-то не пришлёт команду «разморозь». Об этом заботится служба — см.
-> [раздел 6](#6-предел-заморозки-и-сторож).
+> [раздел 7](#7-предел-заморозки-и-сторож).
 
 ### Строгий диспетчер
 
@@ -306,7 +447,7 @@ DO SLEEP(120);
 
 ---
 
-## 4. Как служба решает, морозить ли
+## 5. Как служба решает, морозить ли
 
 ```mermaid
 flowchart TD
@@ -343,7 +484,7 @@ flowchart TD
 
 ---
 
-## 5. Сколько гость стоит замороженным
+## 6. Сколько гость стоит замороженным
 
 Этим режимы и отличаются друг от друга.
 
@@ -502,10 +643,29 @@ gantt
 ### Другие пути
 
 - **KVM** — замораживает всегда служба. Режимы «Движок» и «Смешанный» API не
-  примет: там нет движка.
-- **oVirt через временный снапшот** — для дисков и движков без отслеживания
-  изменений. Замораживает всегда служба, какой бы режим ни был выбран в
-  задании. Есть тонкость, см. [раздел 9](#9-подводные-камни).
+  примет: там нет движка. Зато только на KVM можно заморозить не все
+  файловые системы, а перечисленные в поле задания «Заморозить только эти
+  файловые системы» (`freeze_mountpoints`). libvirt передаёт список агенту
+  командой `guest-fsfreeze-freeze-list`, и сценарии `fsfreeze-hook` агент
+  вызывает так же. Нужно узлам Kubernetes: заморозить том СУБД, не
+  останавливая запись etcd и корня. Остальные файловые системы в такой копии —
+  как после сбоя питания. Разморозка всегда общая.
+
+  Указывать нужно точки монтирования отдельных томов (`findmnt` в госте):
+  обычный каталог агент молча пропускает. Если из списка не заморожено ничего,
+  служба считает заморозку неудачной, а не приписывает точке уровень, которого
+  нет.
+
+  Поле есть и в задании, и в разовом бэкапе со страницы ВМ. Когда ВМ одна,
+  поле предлагает её тома: служба спрашивает агента `guest-get-fsinfo` через
+  libvirt (`GET /servers/{id}/vms/{vmID}/filesystems`). Гость при этом не
+  замораживается, а зависший агент ждут не дольше 10 секунд.
+- **oVirt через временный снапшот** — для движков без Backup API и для типа
+  «Полный через снапшот». Диски raw и диски без отслеживания изменений на
+  движке с Backup API идут обычным путём, и режимы заморозки для них те же,
+  что для qcow2. В пути через снапшот замораживает всегда служба, какой бы
+  режим ни был выбран в задании. Есть тонкость, см.
+  [раздел 10](#10-подводные-камни).
 - **Экспорт OVA** — гость не замораживается.
 - **Proxmox** — гостя замораживает сам `vzdump` при `agent=1` в настройках
   гостя, через тот же агент и те же сценарии. Результата служба не видит,
@@ -516,7 +676,7 @@ gantt
 
 ---
 
-## 6. Предел заморозки и сторож
+## 7. Предел заморозки и сторож
 
 Пока служба держит гостя замороженным (режимы «Служба» и «Смешанный», KVM,
 снапшот), за временем следит сторож.
@@ -566,7 +726,7 @@ stateDiagram-v2
 
 ---
 
-## 7. Откуда служба берёт настройки
+## 8. Откуда служба берёт настройки
 
 ```mermaid
 flowchart LR
@@ -591,6 +751,7 @@ flowchart LR
 | Если согласованность не достигнута | `require_consistency` | копия сохраняется как после сбоя питания |
 | Кто замораживает гостя | `freeze_by` | служба; новые задания oVirt в интерфейсе получают «Движок» |
 | Предел заморозки, с | `max_freeze_seconds` | `backup.max_freeze` из настроек службы, по умолчанию 60 с |
+| Заморозить только эти файловые системы (KVM) | `freeze_mountpoints` | все файловые системы гостя |
 
 Что проверяется при сохранении:
 
@@ -610,7 +771,7 @@ flowchart LR
 
 ---
 
-## 8. Что остаётся после запуска
+## 9. Что остаётся после запуска
 
 ```mermaid
 flowchart LR
@@ -641,6 +802,7 @@ flowchart LR
 | Заморозку перехватил движок | смешанный режим передал заморозку движку | — |
 | Точка зафиксирована на движке | дальше данные читаются из точки | от запроса бэкапа |
 | Снапшот создан | путь через временный снапшот | от запроса снапшота |
+| Инкремент снят полной копией | движок отклонил смешанный бэкап, запуск повторён полным; в режимах «Служба» и «Смешанный» гость заморожен второй раз | — |
 
 На графике ввода-вывода в карточке запуска время заморозки показано полосой.
 Оранжевая полоса значит, что гость заморожен прямо сейчас, красная — что
@@ -648,18 +810,33 @@ flowchart LR
 
 ---
 
-## 9. Подводные камни
+## 10. Подводные камни
 
-> [!WARNING]
-> **На KVM заморозка может ждать дольше минуты.** В коде у вызова заморозки
-> стоит предел 60 секунд, но до libvirt он не доходит: библиотека go-libvirt
-> контекста не принимает. Сколько ждать ответа агента, решает сам libvirt
-> (`virsh guest-agent-timeout`), и по умолчанию он ждёт без ограничения. Со
-> 60-секундным пределом разморозки то же самое. Сторож тут не спасает: он
-> включается только после того, как заморозка удалась. Строка «тайм-аут
-> заморозки на KVM» в
-> [OPERATIONS.md](OPERATIONS.md#если-уровень-не-достигнут) описывает замысел,
-> а не нынешнее поведение.
+> [!NOTE]
+> **Предел ожидания агента на KVM задаётся самому домену.** Библиотека
+> go-libvirt не принимает контекст, поэтому перед заморозкой служба
+> выставляет домену тайм-аут ответа агента — 60 секунд
+> (`virDomainAgentSetResponseTimeout`, как `virsh guest-agent-timeout`), а
+> после последней разморозки возвращает умолчание libvirt. Узнать прежнее
+> значение libvirt не даёт: если администратор задавал домену свой тайм-аут,
+> после бэкапа его придётся задать снова. На libvirt старше 5.10 предела нет —
+> остаётся поведение самого libvirt.
+
+> [!NOTE]
+> **Неудачная заморозка тоже заканчивается разморозкой.** Ошибка вызова не
+> значит, что гость не заморожен: libvirt, VDSM или движок могли не дождаться
+> агента, а агент — заморозить файловые системы уже после ответа. Поэтому
+> после любой ошибки заморозки служба размораживает гостя сама:
+> - если агент прямо отказал — упал сценарий, агент не подключён, — хватает
+>   одной попытки;
+> - если ответа не дождались, разморозка повторяется раз в 10 секунд, пока не
+>   пройдёт, но не дольше трёх минут. Всё это время запуск ждёт: оставить гостя
+>   замороженным хуже, чем задержать бэкап.
+>
+> На KVM, если агент всё-таки успел заморозить гостя, в хронологии появится
+> «Гость разморожен» с пояснением. Если разморозить не удалось — «Не удалось
+> разморозить гостя» и красный баннер в карточке запуска: проверьте ВМ
+> вручную.
 
 > [!WARNING]
 > **В пути через снапшот гость размораживается раньше, чем готов снапшот.**
@@ -671,9 +848,17 @@ flowchart LR
 > разморожен» и «Снапшот создан».
 
 > [!NOTE]
+> **На движке старше 4.4.5 смешанный бэкап стоит второй заморозки.** В
+> режимах «Служба» и «Смешанный» гость уже заморожен, когда движок
+> отклоняет смешанный запрос. Служба размораживает его и замораживает снова
+> для полного бэкапа. Отказ служба запоминает на 7 дней, так что вторая
+> заморозка не повторяется каждую ночь. Подробнее — в
+> [разделе 2](#смешанный-бэкап-и-откат-к-полному).
+
+> [!NOTE]
 > **Про агента на oVirt служба узнаёт с опозданием** — из последней
 > синхронизации инвентаря, а не перед самим бэкапом. Что из этого следует — в
-> [разделе 4](#откуда-служба-знает-про-агента).
+> [разделе 5](#откуда-служба-знает-про-агента).
 
 > [!NOTE]
 > **Уровень `application` не проверяется.** Установлены ли сценарии, служба не
@@ -682,7 +867,355 @@ flowchart LR
 
 ---
 
-## 10. Где что в коде
+## 11. Заморозка в коде по шагам
+
+Здесь путь заморозки пройден по коду горячего бэкапа oVirt и KVM. Фрагменты
+сокращены, пропуски отмечены `// …`. Полные функции — по ссылкам в
+[разделе 12](#12-где-что-в-коде).
+
+### Горячий запуск oVirt целиком
+
+На схеме имена функций. Заморозка возможна только внутри функций, выделенных
+красным. До них и после того, как точка готова, гость работает.
+
+```mermaid
+flowchart TD
+    Exec(["Engine.Execute"]) --> Plan["resolvePlan<br/>полный, инкремент или смешанный"]
+    Plan --> Type{"тип запуска"}
+    Type -->|"полный, инкремент, разностный"| CBT["runCBT"]
+    Type -->|"через снапшот"| Snap["runSnapshot<br/>замораживает служба"]
+    CBT --> Prep["waitSnapshotOperations<br/>releaseEngineLeftovers<br/>checkDomainSpace"]
+    Prep --> Open{"open: кто замораживает"}
+    Open -->|Служба| Svc["openBackupServiceFreeze"]
+    Open -->|Движок| Eng["openBackupEngineFreeze"]
+    Open -->|Смешанный| Mix["openBackupMixedFreeze"]
+    Svc --> Start["startEngineBackup<br/>ждёт, пока точка готова"]
+    Eng --> Start
+    Mix --> Start
+    Start --> Rej{"движок отклонил<br/>смешанный бэкап?"}
+    Rej -->|да| Down["downgradeToFull"] --> Open
+    Rej -->|нет| Copy["copyDisksGuarded<br/>чтение дисков"]
+    Copy --> Fin(["finalizeEngineBackup"])
+
+    classDef frozen fill:#ffd7d7,stroke:#c62828,color:#000
+    class Svc,Eng,Mix,Snap frozen
+```
+
+Красным — функции, внутри которых гость может стоять замороженным.
+
+Порядок в `runCBT` — не случайность: уборка и проверка места стоят до
+заморозки.
+
+```go
+// internal/backup/runner.go — runCBT
+e.waitSnapshotOperations(ctx, client, vm, run)
+
+// Бэкап, брошенный прошлым запуском, держит диски: убрать его надо до
+// заморозки, иначе гость простоит замороженным всю уборку.
+if err := e.releaseEngineLeftovers(ctx, client, srv, vm, run, diskIDs); err != nil {
+	return nil, err
+}
+
+// После уборки: она могла вернуть место на домене. До заморозки и до
+// открытия бэкапа: на почти полном домене он не открывается вовсе.
+domains, err := e.checkDomainSpace(ctx, client, vm, disks)
+if err != nil {
+	return nil, err
+}
+
+open := func() (*ovirt.Backup, error) {
+	switch {
+	case req.FreezeBy.Engine():
+		return e.openBackupEngineFreeze(ctx, client, srv, vm, run, req, diskIDs, p, "")
+	case req.FreezeBy.Mixed():
+		return e.openBackupMixedFreeze(ctx, client, srv, vm, run, req, diskIDs, p)
+	default:
+		return e.openBackupServiceFreeze(ctx, client, srv, vm, run, req, diskIDs, p)
+	}
+}
+backup, err := open()
+if backup == nil && err != nil && p.FromCheckpointID != "" && len(p.FullDisks) > 0 && mixedBackupRejected(err) {
+	// …
+	e.event(ctx, run, model.RunEventDowngradedFull, 0, reason+"; копия снимается полной")
+	e.downgradeToFull(ctx, run, &p)
+	backup, err = open()
+}
+```
+
+`open` — замыкание. Повтор после отказа идёт тем же режимом заморозки, что и
+первая попытка, и видит план, который `downgradeToFull` уже сделал полным.
+
+### Решение: морозить ли
+
+Все пути спрашивают одну функцию. Уровень `crash` возвращается раньше, чем
+кто-либо обратится к гостю.
+
+```go
+// internal/backup/consistency.go
+func QuiesceGuest(ctx context.Context, target model.Consistency, require bool, guest GuestState,
+	freeze func(context.Context) error) (Quiesced, error) {
+	// …
+	if !target.NeedsFreeze() {
+		return Quiesced{Level: model.ConsistencyCrash}, nil
+	}
+	if !guest.Running {
+		return Quiesced{Level: target, Note: "ВМ не работала: заморозка не требовалась"}, nil
+	}
+
+	var reason string
+	if !guest.Agent {
+		reason = "гостевой агент не отвечает — заморозка невозможна"
+	} else if err := freeze(ctx); err != nil {
+		reason = fmt.Sprintf("заморозка не удалась: %v", err)
+	} else {
+		return Quiesced{Frozen: true, Level: target}, nil
+	}
+
+	if require {
+		return Quiesced{Level: model.ConsistencyCrash, Note: reason}, fmt.Errorf( /* … */ )
+	}
+	return Quiesced{Level: model.ConsistencyCrash, Note: reason + "; копия снята как после сбоя питания"}, nil
+}
+```
+
+Та же логика в блок-схеме — в [разделе 5](#5-как-служба-решает-морозить-ли).
+Для режима «Движок» есть двойник `EngineQuiesce`: он не замораживает сам, а
+решает, передавать ли движку `require_consistency`.
+
+### Режим «Служба»: как гарантируется разморозка
+
+```go
+// internal/backup/runner.go
+func (e *Engine) openBackupServiceFreeze(ctx context.Context, client *ovirt.Client, srv *model.Server,
+	vm *model.VM, run *model.BackupRun, req RunRequest, diskIDs []string, p plan) (*ovirt.Backup, error) {
+
+	frozenAt, err := e.quiesce(ctx, client, vm, run, req)
+	if err != nil {
+		return nil, err
+	}
+	window := e.guardFreeze(ctx, client, vm, run, req, frozenAt)
+	defer func() { _ = window.Thaw() }()
+
+	backup, err := e.startEngineBackup(ctx, client, srv, vm, run, diskIDs, p, false)
+	if err != nil {
+		return backup, err
+	}
+	// The point in time is fixed once the backup is ready; the guest can run
+	// again while we read the frozen image.
+	if err := window.Thaw(); err != nil {
+		return backup, err
+	}
+	return backup, e.settleFreeze(ctx, run, req, window)
+}
+```
+
+Гостя размораживают три пути, и хотя бы один из них срабатывает всегда:
+
+```mermaid
+flowchart TD
+    Q["quiesce<br/>гость заморожен"] --> W["guardFreeze<br/>сторож с пределом"]
+    W --> S["startEngineBackup"]
+    S -->|"точка готова"| T["window.Thaw сразу"]
+    S -->|"ошибка или отмена"| D["defer window.Thaw<br/>при выходе из функции"]
+    W -.->|"предел истёк"| X["сторож размораживает сам"]
+    T --> Set["settleFreeze<br/>понижает уровень до crash,<br/>если разморозил сторож"]
+    X -.-> Set
+    Set --> Read(["чтение дисков"])
+    D --> Fail(["ошибка запуска,<br/>гость разморожен"])
+```
+
+- **`window.Thaw` можно звать сколько угодно раз.** После первой удачной
+  разморозки функция `thaw` видит нулевой `frozenAt` и ничего не делает.
+- **Контекст разморозки отвязан от запуска** (`context.WithoutCancel`).
+  Отменённый бэкап всё равно разморозит гостя.
+- **`Expired` проверяется после `Thaw`.** Если сторож и служба сошлись в одно
+  мгновение, выигрывает осторожный ответ: уровень понижается.
+
+Сам сторож — таймер на `time.AfterFunc`:
+
+```go
+// internal/backup/freeze_window.go — NewFreezeWindow
+wait := limit - time.Since(frozenAt)
+if wait < 0 {
+	wait = 0
+}
+w.timer = time.AfterFunc(wait, func() {
+	w.mu.Lock()
+	w.expired = true
+	err := w.thaw()
+	w.mu.Unlock()
+	if onExpire != nil {
+		onExpire(err)
+	}
+})
+```
+
+### Неудачная заморозка тоже кончается разморозкой
+
+Ошибка вызова заморозки не значит, что гость не заморожен. libvirt, VDSM или
+движок могли не дождаться агента, а агент — заморозить файловые системы
+позже. Поэтому вызов заморозки всегда обёрнут так:
+
+```go
+// internal/backup/runner.go — quiesce, функция заморозки для QuiesceGuest
+asked := time.Now().UTC()
+if err := client.FreezeFilesystems(ctx, vm.ID); err != nil {
+	e.thawAfterFailedFreeze(ctx, client, vm, run, err)
+	return err
+}
+frozenAt = time.Now().UTC()
+e.event(ctx, run, model.RunEventFrozen, frozenAt.Sub(asked), "")
+```
+
+Сколько раз пробовать разморозить, решает, могла ли заморозка ещё идти:
+
+```mermaid
+flowchart TD
+    F["заморозка вернула ошибку"] --> T["разморозить,<br/>попытка до 60 с"]
+    T --> OK{"удалось?"}
+    OK -->|да| Done(["гость работает"])
+    OK -->|нет| P{"заморозка могла<br/>ещё идти?"}
+    P -->|"нет: агент прямо отказал"| Fail(["«Не удалось разморозить гостя»"])
+    P -->|"да: тайм-аут или обрыв"| W{"прошло меньше<br/>3 минут?"}
+    W -->|да| Sleep["подождать 10 с"] --> T
+    W -->|нет| Fail
+```
+
+```go
+// internal/backup/freeze_release.go
+base := context.WithoutCancel(ctx)
+deadline := time.Now().Add(window)
+for {
+	attemptCtx, cancel := context.WithTimeout(base, thawAttemptTimeout)
+	err := thaw(attemptCtx)
+	cancel()
+	if err == nil {
+		return nil
+	}
+	if !pending || time.Now().Add(interval).After(deadline) {
+		return err
+	}
+	time.Sleep(interval)
+}
+```
+
+«Могла ещё идти» у каждого гипервизора определяет своя функция
+`FreezeMayBePending`:
+
+| Ошибка | KVM, libvirt | oVirt, движок |
+|---|---|---|
+| обрыв связи, ответ не разобран | могла | могла |
+| агент не ответил вовремя | `ErrAgentCommandTimeout`, `ErrOperationTimeout`, `ErrAgentUnsynced`, `ErrAgentUnresponsive` без `not connected` — могла | в тексте `timeout`, `timed out`, `not responding`, `not available` — могла |
+| агент не подключён | `ErrAgentUnresponsive` с `not connected` — не могла | — |
+| агент отказал: упал сценарий, ВМ выключена | не могла | не могла |
+
+### KVM: порядок в `Driver.Backup`
+
+На KVM всё происходит в одной функции, а разморозку и уборку держат
+отложенные вызовы. Выполняются они в обратном порядке регистрации:
+
+```go
+// internal/kvm/driver.go — Driver.Backup
+if err := checkScratchStart(freeBytes, d.cfg.ScratchDir); err != nil { /* … */ }
+
+agentLimited := false
+defer func() { /* … */ d.conn.RestoreAgentTimeout(restoreCtx, dom) /* … */ }()
+
+q, frozenAt, err := d.quiesce(ctx, dom, info, req, result, &agentLimited, log)
+// …
+window := backup.NewFreezeWindow(frozenAt, limit,
+	func() error { return d.thaw(ctx, dom, &frozenAt, result, log) }, /* … */)
+
+if err := d.conn.BeginBackup(ctx, dom, spec, checkpoint); err != nil {
+	if thawErr := window.Thaw(); thawErr != nil {
+		_ = window.Thaw()
+	}
+	// …
+	return result, err
+}
+
+defer func() { /* … */ d.conn.EndBackup(cleanupCtx, dom) /* … */ }()
+defer func() { _ = window.Thaw() }()
+
+if err := window.Thaw(); err != nil {
+	return result, err
+}
+```
+
+```mermaid
+flowchart LR
+    Exit(["выход из Backup:<br/>успех, ошибка или отмена"]) --> A["1. window.Thaw<br/>повтор разморозки"]
+    A --> B["2. EndBackup<br/>и удаление scratch"]
+    B --> C["3. RestoreAgentTimeout<br/>умолчание libvirt"]
+```
+
+- **Сначала разморозка, потом уборка.** Закрытие задания на гипервизоре может
+  затянуться, а гость не должен ждать его замороженным.
+- **Предел ожидания агента возвращается последним**, уже после всех
+  разморозок: `LimitAgentTimeout` ставит домену 60 с только на время
+  заморозки.
+- **Место под scratch проверяется до заморозки.** На почти полном томе бэкап
+  не откроется, и гость не простоит зря.
+
+Выборочная заморозка — это тот же вызов libvirt со списком точек
+монтирования:
+
+```go
+// internal/libvirtx/domain.go
+func (c *Conn) FreezeFilesystems(ctx context.Context, dom libvirt.Domain, mountpoints []string) (int, error) {
+	n, err := c.lv.DomainFsfreeze(dom, mountpoints, 0)
+	if err != nil {
+		return 0, fmt.Errorf("заморозка файловых систем гостя: %w", err)
+	}
+	return int(n), nil
+}
+```
+
+Агент молча пропускает пути, которые не являются точками монтирования.
+Поэтому `checkPartialFreeze` считает заморозку неудачной, если из списка не
+заморожено ничего.
+
+### Вызовы гипервизора
+
+| Что делает служба | KVM: вызов libvirt | Команда агента | oVirt: запрос к движку |
+|---|---|---|---|
+| заморозить все ФС | `DomainFsfreeze(dom, nil, 0)` | `guest-fsfreeze-freeze` | `POST /vms/{id}/freezefilesystems` |
+| заморозить выбранные ФС | `DomainFsfreeze(dom, список, 0)` | `guest-fsfreeze-freeze-list` | нет |
+| разморозить | `DomainFsthaw(dom, nil, 0)` | `guest-fsfreeze-thaw` | `POST /vms/{id}/thawfilesystems` |
+| ограничить ожидание агента | `DomainAgentSetResponseTimeout` | — | нет |
+| бэкап с заморозкой движком | нет | `guest-fsfreeze-freeze` от VDSM | `POST /vms/{id}/backups?require_consistency=true` |
+
+Флаг `require_consistency` передаётся параметром запроса, а не в теле:
+
+```go
+// internal/ovirt/backup.go — Client.StartBackup
+var opts []func(*requestOptions)
+if requireConsistency {
+	opts = append(opts, withQuery(url.Values{"require_consistency": {"true"}}))
+}
+
+var backup Backup
+if err := c.post(ctx, "/vms/"+vmID+"/backups", body, &backup, opts...); err != nil {
+	// …
+}
+```
+
+Разморозить гостя вручную, если служба сообщила «Не удалось разморозить
+гостя». На KVM:
+
+```bash
+virsh domfsthaw <имя-ВМ>
+```
+
+На oVirt — запросом к движку. Пароль `curl` спросит сам:
+
+```bash
+curl -k -u 'admin@internal' -X POST -H 'Content-Type: application/xml' -d '<action/>' https://<движок>/ovirt-engine/api/vms/<id-ВМ>/thawfilesystems
+```
+
+---
+
+## 12. Где что в коде
 
 На GitHub ссылки открывают файлы. Во встроенной документации это просто пути
 в репозитории.
@@ -695,7 +1228,10 @@ flowchart LR
 | морозить ли, что делать при неудаче | `QuiesceGuest`, `EngineQuiesce` — [internal/backup/consistency.go](../internal/backup/consistency.go) |
 | предел и сторож | `FreezeWindow`, `RunRequest.FreezeLimit`, `DefaultMaxFreeze` — [internal/backup/freeze_window.go](../internal/backup/freeze_window.go) |
 | режимы на oVirt | `runCBT`, `openBackupServiceFreeze`, `openBackupEngineFreeze`, `openBackupMixedFreeze`, `runSnapshot`, `quiesce`, `guardFreeze`, `settleFreeze` — [internal/backup/runner.go](../internal/backup/runner.go) |
-| KVM | `Driver.Backup`, `Driver.quiesce`, `Driver.thaw` — [internal/kvm/driver.go](../internal/kvm/driver.go) |
+| разморозка после неудачной заморозки | `ThawAfterFailedFreeze` — [internal/backup/freeze_release.go](../internal/backup/freeze_release.go); на oVirt — `Engine.thawAfterFailedFreeze` в [internal/backup/runner.go](../internal/backup/runner.go) |
+| повтор полным, если движок отклонил смешанный бэкап | `mixedBackupRejected`, `Engine.downgradeToFull` — [internal/backup/runner.go](../internal/backup/runner.go) |
+| что делается до заморозки на oVirt | `waitSnapshotOperations` — [internal/backup/snapshot_leftovers.go](../internal/backup/snapshot_leftovers.go); `releaseEngineLeftovers` — [internal/backup/engine_leftovers.go](../internal/backup/engine_leftovers.go); `checkDomainSpace` — [internal/backup/storage_guard.go](../internal/backup/storage_guard.go) |
+| KVM | `Driver.Backup`, `Driver.quiesce`, `Driver.thaw`, `Driver.thawAfterFailedFreeze`, `checkPartialFreeze` — [internal/kvm/driver.go](../internal/kvm/driver.go); место до заморозки — `checkScratchStart` в [internal/kvm/scratch.go](../internal/kvm/scratch.go) |
 | выбор гипервизора | `Dispatcher.Execute`, `executeLibvirt` — [internal/dispatch/dispatch.go](../internal/dispatch/dispatch.go); Proxmox — [internal/dispatch/proxmox.go](../internal/dispatch/proxmox.go) |
 
 **Вызовы гипервизора**
@@ -706,18 +1242,20 @@ flowchart LR
 | заморозка и разморозка через oVirt | `Client.FreezeFilesystems`, `Client.ThawFilesystems` — [internal/ovirt/actions.go](../internal/ovirt/actions.go) |
 | бэкап с `require_consistency`, распознавание `failed` | `Client.StartBackup`, `Client.WaitBackupReady`, `ErrBackupFailed` — [internal/ovirt/backup.go](../internal/ovirt/backup.go) |
 | отвечает ли агент на oVirt | `VM.HasGuestAgent` — [internal/ovirt/types.go](../internal/ovirt/types.go) |
+| могла ли заморозка ещё идти после ошибки | `FreezeMayBePending` — [internal/libvirtx/domain.go](../internal/libvirtx/domain.go) и [internal/ovirt/actions.go](../internal/ovirt/actions.go) |
+| предел ожидания агента на KVM | `AgentFreezeTimeout`, `Conn.LimitAgentTimeout`, `Conn.RestoreAgentTimeout` — [internal/libvirtx/domain.go](../internal/libvirtx/domain.go) |
 
 **Настройки, хранение, оповещения**
 
 | Что | Где |
 |---|---|
-| поля задания, вывод уровня из `quiesce`, верхний предел | `BackupJob`, `NormalizeConsistency`, `MaxFreezeLimit` — [internal/model/backup.go](../internal/model/backup.go) |
+| поля задания, вывод уровня из `quiesce`, верхний предел, список ФС | `BackupJob`, `NormalizeConsistency`, `MaxFreezeLimit`, `ValidateFreezeMountpoints` — [internal/model/backup.go](../internal/model/backup.go) |
 | API задания и разового запуска | `jobPayload`, `validateJob`, `adHocRequest` — [internal/api/handlers_backup.go](../internal/api/handlers_backup.go) |
 | предел службы | `backup.max_freeze` — [internal/config/config.go](../internal/config/config.go), [config/ovirt-backup.yaml](../config/ovirt-backup.yaml) |
 | перенос настроек в запуск, оповещение о понижении | `RunRequest`, `checkConsistency` — [internal/scheduler/scheduler.go](../internal/scheduler/scheduler.go) |
 | отметки хронологии и память смешанного режима | [internal/model/run_event.go](../internal/model/run_event.go), `LastRunEventAt` — [internal/store/run_events.go](../internal/store/run_events.go) |
 | уровень в `run.json` | `RunManifest` — [internal/backup/format.go](../internal/backup/format.go) |
-| столбцы в БД | миграции [0043](../internal/store/migrations/0043_backup_consistency.sql), [0047](../internal/store/migrations/0047_backup_max_freeze.sql), [0049](../internal/store/migrations/0049_backup_freeze_by.sql), [0050](../internal/store/migrations/0050_backup_freeze_mixed.sql) |
+| столбцы в БД | миграции [0043](../internal/store/migrations/0043_backup_consistency.sql), [0047](../internal/store/migrations/0047_backup_max_freeze.sql), [0049](../internal/store/migrations/0049_backup_freeze_by.sql), [0050](../internal/store/migrations/0050_backup_freeze_mixed.sql), [0053](../internal/store/migrations/0053_backup_freeze_mountpoints.sql) |
 
 **Интерфейс**
 

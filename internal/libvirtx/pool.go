@@ -112,6 +112,14 @@ func (p *Pool) ForServer(ctx context.Context, srv *model.Server) (*Conn, error) 
 	p.entries[srv.ID] = &poolEntry{conn: conn, updatedAt: srv.UpdatedAt}
 	p.mu.Unlock()
 
+	// Соединение пула живёт долго и простаивает между операциями: keepalive
+	// не даёт NAT и межсетевому экрану закрыть его молча.
+	name := srv.Name
+	conn.StartKeepalive(KeepaliveInterval, func() {
+		p.log.Warn().Str("гипервизор", name).
+			Msg("гипервизор не отвечает на keepalive — соединение, вероятно, оборвано; пул переподключится при следующей операции")
+	})
+
 	return conn, nil
 }
 

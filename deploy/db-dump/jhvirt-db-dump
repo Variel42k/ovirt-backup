@@ -14,6 +14,9 @@
 #   probe                       версия протокола и доступные СУБД
 #   list ENGINE                 базы, по одной в строке
 #   stats ENGINE                read-only счётчики транзакций и журнала
+#   stats-watch ENGINE SECONDS  те же счётчики строкой раз в SECONDS секунд,
+#                               пока служба не закроет сессию: одна сессия на
+#                               весь бэкап вместо команды на каждый замер
 #   dump ENGINE DB              дамп одной базы в stdout
 #   globals postgresql          роли и табличные пространства без хешей паролей
 #   restore ENGINE NEWDB        восстановление из stdin в НОВУЮ базу (выключено
@@ -250,6 +253,20 @@ mysql_q() {
     db "$client" "${my_args[@]}" --batch --skip-column-names "$@" </dev/null
 }
 
+# stats_line ENGINE печатает одну строку счётчиков. Счётчики read-only: сумма
+# коммитов и откатов, активные сеансы, позиция журнала.
+stats_line() {
+    local values
+    if [[ "$1" == postgresql ]]; then
+        values=$(psql_q --field-separator=' ' --command="SELECT COALESCE(sum(xact_commit),0), COALESCE(sum(xact_rollback),0), COALESCE(sum(numbackends),0), pg_wal_lsn_diff(pg_current_wal_lsn(),'0/0')::bigint FROM pg_stat_database")
+    else
+        values=$(mysql_q --execute="SELECT COALESCE(MAX(CASE WHEN VARIABLE_NAME='Com_commit' THEN VARIABLE_VALUE END),0), COALESCE(MAX(CASE WHEN VARIABLE_NAME='Com_rollback' THEN VARIABLE_VALUE END),0), COALESCE(MAX(CASE WHEN VARIABLE_NAME='Threads_running' THEN VARIABLE_VALUE END),0), COALESCE(MAX(CASE WHEN VARIABLE_NAME='Innodb_os_log_written' THEN VARIABLE_VALUE END),0) FROM performance_schema.global_status")
+    fi
+    values=$(printf '%s' "$values" | tr '\t' ' ' | tr -s '[:space:]' ' ')
+    [[ "$values" =~ ^[[:space:]]*[0-9]+\ [0-9]+\ [0-9]+\ [0-9]+[[:space:]]*$ ]] || return 1
+    printf 'jhvirt-db-stats/1 %s %s\n' "$1" "$values"
+}
+
 action="${1:-}"
 case "$action" in
 probe)
@@ -297,14 +314,20 @@ list)
 stats)
     [[ $# -eq 2 ]] || fail "usage: stats ENGINE"
     check_engine "$2"
-    if [[ "$2" == postgresql ]]; then
-        values=$(psql_q --field-separator=' ' --command="SELECT COALESCE(sum(xact_commit),0), COALESCE(sum(xact_rollback),0), COALESCE(sum(numbackends),0), pg_wal_lsn_diff(pg_current_wal_lsn(),'0/0')::bigint FROM pg_stat_database")
-    else
-        values=$(mysql_q --execute="SELECT COALESCE(MAX(CASE WHEN VARIABLE_NAME='Com_commit' THEN VARIABLE_VALUE END),0), COALESCE(MAX(CASE WHEN VARIABLE_NAME='Com_rollback' THEN VARIABLE_VALUE END),0), COALESCE(MAX(CASE WHEN VARIABLE_NAME='Threads_running' THEN VARIABLE_VALUE END),0), COALESCE(MAX(CASE WHEN VARIABLE_NAME='Innodb_os_log_written' THEN VARIABLE_VALUE END),0) FROM performance_schema.global_status")
-    fi
-    values=$(printf '%s' "$values" | tr '\t' ' ' | tr -s '[:space:]' ' ')
-    [[ "$values" =~ ^[[:space:]]*[0-9]+\ [0-9]+\ [0-9]+\ [0-9]+[[:space:]]*$ ]] || fail "database returned invalid counters"
-    printf 'jhvirt-db-stats/1 %s %s\n' "$2" "$values"
+    stats_line "$2" || fail "database returned invalid counters"
+    ;;
+
+stats-watch)
+    [[ $# -eq 3 ]] || fail "usage: stats-watch ENGINE SECONDS"
+    check_engine "$2"
+    [[ "$3" =~ ^[0-9]{1,3}$ ]] && (( $3 >= 2 && $3 <= 300 )) || fail "invalid interval"
+    # Цикл кончается, когда служба закрывает сессию: запись в закрытый поток
+    # завершает хелпер. СУБД, временно не ответившая, — строка unavailable, а
+    # не конец потока: статистика во время бэкапа не должна обрываться.
+    while :; do
+        stats_line "$2" 2>/dev/null || printf 'jhvirt-db-stats/1 %s unavailable\n' "$2"
+        sleep "$3"
+    done
     ;;
 
 dump)

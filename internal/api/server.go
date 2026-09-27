@@ -237,6 +237,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /servers/{id}/vms", s.perm(model.PermServersRead, s.handleListVMs))
 	mux.HandleFunc("GET /servers/{id}/vms/{vmID}", s.perm(model.PermServersRead, s.handleGetVM))
 	mux.HandleFunc("GET /servers/{id}/vms/{vmID}/disks", s.perm(model.PermServersRead, s.handleListVMDisks))
+	mux.HandleFunc("GET /servers/{id}/vms/{vmID}/filesystems", s.perm(model.PermServersRead, s.handleGuestFilesystems))
 	mux.HandleFunc("GET /servers/{id}/disks", s.perm(model.PermServersRead, s.handleListDisks))
 	mux.HandleFunc("GET /servers/{id}/storage-domains", s.perm(model.PermServersRead, s.handleListStorageDomains))
 	mux.HandleFunc("GET /servers/{id}/restore-networks", s.perm(model.PermServersRead, s.handleListRestoreNetworks))

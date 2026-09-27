@@ -15,8 +15,19 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/Variel42k/ovirt-backup/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/sshpool"
+	"github.com/Variel42k/ovirt-backup/internal/sshstats"
 	"github.com/Variel42k/ovirt-backup/internal/sshtrust"
 )
+
+// sftpPool держит SSH-соединения к SFTP-хранилищам между открытиями.
+//
+// Хранилище открывается на каждый бэкап ВМ, каждую проверку копии и раз в
+// 15 минут для проверки доступности; вход по ключу на каждое открытие
+// засорял бы журнал сервера хранилища. По одной сессии на соединение: поток
+// копии не делит TCP-соединение с другим. Простой — 20 минут, дольше интервала
+// проверки хранилищ, чтобы она не открывала соединение заново.
+var sftpPool = sshpool.New(20*time.Minute, 1)
 
 // sftpBackend stores backups on a remote host over SSH. It is the fallback for
 // sites that have neither object storage nor a shared mount, and it is the one
@@ -27,8 +38,11 @@ type sftpBackend struct {
 	basePath string
 	sshCfg   *ssh.ClientConfig
 
+	// poolKey — всё, что определяет подключение, для пула соединений.
+	poolKey string
+
 	mu     sync.Mutex
-	ssh    *ssh.Client
+	lease  *sshpool.Lease
 	client *sftp.Client
 }
 
@@ -74,10 +88,13 @@ func newSFTP(target *model.StorageTarget) (Backend, error) {
 		base = "."
 	}
 
+	addr := fmt.Sprintf("%s:%d", target.Host, port)
 	return &sftpBackend{
 		name:     target.Name,
-		addr:     fmt.Sprintf("%s:%d", target.Host, port),
+		addr:     addr,
 		basePath: strings.TrimRight(base, "/"),
+		poolKey: sshpool.Key("sftp", target.ID, addr, target.Username, target.PrivateKey, target.Password,
+			target.HostKey, fmt.Sprint(target.TrustAnyHostKey)),
 		sshCfg: &ssh.ClientConfig{
 			User:            target.Username,
 			Auth:            auths,
@@ -101,37 +118,54 @@ func (s *sftpBackend) conn() (*sftp.Client, error) {
 		if _, err := s.client.Getwd(); err == nil {
 			return s.client, nil
 		}
-		s.closeLocked()
+		s.closeLocked(true)
 	}
 
-	sshClient, err := ssh.Dial("tcp", s.addr, s.sshCfg)
-	if err != nil {
-		return nil, fmt.Errorf("подключение SSH к %s: %w", s.addr, err)
+	// Соединение из пула могло умереть, пока лежало: тогда ещё одна попытка
+	// на новом.
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		lease, err := sftpPool.Acquire(context.Background(), s.poolKey, func(context.Context) (*ssh.Client, error) {
+			client, err := ssh.Dial("tcp", s.addr, s.sshCfg)
+			sshstats.Record(s.addr, sshstats.SFTPRepo, err)
+			return client, err
+		})
+		if err != nil {
+			return nil, fmt.Errorf("подключение SSH к %s: %w", s.addr, err)
+		}
+		client, err := sftp.NewClient(lease.Client, sftp.MaxPacket(1<<15))
+		if err != nil {
+			lease.Discard()
+			lastErr = err
+			continue
+		}
+		s.lease, s.client = lease, client
+		return client, nil
 	}
-	client, err := sftp.NewClient(sshClient, sftp.MaxPacket(1<<15))
-	if err != nil {
-		_ = sshClient.Close()
-		return nil, fmt.Errorf("открытие SFTP-сессии на %s: %w", s.addr, err)
-	}
-	s.ssh, s.client = sshClient, client
-	return client, nil
+	return nil, fmt.Errorf("открытие SFTP-сессии на %s: %w", s.addr, lastErr)
 }
 
-func (s *sftpBackend) closeLocked() {
+// closeLocked закрывает SFTP-сессию и возвращает соединение в пул; broken —
+// соединение перестало отвечать, и пул его больше не выдаст.
+func (s *sftpBackend) closeLocked(broken bool) {
 	if s.client != nil {
 		_ = s.client.Close()
 		s.client = nil
 	}
-	if s.ssh != nil {
-		_ = s.ssh.Close()
-		s.ssh = nil
+	if s.lease != nil {
+		if broken {
+			s.lease.Discard()
+		} else {
+			s.lease.Release()
+		}
+		s.lease = nil
 	}
 }
 
 func (s *sftpBackend) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.closeLocked()
+	s.closeLocked(false)
 	return nil
 }
 

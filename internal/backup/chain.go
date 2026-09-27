@@ -188,7 +188,8 @@ func (e *Engine) loadChainCopy(ctx context.Context, runID, copyID string, allowV
 	}
 
 	for _, diskID := range set.DiskOrder {
-		chain := set.Manifests[diskID]
+		chain := EffectiveChain(set.Manifests[diskID])
+		set.Manifests[diskID] = chain
 		if len(chain) == 0 {
 			backend.Close()
 			return nil, fmt.Errorf("для диска %s не найдено ни одного манифеста в цепочке", diskID)

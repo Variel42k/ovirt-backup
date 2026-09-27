@@ -22,11 +22,17 @@ func TestOIDCManualRoleUsesExactSubjectAndOverridesGroups(t *testing.T) {
 	cfg := testOIDC()
 	cfg.SubjectRoleMapping = map[string]string{"Subject-A": "viewer", "Subject-B": "operator"}
 	role, err := mapOIDCSubjectRole(cfg, "Subject-A", []string{"virt-admins"})
-	if err != nil || role != model.RoleViewer { t.Fatal("manual downgrade ignored") }
+	if err != nil || role != model.RoleViewer {
+		t.Fatal("manual downgrade ignored")
+	}
 	role, err = mapOIDCSubjectRole(cfg, "Subject-B", nil)
-	if err != nil || role != model.RoleOperator { t.Fatal("manual access without AD groups failed") }
+	if err != nil || role != model.RoleOperator {
+		t.Fatal("manual access without AD groups failed")
+	}
 	for _, subject := range []string{"subject-b", " Subject-B", "domain-username", ""} {
-		if _, err := mapOIDCSubjectRole(cfg, subject, nil); err == nil { t.Fatal("mutable or inexact identity matched manual access") }
+		if _, err := mapOIDCSubjectRole(cfg, subject, nil); err == nil {
+			t.Fatal("mutable or inexact identity matched manual access")
+		}
 	}
 }
 

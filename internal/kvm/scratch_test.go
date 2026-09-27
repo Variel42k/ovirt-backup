@@ -31,6 +31,20 @@ func TestScratchReserve(t *testing.T) {
 	}
 }
 
+// На почти полном томе бэкап не открывается вовсе; если место неизвестно,
+// решает сторож по ходу.
+func TestCheckScratchStart(t *testing.T) {
+	if err := checkScratchStart(512<<20, "/var/lib/libvirt/qemu"); !errors.Is(err, errScratchLow) {
+		t.Fatalf("при 512 МиБ свободных бэкап не должен начинаться: %v", err)
+	}
+	if err := checkScratchStart(0, "/var/lib/libvirt/qemu"); err != nil {
+		t.Fatalf("неизвестное место — не повод отказывать: %v", err)
+	}
+	if err := checkScratchStart(10*gib, "/var/lib/libvirt/qemu"); err != nil {
+		t.Fatalf("10 ГиБ достаточно для старта: %v", err)
+	}
+}
+
 // fakeScratch отдаёт замеры по очереди, последний повторяет.
 type fakeScratch struct {
 	mu      sync.Mutex
@@ -145,5 +159,19 @@ func waitForSamples(t *testing.T, fake *fakeScratch, n int) {
 			t.Fatalf("сторож сделал %d замеров из %d", fake.count(), n)
 		}
 		time.Sleep(time.Millisecond)
+	}
+}
+
+// Агент пропускает пути, которые не точки монтирования: ноль замороженных при
+// непустом списке — это не заморозка.
+func TestCheckPartialFreeze(t *testing.T) {
+	if err := checkPartialFreeze(0, []string{"/var/lib/data"}); err == nil {
+		t.Fatal("ноль замороженных из списка должен считаться неудачей")
+	}
+	if err := checkPartialFreeze(1, []string{"/var/lib/data", "/srv"}); err != nil {
+		t.Fatalf("часть заморожена — заморозка есть: %v", err)
+	}
+	if err := checkPartialFreeze(0, nil); err != nil {
+		t.Fatalf("без списка решает агент: %v", err)
 	}
 }

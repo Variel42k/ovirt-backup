@@ -82,6 +82,23 @@ func (c *Client) GetBackup(ctx context.Context, vmID, backupID string) (*Backup,
 	return &backup, nil
 }
 
+// BackupDiskModes сообщает, как движок отдал каждый диск бэкапа: full или
+// incremental. Пустая карта — движок режимов не сообщает (старше 4.4.5); тогда
+// бэкап не смешанный, и режим у всех дисков один — тот, что запрошен.
+func (c *Client) BackupDiskModes(ctx context.Context, vmID, backupID string) (map[string]string, error) {
+	var list diskList
+	if err := c.get(ctx, "/vms/"+vmID+"/backups/"+backupID+"/disks", &list); err != nil {
+		return nil, err
+	}
+	modes := map[string]string{}
+	for _, d := range list.Disk {
+		if d.ID != "" && d.BackupMode != "" {
+			modes[d.ID] = d.BackupMode
+		}
+	}
+	return modes, nil
+}
+
 // ListBackups returns the backups the engine still tracks for a VM. Leftovers
 // here are what a crashed run leaves behind.
 func (c *Client) ListBackups(ctx context.Context, vmID string) ([]Backup, error) {

@@ -16,6 +16,8 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/Variel42k/ovirt-backup/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/sshpool"
+	"github.com/Variel42k/ovirt-backup/internal/sshstats"
 	"github.com/Variel42k/ovirt-backup/internal/sshtrust"
 )
 
@@ -48,6 +50,16 @@ type StatsTransport interface {
 	Stats(context.Context, model.DBEngine) (Stats, error)
 }
 
+// StatsWatcher отдаёт статистику потоком — одна сессия на весь бэкап. onSample
+// вызывается на каждую строку: с ошибкой, если СУБД не ответила. Возврат без
+// отмены ctx значит, что поток недоступен (старый хелпер) или оборвался.
+type StatsWatcher interface {
+	WatchStats(ctx context.Context, engine model.DBEngine, interval time.Duration, onSample func(Stats, error)) error
+}
+
+// errStatsUnavailable — хелпер жив, но СУБД не ответила на этот замер.
+var errStatsUnavailable = errors.New("СУБД не ответила на запрос статистики")
+
 // ParseProbe разбирает ответ probe. Первая строка обязана быть версией
 // протокола: чужая программа на месте хелпера не должна сойти за него.
 func ParseProbe(out string) (*ProbeResult, error) {
@@ -76,10 +88,15 @@ func ParseProbe(out string) (*ProbeResult, error) {
 
 // SSHTransport ходит к хелперу по SSH. Команды — только операции протокола
 // с проверенными аргументами; хелпер проверяет их ещё раз на своей стороне.
+//
+// Соединение берётся из общего пула (sshpool): статистика СУБД во время
+// бэкапа снимается раз в несколько секунд, и соединение на каждый замер
+// засоряло бы журнал хоста входами по ключу.
 type SSHTransport struct {
 	host    *model.DBHost
 	timeout time.Duration
 	hostKey ssh.HostKeyCallback
+	poolKey string
 }
 
 // NewSSHTransport готовит канал к хосту СУБД. Без закреплённого ключа хоста
@@ -98,7 +115,18 @@ func NewSSHTransport(h *model.DBHost, timeout time.Duration) (*SSHTransport, err
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
-	return &SSHTransport{host: h, timeout: timeout, hostKey: callback}, nil
+	key := sshpool.Key("db-host", h.ID, strings.TrimSpace(h.Address), fmt.Sprint(h.Port), h.Username,
+		h.PrivateKey, h.HostKey, fmt.Sprint(h.TrustAnyHostKey))
+	return &SSHTransport{host: h, timeout: timeout, hostKey: callback, poolKey: key}, nil
+}
+
+// session открывает сессию на соединении из пула.
+func (t *SSHTransport) session(ctx context.Context) (*ssh.Session, func(broken bool), error) {
+	session, done, err := sshpool.Shared().Session(ctx, t.poolKey, t.connect)
+	if err != nil {
+		return nil, nil, fmt.Errorf("SSH-сессия на %s: %w", t.host.Name, err)
+	}
+	return session, done, nil
 }
 
 func (t *SSHTransport) Probe(ctx context.Context) (*ProbeResult, error) {
@@ -135,6 +163,68 @@ func (t *SSHTransport) Stats(ctx context.Context, engine model.DBEngine) (Stats,
 		return Stats{}, err
 	}
 	return ParseStats(body.String(), engine)
+}
+
+// WatchStats читает статистику из одной долгой сессии stats-watch.
+//
+// Конец бэкапа — отмена ctx — закрывает сессию, но не соединение: оно цело и
+// пригодится следующему бэкапу. Хелпер на хосте завершается на следующей
+// записи в закрытый поток.
+func (t *SSHTransport) WatchStats(ctx context.Context, engine model.DBEngine, interval time.Duration,
+	onSample func(Stats, error)) error {
+
+	if !engine.Valid() {
+		return fmt.Errorf("неизвестная СУБД %q", engine)
+	}
+	seconds := int(interval / time.Second)
+	if seconds < 2 {
+		seconds = 2
+	}
+	if seconds > 300 {
+		seconds = 300
+	}
+	session, release, err := t.session(ctx)
+	if err != nil {
+		return err
+	}
+	defer release(false)
+	stdout, err := session.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	stderr := &limitedBuffer{limit: 16 << 10}
+	session.Stderr = stderr
+	if err := session.Start(fmt.Sprintf("%s stats-watch %s %d", helper, engine, seconds)); err != nil {
+		return fmt.Errorf("запуск хелпера на %s: %w", t.host.Name, err)
+	}
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = session.Close()
+		case <-stop:
+		}
+	}()
+
+	unavailable := fmt.Sprintf("jhvirt-db-stats/1 %s unavailable", engine)
+	sc := bufio.NewScanner(stdout)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == unavailable {
+			onSample(Stats{}, errStatsUnavailable)
+			continue
+		}
+		onSample(ParseStats(line, engine))
+	}
+	waitErr := session.Wait()
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if waitErr != nil {
+		return t.commandError(waitErr, stderr.String())
+	}
+	return errors.New("поток статистики закончился")
 }
 
 // ParseStats validates the deliberately small helper response. Rejecting an
@@ -176,17 +266,16 @@ func (t *SSHTransport) Restore(ctx context.Context, engine model.DBEngine, datab
 	return t.run(ctx, fmt.Sprintf("%s restore %s %s", helper, engine, database), dump, io.Discard)
 }
 
+// Прерывание — отмена или ошибка потребителя — закрывает сессию и помечает
+// соединение негодным: пул закроет его, как только им перестанут пользоваться
+// другие операции, и sshd завершит процесс хелпера.
 func (t *SSHTransport) stream(ctx context.Context, command string, consume func(io.Reader) error) error {
-	client, err := t.connect(ctx)
+	session, release, err := t.session(ctx)
 	if err != nil {
 		return err
 	}
-	defer client.Close()
-	session, err := client.NewSession()
-	if err != nil {
-		return fmt.Errorf("SSH-сессия на %s: %w", t.host.Name, err)
-	}
-	defer session.Close()
+	broken := false
+	defer func() { release(broken) }()
 	stdout, err := session.StdoutPipe()
 	if err != nil {
 		return err
@@ -201,34 +290,35 @@ func (t *SSHTransport) stream(ctx context.Context, command string, consume func(
 	go func() {
 		select {
 		case <-ctx.Done():
-			_ = client.Close()
+			_ = session.Close()
 		case <-stop:
 		}
 	}()
 	done := make(chan error, 1)
 	go func() { done <- session.Wait() }()
 	if err := consume(stdout); err != nil {
-		_ = client.Close()
+		broken = true
+		_ = session.Close()
 		<-done
 		return err
 	}
 	if err := <-done; err != nil {
+		if ctx.Err() != nil {
+			broken = true
+			return ctx.Err()
+		}
 		return t.commandError(err, stderr.String())
 	}
 	return ctx.Err()
 }
 
 func (t *SSHTransport) run(ctx context.Context, command string, stdin io.Reader, stdout io.Writer) error {
-	client, err := t.connect(ctx)
+	session, release, err := t.session(ctx)
 	if err != nil {
 		return err
 	}
-	defer client.Close()
-	session, err := client.NewSession()
-	if err != nil {
-		return fmt.Errorf("SSH-сессия на %s: %w", t.host.Name, err)
-	}
-	defer session.Close()
+	broken := false
+	defer func() { release(broken) }()
 	stderr := &limitedBuffer{limit: 64 << 10}
 	session.Stdin, session.Stdout, session.Stderr = stdin, stdout, stderr
 	done := make(chan error, 1)
@@ -240,7 +330,8 @@ func (t *SSHTransport) run(ctx context.Context, command string, stdin io.Reader,
 		}
 		return nil
 	case <-ctx.Done():
-		_ = client.Close()
+		broken = true
+		_ = session.Close()
 		<-done
 		return ctx.Err()
 	}
@@ -266,6 +357,7 @@ func (t *SSHTransport) connect(ctx context.Context) (*ssh.Client, error) {
 		User: t.host.Username, Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)},
 		HostKeyCallback: t.hostKey, Timeout: t.timeout,
 	})
+	sshstats.Record(addr, sshstats.DBDump, err)
 	if err != nil {
 		_ = raw.Close()
 		return nil, fmt.Errorf("SSH-аутентификация на %s: %w", addr, err)

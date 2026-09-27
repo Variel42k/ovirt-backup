@@ -259,6 +259,11 @@ func TestMixedFreezeServiceFailsEngineTakesOver(t *testing.T) {
 	if run.Consistency != model.ConsistencyApplication {
 		t.Fatalf("уровень %s", run.Consistency)
 	}
+	// Агент отказал явно (упал сценарий) — заморозки не было, но служба всё
+	// равно размораживает гостя, и ровно один раз: повторять незачем.
+	if fake.serviceThawed != 1 {
+		t.Fatalf("разморозок после неудачной заморозки %d, ожидалась одна", fake.serviceThawed)
+	}
 }
 
 // Случай dtseven: движок готовит бэкап дольше предела службы. Бэкап службы

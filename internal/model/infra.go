@@ -179,7 +179,8 @@ type Server struct {
 	// отдельный, чтобы отказ был виден в интерфейсе и записан в журнал аудита, а
 	// не выводился из пустого поля.
 	SSHTrustAnyHostKey bool `json:"ssh_trust_any_host_key"`
-	// ScratchDir — каталог на гипервизоре под scratch-файлы бэкапа и сокет NBD.
+	// ScratchDir — каталог на гипервизоре под scratch-файлы бэкапа и сокет NBD;
+	// пусто — DefaultScratchDir.
 	ScratchDir string `json:"scratch_dir,omitempty"`
 	// FleecingStorage — хранилище узлов Proxmox для fleecing при бэкапе ВМ
 	// (vzdump --fleecing, Proxmox VE 8.2+); пусто — без fleecing. Должно
@@ -214,6 +215,17 @@ func (s *Server) HasProxmoxDataPlane() bool {
 	return s.Kind.UsesProxmoxAPI() && strings.TrimSpace(s.SSHUsername) != "" &&
 		strings.TrimSpace(s.SSHPrivateKey) != "" &&
 		(strings.TrimSpace(s.SSHHostKey) != "" || s.SSHTrustAnyHostKey)
+}
+
+// DefaultScratchDir — каталог scratch на хосте KVM, если в подключении он не задан.
+const DefaultScratchDir = "/var/lib/libvirt/qemu"
+
+// ScratchDirOrDefault — каталог scratch подключения KVM с учётом умолчания.
+func (s *Server) ScratchDirOrDefault() string {
+	if s.ScratchDir != "" {
+		return s.ScratchDir
+	}
+	return DefaultScratchDir
 }
 
 // Target renders where this connection points, for logs and the UI.

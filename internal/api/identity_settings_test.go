@@ -48,29 +48,45 @@ func TestIdentityChangesRequireLocalAdminPassword(t *testing.T) {
 func TestIdentityAccessPolicyPreservesLegacyAndScopesSubjects(t *testing.T) {
 	current := config.OIDCConfig{Issuer: "https://sso.example.org/realms/jhvirt", DefaultRole: "viewer", SubjectRoleMapping: map[string]string{"exact-sub": "operator"}}
 	value := model.IdentitySettings{Issuer: current.Issuer}
-	if err := applyIdentityAccessPolicy(&value, current, nil, nil); err != nil { t.Fatal(err) }
-	if value.DefaultRole != "viewer" || value.SubjectRoleMapping["exact-sub"] != "operator" { t.Fatal("legacy request lost access policy") }
+	if err := applyIdentityAccessPolicy(&value, current, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if value.DefaultRole != "viewer" || value.SubjectRoleMapping["exact-sub"] != "operator" {
+		t.Fatal("legacy request lost access policy")
+	}
 	value.SubjectRoleMapping["exact-sub"] = "viewer"
-	if current.SubjectRoleMapping["exact-sub"] != "operator" { t.Fatal("access mapping aliases running configuration") }
+	if current.SubjectRoleMapping["exact-sub"] != "operator" {
+		t.Fatal("access mapping aliases running configuration")
+	}
 	value.Issuer = "https://other.example.org/realms/jhvirt"
-	if err := applyIdentityAccessPolicy(&value, current, nil, &current.SubjectRoleMapping); err == nil { t.Fatal("subject assignments carried to another issuer") }
-	if err := applyIdentityAccessPolicy(&value, current, nil, nil); err != nil || len(value.SubjectRoleMapping) != 0 { t.Fatal("issuer switch retained old subjects") }
+	if err := applyIdentityAccessPolicy(&value, current, nil, &current.SubjectRoleMapping); err == nil {
+		t.Fatal("subject assignments carried to another issuer")
+	}
+	if err := applyIdentityAccessPolicy(&value, current, nil, nil); err != nil || len(value.SubjectRoleMapping) != 0 {
+		t.Fatal("issuer switch retained old subjects")
+	}
 }
 
 func TestWebAccessPolicyRejectsBroadPrivilegeAndInvalidSubjects(t *testing.T) {
 	current := config.OIDCConfig{Issuer: "https://sso.example.org/realms/jhvirt"}
 	value := model.IdentitySettings{Issuer: current.Issuer}
 	admin := "admin"
-	if err := applyIdentityAccessPolicy(&value, current, &admin, nil); err == nil { t.Fatal("default administrator access accepted") }
+	if err := applyIdentityAccessPolicy(&value, current, &admin, nil); err == nil {
+		t.Fatal("default administrator access accepted")
+	}
 	for _, mapping := range []map[string]string{{"": "admin"}, {" sub ": "admin"}, {"sub\n": "admin"}, {"sub": "unknown"}} {
-		if err := applyIdentityAccessPolicy(&value, current, nil, &mapping); err == nil { t.Fatal("invalid manual assignment accepted") }
+		if err := applyIdentityAccessPolicy(&value, current, nil, &mapping); err == nil {
+			t.Fatal("invalid manual assignment accepted")
+		}
 	}
 }
 
 func TestIdentityConversionKeepsAccessPolicy(t *testing.T) {
 	want := config.OIDCConfig{DefaultRole: "viewer", SubjectRoleMapping: map[string]string{"subject": "operator"}}
 	got := OIDCConfigFromIdentity(identityFromConfig(want))
-	if got.DefaultRole != want.DefaultRole || got.SubjectRoleMapping["subject"] != "operator" { t.Fatal("database conversion lost access policy") }
+	if got.DefaultRole != want.DefaultRole || got.SubjectRoleMapping["subject"] != "operator" {
+		t.Fatal("database conversion lost access policy")
+	}
 }
 
 func TestIdentityReauthenticationIsRateLimited(t *testing.T) {

@@ -41,7 +41,9 @@ type Dispatcher struct {
 	cipher         *secret.Cipher
 	log            zerolog.Logger
 	proxmoxRestore sync.Mutex
-	telemetry      []interface {
+	// scratch — замеры места под scratch для прогноза на странице ВМ.
+	scratch   scratchFreeCache
+	telemetry []interface {
 		MonitorBackup(context.Context, *model.BackupRun) func()
 	}
 }
@@ -192,6 +194,14 @@ func (d *Dispatcher) executeLibvirt(ctx context.Context, srv *model.Server, req 
 	}
 	defer backend.Close()
 
+	// Очередь на каталог scratch хоста — до отметки «выполняется»: пока запуск
+	// ждёт, он остаётся в ожидании, а время старта — время начала копирования.
+	releaseScratch, err := d.waitScratch(ctx, srv, vm, run)
+	if err != nil {
+		return d.failRun(ctx, run, fmt.Errorf("ожидание очереди на каталог scratch: %w", err))
+	}
+	defer releaseScratch()
+
 	started := time.Now().UTC()
 	run.StartedAt = &started
 	run.Status = model.RunRunning
@@ -229,6 +239,7 @@ func (d *Dispatcher) executeLibvirt(ctx context.Context, srv *model.Server, req 
 		Consistency:        req.ConsistencyTarget(),
 		RequireConsistency: req.RequireConsistency,
 		MaxFreeze:          req.FreezeLimit(d.cfg.MaxFreeze),
+		FreezeMountpoints:  req.FreezeMountpoints,
 		MaxReadMBps:        req.ReadLimit(d.cfg.Transfer.MaxReadMBps),
 		Encrypt:            req.Encrypt,
 		OnProgress: func(target string, done, total int64) {

@@ -50,6 +50,13 @@ const (
 	// RunEventTransferViaProxy — хост с ovirt-imageio перестал отвечать
 	// напрямую, и чтение продолжилось через прокси движка.
 	RunEventTransferViaProxy RunEventKind = "transfer_via_proxy"
+	// RunEventDowngradedFull — инкремент пришлось снять полным: движок не
+	// принял смешанный бэкап (raw-диски вместе с инкрементом).
+	RunEventDowngradedFull RunEventKind = "downgraded_full"
+	// RunEventStorageQueue — на домене хранения или в каталоге scratch уже
+	// открыто столько горячих бэкапов, сколько разрешает
+	// backup.max_runs_per_storage: запуск ждёт очереди.
+	RunEventStorageQueue RunEventKind = "storage_queue"
 )
 
 // Title возвращает название этапа для интерфейса.
@@ -97,6 +104,10 @@ func (k RunEventKind) Title() string {
 		return "Передача образа открыта заново"
 	case RunEventTransferViaProxy:
 		return "Чтение переключено на прокси движка"
+	case RunEventDowngradedFull:
+		return "Инкремент снят полной копией"
+	case RunEventStorageQueue:
+		return "Ожидание очереди на хранилище"
 	}
 	return string(k)
 }

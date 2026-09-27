@@ -333,6 +333,8 @@ export interface BackupJob {
   max_freeze?: number
   /** Кто замораживает гостя: служба до запроса бэкапа или движок oVirt на момент точки. */
   freeze_by?: FreezeBy
+  /** KVM: какие файловые системы гостя замораживать; пусто — все. */
+  freeze_mountpoints?: string[]
   /** Предел чтения с хранилища ВМ, МиБ/с; 0 — предел службы. */
   max_read_mbps?: number
   verify_after?: string
@@ -1224,6 +1226,44 @@ export interface DiskFacts {
   not_backed_up?: string
 }
 
+/** Смонтированная файловая система гостя по данным агента. */
+export interface GuestFilesystem {
+  mountpoint: string
+  type: string
+  device: string
+  /** Устройства ВМ, на которых она лежит (vda, sdb). */
+  disks?: string[]
+}
+
+/** Чем грозит место горячему бэкапу. */
+export type SpaceStatus = 'ok' | 'tight' | 'short' | 'no_start' | 'unknown'
+
+/** Место, где копятся записи гостя, пока открыт горячий бэкап. */
+export interface SpacePlace {
+  kind: 'storage_domain' | 'scratch'
+  id?: string
+  name: string
+  /** Больше всего записей гостя за один прошлый бэкап; -1 — замеров нет. */
+  need: number
+  /** Свободно сейчас; -1 — неизвестно. */
+  free: number
+  /** Запас: когда свободного меньше, сторож закрывает бэкап. */
+  reserve: number
+  /** При меньшем свободном месте бэкап не начнётся. */
+  start_min: number
+  measured_at?: string
+  status: SpaceStatus
+}
+
+/** Прогноз места под горячий бэкап; только совет, запуск решают сторожа. */
+export interface SpaceForecast {
+  /** По скольким прошлым бэкапам есть замеры записи гостя. */
+  runs: number
+  vm_running: boolean
+  places: SpacePlace[]
+  warnings?: string[]
+}
+
 export interface Recommendation {
   assessment: {
     server_name: string
@@ -1240,11 +1280,14 @@ export interface Recommendation {
     cbt_possible_disks: number
     /** Сколько дисков не могут вести карту изменённых блоков из-за формата. */
     raw_disks: number
+    /** ВМ на KVM: инкремент требует qcow2 на всех дисках. */
+    libvirt?: boolean
     observed_throughput: number
     average_increment: number
     last_backup_at?: string
     backup_count: number
     qemu_img_available: boolean
+    space_forecast?: SpaceForecast
     warnings?: string[]
   }
   options: BackupOption[]
@@ -1442,8 +1485,26 @@ export interface DBStatsSample {
   error?: string
 }
 
+/** Задержка операций гостя по замерам, микросекунды. */
+export interface LatencyStats {
+  p50_us: number
+  p95_us: number
+  samples: number
+}
+
+/** Задержки гостя за время бэкапа против обычных за сутки до него. */
+export interface IOImpact {
+  write_during: LatencyStats
+  write_baseline: LatencyStats
+  read_during: LatencyStats
+  read_baseline: LatencyStats
+  level: 'none' | 'noticeable' | 'strong' | 'unknown'
+  note: string
+}
+
 export interface BackupTelemetry {
   events: RunEvent[]
   databases: DBStatsSample[]
   disks: DiskSample[]
+  impact?: IOImpact
 }

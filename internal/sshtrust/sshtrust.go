@@ -20,6 +20,8 @@ import (
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
+
+	"github.com/Variel42k/ovirt-backup/internal/sshstats"
 )
 
 // ErrNoHostKey means the connection has neither a pinned key nor a decision to
@@ -185,6 +187,13 @@ func Scan(ctx context.Context, addr string, timeout time.Duration) (*Key, error)
 	client, _, _, err := ssh.NewClientConn(conn, addr, cfg)
 	if client != nil {
 		_ = client.Close()
+	}
+	// Рукопожатие обрывается нарочно, как только ключ получен: удачей считается
+	// полученный ключ, а не ошибка рукопожатия.
+	if found != nil {
+		sshstats.Record(addr, sshstats.HostKey, nil)
+	} else {
+		sshstats.Record(addr, sshstats.HostKey, err)
 	}
 	if found == nil {
 		if err != nil {

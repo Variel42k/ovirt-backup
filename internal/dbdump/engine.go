@@ -140,61 +140,93 @@ func (e *Engine) ListDatabases(ctx context.Context, hostID string, engine model.
 	return transport.List(ctx, engine)
 }
 
+// statsInterval — как часто снимать статистику СУБД во время бэкапа.
+//
+// Каждый замер — запуск хелпера на хосте и подключение хелпера к самой СУБД,
+// а при log_connections в PostgreSQL и строка в её журнале. Для графика
+// коммитов и журнала за время бэкапа, который длится минуты и часы, десяти
+// секунд достаточно; чаще значило бы засорять журналы хоста и СУБД.
+const statsInterval = 10 * time.Second
+
 // MonitorBackup samples linked databases until stop is called. Telemetry
 // failures are visible in history but never fail the backup itself.
+//
+// Каждый хост — своей горутиной и, если хелпер это умеет, одной долгой
+// сессией stats-watch на весь бэкап: команда на каждый замер оставляла бы в
+// журнале хоста строку на замер (при LogLevel VERBOSE у sshd). Старый хелпер
+// без stats-watch и оборвавшийся поток переводят хост на замеры по одному.
 func (e *Engine) MonitorBackup(parent context.Context, run *model.BackupRun) func() {
 	hosts, err := e.store.ListDBHostsForVM(parent, run.ServerID, run.VMID)
 	if err != nil || len(hosts) == 0 {
 		return func() {}
 	}
 	ctx, cancel := context.WithCancel(context.WithoutCancel(parent))
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		sample := func() {
-			for _, host := range hosts {
-				probe := &model.DBStatsSample{RunID: run.ID, HostID: host.ID, HostName: host.Name, Engine: host.MonitorEngine}
-				transport, probeErr := e.dial(host)
-				if probeErr == nil {
-					if source, ok := transport.(StatsTransport); ok {
-						var stats Stats
-						stats, probeErr = source.Stats(ctx, host.MonitorEngine)
-						probe.Commits, probe.Rollbacks, probe.Active, probe.LogBytes = stats.Commits, stats.Rollbacks, stats.Active, stats.LogBytes
-					} else {
-						probeErr = errors.New("хелпер не поддерживает статистику")
-					}
-				}
-				// Cancellation is the normal end of a backup monitor. Do not turn it
-				// into a misleading final "database unavailable" sample.
-				if probeErr != nil && ctx.Err() != nil {
-					return
-				}
-				if probeErr != nil {
-					probe.Error = "статистика СУБД недоступна"
-					e.log.Debug().Err(probeErr).Str("хост", host.Name).Msg("не удалось получить статистику СУБД")
-				}
-				probe.At = time.Now().UTC()
-				saveCtx, saveCancel := context.WithTimeout(context.WithoutCancel(parent), 5*time.Second)
-				saveErr := e.store.AddDBStatsSample(saveCtx, probe)
-				saveCancel()
-				if saveErr != nil {
-					e.log.Debug().Err(saveErr).Msg("не удалось сохранить статистику СУБД")
-				}
-			}
+	var wg sync.WaitGroup
+	for _, host := range hosts {
+		wg.Add(1)
+		go func(host *model.DBHost) {
+			defer wg.Done()
+			e.monitorHost(ctx, parent, run, host)
+		}(host)
+	}
+	return func() { cancel(); wg.Wait() }
+}
+
+func (e *Engine) monitorHost(ctx, parent context.Context, run *model.BackupRun, host *model.DBHost) {
+	save := func(stats Stats, statsErr error) {
+		// Cancellation is the normal end of a backup monitor. Do not turn it
+		// into a misleading final "database unavailable" sample.
+		if statsErr != nil && ctx.Err() != nil {
+			return
 		}
-		sample()
-		ticker := time.NewTicker(2 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				sample()
-			}
+		probe := &model.DBStatsSample{RunID: run.ID, HostID: host.ID, HostName: host.Name, Engine: host.MonitorEngine,
+			Commits: stats.Commits, Rollbacks: stats.Rollbacks, Active: stats.Active, LogBytes: stats.LogBytes}
+		if statsErr != nil {
+			probe.Error = "статистика СУБД недоступна"
+			e.log.Debug().Err(statsErr).Str("хост", host.Name).Msg("не удалось получить статистику СУБД")
 		}
-	}()
-	return func() { cancel(); <-done }
+		probe.At = time.Now().UTC()
+		saveCtx, saveCancel := context.WithTimeout(context.WithoutCancel(parent), 5*time.Second)
+		saveErr := e.store.AddDBStatsSample(saveCtx, probe)
+		saveCancel()
+		if saveErr != nil {
+			e.log.Debug().Err(saveErr).Msg("не удалось сохранить статистику СУБД")
+		}
+	}
+
+	transport, err := e.dial(host)
+	if err != nil {
+		save(Stats{}, err)
+		return
+	}
+	if watcher, ok := transport.(StatsWatcher); ok {
+		watchErr := watcher.WatchStats(ctx, host.MonitorEngine, statsInterval, save)
+		if ctx.Err() != nil {
+			return
+		}
+		e.log.Debug().Err(watchErr).Str("хост", host.Name).
+			Msg("поток статистики СУБД недоступен — замеры по одному")
+	}
+
+	source, ok := transport.(StatsTransport)
+	sample := func() {
+		if !ok {
+			save(Stats{}, errors.New("хелпер не поддерживает статистику"))
+			return
+		}
+		save(source.Stats(ctx, host.MonitorEngine))
+	}
+	sample()
+	ticker := time.NewTicker(statsInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			sample()
+		}
+	}
 }
 
 // Start запускает задание в фоне и сразу возвращает запись о запуске.

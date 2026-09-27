@@ -356,6 +356,10 @@ export const api = {
   listVMDisks: (serverId: string, vmId: string) =>
     http.get<ListResponse<Disk>>(`/servers/${serverId}/vms/${vmId}/disks`).then((r) => unwrap(r.data)),
   listDisks: (serverId: string) => http.get<ListResponse<Disk>>(`/servers/${serverId}/disks`).then((r) => unwrap(r.data)),
+  /** Смонтированные файловые системы гостя KVM по данным агента — для выборочной заморозки. */
+  guestFilesystems: (serverId: string, vmId: string) =>
+    http.get<ListResponse<import('./types').GuestFilesystem>>(`/servers/${serverId}/vms/${vmId}/filesystems`)
+      .then((r) => unwrap(r.data)),
   listStorageDomains: (serverId: string) =>
     http.get<ListResponse<StorageDomain>>(`/servers/${serverId}/storage-domains`).then((r) => unwrap(r.data)),
   listRestoreNetworks: (serverId: string) =>

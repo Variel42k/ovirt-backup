@@ -55,6 +55,8 @@ type jobPayload struct {
 	MaxFreezeSeconds int `json:"max_freeze_seconds"`
 	// FreezeBy — service или engine; пусто — служба.
 	FreezeBy string `json:"freeze_by"`
+	// FreezeMountpoints — какие ФС замораживать; пусто — все. Только KVM.
+	FreezeMountpoints []string `json:"freeze_mountpoints"`
 	// MaxReadMBps — предел чтения с хранилища ВМ, МиБ/с; 0 — предел службы.
 	MaxReadMBps   int                 `json:"max_read_mbps"`
 	VerifyAfter   string              `json:"verify_after"`
@@ -91,6 +93,7 @@ func (p jobPayload) apply(dst *model.BackupJob) {
 	dst.RequireConsistency = p.RequireConsistency
 	dst.MaxFreeze = time.Duration(p.MaxFreezeSeconds) * time.Second
 	dst.FreezeBy = model.FreezeBy(strings.TrimSpace(p.FreezeBy))
+	dst.FreezeMountpoints = trimMountpoints(p.FreezeMountpoints)
 	dst.MaxReadMBps = p.MaxReadMBps
 	dst.VerifyAfter = model.VerifyMode(p.VerifyAfter)
 	dst.VerifyOptions = p.VerifyOptions
@@ -120,6 +123,10 @@ func (s *Server) validateJob(ctx context.Context, job *model.BackupJob) error {
 	if job.FreezeBy.NeedsEngine() && !srv.Kind.UsesOVirtAPI() {
 		return badRequest("заморозку силами движка поддерживает только oVirt и его производные: "+
 			"у %s выберите заморозку службой", srv.Kind.Title())
+	}
+	if len(job.FreezeMountpoints) > 0 && !srv.Kind.UsesLibvirt() {
+		return badRequest("заморозить только выбранные файловые системы можно на KVM: " +
+			"движок oVirt и vzdump замораживают все файловые системы гостя")
 	}
 	if srv.Kind.UsesProxmoxAPI() {
 		if !srv.HasProxmoxDataPlane() {
@@ -378,6 +385,7 @@ type adHocRequest struct {
 	RequireConsistency bool                `json:"require_consistency"`
 	MaxFreezeSeconds   int                 `json:"max_freeze_seconds"`
 	FreezeBy           string              `json:"freeze_by"`
+	FreezeMountpoints  []string            `json:"freeze_mountpoints"`
 	Encrypt            bool                `json:"encrypt"`
 	VerifyAfter        string              `json:"verify_after"`
 	VerifyOptions      model.VerifyOptions `json:"verify_options"`
@@ -438,6 +446,18 @@ func (s *Server) handleAdHocBackup(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, badRequest("заморозку силами движка поддерживает только oVirt и его производные"))
 		return
 	}
+	mountpoints := trimMountpoints(req.FreezeMountpoints)
+	if !consistency.NeedsFreeze() && !(consistency == "" && req.Quiesce) {
+		mountpoints = nil
+	}
+	if err := model.ValidateFreezeMountpoints(mountpoints); err != nil {
+		s.writeError(w, r, badRequest("%v", err))
+		return
+	}
+	if len(mountpoints) > 0 && !srv.Kind.UsesLibvirt() {
+		s.writeError(w, r, badRequest("заморозить только выбранные файловые системы можно на KVM"))
+		return
+	}
 	maxFreeze := time.Duration(req.MaxFreezeSeconds) * time.Second
 	if maxFreeze < 0 || maxFreeze > model.MaxFreezeLimit {
 		s.writeError(w, r, badRequest("предел заморозки должен быть от 0 до %d с", int(model.MaxFreezeLimit.Seconds())))
@@ -479,6 +499,7 @@ func (s *Server) handleAdHocBackup(w http.ResponseWriter, r *http.Request) {
 		RequireConsistency: req.RequireConsistency && consistency.NeedsFreeze(),
 		MaxFreeze:          maxFreeze,
 		FreezeBy:           freezeBy,
+		FreezeMountpoints:  mountpoints,
 		Encrypt:            req.Encrypt,
 		VerifyAfter:        verifyMode,
 		VerifyOptions:      req.VerifyOptions,
@@ -576,6 +597,8 @@ type runTelemetryResponse struct {
 	Events    []*model.RunEvent      `json:"events"`
 	Databases []*model.DBStatsSample `json:"databases"`
 	Disks     []*model.DiskSample    `json:"disks"`
+	// Impact — задержки гостя за время бэкапа против обычных за сутки до него.
+	Impact *model.IOImpact `json:"impact,omitempty"`
 }
 
 func (s *Server) handleRunTelemetry(w http.ResponseWriter, r *http.Request) {
@@ -594,17 +617,18 @@ func (s *Server) handleRunTelemetry(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
-	since := run.CreatedAt.Add(-30 * time.Second)
-	until := time.Now().UTC()
-	if run.EndedAt != nil {
-		until = run.EndedAt.Add(30 * time.Second)
-	}
-	disks, err := s.store.ListDiskSamples(r.Context(), store.DiskSampleFilter{ServerID: run.ServerID, RunID: run.ID, VMID: run.VMID, Since: since, Until: until, Limit: 5000})
+	disks, err := backup.RunDiskSamples(r.Context(), s.store, run)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, runTelemetryResponse{Events: events, Databases: databases, Disks: disks})
+	resp := runTelemetryResponse{Events: events, Databases: databases, Disks: disks}
+	impact, impactErr := backup.RunIOImpact(r.Context(), s.store, run, disks)
+	if impactErr != nil {
+		s.log.Debug().Err(impactErr).Str("run", run.ID).Msg("влияние на ВМ: не удалось прочитать обычные замеры")
+	}
+	resp.Impact = impact
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleRunChain(w http.ResponseWriter, r *http.Request) {
@@ -1202,4 +1226,20 @@ func (s *Server) handleCleanupVMLeftovers(w http.ResponseWriter, r *http.Request
 	s.audit(r, "backup.leftovers.cleanup", model.ScopeVM, vmID, failed == 0,
 		fmt.Sprintf("выполнено действий: %d, не удалось: %d", done, failed))
 	writeJSON(w, http.StatusOK, res)
+}
+
+// trimMountpoints убирает пробелы и пустые строки из списка файловых систем
+// для заморозки; повторы тоже, чтобы агент не получил одну ФС дважды.
+func trimMountpoints(list []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, mp := range list {
+		mp = strings.TrimSpace(mp)
+		if mp == "" || seen[mp] {
+			continue
+		}
+		seen[mp] = true
+		out = append(out, mp)
+	}
+	return out
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -98,6 +99,24 @@ func (c *Client) WaitVMStatus(ctx context.Context, vmID string, wanted []string,
 // snapshot or backup is application-consistent rather than crash-consistent.
 func (c *Client) FreezeFilesystems(ctx context.Context, vmID string) error {
 	return c.post(ctx, "/vms/"+vmID+"/freezefilesystems", struct{}{}, nil)
+}
+
+// FreezeMayBePending сообщает, что после такой ошибки заморозки гость мог
+// всё же оказаться замороженным: движок не ответил вовсе или VDSM не дождался
+// агента, а агент закончил заморозку позже. Отказ, в котором движок назвал
+// причину (упавший сценарий, выключенная ВМ), — не такой случай.
+func FreezeMayBePending(err error) bool {
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		return true
+	}
+	msg := strings.ToLower(apiErr.Error())
+	for _, marker := range []string{"not responding", "timeout", "timed out", "not available"} {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // ThawFilesystems releases a freeze. It must be called even when the operation

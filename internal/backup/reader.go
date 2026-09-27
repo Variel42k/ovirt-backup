@@ -8,9 +8,28 @@ import (
 	"io"
 	"sort"
 
+	"github.com/Variel42k/ovirt-backup/internal/model"
 	"github.com/Variel42k/ovirt-backup/internal/repo"
 	"github.com/Variel42k/ovirt-backup/internal/secret"
 )
+
+// EffectiveChain — часть цепочки диска, которую читает восстановление: от его
+// последней полной копии к последнему инкременту.
+//
+// Обычно полная копия одна — корень цепочки. Но в смешанном бэкапе oVirt диск
+// без отслеживания изменений (raw) копируется целиком внутри инкрементального
+// запуска, и его манифест помечен как полный. Такой манифест — новая основа:
+// полная копия не хранит нулевых областей, и если бы восстановление смотрело
+// дальше в прошлое, области, обнулённые с тех пор, вернулись бы со старыми
+// данными.
+func EffectiveChain(manifests []*DiskManifest) []*DiskManifest {
+	for i := len(manifests) - 1; i > 0; i-- {
+		if m := manifests[i]; m != nil && (m.Type == model.BackupFull || m.Type == model.BackupSnapshot) {
+			return manifests[i:]
+		}
+	}
+	return manifests
+}
 
 // maxBatchBytes caps how much of a data object is pulled in one request when
 // serving a run of adjacent chunks. Large enough to amortise S3 round trips,
@@ -61,6 +80,7 @@ func NewChainReader(backend repo.Backend, cipher *secret.Cipher, manifests []*Di
 	if len(manifests) == 0 {
 		return nil, fmt.Errorf("пустая цепочка бэкапов")
 	}
+	manifests = EffectiveChain(manifests)
 
 	r := &ChainReader{
 		backend:    backend,

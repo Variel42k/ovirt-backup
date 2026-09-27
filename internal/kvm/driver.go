@@ -6,6 +6,7 @@ package kvm
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -110,6 +111,8 @@ type Request struct {
 	RequireConsistency bool
 	// MaxFreeze — предел окна заморозки; 0 — backup.DefaultMaxFreeze.
 	MaxFreeze time.Duration
+	// FreezeMountpoints — какие ФС гостя замораживать; пусто — все.
+	FreezeMountpoints []string
 	// MaxReadMBps — предел чтения с хранилища ВМ на весь запуск, МиБ/с;
 	// 0 — без ограничения. Общий на все диски: они читаются параллельно с
 	// одного хранилища.
@@ -333,6 +336,11 @@ func (d *Driver) Backup(ctx context.Context, req Request) (*Result, error) {
 		log.Debug().Str("свободно", humanBytes(freeBytes)).
 			Str("каталог", d.cfg.ScratchDir).Msg("место под scratch-файлы")
 	}
+	// До заморозки и до открытия бэкапа: на таком томе сторож закрыл бы бэкап
+	// почти сразу, а гость зря пережил бы и то и другое.
+	if err := checkScratchStart(freeBytes, d.cfg.ScratchDir); err != nil {
+		return nil, err
+	}
 
 	socketPath := libvirtx.SocketPath(d.cfg.ScratchDir, req.RunID)
 	// libvirt refuses to bind a socket path that already exists.
@@ -373,7 +381,22 @@ func (d *Driver) Backup(ctx context.Context, req Request) (*Result, error) {
 				"копия снимается полностью и на горячую")
 	}
 
-	q, frozenAt, err := d.quiesce(ctx, dom, info, req, result, log)
+	// Ожидание агента ограничивается только на время заморозки и
+	// разморозки, и потом возвращается умолчание libvirt. Отложенный вызов
+	// зарегистрирован раньше всех остальных, поэтому выполнится после
+	// последней разморозки.
+	agentLimited := false
+	defer func() {
+		if !agentLimited {
+			return
+		}
+		restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		if err := d.conn.RestoreAgentTimeout(restoreCtx, dom); err != nil {
+			log.Warn().Err(err).Msg("не удалось вернуть домену ожидание агента по умолчанию")
+		}
+	}()
+	q, frozenAt, err := d.quiesce(ctx, dom, info, req, result, &agentLimited, log)
 	result.Consistency, result.ConsistencyNote = q.Level, q.Note
 	if err != nil {
 		_ = d.conn.RemoveSocket(ctx, socketPath)
@@ -448,8 +471,10 @@ func (d *Driver) Backup(ctx context.Context, req Request) (*Result, error) {
 	// получать ошибки.
 	copyCtx, stopCopy := context.WithCancelCause(ctx)
 	defer stopCopy(nil)
+	space := d.conn.NewScratchSpace(d.cfg.ScratchDir)
+	defer space.Close()
 	guard := startScratchGuard(copyCtx, scratchCheckInterval, scratchReserve(freeBytes),
-		d.scratchSampler(dom), stopCopy, log)
+		d.scratchSampler(dom, space), stopCopy, log)
 
 	transferStarted := time.Now().UTC()
 	manifests, stats, err := d.copyDisks(copyCtx, req, plan, socketPath, info, log)
@@ -487,8 +512,11 @@ func (d *Driver) Backup(ctx context.Context, req Request) (*Result, error) {
 // quiesce freezes the guest filesystems when the requested level needs it and
 // reports the level reached. An error means the job demands a level that could
 // not be reached; nothing has been started on the hypervisor at that point.
+//
+// agentLimited отмечает, что служба ограничила домену ожидание агента и
+// должна вернуть его по окончании.
 func (d *Driver) quiesce(ctx context.Context, dom golibvirt.Domain, info *libvirtx.Domain,
-	req Request, result *Result, log zerolog.Logger) (backup.Quiesced, time.Time, error) {
+	req Request, result *Result, agentLimited *bool, log zerolog.Logger) (backup.Quiesced, time.Time, error) {
 	target := req.Consistency
 	if !target.Valid() {
 		target = model.ConsistencyCrash
@@ -501,18 +529,42 @@ func (d *Driver) quiesce(ctx context.Context, dom golibvirt.Domain, info *libvir
 		backup.GuestState{Running: info.State.Running(), Agent: info.GuestAgent},
 		func(ctx context.Context) error {
 			// The agent runs the guest's fsfreeze hooks before the freeze
-			// itself; a database flush has to fit into the same minute.
-			freezeCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
-			defer cancel()
-			result.mark(model.RunEventFreezeRequested, 0, "уровень: "+target.Title())
+			// itself; a database flush has to fit into the same minute. The
+			// limit is set on the domain: go-libvirt calls take no context.
+			if d.conn.LimitAgentTimeout(ctx, dom, libvirtx.AgentFreezeTimeout) {
+				*agentLimited = true
+			} else {
+				log.Debug().Msg("libvirt не ограничил ожидание агента — заморозку ограничивает только сам libvirt")
+			}
+			scope := ""
+			if len(req.FreezeMountpoints) > 0 {
+				scope = "; только " + strings.Join(req.FreezeMountpoints, ", ") +
+					" — остальные файловые системы как после сбоя питания"
+			}
+			result.mark(model.RunEventFreezeRequested, 0, "уровень: "+target.Title()+scope)
 			asked := time.Now().UTC()
-			n, err := d.conn.FreezeFilesystems(freezeCtx, dom)
+			n, err := d.conn.FreezeFilesystems(ctx, dom, req.FreezeMountpoints)
+			if err == nil {
+				err = checkPartialFreeze(n, req.FreezeMountpoints)
+				if err != nil {
+					// Замораживать нечего — но разморозка всё равно общая и
+					// безвредна; зато уровень не припишется точке зря.
+					d.thawAfterFailedFreeze(ctx, dom, err, result, log)
+					return err
+				}
+			}
 			if err == nil {
 				frozenAt = time.Now().UTC()
-				result.mark(model.RunEventFrozen, frozenAt.Sub(asked),
-					fmt.Sprintf("файловых систем: %d", n))
+				detail := fmt.Sprintf("файловых систем: %d", n)
+				if len(req.FreezeMountpoints) > 0 && n < len(req.FreezeMountpoints) {
+					detail += fmt.Sprintf(" из %d указанных — часть путей не точки монтирования и пропущена агентом",
+						len(req.FreezeMountpoints))
+				}
+				result.mark(model.RunEventFrozen, frozenAt.Sub(asked), detail)
 				log.Debug().Int("файловых систем", n).Msg("файловые системы гостя заморожены")
+				return nil
 			}
+			d.thawAfterFailedFreeze(ctx, dom, err, result, log)
 			return err
 		})
 	if q.Note != "" && q.Level.Below(target) {
@@ -558,13 +610,50 @@ func (d *Driver) PruneCheckpoints(ctx context.Context, domainName string, keep m
 	return removed, nil
 }
 
+// checkPartialFreeze: агент молча пропускает пути, которые не являются точками
+// монтирования. Если из указанного списка не заморожено ничего, заморозки не
+// было, и уровень точке приписывать нельзя.
+func checkPartialFreeze(frozen int, mountpoints []string) error {
+	if len(mountpoints) == 0 || frozen > 0 {
+		return nil
+	}
+	return fmt.Errorf("агент не заморозил ни одной из файловых систем %s: это не точки монтирования "+
+		"в госте. Укажите точки монтирования отдельных томов (findmnt в госте) или оставьте поле пустым",
+		strings.Join(mountpoints, ", "))
+}
+
+// thawAfterFailedFreeze размораживает гостя после неудачной заморозки: агент
+// мог заморозить его уже после того, как libvirt перестал ждать ответа (см.
+// backup.ThawAfterFailedFreeze).
+func (d *Driver) thawAfterFailedFreeze(ctx context.Context, dom golibvirt.Domain, freezeErr error,
+	result *Result, log zerolog.Logger) {
+
+	thawed := 0
+	err := backup.ThawAfterFailedFreeze(ctx, libvirtx.FreezeMayBePending(freezeErr), func(ctx context.Context) error {
+		n, err := d.conn.ThawFilesystems(ctx, dom)
+		thawed = n
+		return err
+	})
+	switch {
+	case err != nil:
+		log.Error().Err(err).Msg("НЕ УДАЛОСЬ РАЗМОРОЗИТЬ гостя после неудачной заморозки — проверьте ВМ немедленно")
+		result.mark(model.RunEventThawFailed, 0,
+			"заморозка не удалась, а разморозить гостя после неё не получилось — проверьте ВМ немедленно")
+	case thawed > 0:
+		log.Warn().Int("файловых систем", thawed).
+			Msg("агент заморозил гостя уже после ошибки вызова — служба разморозила его")
+		result.mark(model.RunEventThawed, 0, fmt.Sprintf(
+			"агент заморозил гостя уже после ошибки вызова; служба разморозила файловых систем: %d", thawed))
+	}
+}
+
 // scratchSampler замеряет свободное место на томе scratch и занятое
 // scratch-файлами бэкапа. Что не удалось узнать, остаётся помеченным как
 // неизвестное: сторож без замера ничего не решает.
-func (d *Driver) scratchSampler(dom golibvirt.Domain) func(context.Context) scratchSample {
+func (d *Driver) scratchSampler(dom golibvirt.Domain, space *libvirtx.ScratchSpace) func(context.Context) scratchSample {
 	return func(ctx context.Context) scratchSample {
 		var s scratchSample
-		if free, err := d.conn.ScratchFree(ctx, d.cfg.ScratchDir); err == nil {
+		if free, err := space.Free(ctx); err == nil {
 			s.free, s.freeKnown = free, true
 		} else if ctx.Err() == nil {
 			d.log.Debug().Err(err).Msg("не удалось замерить место под scratch")
@@ -586,7 +675,7 @@ func (d *Driver) thaw(ctx context.Context, dom golibvirt.Domain, frozenAt *time.
 	thawCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 60*time.Second)
 	defer cancel()
 
-	if err := d.conn.ThawFilesystems(thawCtx, dom); err != nil {
+	if _, err := d.conn.ThawFilesystems(thawCtx, dom); err != nil {
 		log.Error().Err(err).
 			Msg("НЕ УДАЛОСЬ РАЗМОРОЗИТЬ файловые системы гостя — проверьте ВМ немедленно")
 		result.mark(model.RunEventThawFailed, held, "проверьте ВМ немедленно")

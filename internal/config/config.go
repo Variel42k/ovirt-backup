@@ -604,8 +604,14 @@ type BackupConfig struct {
 	// истечении служба размораживает гостя сама, а копия становится
 	// crash-consistent: узел Kubernetes или нагруженная СУБД дольше не
 	// выдерживают остановки записи.
-	MaxFreeze time.Duration  `mapstructure:"max_freeze"`
-	Transfer  TransferConfig `mapstructure:"transfer"`
+	MaxFreeze time.Duration `mapstructure:"max_freeze"`
+	// MaxRunsPerStorage — сколько горячих бэкапов работающих ВМ одновременно
+	// держат открытыми на одном домене хранения oVirt или в одном каталоге
+	// scratch на хосте KVM. Записи гостей копятся там, пока бэкап открыт, и
+	// бэкапы многих ВМ одного места делят одно свободное место. Остальные
+	// ждут очереди. 0 — без предела.
+	MaxRunsPerStorage int            `mapstructure:"max_runs_per_storage"`
+	Transfer          TransferConfig `mapstructure:"transfer"`
 
 	// RestoreDirs ограничивает каталоги, куда разрешено восстанавливать
 	// образы. Каталог приходит из запроса, а восстановленный образ — это
@@ -964,6 +970,10 @@ func (c *Config) Validate() error {
 	if c.Backup.MaxFreeze != 0 && (c.Backup.MaxFreeze < time.Second || c.Backup.MaxFreeze > 10*time.Minute) {
 		return fmt.Errorf("backup.max_freeze must be between 1s and 10m, got %s", c.Backup.MaxFreeze)
 	}
+	if c.Backup.MaxRunsPerStorage < 0 {
+		return fmt.Errorf("backup.max_runs_per_storage must be 0 (unlimited) or positive, got %d",
+			c.Backup.MaxRunsPerStorage)
+	}
 	seenFileRoots := map[string]bool{}
 	for _, root := range c.FileBackup.Roots {
 		if strings.TrimSpace(root.ID) == "" || strings.TrimSpace(root.Path) == "" {
@@ -1180,6 +1190,7 @@ func setDefaults(v *viper.Viper) {
 	// больший карантин начинает заметно держать место.
 	v.SetDefault("backup.purge_delay", "72h")
 	v.SetDefault("backup.max_freeze", "60s")
+	v.SetDefault("backup.max_runs_per_storage", 0)
 	v.SetDefault("backup.restore_dirs", []string{})
 	v.SetDefault("backup.qemu_img_path", "")
 

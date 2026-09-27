@@ -145,6 +145,16 @@ func (c *Client) ListStorageDomains(ctx context.Context, serverID string) ([]*mo
 	return out, nil
 }
 
+// GetStorageDomain reads one storage domain as the engine reports it, with
+// its free and used space.
+func (c *Client) GetStorageDomain(ctx context.Context, id string) (*StorageDomain, error) {
+	var d StorageDomain
+	if err := c.get(ctx, "/storagedomains/"+id, &d); err != nil {
+		return nil, err
+	}
+	return &d, nil
+}
+
 // ListVNICProfiles returns the engine-managed network targets accepted when a
 // NIC is created. Network IDs alone are insufficient in oVirt: CreateNIC
 // requires a vNIC profile ID.

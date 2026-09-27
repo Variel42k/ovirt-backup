@@ -468,3 +468,28 @@ func TestManagementDisabledFromEnv(t *testing.T) {
 		t.Fatal("JHV_MANAGEMENT_ENABLED=false не выключил управление")
 	}
 }
+
+// Очередь горячих бэкапов на место хранения по умолчанию выключена: без
+// настройки порядок запусков остаётся прежним.
+func TestMaxRunsPerStorage(t *testing.T) {
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("загрузка конфигурации: %v", err)
+	}
+	if cfg.Backup.MaxRunsPerStorage != 0 {
+		t.Fatalf("по умолчанию предел должен быть выключен, а он %d", cfg.Backup.MaxRunsPerStorage)
+	}
+
+	t.Setenv("JHV_BACKUP_MAX_RUNS_PER_STORAGE", "2")
+	if cfg, err = Load(""); err != nil {
+		t.Fatalf("предел из окружения: %v", err)
+	}
+	if cfg.Backup.MaxRunsPerStorage != 2 {
+		t.Fatalf("предел из окружения: %d, want 2", cfg.Backup.MaxRunsPerStorage)
+	}
+
+	t.Setenv("JHV_BACKUP_MAX_RUNS_PER_STORAGE", "-1")
+	if _, err := Load(""); err == nil {
+		t.Fatal("отрицательный предел принят")
+	}
+}

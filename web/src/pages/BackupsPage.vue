@@ -15,7 +15,7 @@ import IOChart from '@/components/IOChart.vue'
 import type { IOPoint, TimeBand, TimeMarker } from '@/components/IOChart.vue'
 import PageLoadError from '@/components/PageLoadError.vue'
 import { useUnsavedChanges } from '@/composables/unsavedChanges'
-import type { BackupCopy, BackupDisk, BackupRun, BackupTelemetry, BootReport, Cluster, DBStatsSample, Host, ReplicationDetail, RepositoryArtifact, RestoreNetworkTarget, RestoreRun, RestoreVMPlan, StorageDomain, VerifyRun } from '@/api/types'
+import type { BackupCopy, BackupDisk, BackupRun, BackupTelemetry, BootReport, Cluster, DBStatsSample, Host, IOImpact, LatencyStats, ReplicationDetail, RepositoryArtifact, RestoreNetworkTarget, RestoreRun, RestoreVMPlan, StorageDomain, VerifyRun } from '@/api/types'
 
 const $q = useQuasar()
 const route = useRoute()
@@ -64,6 +64,19 @@ const chain = ref<BackupRun[]>([])
 const verifications = ref<VerifyRun[]>([])
 const artifacts = ref<RepositoryArtifact[]>([])
 const telemetry = ref<BackupTelemetry>({ events: [], databases: [], disks: [] })
+
+// Влияние бэкапа на ВМ: задержки гостя за время запуска против обычных.
+const impactMeta: Record<IOImpact['level'], { label: string; color: string }> = {
+  none: { label: 'не мешал', color: 'positive' },
+  noticeable: { label: 'заметно', color: 'warning' },
+  strong: { label: 'сильно', color: 'negative' },
+  unknown: { label: 'неизвестно', color: 'grey-6' },
+}
+
+function latency(stats: LatencyStats): string {
+  if (!stats.samples) return 'нет данных'
+  return stats.p95_us < 1000 ? `${stats.p95_us} мкс` : `${(stats.p95_us / 1000).toFixed(1)} мс`
+}
 const telemetryLoading = ref(false)
 const telemetryError = ref('')
 const replications = ref<BackupCopy[]>([])
@@ -320,6 +333,7 @@ const runMarkerKinds: Record<string, string> = {
   extent_map_unavailable: '#f57c00',
   transfer_reopened: '#f57c00',
   transfer_via_proxy: '#f57c00',
+  storage_queue: '#f57c00',
   transfer_finished: '#21ba45',
   run_finished: '#21ba45',
   run_failed: '#c10015',
@@ -415,7 +429,7 @@ function eventColor(kind: string): string {
   if (kind === 'run_finished' || kind === 'manifest_written') return 'positive'
   if (kind === 'frozen' || kind === 'thawed' || kind === 'engine_takeover'
     || kind === 'extent_map_unavailable' || kind === 'transfer_reopened'
-    || kind === 'transfer_via_proxy') return 'warning'
+    || kind === 'transfer_via_proxy' || kind === 'downgraded_full' || kind === 'storage_queue') return 'warning'
   return 'primary'
 }
 
@@ -1520,6 +1534,20 @@ const replicationColumns = [
               <IOChart :points="vmIOPoints" :bands="freezeBands" :markers="runMarkers" :height="190" />
               <div v-if="!vmIOPoints.length && !telemetryLoading" class="jhv-reason q-mt-xs">
                 За время запуска замеров I/O не получено. Проверьте, что сбор метрик включён, а учётная запись виртуализации может читать статистику дисков.
+              </div>
+              <div v-if="telemetry.impact" class="q-mt-sm" data-testid="run-io-impact">
+                <div class="row items-center q-gutter-xs">
+                  <div class="text-caption text-weight-medium">Влияние на ВМ</div>
+                  <q-chip dense :color="impactMeta[telemetry.impact.level].color" text-color="white">
+                    {{ impactMeta[telemetry.impact.level].label }}
+                  </q-chip>
+                </div>
+                <div class="text-caption jhv-wrap">{{ telemetry.impact.note }}</div>
+                <div v-if="telemetry.impact.write_during.samples || telemetry.impact.read_during.samples" class="text-caption text-grey-7">
+                  Задержка гостя, 95 % операций: запись {{ latency(telemetry.impact.write_during) }}
+                  (обычно {{ latency(telemetry.impact.write_baseline) }}), чтение {{ latency(telemetry.impact.read_during) }}
+                  (обычно {{ latency(telemetry.impact.read_baseline) }}).
+                </div>
               </div>
             </div>
           </div>

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/Variel42k/ovirt-backup/internal/model"
@@ -89,7 +90,10 @@ type DiskSampleFilter struct {
 	Disk     string
 	Since    time.Time
 	Until    time.Time
-	Limit    int
+	// OnlyMonitoring — только замеры обычного мониторинга, без замеров
+	// запусков бэкапа: так выглядит работа ВМ без бэкапа.
+	OnlyMonitoring bool
+	Limit          int
 }
 
 // ListDiskSamples returns disk observations oldest-first, which is the order a
@@ -101,6 +105,8 @@ func (s *Store) ListDiskSamples(ctx context.Context, f DiskSampleFilter) ([]*mod
 	if f.RunID != "" {
 		query += ` AND run_id=?`
 		args = append(args, f.RunID)
+	} else if f.OnlyMonitoring {
+		query += ` AND run_id IS NULL`
 	}
 	if f.VMID != "" {
 		query += ` AND vm_id=?`
@@ -229,6 +235,56 @@ func (s *Store) LatestMountSamples(ctx context.Context, serverID string) ([]*mod
 		out = append(out, sample)
 	}
 	return out, nil
+}
+
+// RunDiskWrites — сколько гость записал на один диск, пока шёл бэкап.
+type RunDiskWrites struct {
+	RunID string
+	Disk  string
+	Bytes int64
+}
+
+// GuestWritesDuringRuns оценивает по замерам мониторинга запусков, сколько
+// гость записал на каждый диск за время каждого из этих бэкапов: средняя
+// скорость записи, умноженная на время между первым и последним замером.
+// Запуск или диск меньше чем с двумя замерами не попадает в ответ: по одному
+// замеру время не посчитать.
+func (s *Store) GuestWritesDuringRuns(ctx context.Context, serverID string, runIDs []string) ([]RunDiskWrites, error) {
+	if len(runIDs) == 0 {
+		return nil, nil
+	}
+	args := make([]any, 0, len(runIDs)+1)
+	args = append(args, serverID)
+	for _, id := range runIDs {
+		args = append(args, id)
+	}
+	marks := strings.TrimSuffix(strings.Repeat("?,", len(runIDs)), ",")
+	rows, err := s.db.Query(ctx, `SELECT run_id, disk,
+		CAST(AVG(write_bps) * EXTRACT(EPOCH FROM (MAX(at) - MIN(at))) AS DOUBLE PRECISION)
+		FROM disk_samples
+		WHERE server_id=? AND run_id IN (`+marks+`)
+		GROUP BY run_id, disk
+		HAVING COUNT(*) > 1`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("guest writes during runs: %w", err)
+	}
+	defer rows.Close()
+
+	var out []RunDiskWrites
+	for rows.Next() {
+		var (
+			w     RunDiskWrites
+			bytes sql.NullFloat64
+		)
+		if err := rows.Scan(&w.RunID, &w.Disk, &bytes); err != nil {
+			return nil, fmt.Errorf("scan guest writes: %w", err)
+		}
+		if bytes.Valid && bytes.Float64 > 0 {
+			w.Bytes = int64(bytes.Float64)
+		}
+		out = append(out, w)
+	}
+	return out, rows.Err()
 }
 
 // PruneIOSamples drops observations older than the retention window.

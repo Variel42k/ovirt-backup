@@ -52,6 +52,9 @@ type Engine struct {
 	// а не в хранилище копий, и смешивать пределы значило бы дать одному виду
 	// работы вытеснять другой.
 	heavy chan struct{}
+	// places — очередь горячих бэкапов на домены хранения oVirt и каталоги
+	// scratch KVM (backup.max_runs_per_storage).
+	places *PlaceLimiter
 
 	// sweeping — ВМ, у которых сейчас идёт фоновая уборка.
 	sweeping sync.Map
@@ -74,6 +77,7 @@ func NewEngine(st *store.Store, pool *ovirt.Pool, cfg config.BackupConfig, ciphe
 		log:      log,
 		external: map[model.VerifyMode]ExternalVerifier{},
 		heavy:    make(chan struct{}, heavy),
+		places:   NewPlaceLimiter(cfg.MaxRunsPerStorage),
 	}
 	e.compression.Store(cfg.Compression)
 	return e
@@ -140,12 +144,15 @@ type RunRequest struct {
 	// MaxReadMBps — предел чтения с хранилища ВМ, МиБ/с; 0 — предел службы.
 	MaxReadMBps int
 	// FreezeBy — кто замораживает гостя; см. model.FreezeBy.
-	FreezeBy      model.FreezeBy
-	Encrypt       bool
-	ExportQcow2   bool
-	VerifyAfter   model.VerifyMode
-	VerifyOptions model.VerifyOptions
-	Retention     model.RetentionPolicy
+	FreezeBy model.FreezeBy
+	// FreezeMountpoints — какие ФС замораживать; пусто — все. Только KVM;
+	// см. model.BackupJob.FreezeMountpoints.
+	FreezeMountpoints []string
+	Encrypt           bool
+	ExportQcow2       bool
+	VerifyAfter       model.VerifyMode
+	VerifyOptions     model.VerifyOptions
+	Retention         model.RetentionPolicy
 
 	// OVAHostID и OVADirectory нужны только для типа ova.
 	OVAHostID    string
@@ -312,6 +319,14 @@ func (e *Engine) Execute(ctx context.Context, req RunRequest) (*model.BackupRun,
 		}
 	}
 
+	// Очередь на домены хранения — до отметки «выполняется»: пока запуск ждёт,
+	// он остаётся в ожидании, а время старта — время начала копирования.
+	releaseDomains, err := e.waitDomains(ctx, srv, vm, run, disks)
+	if err != nil {
+		return e.failRun(ctx, run, fmt.Errorf("ожидание очереди на домен хранения: %w", err))
+	}
+	defer releaseDomains()
+
 	started := time.Now().UTC()
 	run.StartedAt = &started
 	run.Status = model.RunRunning
@@ -324,8 +339,12 @@ func (e *Engine) Execute(ctx context.Context, req RunRequest) (*model.BackupRun,
 		Int("дисков", len(disks)).
 		Str("родитель", run.ParentRunID).
 		Msg("бэкап запущен")
-	e.event(ctx, run, model.RunEventStarted, 0,
-		fmt.Sprintf("%s, дисков: %d, хранилище: %s", run.Type.Title(), len(disks), target.Name))
+	// Причина смены типа — в хронологию: иначе её видно только в журнале службы.
+	startDetail := fmt.Sprintf("%s, дисков: %d, хранилище: %s", run.Type.Title(), len(disks), target.Name)
+	if plan.Note != "" {
+		startDetail += "; " + plan.Note
+	}
+	e.event(ctx, run, model.RunEventStarted, 0, startDetail)
 
 	execCtx := ctx
 	var cancel context.CancelFunc
@@ -516,6 +535,21 @@ type plan struct {
 	ChunkSize        int64
 	MaxDuration      time.Duration
 	Note             string
+	// FullDisks — диски инкрементального запуска, которые копируются целиком,
+	// с причиной (смешанный бэкап oVirt 4.4.5+). Их манифест помечается
+	// полным и становится новой основой диска (см. EffectiveChain).
+	FullDisks map[string]string
+}
+
+// markFullDisk отмечает диск инкрементального запуска, который копируется
+// целиком. Причина — первая названная: движок и план говорят об одном и том же.
+func (p *plan) markFullDisk(id, reason string) {
+	if p.FullDisks == nil {
+		p.FullDisks = map[string]string{}
+	}
+	if _, ok := p.FullDisks[id]; !ok {
+		p.FullDisks[id] = reason
+	}
 }
 
 // resolvePlan turns the requested type into one that can actually run here.
@@ -545,21 +579,22 @@ func (e *Engine) resolvePlan(ctx context.Context, client *ovirt.Client, srv *mod
 		return p, nil
 	}
 
-	var without []string
-	for _, d := range disks {
-		if d.Backup != "incremental" {
-			without = append(without, d.AliasOrName())
-		}
-	}
-	if len(without) > 0 {
-		p.Type = fallback
-		p.Note = fmt.Sprintf("на дисках %s не включён режим incremental — используется «%s». "+
-			"Включите отслеживание изменённых блоков, чтобы получать горячие инкременты",
-			strings.Join(without, ", "), fallback.Title())
+	// Полный бэкап Backup API снимает любые диски — и raw, и qcow2 — без
+	// временного снапшота. Режим incremental нужен только инкрементам.
+	if req.Type == model.BackupFull {
 		return p, nil
 	}
 
-	if req.Type == model.BackupFull {
+	var without []ovirt.Disk
+	for _, d := range disks {
+		if d.Backup != "incremental" {
+			without = append(without, d)
+		}
+	}
+	if len(without) == len(disks) {
+		p.Type = model.BackupFull
+		p.Note = "ни на одном диске не включён режим incremental — выполняется полный бэкап через Backup API, " +
+			"без временного снапшота. Включите отслеживание изменённых блоков на qcow2-дисках, чтобы получать инкременты"
 		return p, nil
 	}
 
@@ -611,10 +646,36 @@ func (e *Engine) resolvePlan(ctx context.Context, client *ovirt.Client, srv *mod
 		return p, nil
 	}
 
+	// Движок, который уже отверг смешанный бэкап этой ВМ, отвергнет и этот:
+	// попытка стоила бы лишнего запроса, а в режимах «Служба» и «Смешанный» —
+	// второй заморозки гостя. Пока память свежа, запуск по заданию сразу
+	// полный. Разовый запуск память не учитывает: им проверяют движок после
+	// обновления.
+	if len(without) > 0 && req.JobID != "" {
+		if last := e.recentMixedRejection(ctx, srv.ID, req.VMID, parent); last != nil {
+			p.Type = model.BackupFull
+			p.Note = fmt.Sprintf("движок отверг смешанный бэкап этой ВМ %s — запуск сразу полный, "+
+				"без лишней попытки и повторной заморозки; служба попробует снова после %s",
+				last.Local().Format("02.01.2006 15:04"), last.Add(mixedRejectionRetry).Local().Format("02.01.2006"))
+			return p, nil
+		}
+	}
+
 	p.ParentRunID = parent.ID
 	p.ChainID = parent.ChainID
 	p.ChainIndex = parent.ChainIndex + 1
 	p.FromCheckpointID = parent.ToCheckpointID
+	// Смешанный бэкап: диски без режима incremental движок (4.4.5+) отдаёт
+	// в этом же бэкапе целиком, остальные — инкрементом.
+	if len(without) > 0 {
+		names := make([]string, 0, len(without))
+		for _, d := range without {
+			p.markFullDisk(d.ID, "режим incremental не включён")
+			names = append(names, d.AliasOrName())
+		}
+		p.Note = fmt.Sprintf("диски %s без режима incremental копируются целиком, остальные — инкрементом",
+			strings.Join(names, ", "))
+	}
 	p.ChunkSize = e.chainChunkSize(ctx, parent, p.ChunkSize)
 	return p, nil
 }
@@ -787,15 +848,33 @@ func (e *Engine) runCBT(ctx context.Context, client *ovirt.Client, backend repo.
 		return nil, err
 	}
 
-	var backup *ovirt.Backup
-	var err error
-	switch {
-	case req.FreezeBy.Engine():
-		backup, err = e.openBackupEngineFreeze(ctx, client, srv, vm, run, req, diskIDs, p, "")
-	case req.FreezeBy.Mixed():
-		backup, err = e.openBackupMixedFreeze(ctx, client, srv, vm, run, req, diskIDs, p)
-	default:
-		backup, err = e.openBackupServiceFreeze(ctx, client, srv, vm, run, req, diskIDs, p)
+	// После уборки: она могла вернуть место на домене. До заморозки и до
+	// открытия бэкапа: на почти полном домене он не открывается вовсе.
+	domains, err := e.checkDomainSpace(ctx, client, vm, disks)
+	if err != nil {
+		return nil, err
+	}
+
+	open := func() (*ovirt.Backup, error) {
+		switch {
+		case req.FreezeBy.Engine():
+			return e.openBackupEngineFreeze(ctx, client, srv, vm, run, req, diskIDs, p, "")
+		case req.FreezeBy.Mixed():
+			return e.openBackupMixedFreeze(ctx, client, srv, vm, run, req, diskIDs, p)
+		default:
+			return e.openBackupServiceFreeze(ctx, client, srv, vm, run, req, diskIDs, p)
+		}
+	}
+	backup, err := open()
+	// Движок старше 4.4.5 не принимает смешанный бэкап: raw-диск в
+	// инкрементальном бэкапе он отвергает. Бэкап на движке не открылся, и его
+	// можно повторить полным — горячим, через тот же Backup API.
+	if backup == nil && err != nil && p.FromCheckpointID != "" && len(p.FullDisks) > 0 && mixedBackupRejected(err) {
+		reason := fmt.Sprintf("движок не принял смешанный бэкап (нужен oVirt 4.4.5+): %v", err)
+		e.log.Warn().Str("vm", vm.Name).Msg(reason + " — повтор полным бэкапом")
+		e.event(ctx, run, model.RunEventDowngradedFull, 0, reason+"; копия снимается полной")
+		e.downgradeToFull(ctx, run, &p)
+		backup, err = open()
 	}
 	// From here on the engine holds a lock on the disks; it must be released
 	// no matter how this function exits — including when the engine opened the
@@ -810,17 +889,84 @@ func (e *Engine) runCBT(ctx context.Context, client *ovirt.Client, backend repo.
 	extentContext := imageio.ContextZero
 	if p.FromCheckpointID != "" {
 		extentContext = imageio.ContextDirty
+		// Какой диск движок отдал целиком, решает он: диск без режима
+		// incremental или подключённый после checkpoint. Читать такой диск
+		// как изменения нельзя — битмапа у него нет.
+		modes, modeErr := client.BackupDiskModes(ctx, vm.ID, backup.ID)
+		if modeErr != nil {
+			e.log.Debug().Err(modeErr).Str("vm", vm.Name).Msg("движок не сообщил режимы дисков бэкапа")
+		}
+		for _, d := range disks {
+			if modes[d.ID] == "full" {
+				p.markFullDisk(d.ID, "движок отдал его целиком")
+			}
+		}
 	}
 
-	return e.copyDisks(ctx, client, backend, srv, vm, run, req, disks, p, func(d ovirt.Disk) ovirt.TransferRequest {
-		return ovirt.TransferRequest{
-			DiskID:            d.ID,
-			BackupID:          backup.ID,
-			Direction:         "download",
-			Format:            "raw",
-			InactivityTimeout: e.cfg.Transfer.InactivityTimeout,
-		}
-	}, extentContext)
+	return e.copyDisksGuarded(ctx, client, run, domains, func(ctx context.Context) ([]*DiskManifest, error) {
+		return e.copyDisks(ctx, client, backend, srv, vm, run, req, disks, p, func(d ovirt.Disk) ovirt.TransferRequest {
+			return ovirt.TransferRequest{
+				DiskID:            d.ID,
+				BackupID:          backup.ID,
+				Direction:         "download",
+				Format:            "raw",
+				InactivityTimeout: e.cfg.Transfer.InactivityTimeout,
+			}
+		}, extentContext)
+	})
+}
+
+// mixedRejectionRetry — сколько после отказа движка в смешанном бэкапе ВМ
+// её инкременты сразу снимаются полными. Движок могли обновить до 4.4.5+,
+// поэтому раз в неделю служба пробует снова.
+const mixedRejectionRetry = 7 * 24 * time.Hour
+
+// recentMixedRejection — когда движок последний раз отверг смешанный бэкап
+// ВМ, если это было не раньше mixedRejectionRetry. Инкремент, снятый уже
+// после отказа, память гасит: движок смешанный бэкап теперь принимает.
+// Ошибка чтения памяти запуск не останавливает: он просто попробует
+// смешанный бэкап, как раньше.
+func (e *Engine) recentMixedRejection(ctx context.Context, serverID, vmID string, parent *model.BackupRun) *time.Time {
+	last, err := e.store.LastRunEventAt(ctx, serverID, vmID, model.RunEventDowngradedFull)
+	if err != nil {
+		e.log.Warn().Err(err).Msg("не удалось проверить прошлые отказы движка в смешанном бэкапе")
+		return nil
+	}
+	if last == nil || time.Since(*last) >= mixedRejectionRetry {
+		return nil
+	}
+	if parent != nil && parent.Type != model.BackupFull && parent.CreatedAt.After(*last) {
+		return nil
+	}
+	return last
+}
+
+// mixedBackupRejected — движок отверг инкрементальный бэкап из-за диска без
+// режима incremental: так отвечают движки старше 4.4.5, не знающие смешанного
+// бэкапа.
+func mixedBackupRejected(err error) bool {
+	var apiErr *ovirt.APIError
+	if !errors.As(err, &apiErr) || apiErr.Status < 400 || apiErr.Status >= 500 {
+		return false
+	}
+	msg := strings.ToLower(apiErr.Error())
+	return strings.Contains(msg, "incremental") || strings.Contains(msg, "инкремент")
+}
+
+// downgradeToFull превращает запуск в полный: новая цепочка без основы.
+func (e *Engine) downgradeToFull(ctx context.Context, run *model.BackupRun, p *plan) {
+	p.Type = model.BackupFull
+	p.ParentRunID, p.ChainID, p.ChainIndex, p.FromCheckpointID = "", "", 0, ""
+	p.FullDisks = nil
+	run.Type = model.BackupFull
+	run.ParentRunID, run.ChainIndex, run.FromCheckpointID = "", 0, ""
+	run.ChainID = run.ID
+	// Отказ движка мог прийти ответом 409 и быть принят за блокировку дисков:
+	// команды уборки к успешному повтору отношения не имеют.
+	run.ManualSteps = nil
+	if err := e.store.UpdateBackupRun(ctx, run); err != nil {
+		e.log.Warn().Err(err).Msg("не удалось сохранить смену типа запуска на полный")
+	}
 }
 
 // openBackupServiceFreeze — прежний путь: служба замораживает гостя сама до
@@ -955,6 +1101,9 @@ func (e *Engine) openBackupMixedFreeze(ctx context.Context, client *ovirt.Client
 		"уровень: "+target.Title()+"; замораживает служба, при неудаче подключится движок")
 	asked := time.Now().UTC()
 	if err := client.FreezeFilesystems(ctx, vm.ID); err != nil {
+		// До того как просить движок: его заморозка упала бы на госте,
+		// которого агент успел заморозить уже после ошибки.
+		e.thawAfterFailedFreeze(ctx, client, vm, run, err)
 		e.event(ctx, run, model.RunEventFreezeFailed, 0,
 			fmt.Sprintf("служба не смогла заморозить гостя: %v — заморозку выполнит движок", err))
 		e.log.Warn().Err(err).Str("vm", vm.Name).Msg("заморозка службой не удалась — подключаю движок")
@@ -1067,6 +1216,7 @@ func (e *Engine) quiesce(ctx context.Context, client *ovirt.Client, vm *model.VM
 			e.event(ctx, run, model.RunEventFreezeRequested, 0, "уровень: "+target.Title())
 			asked := time.Now().UTC()
 			if err := client.FreezeFilesystems(ctx, vm.ID); err != nil {
+				e.thawAfterFailedFreeze(ctx, client, vm, run, err)
 				return err
 			}
 			// Длительность здесь — подготовка гостя: агент и сценарии СУБД.
@@ -1088,6 +1238,24 @@ func (e *Engine) quiesce(ctx context.Context, client *ovirt.Client, vm *model.VM
 		return time.Time{}, nil
 	}
 	return frozenAt, nil
+}
+
+// thawAfterFailedFreeze размораживает гостя после неудачной заморозки: движок
+// или VDSM могли не дождаться агента, а агент — заморозить гостя позже (см.
+// ThawAfterFailedFreeze). Движок не сообщает, было ли что размораживать,
+// поэтому в хронологию попадает только неудача.
+func (e *Engine) thawAfterFailedFreeze(ctx context.Context, client *ovirt.Client, vm *model.VM,
+	run *model.BackupRun, freezeErr error) {
+
+	err := ThawAfterFailedFreeze(ctx, ovirt.FreezeMayBePending(freezeErr), func(ctx context.Context) error {
+		return client.ThawFilesystems(ctx, vm.ID)
+	})
+	if err != nil {
+		e.log.Error().Err(err).Str("vm", vm.Name).
+			Msg("НЕ УДАЛОСЬ РАЗМОРОЗИТЬ гостя после неудачной заморозки — проверьте ВМ вручную")
+		e.event(ctx, run, model.RunEventThawFailed, 0,
+			"заморозка не удалась, а разморозить гостя после неё не получилось — проверьте ВМ вручную")
+	}
 }
 
 // guardFreeze ставит сторожа на заморозку гостя oVirt: по истечении окна он
@@ -1170,6 +1338,12 @@ func (e *Engine) runSnapshot(ctx context.Context, client *ovirt.Client, backend 
 
 	e.waitSnapshotOperations(ctx, client, vm, run)
 
+	// Записи гостя за время бэкапа копятся в слое снапшота на том же домене.
+	domains, err := e.checkDomainSpace(ctx, client, vm, disks)
+	if err != nil {
+		return nil, err
+	}
+
 	frozenAt, err := e.quiesce(ctx, client, vm, run, req)
 	if err != nil {
 		return nil, err
@@ -1229,17 +1403,19 @@ func (e *Engine) runSnapshot(ctx context.Context, client *ovirt.Client, backend 
 		}
 	}
 
-	return e.copyDisks(ctx, client, backend, srv, vm, run, req, disks, plan{
-		Type:      model.BackupSnapshot,
-		ChunkSize: int64(e.cfg.ChunkSize),
-	}, func(d ovirt.Disk) ovirt.TransferRequest {
-		return ovirt.TransferRequest{
-			SnapshotID:        imageByDisk[d.ID],
-			Direction:         "download",
-			Format:            "raw",
-			InactivityTimeout: e.cfg.Transfer.InactivityTimeout,
-		}
-	}, imageio.ContextZero)
+	return e.copyDisksGuarded(ctx, client, run, domains, func(ctx context.Context) ([]*DiskManifest, error) {
+		return e.copyDisks(ctx, client, backend, srv, vm, run, req, disks, plan{
+			Type:      model.BackupSnapshot,
+			ChunkSize: int64(e.cfg.ChunkSize),
+		}, func(d ovirt.Disk) ovirt.TransferRequest {
+			return ovirt.TransferRequest{
+				SnapshotID:        imageByDisk[d.ID],
+				Direction:         "download",
+				Format:            "raw",
+				InactivityTimeout: e.cfg.Transfer.InactivityTimeout,
+			}
+		}, imageio.ContextZero)
+	})
 }
 
 // transferFactory builds the transfer request for one disk.
@@ -1288,8 +1464,14 @@ func (e *Engine) copyDisks(ctx context.Context, client *ovirt.Client, backend re
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
+			// Диск, который движок отдал целиком в инкрементальном запуске,
+			// читается как полный и становится новой основой (EffectiveChain).
+			diskContext, diskType := extentContext, run.Type
+			if _, full := p.FullDisks[disk.ID]; full {
+				diskContext, diskType = imageio.ContextZero, model.BackupFull
+			}
 			manifest, read, stored, err := e.copyOneDisk(ctx, client, backend, srv, vm, run, req,
-				disk, index, chunkSize, factory(disk), extentContext, pacer)
+				disk, index, chunkSize, factory(disk), diskContext, diskType, pacer)
 
 			mu.Lock()
 			defer mu.Unlock()
@@ -1322,9 +1504,18 @@ func (e *Engine) copyDisks(ctx context.Context, client *ovirt.Client, backend re
 			out = append(out, m)
 		}
 	}
-	e.event(ctx, run, model.RunEventTransfer, time.Since(transferStarted),
-		fmt.Sprintf("дисков сохранено: %d из %d; прочитано %s, записано %s",
-			len(out), len(disks), humanBytes(readTotal), humanBytes(storeTotal)))
+	transferDetail := fmt.Sprintf("дисков сохранено: %d из %d; прочитано %s, записано %s",
+		len(out), len(disks), humanBytes(readTotal), humanBytes(storeTotal))
+	if run.Type.NeedsParent() && len(p.FullDisks) > 0 {
+		var whole []string
+		for _, d := range disks {
+			if reason, ok := p.FullDisks[d.ID]; ok {
+				whole = append(whole, fmt.Sprintf("%s (%s)", d.AliasOrName(), reason))
+			}
+		}
+		transferDetail += "; целиком, остальные инкрементом: " + strings.Join(whole, ", ")
+	}
+	e.event(ctx, run, model.RunEventTransfer, time.Since(transferStarted), transferDetail)
 
 	switch {
 	case failed == len(disks):
@@ -1344,7 +1535,7 @@ func (e *Engine) copyDisks(ctx context.Context, client *ovirt.Client, backend re
 func (e *Engine) copyOneDisk(ctx context.Context, client *ovirt.Client, backend repo.Backend,
 	srv *model.Server, vm *model.VM, run *model.BackupRun, req RunRequest,
 	disk ovirt.Disk, index int, chunkSize int64, transferReq ovirt.TransferRequest,
-	extentContext string, pacer *ReadPacer) (*DiskManifest, int64, int64, error) {
+	extentContext string, diskType model.BackupType, pacer *ReadPacer) (*DiskManifest, int64, int64, error) {
 
 	if transferReq.DiskID == "" && transferReq.SnapshotID == "" {
 		return nil, 0, 0, fmt.Errorf("для диска %s не удалось определить источник передачи", disk.AliasOrName())
@@ -1445,7 +1636,7 @@ func (e *Engine) copyOneDisk(ctx context.Context, client *ovirt.Client, backend 
 		ChainID:          run.ChainID,
 		ParentRunID:      run.ParentRunID,
 		ChainIndex:       run.ChainIndex,
-		Type:             run.Type,
+		Type:             diskType,
 		ServerID:         srv.ID,
 		VMID:             vm.ID,
 		VMName:           vm.Name,

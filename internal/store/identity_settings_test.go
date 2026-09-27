@@ -19,7 +19,7 @@ func TestIdentitySettingsRoundTripEncryptsClientSecret(t *testing.T) {
 		BackchannelURL: "http://keycloak:8080", ClientID: "jhvirt",
 		ClientSecret: "client-secret-value", RedirectURL: "https://backup.example.org/api/v1/auth/oidc/callback",
 		ButtonLabel: "Войти через Keycloak", GroupsClaim: "groups",
-		RoleMapping:     map[string]string{"admins": "admin", "operators": "operator", "readers": "viewer"},
+		RoleMapping: map[string]string{"admins": "admin", "operators": "operator", "readers": "viewer"},
 		DefaultRole: "viewer", SubjectRoleMapping: map[string]string{"exact-subject": "operator"}, LDAPGroupMode: "manual",
 		AllowLocalLogin: true, SessionTTL: time.Hour, RevalidateInterval: 5 * time.Minute,
 		DomainName: "example.org", LDAPProviderName: "active-directory",

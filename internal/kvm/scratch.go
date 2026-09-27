@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+
+	"github.com/Variel42k/ovirt-backup/internal/backup"
 )
 
 // Сторож места под scratch-файлы.
@@ -19,10 +21,10 @@ import (
 // начнёт получать ошибки ввода-вывода: бэкап без остановок обернётся сбоем
 // работающей ВМ.
 //
-// Поэтому, пока диски читаются, сторож следит за свободным местом на томе
-// scratch и закрывает бэкап раньше, чем место кончится. Закрытый бэкап
-// освобождает scratch сразу, гость работает дальше, а запуск завершается
-// понятной ошибкой вместо сбоя ВМ.
+// Поэтому бэкап не открывается на томе, где свободно меньше scratchStartMin,
+// а пока читаются диски, сторож следит за свободным местом и закрывает бэкап
+// раньше, чем место кончится. Закрытый бэкап освобождает scratch сразу, гость
+// работает дальше, а запуск завершается понятной ошибкой вместо сбоя ВМ.
 
 const (
 	// scratchCheckInterval — как часто сторож смотрит на свободное место.
@@ -33,6 +35,10 @@ const (
 	// scratchReserveShare — запас как доля свободного на старте: 1/20, то
 	// есть 5 %.
 	scratchReserveShare = 20
+	// scratchStartMin — меньше этого на томе scratch бэкап не открывается:
+	// сторож сработал бы почти сразу, а открытие и закрытие бэкапа нагружают
+	// ВМ зря.
+	scratchStartMin = 2 * scratchReserveMin
 )
 
 // errScratchLow — сторож закрыл бэкап, потому что место под scratch
@@ -42,9 +48,8 @@ var errScratchLow = errors.New("на хосте кончается место п
 // scratchReserve — сколько свободного места на томе scratch бэкап не трогает.
 //
 // 5 % от свободного на старте, но не меньше 1 ГиБ. На почти заполненном томе
-// запас не больше половины свободного: иначе сторож закрывал бы бэкап сразу,
-// а такой том всё же переживает бэкап спокойной ВМ. Ноль — свободное место
-// неизвестно, и сторож только наблюдает.
+// запас не больше половины свободного: иначе сторож закрывал бы бэкап сразу.
+// Ноль — свободное место неизвестно, и сторож только наблюдает.
 func scratchReserve(initialFree int64) int64 {
 	if initialFree <= 0 {
 		return 0
@@ -59,6 +64,26 @@ func scratchReserve(initialFree int64) int64 {
 	return reserve
 }
 
+// ScratchStartMin — меньше этого свободного места под scratch бэкап не
+// начнётся; для прогноза места до старта.
+const ScratchStartMin = scratchStartMin
+
+// ScratchReserve — запас, при котором сторож закроет бэкап, если на старте
+// свободно free; для прогноза места до старта.
+func ScratchReserve(free int64) int64 { return scratchReserve(free) }
+
+// checkScratchStart отказывает в бэкапе, если на томе scratch свободно меньше
+// scratchStartMin. Ноль — место неизвестно, и бэкап идёт под присмотром
+// сторожа.
+func checkScratchStart(free int64, dir string) error {
+	if free <= 0 || free >= scratchStartMin {
+		return nil
+	}
+	return fmt.Errorf("%w: в %s свободно %s, а для бэкапа нужно хотя бы %s. Бэкап не начат: гость успел бы "+
+		"заполнить остаток за считаные минуты записи. Освободите место или перенесите каталог scratch "+
+		"подключения на том побольше", errScratchLow, dir, humanBytes(free), humanBytes(scratchStartMin))
+}
+
 // scratchSample — один замер: свободное место на томе и сколько занимают
 // scratch-файлы бэкапа. Поля *Known — удалось ли их узнать.
 type scratchSample struct {
@@ -66,22 +91,18 @@ type scratchSample struct {
 	freeKnown, usedKnown bool
 }
 
-// scratchGuard следит за местом под scratch, пока читаются диски.
+// scratchGuard следит за местом под scratch, пока читаются диски. Цикл —
+// backup.Guard, здесь только решение и то, что стоит запомнить для
+// хронологии.
 type scratchGuard struct {
-	interval time.Duration
-	reserve  int64
-	sample   func(context.Context) scratchSample
-	stop     context.CancelCauseFunc
-	log      zerolog.Logger
+	reserve int64
+	sample  func(context.Context) scratchSample
+	log     zerolog.Logger
+	guard   *backup.Guard
 
 	mu       sync.Mutex
 	peakUsed int64
-	minFree  int64
 	warned   bool
-	fired    error
-
-	quit chan struct{}
-	done chan struct{}
 }
 
 // startScratchGuard запускает сторожа. stop отменяет копирование с причиной;
@@ -89,35 +110,13 @@ type scratchGuard struct {
 func startScratchGuard(ctx context.Context, interval time.Duration, reserve int64,
 	sample func(context.Context) scratchSample, stop context.CancelCauseFunc, log zerolog.Logger) *scratchGuard {
 
-	g := &scratchGuard{
-		interval: interval, reserve: reserve, sample: sample, stop: stop, log: log,
-		minFree: -1,
-		quit:    make(chan struct{}), done: make(chan struct{}),
-	}
-	go g.run(ctx)
+	g := &scratchGuard{reserve: reserve, sample: sample, log: log}
+	g.guard = backup.StartGuard(ctx, interval, g.check, stop)
 	return g
 }
 
-func (g *scratchGuard) run(ctx context.Context) {
-	defer close(g.done)
-	ticker := time.NewTicker(g.interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-g.quit:
-			return
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-		if g.check(ctx) {
-			return
-		}
-	}
-}
-
-// check делает один замер; true — сторож закрыл бэкап и больше не нужен.
-func (g *scratchGuard) check(ctx context.Context) bool {
+// check делает один замер; непустая ошибка — пора закрывать бэкап.
+func (g *scratchGuard) check(ctx context.Context) error {
 	s := g.sample(ctx)
 
 	g.mu.Lock()
@@ -125,41 +124,28 @@ func (g *scratchGuard) check(ctx context.Context) bool {
 	if s.usedKnown && s.used > g.peakUsed {
 		g.peakUsed = s.used
 	}
-	if !s.freeKnown {
-		return false
-	}
-	if g.minFree < 0 || s.free < g.minFree {
-		g.minFree = s.free
-	}
-	if g.reserve <= 0 {
-		return false
+	if !s.freeKnown || g.reserve <= 0 {
+		return nil
 	}
 	if s.free < g.reserve {
-		g.fired = fmt.Errorf("%w: свободно %s при запасе %s. Бэкап закрыт, чтобы запись гостя не начала "+
+		return fmt.Errorf("%w: свободно %s при запасе %s. Бэкап закрыт, чтобы запись гостя не начала "+
 			"получать ошибки; освободите место на томе scratch-каталога, перенесите его на том побольше "+
 			"или запускайте бэкап этой ВМ в часы меньшей нагрузки",
 			errScratchLow, humanBytes(s.free), humanBytes(g.reserve))
-		g.stop(g.fired)
-		return true
 	}
 	if !g.warned && s.free < 2*g.reserve {
 		g.warned = true
 		g.log.Warn().Str("свободно", humanBytes(s.free)).Str("запас", humanBytes(g.reserve)).
 			Msg("место под scratch-файлы бэкапа подходит к запасу; если дойдёт до него, бэкап будет закрыт")
 	}
-	return false
+	return nil
 }
 
 // Stop останавливает сторожа и возвращает, чем кончилось наблюдение: пик
 // scratch-файлов (0 — неизвестен) и ошибку, если сторож закрыл бэкап.
 func (g *scratchGuard) Stop() (peakUsed int64, fired error) {
-	select {
-	case <-g.quit:
-	default:
-		close(g.quit)
-	}
-	<-g.done
+	fired = g.guard.Stop()
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return g.peakUsed, g.fired
+	return g.peakUsed, fired
 }

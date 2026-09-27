@@ -2,6 +2,8 @@ package model
 
 import (
 	"fmt"
+	"regexp"
+	"strings"
 	"time"
 )
 
@@ -519,6 +521,13 @@ type BackupJob struct {
 	// FreezeBy — кто замораживает гостя; пусто — служба. Движок держит
 	// заморозку доли секунды, и предел MaxFreeze для него не нужен.
 	FreezeBy FreezeBy `json:"freeze_by,omitempty"`
+	// FreezeMountpoints — какие файловые системы гостя замораживать; пусто —
+	// все. Только KVM: libvirt передаёт список агенту
+	// (guest-fsfreeze-freeze-list), а движок oVirt и vzdump замораживают все
+	// файловые системы. Нужен узлам Kubernetes: заморозить том СУБД, не
+	// останавливая запись etcd и корня. Остальные ФС в такой копии — как после
+	// сбоя питания.
+	FreezeMountpoints []string `json:"freeze_mountpoints,omitempty"`
 	// MaxReadMBps — предел скорости чтения с хранилища ВМ, МиБ/с; 0 — предел
 	// службы (backup.transfer.max_read_mbps). Бэкап работающей ВМ читает её
 	// диски с того же хранилища, с которого работает она сама.
@@ -595,6 +604,34 @@ func (j *BackupJob) Validate() error {
 	}
 	if j.MaxFreeze < 0 || j.MaxFreeze > MaxFreezeLimit {
 		return fmt.Errorf("предел заморозки должен быть от 0 до %d с", int(MaxFreezeLimit.Seconds()))
+	}
+	return ValidateFreezeMountpoints(j.FreezeMountpoints)
+}
+
+// MaxFreezeMountpoints — сколько точек монтирования можно перечислить.
+const MaxFreezeMountpoints = 32
+
+var windowsVolume = regexp.MustCompile(`^[A-Za-z]:\\?$`)
+
+// ValidateFreezeMountpoints проверяет список файловых систем для заморозки:
+// абсолютные пути Linux (/var/lib/postgresql) или тома Windows (D:\). Список
+// уходит агенту в гость, поэтому управляющие символы и относительные пути
+// отвергаются здесь, а не на хосте посреди бэкапа.
+func ValidateFreezeMountpoints(list []string) error {
+	if len(list) > MaxFreezeMountpoints {
+		return fmt.Errorf("заморозить можно не больше %d файловых систем", MaxFreezeMountpoints)
+	}
+	for _, mp := range list {
+		if len(mp) == 0 || len(mp) > 1024 {
+			return fmt.Errorf("пустая или слишком длинная точка монтирования для заморозки")
+		}
+		if strings.ContainsFunc(mp, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+			return fmt.Errorf("точка монтирования %q содержит управляющие символы", mp)
+		}
+		if !strings.HasPrefix(mp, "/") && !windowsVolume.MatchString(mp) {
+			return fmt.Errorf("точка монтирования %q: нужен абсолютный путь, например /var/lib/postgresql, "+
+				"или том Windows, например D:\\", mp)
+		}
 	}
 	return nil
 }
@@ -776,6 +813,7 @@ func (j *BackupJob) NormalizeConsistency() {
 	j.Quiesce = j.Consistency.NeedsFreeze()
 	if !j.Quiesce {
 		j.RequireConsistency = false
+		j.FreezeMountpoints = nil
 	}
 }
 

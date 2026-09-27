@@ -12,6 +12,8 @@ import EngineLeftovers from '@/components/EngineLeftovers.vue'
 import BackupTypeHelpCard from '@/components/BackupTypeHelpCard.vue'
 import HelpButton from '@/components/HelpButton.vue'
 import PageLoadError from '@/components/PageLoadError.vue'
+import SpaceForecastCard from '@/components/SpaceForecastCard.vue'
+import FreezeMountpointsField from '@/components/FreezeMountpointsField.vue'
 import type { BackupOption, BackupRun, Consistency, Disk, FreezeBy, Recommendation, SchedulePreset, VM } from '@/api/types'
 
 const props = defineProps<{ serverId: string; vmId: string }>()
@@ -40,6 +42,8 @@ const requireConsistency = ref(false)
 // а не вся подготовка бэкапа.
 const freezeBy = ref<FreezeBy>('engine')
 const maxFreezeSeconds = ref(0)
+// Выборочная заморозка — только KVM; пусто — все файловые системы гостя.
+const freezeMountpoints = ref<string[]>([])
 const encrypt = ref(false)
 const verifyAfter = ref<string>('')
 const verifyOptions = ref({
@@ -67,6 +71,7 @@ const backupPlanningAvailable = computed(() => backupSupported.value && auth.can
 const isProxmox = computed(() => sourceServer.value?.kind === 'proxmox')
 // Выбор «кто замораживает» есть только у oVirt: у KVM и Proxmox замораживает служба или vzdump.
 const isOVirt = computed(() => usesOVirtAPI(sourceServer.value?.kind))
+const isKvm = computed(() => sourceServer.value?.kind === 'kvm')
 const consistencyChoices = computed(() => consistencyOptions.map((option) => ({
   ...option,
   disable: option.value !== 'crash' && !assessment.value?.guest_agent,
@@ -167,6 +172,7 @@ async function startBackup() {
       require_consistency: requireConsistency.value && consistency.value !== 'crash' && !isProxmox.value,
       freeze_by: isOVirt.value ? freezeBy.value : 'service',
       max_freeze_seconds: isOVirt.value && freezeBy.value === 'engine' ? 0 : maxFreezeSeconds.value,
+      freeze_mountpoints: isKvm.value && consistency.value !== 'crash' ? freezeMountpoints.value : undefined,
       encrypt: encrypt.value,
       verify_after: verifyAfter.value || undefined,
       verify_options: verifyAfter.value === 'boot' ? verifyOptions.value : undefined,
@@ -406,6 +412,24 @@ onMounted(load)
                 data-testid="adhoc-max-freeze"
               />
             </div>
+            <div v-if="isKvm && consistency !== 'crash'" class="col-12">
+              <FreezeMountpointsField
+                v-model="freezeMountpoints"
+                :server-id="serverId"
+                :vm-id="vmId"
+                testid="adhoc-freeze-mountpoints"
+              />
+            </div>
+            <div v-if="isOVirt && consistency !== 'crash' && freezeBy === 'service'" class="col-12">
+              <q-banner dense class="bg-orange-1" data-testid="adhoc-long-freeze">
+                <template #avatar><q-icon name="ac_unit" color="warning" /></template>
+                <span class="jhv-wrap">
+                  Запись в госте будет стоять, пока движок готовит бэкап: обычно 20 с и больше, но не дольше
+                  предела заморозки. Узлы Kubernetes и нагруженные СУБД такую паузу не переживают. Режим
+                  «Движок» останавливает запись на доли секунды.
+                </span>
+              </q-banner>
+            </div>
             <div class="col-12 row items-center q-gutter-md">
               <q-toggle
                 v-if="!isProxmox"
@@ -628,6 +652,12 @@ onMounted(load)
             <div>qemu-img: {{ assessment.qemu_img_available ? 'доступен' : 'не установлен' }}</div>
           </q-card-section>
         </q-card>
+
+        <SpaceForecastCard
+          v-if="assessment?.space_forecast?.places.length"
+          :forecast="assessment.space_forecast"
+          class="q-mt-md"
+        />
       </div>
     </div>
   </q-page>

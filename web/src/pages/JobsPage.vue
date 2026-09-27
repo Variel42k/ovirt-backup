@@ -9,6 +9,7 @@ import {
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import BackupOptionsPicker from '@/components/BackupOptionsPicker.vue'
+import FreezeMountpointsField from '@/components/FreezeMountpointsField.vue'
 import HelpButton from '@/components/HelpButton.vue'
 import PageLoadError from '@/components/PageLoadError.vue'
 import { useUnsavedChanges } from '@/composables/unsavedChanges'
@@ -38,6 +39,9 @@ const hostsOfServer = ref<Host[]>([])
 const backupOptions = ref<BackupOption[]>([])
 const backupOptionsLoading = ref(false)
 const backupOptionsError = ref('')
+// Прогноз места под горячий бэкап по выбранным ВМ — только совет, запуск
+// по-прежнему решают сторожа места.
+const spaceWarnings = ref<string[]>([])
 let vmLoadSequence = 0
 let optionLoadSequence = 0
 let jobsLoadSequence = 0
@@ -79,6 +83,8 @@ const emptyForm = () => ({
   consistency: 'crash' as Consistency,
   require_consistency: false,
   max_freeze_seconds: 0,
+  // Только KVM: какие файловые системы замораживать; пусто — все.
+  freeze_mountpoints: [] as string[],
   // Новые задания на oVirt замораживает движок: доли секунды вместо всей фазы
   // подготовки бэкапа. Для остальных платформ значение игнорируется при сохранении.
   freeze_by: 'engine' as FreezeBy,
@@ -121,6 +127,8 @@ const bootHosts = computed(() => app.servers.filter((s) => s.kind === 'kvm' && s
 const backupServers = computed(() => app.servers.filter((s) => s.enabled && app.serverSupports(s, 'supports_backup')))
 const jobServer = computed(() => app.servers.find((server) => server.id === form.value.server_id))
 const isProxmoxJob = computed(() => jobServer.value?.kind === 'proxmox')
+// Заморозить только выбранные ФС умеет libvirt; движок oVirt и vzdump — только все.
+const isKvmJob = computed(() => jobServer.value?.kind === 'kvm')
 // Заморозку силами движка умеет только Backup API oVirt и его производных.
 const isOVirtJob = computed(() => usesOVirtAPI(jobServer.value?.kind))
 // Что будет, если заявленный уровень не достигнут. Формулировка — об итоге для
@@ -148,6 +156,27 @@ const consistencyHint = computed(() => {
 })
 
 const freezeHint = computed(() => freezeByHint(freezeMode.value))
+
+// Заморозка службой на oVirt держит запись в госте всю подготовку бэкапа на
+// движке. Так работают и задания, созданные до появления выбора режима: сами
+// они не меняются, а оператор видит это и переключает режим сам.
+const longFreezeText = 'Запись в госте будет стоять, пока движок готовит бэкап: обычно 20 с и больше, '
+  + 'но не дольше предела заморозки. Узлы Kubernetes и нагруженные СУБД такую паузу не переживают. '
+  + 'Режим «Движок» останавливает запись на доли секунды.'
+
+function freezesLong(job: BackupJob): boolean {
+  const level = job.consistency || (job.quiesce ? 'filesystem' : 'crash')
+  if (level === 'crash') return false
+  const kind = app.servers.find((server) => server.id === job.server_id)?.kind
+  return usesOVirtAPI(kind) && (!job.freeze_by || job.freeze_by === 'service')
+}
+
+const longFreezeJobs = computed(() => jobs.value.filter(freezesLong))
+const longFreezeNames = computed(() => {
+  const names = longFreezeJobs.value.slice(0, 5).map((job) => job.name).join(', ')
+  const rest = longFreezeJobs.value.length - 5
+  return rest > 0 ? `${names} и ещё ${rest}` : names
+})
 
 // Когда уровень не будет достигнут: причины зависят и от уровня (сценарии СУБД
 // есть только у «приложений»), и от того, кто замораживает (предел — только у службы).
@@ -259,6 +288,7 @@ async function loadVMs() {
   ++optionLoadSequence
   backupOptions.value = []
   backupOptionsError.value = ''
+  spaceWarnings.value = []
   if (!form.value.server_id) {
     vmsOfServer.value = []
     disksOfServer.value = []
@@ -293,6 +323,7 @@ async function loadBackupOptions() {
 
   backupOptions.value = []
   backupOptionsError.value = ''
+  spaceWarnings.value = []
   if (!serverID || !vms.length) {
     backupOptionsLoading.value = false
     return
@@ -313,6 +344,9 @@ async function loadBackupOptions() {
     if (sequence !== optionLoadSequence || serverID !== form.value.server_id) return
 
     backupOptions.value = aggregateOptions(entries)
+    spaceWarnings.value = entries.flatMap(({ vm, recommendation }) =>
+      (recommendation.assessment.space_forecast?.warnings ?? [])
+        .map((warning) => (entries.length > 1 ? `${vm.name}: ${warning}` : warning)))
     const current = backupOptions.value.find((option) => option.type === form.value.type)
     if (!form.value.type || (!current?.available && !preserveUnavailableType)) {
       const wasPristine = dialog.value && jobFormSignature.value === jobFormBaseline.value
@@ -328,6 +362,7 @@ async function loadBackupOptions() {
   } catch {
     if (sequence !== optionLoadSequence) return
     backupOptions.value = []
+    spaceWarnings.value = []
     backupOptionsError.value = 'Не удалось проверить доступность типов бэкапа. Повторите проверку.'
     preserveUnavailableType = false
   } finally {
@@ -399,6 +434,7 @@ function openEdit(job: BackupJob) {
     max_freeze_seconds: job.max_freeze ? Math.round(job.max_freeze / 1_000_000_000) : 0,
     // У заданий, созданных до выбора, замораживает служба — как и раньше.
     freeze_by: (job.freeze_by || 'service') as FreezeBy,
+    freeze_mountpoints: [...(job.freeze_mountpoints ?? [])],
   }
   void loadVMs()
   jobStep.value = 1
@@ -476,6 +512,7 @@ async function save() {
   form.value.quiesce = form.value.consistency !== 'crash'
   if (!form.value.quiesce || isProxmoxJob.value) form.value.require_consistency = false
   if (!isOVirtJob.value) form.value.freeze_by = 'service'
+  if (!isKvmJob.value || !form.value.quiesce) form.value.freeze_mountpoints = []
   saving.value = true
   try {
     if (editing.value) {
@@ -715,6 +752,15 @@ const columns = [
 
     <PageLoadError :message="pageError" title="Не удалось загрузить задания" :loading="loading" @retry="load" />
 
+    <q-banner v-if="longFreezeJobs.length" dense rounded class="bg-orange-1 q-mb-md" data-testid="jobs-long-freeze">
+      <template #avatar><q-icon name="ac_unit" color="warning" /></template>
+      <span class="jhv-wrap">
+        Заданий oVirt, где гостя замораживает служба: {{ longFreezeJobs.length }}
+        ({{ longFreezeNames }}). {{ longFreezeText }}
+        Откройте задание и выберите «Движок» в поле «Кто замораживает гостя» или уровень «как после сбоя питания».
+      </span>
+    </q-banner>
+
     <q-banner v-if="selectedJobs.length" dense rounded class="bg-blue-1 q-mb-md">
       <div class="row items-center q-gutter-sm">
         <div>Выбрано заданий: {{ selectedJobs.length }}</div>
@@ -775,6 +821,10 @@ const columns = [
             <template v-else-if="!props.row.consistency && props.row.quiesce"> · заморозка ФС</template>
             <template v-if="props.row.encrypt"> · шифрование</template>
           </div>
+          <q-badge v-if="freezesLong(props.row)" color="warning" text-color="dark" class="q-mt-xs">
+            <q-icon name="ac_unit" size="12px" class="q-mr-xs" />замораживает служба
+            <q-tooltip max-width="320px">{{ longFreezeText }}</q-tooltip>
+          </q-badge>
         </q-td>
       </template>
 
@@ -976,6 +1026,13 @@ const columns = [
               <template #action>
                 <q-btn flat dense icon="refresh" label="Повторить" @click="loadBackupOptions" />
               </template>
+            </q-banner>
+          </div>
+
+          <div v-if="spaceWarnings.length" class="col-12">
+            <q-banner v-for="(warning, i) in spaceWarnings" :key="i" dense class="bg-orange-1 q-mb-xs">
+              <template #avatar><q-icon name="storage" color="warning" /></template>
+              <span class="jhv-wrap">{{ warning }}</span>
             </q-banner>
           </div>
 
@@ -1256,6 +1313,20 @@ const columns = [
               outlined
               dense
               data-testid="job-max-freeze"
+            />
+          </div>
+          <div v-if="isOVirtJob && form.consistency !== 'crash' && form.freeze_by === 'service'" class="col-12">
+            <q-banner dense class="bg-orange-1" data-testid="job-long-freeze">
+              <template #avatar><q-icon name="ac_unit" color="warning" /></template>
+              <span class="jhv-wrap">{{ longFreezeText }}</span>
+            </q-banner>
+          </div>
+          <div v-if="isKvmJob && form.consistency !== 'crash'" class="col-12">
+            <FreezeMountpointsField
+              v-model="form.freeze_mountpoints"
+              :server-id="form.server_id"
+              :vm-id="form.vm_ids.length === 1 ? form.vm_ids[0] : undefined"
+              testid="job-freeze-mountpoints"
             />
           </div>
           <div v-if="!isProxmoxJob && form.consistency !== 'crash'" class="col-12">

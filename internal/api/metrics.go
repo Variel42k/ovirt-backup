@@ -14,6 +14,7 @@ import (
 	drcheck "github.com/Variel42k/ovirt-backup/internal/dr"
 	"github.com/Variel42k/ovirt-backup/internal/model"
 	"github.com/Variel42k/ovirt-backup/internal/quality"
+	"github.com/Variel42k/ovirt-backup/internal/sshstats"
 	"github.com/Variel42k/ovirt-backup/internal/store"
 )
 
@@ -76,6 +77,7 @@ func newBackupCollector(q *quality.Service, st *store.Store, dr *drcheck.Checker
 		"dr_ready":           prometheus.NewDesc("ovirt_backup_disaster_recovery_ready", "Whether the external PostgreSQL dump and secret.key copy are ready.", nil, nil),
 		"dr_dump_age":        prometheus.NewDesc("ovirt_backup_disaster_recovery_dump_age_seconds", "Age of the newest configured PostgreSQL dump.", nil, nil),
 		"dr_key_match":       prometheus.NewDesc("ovirt_backup_disaster_recovery_secret_key_matches", "Whether the external secret.key copy matches the live key.", nil, nil),
+		"ssh_connections":    prometheus.NewDesc("ovirt_backup_ssh_connections_total", "SSH connections the service opened to a host since start; each one leaves login lines in the host log.", labels("host", "component", "result"), nil),
 	}}
 }
 
@@ -86,6 +88,10 @@ func (c *backupCollector) Describe(ch chan<- *prometheus.Desc) {
 }
 
 func (c *backupCollector) Collect(ch chan<- prometheus.Metric) {
+	// SSH-подключения — из памяти службы, до всего, что может прервать сбор:
+	// по ним видно, не шумит ли служба входами в журналах хостов.
+	collectSSHConnections(ch, c.desc["ssh_connections"], sshstats.Snapshot())
+
 	ctx := context.Background()
 	summary, err := c.quality.Evaluate(ctx, "")
 	if err != nil {
@@ -181,5 +187,15 @@ func (c *backupCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 	for _, severity := range []model.Severity{model.SeverityInfo, model.SeverityWarning, model.SeverityCritical} {
 		ch <- prometheus.MustNewConstMetric(c.desc["alerts"], prometheus.GaugeValue, counts[severity], string(severity))
+	}
+}
+
+// collectSSHConnections отдаёт счётчики SSH-подключений службы по хостам.
+func collectSSHConnections(ch chan<- prometheus.Metric, desc *prometheus.Desc, samples []sshstats.Sample) {
+	for _, s := range samples {
+		ch <- prometheus.MustNewConstMetric(desc, prometheus.CounterValue, float64(s.Connected), s.Host, s.Component, "ok")
+		if s.Failed > 0 {
+			ch <- prometheus.MustNewConstMetric(desc, prometheus.CounterValue, float64(s.Failed), s.Host, s.Component, "failed")
+		}
 	}
 }

@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/digitalocean/go-libvirt"
 )
@@ -480,21 +482,67 @@ func (c *Conn) describe(dom libvirt.Domain) (*Domain, error) {
 // FreezeFilesystems asks the guest agent to quiesce the filesystems, turning a
 // crash-consistent copy into a filesystem-consistent one. It returns how many
 // filesystems were frozen.
-func (c *Conn) FreezeFilesystems(ctx context.Context, dom libvirt.Domain) (int, error) {
-	n, err := c.lv.DomainFsfreeze(dom, nil, 0)
+//
+// mountpoints limits the freeze to those filesystems (guest-fsfreeze-freeze-list);
+// empty freezes all. The agent runs the fsfreeze hooks either way. Thawing is
+// always for all: a partial freeze is thawed by the same call.
+func (c *Conn) FreezeFilesystems(ctx context.Context, dom libvirt.Domain, mountpoints []string) (int, error) {
+	n, err := c.lv.DomainFsfreeze(dom, mountpoints, 0)
 	if err != nil {
 		return 0, fmt.Errorf("заморозка файловых систем гостя: %w", err)
 	}
 	return int(n), nil
 }
 
-// ThawFilesystems releases a freeze. It must run even when the operation in
-// between failed: a guest left frozen stops serving anything.
-func (c *Conn) ThawFilesystems(ctx context.Context, dom libvirt.Domain) error {
-	if _, err := c.lv.DomainFsthaw(dom, nil, 0); err != nil {
-		return fmt.Errorf("разморозка файловых систем гостя: %w", err)
+// ThawFilesystems releases a freeze and reports how many filesystems were
+// thawed. It must run even when the operation in between failed: a guest left
+// frozen stops serving anything.
+func (c *Conn) ThawFilesystems(ctx context.Context, dom libvirt.Domain) (int, error) {
+	n, err := c.lv.DomainFsthaw(dom, nil, 0)
+	if err != nil {
+		return 0, fmt.Errorf("разморозка файловых систем гостя: %w", err)
 	}
-	return nil
+	return int(n), nil
+}
+
+// AgentFreezeTimeout — сколько libvirt ждёт ответа агента на заморозку и
+// разморозку. По умолчанию libvirt ждёт без предела, и зависший сценарий СУБД
+// держал бы бэкап сколько угодно. Контекст вызова тут не помогает: вызовы
+// go-libvirt его не принимают.
+const AgentFreezeTimeout = 60 * time.Second
+
+// LimitAgentTimeout ограничивает ожидание ответа агента домена. false —
+// libvirt этого не умеет (до 5.10) или отказал: тогда остаётся его значение.
+func (c *Conn) LimitAgentTimeout(ctx context.Context, dom libvirt.Domain, timeout time.Duration) bool {
+	_, err := c.lv.DomainAgentSetResponseTimeout(dom, int32(timeout/time.Second), 0)
+	return err == nil
+}
+
+// RestoreAgentTimeout возвращает домену ожидание агента по умолчанию libvirt.
+// Узнать прежнее значение libvirt не даёт, поэтому вызывается только после
+// того, как служба сама его меняла.
+func (c *Conn) RestoreAgentTimeout(ctx context.Context, dom libvirt.Domain) error {
+	_, err := c.lv.DomainAgentSetResponseTimeout(dom, int32(libvirt.DomainAgentResponseTimeoutDefault), 0)
+	return err
+}
+
+// FreezeMayBePending сообщает, что после такой ошибки заморозки агент мог
+// всё же заморозить гостя позже: libvirt не дождался ответа, а не получил
+// отказ. «Агент не подключён» и отказ самого агента (например, упавший
+// сценарий fsfreeze-hook) — не такой случай: заморозки не было.
+func FreezeMayBePending(err error) bool {
+	var lv libvirt.Error
+	if !errors.As(err, &lv) {
+		// Не ответ libvirt, а обрыв связи: что успел агент, неизвестно.
+		return true
+	}
+	switch libvirt.ErrorNumber(lv.Code) {
+	case libvirt.ErrAgentUnresponsive:
+		return !strings.Contains(strings.ToLower(lv.Message), "not connected")
+	case libvirt.ErrAgentCommandTimeout, libvirt.ErrOperationTimeout, libvirt.ErrAgentUnsynced:
+		return true
+	}
+	return false
 }
 
 func encodeBase64(data []byte) string {

@@ -171,7 +171,7 @@ Override переживает обновления `.run`, а правка `dock
   "vm_name_regex": "^prod-",
   "type": "incremental",
   "full_every": 7,                  // каждый седьмой запуск — полный
-  "fallback_type": "snapshot",      // диски без CBT снимаются через снапшот
+  "fallback_type": "snapshot",      // только для движка без Backup API: копия через снапшот
   "schedule": "0 1 * * *",          // каждый день в 01:00
   "storage_target_ids": ["…"],      // первое хранилище — основное
   "retention": { "keep_last": 3, "keep_daily": 7, "keep_weekly": 4, "keep_monthly": 6 },

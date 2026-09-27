@@ -24,6 +24,7 @@ import (
 	"github.com/digitalocean/go-libvirt"
 	"golang.org/x/crypto/ssh"
 
+	"github.com/Variel42k/ovirt-backup/internal/sshstats"
 	"github.com/Variel42k/ovirt-backup/internal/sshtrust"
 )
 
@@ -86,6 +87,8 @@ type Conn struct {
 	lv     *libvirt.Libvirt
 	rpc    net.Conn
 	closed bool
+	// stop останавливает keepalive (StartKeepalive); nil — не запущен.
+	stop chan struct{}
 }
 
 // Connect establishes the SSH session and the libvirt RPC channel on top of it.
@@ -121,6 +124,7 @@ func Connect(ctx context.Context, cfg Config) (*Conn, error) {
 	}
 
 	sshConn, chans, reqs, err := ssh.NewClientConn(rawConn, cfg.addr(), clientCfg)
+	sshstats.Record(cfg.addr(), sshstats.Libvirt, err)
 	if err != nil {
 		_ = rawConn.Close()
 		return nil, fmt.Errorf("SSH-подключение к %s: %w", cfg.addr(), err)
@@ -340,6 +344,7 @@ func (c *Conn) Close() error {
 		return nil
 	}
 	c.closed = true
+	c.stopKeepaliveLocked()
 
 	var firstErr error
 	if c.lv != nil {

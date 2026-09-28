@@ -164,6 +164,7 @@ func (m *Monitor) PollServer(ctx context.Context, srv *model.Server) error {
 	srv.LastCheckedAt = &now
 	srv.EngineVersion = inv.Info.Version()
 	srv.ProductName = inv.Info.ProductInfo.Name
+	srv.Kind = srv.Kind.RefineOVirtProduct(inv.Info.ProductInfo.Name, inv.Info.ProductInfo.Vendor)
 	srv.SupportsCBT = inv.Info.SupportsIncrementalBackup()
 
 	if err := m.store.UpdateServerState(ctx, srv); err != nil {

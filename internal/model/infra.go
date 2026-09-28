@@ -104,6 +104,27 @@ func (k ServerKind) Title() string {
 	}
 }
 
+// RefineOVirtProduct upgrades a generic oVirt connection to a known
+// API-compatible downstream product. Explicitly selected fork kinds are kept:
+// some engines expose an upstream-compatible product name even though the
+// operator deliberately selected the vendor connector.
+func (k ServerKind) RefineOVirtProduct(productName, vendor string) ServerKind {
+	if k != KindOVirt {
+		return k
+	}
+	product := strings.ToLower(strings.TrimSpace(productName + " " + vendor))
+	switch {
+	case strings.Contains(product, "red hat virtualization"), strings.Contains(product, "rhev"):
+		return KindRHV
+	case strings.Contains(product, "red virtualization"), strings.Contains(product, "ред виртуализац"):
+		return KindRedVirt
+	case strings.Contains(product, "oracle linux virtualization"), strings.Contains(product, "olvm"):
+		return KindOLVM
+	default:
+		return k
+	}
+}
+
 // ConnState is the reachability of a managed engine.
 type ConnState string
 

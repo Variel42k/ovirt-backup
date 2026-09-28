@@ -63,13 +63,17 @@ onMounted(load)
 
 <template>
   <q-page padding>
-    <div class="row items-center q-col-gutter-md q-mb-lg">
-      <div class="col">
+    <div class="row items-start q-col-gutter-md q-mb-lg">
+      <div class="col-12 col-md">
         <div class="text-h5">Поиск сервисов и резервных копий</div>
         <div class="text-grey-7">Веб-признаки на ВМ, точная карта из гостя и содержимое настроенного BACKUPDATA.</div>
       </div>
-      <q-input v-model="filter" dense outlined clearable debounce="200" placeholder="Фильтр" style="width: 260px"><template #prepend><q-icon name="search" /></template></q-input>
-      <q-btn v-if="auth.can('servers.write')" color="primary" icon="travel_explore" label="Найти сейчас" :loading="scanning" @click="scan" />
+      <div class="col-12 col-md-auto">
+        <div class="discovery-actions">
+          <q-input v-model="filter" class="discovery-filter" dense outlined clearable debounce="200" placeholder="Фильтр"><template #prepend><q-icon name="search" /></template></q-input>
+          <q-btn v-if="auth.can('servers.write')" class="discovery-scan" color="primary" icon="travel_explore" label="Найти сейчас" :loading="scanning" @click="scan" />
+        </div>
+      </div>
     </div>
 
     <q-banner v-if="snapshot.scan" rounded class="bg-blue-1 text-blue-10 q-mb-lg">
@@ -77,7 +81,11 @@ onMounted(load)
       ВМ: {{ snapshot.scan.vm_count }}, сервисов: {{ snapshot.scan.service_count }}, каталогов: {{ snapshot.scan.backup_count }}
       <div v-if="snapshot.scan.error" class="text-negative q-mt-xs">{{ snapshot.scan.error }}</div>
     </q-banner>
-    <q-banner v-else rounded class="bg-grey-2 q-mb-lg">Поиск ещё не запускался. Настройте раздел <code>discovery</code> и нажмите «Найти сейчас».</q-banner>
+    <q-banner v-else rounded class="bg-grey-2 q-mb-lg">Поиск ещё не запускался. Нажмите «Найти сейчас»; для автозапуска и поиска копий настройте <code>discovery</code>.</q-banner>
+
+    <q-banner v-if="snapshot.scan && snapshot.scan.vm_count > 0 && snapshot.scan.service_count === 0" rounded class="bg-amber-1 text-amber-10 q-mb-lg">
+      Поиск выполнен, но сервисы не найдены. Проверьте, что Engine получает IP-адреса от guest agent, а сервер бэкапа имеет сетевой доступ к ВМ на настроенных web-портах.
+    </q-banner>
 
     <q-card flat bordered class="q-mb-lg">
       <q-card-section class="text-h6">Найденные сервисы</q-card-section>
@@ -98,3 +106,32 @@ onMounted(load)
     </q-card>
   </q-page>
 </template>
+
+<style scoped>
+.discovery-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.discovery-filter {
+  width: 260px;
+}
+
+.discovery-scan {
+  flex: 0 0 auto;
+}
+
+@media (max-width: 599px) {
+  .discovery-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .discovery-filter,
+  .discovery-scan {
+    width: 100%;
+  }
+}
+</style>

@@ -187,7 +187,10 @@ func (c *Client) ListVNICProfiles(ctx context.Context, serverID string) ([]*mode
 func (c *Client) listVMsWithAttachments(ctx context.Context, serverID string) ([]*model.VM, map[string][]string, error) {
 	var list vmList
 	q := url.Values{}
-	q.Set("follow", "disk_attachments,tags")
+	// reported_devices is not included in the ordinary VM collection response.
+	// It contains the addresses reported by the guest agent, which discovery
+	// needs in order to probe the VM instead of the Engine itself.
+	q.Set("follow", "disk_attachments,tags,reported_devices")
 	if err := c.get(ctx, "/vms", &list, withQuery(q)); err != nil {
 		return nil, nil, err
 	}

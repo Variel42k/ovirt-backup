@@ -97,6 +97,27 @@ func TestServerKindFamiliesAreExplicit(t *testing.T) {
 	}
 }
 
+func TestRefineOVirtProduct(t *testing.T) {
+	tests := []struct {
+		current ServerKind
+		product string
+		want    ServerKind
+	}{
+		{KindOVirt, "Red Virtualization Engine", KindRedVirt},
+		{KindOVirt, "Red Hat Virtualization Manager", KindRHV},
+		{KindOVirt, "Oracle Linux Virtualization Manager", KindOLVM},
+		{KindOVirt, "oVirt Engine", KindOVirt},
+		// A fork explicitly selected by the operator must not be downgraded by a
+		// generic compatibility name returned by its API.
+		{KindRedVirt, "oVirt Engine", KindRedVirt},
+	}
+	for _, tt := range tests {
+		if got := tt.current.RefineOVirtProduct(tt.product, ""); got != tt.want {
+			t.Errorf("%s + %q = %s, want %s", tt.current, tt.product, got, tt.want)
+		}
+	}
+}
+
 func TestServerRejectsUnknownVirtualizationConnector(t *testing.T) {
 	srv := &Server{
 		Name: "unknown", Kind: ServerKind("future-driver"), Username: "user",

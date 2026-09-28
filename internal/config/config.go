@@ -647,6 +647,7 @@ type DiscoveryConfig struct {
 	WebTargets            []string             `mapstructure:"web_targets"`
 	WebNetworks           []string             `mapstructure:"web_networks"`
 	ServerIDs             []string             `mapstructure:"server_ids"`
+	ScanAdditionalTargets bool                 `mapstructure:"scan_additional_targets"`
 	WebMaxAddresses       int                  `mapstructure:"web_max_addresses"`
 	WebTimeout            time.Duration        `mapstructure:"web_timeout"`
 	MaxParallel           int                  `mapstructure:"max_parallel"`
@@ -1049,7 +1050,9 @@ func (c *Config) Validate() error {
 	}
 	if err := (model.DiscoverySettings{WebTargets: c.Discovery.WebTargets,
 		AddressRanges: c.Discovery.WebNetworks, ServerIDs: c.Discovery.ServerIDs,
-		MaxAddresses: c.Discovery.WebMaxAddresses}).Validate(); err != nil {
+		WebPorts:              c.Discovery.WebPorts,
+		ScanAdditionalTargets: c.Discovery.ScanAdditionalTargets,
+		MaxAddresses:          c.Discovery.WebMaxAddresses}).Validate(); err != nil {
 		return fmt.Errorf("discovery: %w", err)
 	}
 	if c.Discovery.BackupMaxObjects < 1 {
@@ -1292,9 +1295,10 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("discovery.web_targets", []string{})
 	v.SetDefault("discovery.web_networks", []string{})
 	v.SetDefault("discovery.server_ids", []string{})
+	v.SetDefault("discovery.scan_additional_targets", false)
 	v.SetDefault("discovery.web_max_addresses", 1024)
 	v.SetDefault("discovery.web_timeout", "5s")
-	v.SetDefault("discovery.max_parallel", 16)
+	v.SetDefault("discovery.max_parallel", 64)
 	v.SetDefault("discovery.backup_storage_target_id", "")
 	v.SetDefault("discovery.backup_prefix", "")
 	v.SetDefault("discovery.backup_max_objects", 100000)

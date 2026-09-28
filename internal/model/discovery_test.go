@@ -49,3 +49,19 @@ func TestDiscoverySettingsRejectsDuplicateVirtualizationConnections(t *testing.T
 		t.Fatal("duplicate virtualization connection was accepted")
 	}
 }
+
+func TestDiscoverySettingsValidatesWebPorts(t *testing.T) {
+	if err := (DiscoverySettings{WebPorts: []int{80, 443, 3000}, MaxAddresses: 10}).Validate(); err != nil {
+		t.Fatalf("valid ports rejected: %v", err)
+	}
+	if err := (DiscoverySettings{WebPorts: []int{443, 443}, MaxAddresses: 10}).Validate(); err == nil {
+		t.Fatal("duplicate port was accepted")
+	}
+	ports := make([]int, DiscoveryMaxPorts+1)
+	for i := range ports {
+		ports[i] = i + 1
+	}
+	if err := (DiscoverySettings{WebPorts: ports, MaxAddresses: 10}).Validate(); err == nil {
+		t.Fatal("too many ports were accepted")
+	}
+}

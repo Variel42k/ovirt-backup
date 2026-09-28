@@ -1520,6 +1520,9 @@ export interface DiscoveryScan {
   vm_count: number
   service_count: number
   backup_count: number
+  phase?: string
+  probe_total: number
+  probe_completed: number
 }
 
 export interface DiscoveredService {
@@ -1534,7 +1537,7 @@ export interface DiscoveredService {
   hostname?: string
   name: string
   product?: string
-  source: 'web' | 'guest' | 'configured' | 'network' | 'virtualization_manager' | 'virtualization_host'
+  source: 'web' | 'guest' | 'configured' | 'network' | 'dynamic_network' | 'discovered_hostname' | 'virtualization_manager' | 'virtualization_host'
   evidence?: string
   proxy: boolean
   data_paths?: string[]
@@ -1564,6 +1567,8 @@ export interface DiscoverySettings {
   web_targets: string[]
   address_ranges: string[]
   server_ids: string[]
+  web_ports: number[]
+  scan_additional_targets: boolean
   max_addresses: number
   updated_by?: string
   updated_at?: string
@@ -1574,6 +1579,7 @@ export interface DiscoverySettingsResponse {
   source: 'config' | 'database'
   min_addresses: number
   max_addresses: number
+  max_ports: number
   expanded_targets: number
   expanded_addresses: number
 }

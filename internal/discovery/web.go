@@ -39,7 +39,9 @@ func probeWebTarget(ctx context.Context, target webTarget, timeout time.Duration
 		timeout = 5 * time.Second
 	}
 	host := strings.TrimSpace(target.Host)
-	address, err := resolveProbeHost(ctx, host)
+	resolveCtx, cancelResolve := context.WithTimeout(ctx, timeout)
+	defer cancelResolve()
+	address, err := resolveProbeHost(resolveCtx, host)
 	if err != nil {
 		return nil, err
 	}
@@ -56,6 +58,10 @@ func probeWebTarget(ctx context.Context, target webTarget, timeout time.Duration
 	}
 	hostPort := net.JoinHostPort(host, fmt.Sprint(target.Port))
 	dialAddress := net.JoinHostPort(address, fmt.Sprint(target.Port))
+	connectTimeout := timeout
+	if (target.Source == "network" || target.Source == "dynamic_network") && connectTimeout > 500*time.Millisecond {
+		connectTimeout = 500 * time.Millisecond
+	}
 	tlsConfig := &tls.Config{InsecureSkipVerify: true} // #nosec G402 -- see below
 	if net.ParseIP(host) == nil {
 		tlsConfig.ServerName = host
@@ -63,7 +69,7 @@ func probeWebTarget(ctx context.Context, target webTarget, timeout time.Duration
 	transport := &http.Transport{
 		Proxy: nil,
 		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
-			return (&net.Dialer{Timeout: timeout}).DialContext(ctx, network, dialAddress)
+			return (&net.Dialer{Timeout: connectTimeout}).DialContext(ctx, network, dialAddress)
 		},
 		TLSHandshakeTimeout: timeout,
 		// Discovery connects by inventory IP before it knows the certificate

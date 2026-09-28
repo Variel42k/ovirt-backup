@@ -11,16 +11,18 @@ import (
 )
 
 func (s *Store) DiscoverySettings(ctx context.Context) (model.DiscoverySettings, bool, error) {
-	row := s.db.QueryRow(ctx, `SELECT web_targets,address_ranges,server_ids,max_addresses,updated_by,updated_at FROM discovery_settings WHERE id=1`)
+	row := s.db.QueryRow(ctx, `SELECT web_targets,address_ranges,server_ids,web_ports,scan_additional_targets,max_addresses,updated_by,updated_at FROM discovery_settings WHERE id=1`)
 	var out model.DiscoverySettings
-	var targets, ranges, serverIDs string
-	if err := row.Scan(&targets, &ranges, &serverIDs, &out.MaxAddresses, &out.UpdatedBy, &out.UpdatedAt); err != nil {
+	var targets, ranges, serverIDs, webPorts string
+	if err := row.Scan(&targets, &ranges, &serverIDs, &webPorts, &out.ScanAdditionalTargets,
+		&out.MaxAddresses, &out.UpdatedBy, &out.UpdatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return model.DiscoverySettings{}, false, nil
 		}
 		return model.DiscoverySettings{}, false, fmt.Errorf("read discovery settings: %w", err)
 	}
 	out.WebTargets, out.AddressRanges, out.ServerIDs = decodeStrings(targets), decodeStrings(ranges), decodeStrings(serverIDs)
+	decodeJSON(webPorts, &out.WebPorts)
 	out.UpdatedAt = utc(out.UpdatedAt)
 	return out, true, nil
 }
@@ -30,12 +32,13 @@ func (s *Store) SetDiscoverySettings(ctx context.Context, settings model.Discove
 		return err
 	}
 	_, err := s.db.Exec(ctx, `INSERT INTO discovery_settings
-		(id,web_targets,address_ranges,server_ids,max_addresses,updated_by,updated_at) VALUES (1,?,?,?,?,?,?)
+		(id,web_targets,address_ranges,server_ids,web_ports,scan_additional_targets,max_addresses,updated_by,updated_at) VALUES (1,?,?,?,?,?,?,?,?)
 		ON CONFLICT (id) DO UPDATE SET web_targets=EXCLUDED.web_targets,
-		address_ranges=EXCLUDED.address_ranges,server_ids=EXCLUDED.server_ids,max_addresses=EXCLUDED.max_addresses,
+		address_ranges=EXCLUDED.address_ranges,server_ids=EXCLUDED.server_ids,
+		web_ports=EXCLUDED.web_ports,scan_additional_targets=EXCLUDED.scan_additional_targets,max_addresses=EXCLUDED.max_addresses,
 		updated_by=EXCLUDED.updated_by,updated_at=EXCLUDED.updated_at`,
 		encodeJSON(settings.WebTargets), encodeJSON(settings.AddressRanges), encodeJSON(settings.ServerIDs),
-		settings.MaxAddresses, actor, time.Now().UTC())
+		encodeJSON(settings.WebPorts), settings.ScanAdditionalTargets, settings.MaxAddresses, actor, time.Now().UTC())
 	if err != nil {
 		return fmt.Errorf("save discovery settings: %w", err)
 	}
@@ -50,14 +53,23 @@ func (s *Store) ResetDiscoverySettings(ctx context.Context) error {
 }
 
 func (s *Store) CreateDiscoveryScan(ctx context.Context, scan *model.DiscoveryScan) error {
-	_, err := s.db.Exec(ctx, `INSERT INTO discovery_scans (id,status,started_at,error,vm_count,service_count,backup_count) VALUES (?,?,?,?,?,?,?)`,
-		scan.ID, string(scan.Status), scan.StartedAt, scan.Error, scan.VMCount, scan.ServiceCount, scan.BackupCount)
+	_, err := s.db.Exec(ctx, `INSERT INTO discovery_scans
+		(id,status,started_at,error,vm_count,service_count,backup_count,phase,probe_total,probe_completed)
+		VALUES (?,?,?,?,?,?,?,?,?,?)`, scan.ID, string(scan.Status), scan.StartedAt, scan.Error,
+		scan.VMCount, scan.ServiceCount, scan.BackupCount, scan.Phase, scan.ProbeTotal, scan.ProbeCompleted)
 	return err
 }
 
 func (s *Store) FinishDiscoveryScan(ctx context.Context, scan *model.DiscoveryScan) error {
-	_, err := s.db.Exec(ctx, `UPDATE discovery_scans SET status=?,completed_at=?,error=?,vm_count=?,service_count=?,backup_count=? WHERE id=?`,
-		string(scan.Status), scan.CompletedAt, scan.Error, scan.VMCount, scan.ServiceCount, scan.BackupCount, scan.ID)
+	_, err := s.db.Exec(ctx, `UPDATE discovery_scans SET status=?,completed_at=?,error=?,vm_count=?,service_count=?,backup_count=?,phase=?,probe_total=?,probe_completed=? WHERE id=?`,
+		string(scan.Status), scan.CompletedAt, scan.Error, scan.VMCount, scan.ServiceCount, scan.BackupCount,
+		scan.Phase, scan.ProbeTotal, scan.ProbeCompleted, scan.ID)
+	return err
+}
+
+func (s *Store) UpdateDiscoveryScanProgress(ctx context.Context, scan *model.DiscoveryScan) error {
+	_, err := s.db.Exec(ctx, `UPDATE discovery_scans SET vm_count=?,service_count=?,backup_count=?,phase=?,probe_total=?,probe_completed=? WHERE id=?`,
+		scan.VMCount, scan.ServiceCount, scan.BackupCount, scan.Phase, scan.ProbeTotal, scan.ProbeCompleted, scan.ID)
 	return err
 }
 
@@ -78,10 +90,11 @@ func (s *Store) AddDiscoveredBackup(ctx context.Context, v *model.DiscoveredBack
 }
 
 func (s *Store) LatestDiscoverySnapshot(ctx context.Context) (*model.DiscoverySnapshot, error) {
-	row := s.db.QueryRow(ctx, `SELECT id,status,started_at,completed_at,error,vm_count,service_count,backup_count FROM discovery_scans ORDER BY started_at DESC LIMIT 1`)
+	row := s.db.QueryRow(ctx, `SELECT id,status,started_at,completed_at,error,vm_count,service_count,backup_count,phase,probe_total,probe_completed FROM discovery_scans ORDER BY started_at DESC LIMIT 1`)
 	var scan model.DiscoveryScan
 	var status string
-	if err := row.Scan(&scan.ID, &status, &scan.StartedAt, &scan.CompletedAt, &scan.Error, &scan.VMCount, &scan.ServiceCount, &scan.BackupCount); err != nil {
+	if err := row.Scan(&scan.ID, &status, &scan.StartedAt, &scan.CompletedAt, &scan.Error,
+		&scan.VMCount, &scan.ServiceCount, &scan.BackupCount, &scan.Phase, &scan.ProbeTotal, &scan.ProbeCompleted); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return &model.DiscoverySnapshot{Services: []*model.DiscoveredService{}, Backups: []*model.DiscoveredBackup{}}, nil
 		}

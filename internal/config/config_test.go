@@ -81,6 +81,9 @@ func TestDiscoveryNetworkScopeIsBounded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if cfg.Discovery.ScanAdditionalTargets {
+		t.Fatal("ручные диапазоны discovery включены по умолчанию")
+	}
 	cfg.Discovery.WebNetworks = []string{"10.249.254.0/24"}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("bounded discovery network rejected: %v", err)

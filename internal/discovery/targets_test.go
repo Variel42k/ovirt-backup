@@ -18,14 +18,19 @@ func TestExpandWebTargetsIncludesNamesURLsAndNetworks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Bare name: 2 ports; URL: exactly 1; /30: 4 addresses * 2 ports.
-	if len(targets) != 11 {
-		t.Fatalf("targets=%d, want 11: %#v", len(targets), targets)
+	// Bare name: 2 ports; URL: its exact endpoint plus 2 configured ports;
+	// /30: 4 addresses * 2 ports.
+	if len(targets) != 13 {
+		t.Fatalf("targets=%d, want 13: %#v", len(targets), targets)
 	}
 	urlTarget := targets[2]
 	if urlTarget.Host != "nexus.example.org" || urlTarget.Port != 8443 ||
 		urlTarget.Scheme != "https" || urlTarget.Path != "/status" {
 		t.Fatalf("URL target parsed as %#v", urlTarget)
+	}
+	if targets[3].Host != "nexus.example.org" || targets[3].Port != 80 ||
+		targets[4].Host != "nexus.example.org" || targets[4].Port != 443 {
+		t.Fatalf("URL host was not expanded across configured ports: %#v", targets[2:5])
 	}
 }
 
@@ -82,6 +87,63 @@ func TestVirtualizationWebTargetsIncludesManagerAndHypervisors(t *testing.T) {
 	for _, target := range targets {
 		if target.Host == "192.0.2.30" {
 			t.Fatalf("host from unselected connection included: %#v", target)
+		}
+	}
+}
+
+func TestWebTargetsWithoutKeepsOnlyAdditionalEndpoints(t *testing.T) {
+	standard := []webTarget{{Host: "engine.example.org", Port: 443, Scheme: "https"}}
+	configured := []webTarget{
+		{Host: "engine.example.org", Port: 443, Scheme: "https", Source: "configured"},
+		{Host: "gitlab.example.org", Port: 443, Scheme: "https", Source: "configured"},
+	}
+	got := webTargetsWithout(configured, standard)
+	if len(got) != 1 || got[0].Host != "gitlab.example.org" {
+		t.Fatalf("additional targets = %#v", got)
+	}
+}
+
+func TestDynamicInventoryTargetsDerivesPrivateNetwork(t *testing.T) {
+	vms := []*model.VM{
+		{ServerID: "red", IPAddresses: []string{"10.249.254.226"}},
+		{ServerID: "red", IPAddresses: []string{"203.0.113.10"}},
+	}
+	targets, truncated := dynamicInventoryTargets(vms, nil, []*model.Server{{ID: "red"}}, config.DiscoveryConfig{
+		WebPorts: []int{443}, WebMaxAddresses: 256,
+	})
+	if truncated {
+		t.Fatal("single /24 network was unexpectedly truncated")
+	}
+	if len(targets) != 256 {
+		t.Fatalf("targets=%d, want 256", len(targets))
+	}
+	found := false
+	for _, target := range targets {
+		if target.Host == "10.249.254.208" && target.Port == 443 && target.Source == "dynamic_network" {
+			found = true
+		}
+		if target.Host == "203.0.113.10" {
+			t.Fatal("public inventory address expanded into a scan network")
+		}
+	}
+	if !found {
+		t.Fatal("address in dynamically derived inventory network was not included")
+	}
+}
+
+func TestDiscoveredHostnameTargetsExpandAcrossPorts(t *testing.T) {
+	services := []*model.DiscoveredService{{
+		ServerID: "red", VMName: "proxy", Hostname: "adv-gitlab.example.org",
+		Hostnames: []string{"adv-gitlab.example.org", "*.example.org", "10.249.254.208"},
+	}}
+	targets := discoveredHostnameTargets(services, config.DiscoveryConfig{WebPorts: []int{80, 443, 5050}})
+	if len(targets) != 3 {
+		t.Fatalf("hostname targets=%d, want 3: %#v", len(targets), targets)
+	}
+	for i, port := range []int{80, 443, 5050} {
+		if targets[i].Host != "adv-gitlab.example.org" || targets[i].Port != port ||
+			targets[i].Source != "discovered_hostname" {
+			t.Fatalf("target[%d]=%#v", i, targets[i])
 		}
 	}
 }

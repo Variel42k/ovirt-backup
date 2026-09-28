@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { api, notifyError, notifyEvent } from '@/api/client'
 import type { DiscoverySettingsResponse, DiscoverySnapshot, DiscoveredBackup, DiscoveredService } from '@/api/types'
 import { useAuthStore } from '@/stores/auth'
@@ -16,12 +16,21 @@ const settings = ref<DiscoverySettingsResponse | null>(null)
 const targetLines = ref('')
 const rangeLines = ref('')
 const selectedServerIDs = ref<string[]>([])
+const portSpec = ref('80, 443, 8080, 8081, 8443')
+const scanAdditionalTargets = ref(false)
 const maxAddresses = ref(1024)
 const pageSizeOptions = [10, 20, 50, 100, 200]
 const savedPageSize = Number(localStorage.getItem('jhvirt:discovery:page-size'))
 const pageSize = ref(pageSizeOptions.includes(savedPageSize) ? savedPageSize : 20)
 const servicePagination = ref({ page: 1, rowsPerPage: pageSize.value })
 const backupPagination = ref({ page: 1, rowsPerPage: pageSize.value })
+let scanPollTimer: number | undefined
+
+const scanProgress = computed(() => {
+  const scan = snapshot.value.scan
+  if (!scan?.probe_total) return 0
+  return Math.min(1, scan.probe_completed / scan.probe_total)
+})
 
 const services = computed(() => {
   const q = filter.value.trim().toLowerCase()
@@ -35,6 +44,14 @@ const serverOptions = computed(() => app.servers.map((server) => {
   const label = address ? `${server.name} — ${address}` : server.name
   return { label: server.enabled ? label : `${label} (отключено)`, value: server.id, disable: !server.enabled }
 }))
+const scopeCaption = computed(() => {
+  if (!settings.value) return 'загрузка…'
+  const connections = selectedServerIDs.value.length ? `${selectedServerIDs.value.length} подключений` : 'все подключения'
+  const additional = scanAdditionalTargets.value
+    ? `${settings.value.expanded_targets} DNS-целей, ${settings.value.expanded_addresses} IPv4-адресов`
+    : 'ручные цели выключены'
+  return `${connections}, ${settings.value.value.web_ports.length} портов, динамический инвентарь и автосети; ${additional} · ${settings.value.source === 'database' ? 'из web' : 'из YAML'}`
+})
 
 const serviceColumns = [
   { name: 'vm', label: 'Объект виртуализации', field: 'vm_name', align: 'left' as const, sortable: true },
@@ -69,6 +86,8 @@ function sourceLabel(source: DiscoveredService['source']) {
   if (source === 'guest') return 'из гостя'
   if (source === 'configured') return 'внешняя цель'
   if (source === 'network') return 'скан сети'
+  if (source === 'dynamic_network') return 'автосеть виртуализации'
+  if (source === 'discovered_hostname') return 'DNS из HTTP/TLS'
   if (source === 'virtualization_manager') return 'Manager / Engine'
   if (source === 'virtualization_host') return 'гипервизор'
   return 'HTTP/TLS ВМ'
@@ -77,6 +96,8 @@ function sourceColor(source: DiscoveredService['source']) {
   if (source === 'guest') return 'deep-purple'
   if (source === 'configured') return 'teal'
   if (source === 'network') return 'indigo'
+  if (source === 'dynamic_network') return 'green-8'
+  if (source === 'discovered_hostname') return 'light-green-9'
   if (source === 'virtualization_manager') return 'orange-8'
   if (source === 'virtualization_host') return 'cyan-8'
   return 'blue'
@@ -88,21 +109,56 @@ async function load() {
     const [discovery, currentSettings] = await Promise.all([api.getDiscovery(), api.getDiscoverySettings(), serverLoad])
     snapshot.value = discovery
     applySettings(currentSettings)
+    if (discovery.scan?.status === 'running') startScanPolling()
   } catch (err) { notifyError(err, 'Не удалось загрузить результаты поиска') }
   finally { loading.value = false }
 }
+function stopScanPolling() {
+  if (scanPollTimer !== undefined) window.clearInterval(scanPollTimer)
+  scanPollTimer = undefined
+}
+function startScanPolling() {
+  if (scanPollTimer !== undefined) return
+  scanPollTimer = window.setInterval(async () => {
+    try {
+      snapshot.value = await api.getDiscovery()
+      if (snapshot.value.scan?.status !== 'running' && !scanning.value) stopScanPolling()
+    } catch { /* основной запрос или следующий poll покажет ошибку */ }
+  }, 2000)
+}
 async function scan() {
   scanning.value = true
+  startScanPolling()
   try { snapshot.value = await api.runDiscovery(); notifyEvent('info', 'Поиск сервисов завершён') }
   catch (err) { notifyError(err, 'Поиск сервисов не выполнен') }
-  finally { scanning.value = false }
+  finally {
+    stopScanPolling()
+    scanning.value = false
+  }
 }
 function splitLines(value: string) { return value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean) }
+function parsePortSpec(value: string): number[] {
+  const limit = settings.value?.max_ports || 256
+  const ports = new Set<number>()
+  for (const token of value.split(/[\s,;]+/).filter(Boolean)) {
+    const match = token.match(/^(\d+)(?:-(\d+))?$/)
+    if (!match) throw new Error(`Некорректный порт или диапазон: ${token}`)
+    const start = Number(match[1]); const end = Number(match[2] || match[1])
+    if (start < 1 || end > 65535 || start > end) throw new Error(`Некорректный диапазон портов: ${token}`)
+    if (end - start + 1 > limit - ports.size) throw new Error(`Можно указать не более ${limit} портов`)
+    for (let port = start; port <= end; port++) ports.add(port)
+    if (ports.size > limit) throw new Error(`Можно указать не более ${limit} портов`)
+  }
+  if (ports.size === 0) throw new Error('Укажите хотя бы один порт поиска')
+  return [...ports].sort((a, b) => a - b)
+}
 function applySettings(value: DiscoverySettingsResponse) {
   settings.value = value
   targetLines.value = value.value.web_targets.join('\n')
   rangeLines.value = value.value.address_ranges.join('\n')
   selectedServerIDs.value = value.value.server_ids || []
+  portSpec.value = (value.value.web_ports || []).join(', ')
+  scanAdditionalTargets.value = Boolean(value.value.scan_additional_targets)
   maxAddresses.value = value.value.max_addresses
 }
 async function saveSettings() {
@@ -112,6 +168,8 @@ async function saveSettings() {
       web_targets: splitLines(targetLines.value),
       address_ranges: splitLines(rangeLines.value),
       server_ids: selectedServerIDs.value,
+      web_ports: parsePortSpec(portSpec.value),
+      scan_additional_targets: scanAdditionalTargets.value,
       max_addresses: Number(maxAddresses.value),
     }))
     notifyEvent('info', 'Область поиска сохранена')
@@ -133,6 +191,9 @@ watch(pageSize, (value) => {
 })
 watch(filter, () => { servicePagination.value.page = 1 })
 onMounted(load)
+onUnmounted(() => {
+  stopScanPolling()
+})
 </script>
 
 <template>
@@ -154,6 +215,14 @@ onMounted(load)
       Последний поиск: {{ formatDate(snapshot.scan.completed_at || snapshot.scan.started_at) }} ·
       ВМ: {{ snapshot.scan.vm_count }}, сервисов: {{ snapshot.scan.service_count }}, каталогов: {{ snapshot.scan.backup_count }}
       <div v-if="snapshot.scan.error" class="text-negative q-mt-xs">{{ snapshot.scan.error }}</div>
+      <div v-if="snapshot.scan.status === 'running'" class="q-mt-sm">
+        <div class="row items-center justify-between q-mb-xs">
+          <span>{{ snapshot.scan.phase || 'Подготовка поиска' }}</span>
+          <span v-if="snapshot.scan.probe_total">{{ snapshot.scan.probe_completed }} / {{ snapshot.scan.probe_total }}</span>
+        </div>
+        <q-linear-progress rounded size="10px" color="primary" track-color="blue-2"
+          :value="scanProgress" :indeterminate="!snapshot.scan.probe_total" />
+      </div>
     </q-banner>
     <q-banner v-else rounded class="bg-grey-2 q-mb-lg">Поиск ещё не запускался. Нажмите «Найти сейчас»; для автозапуска и поиска копий настройте <code>discovery</code>.</q-banner>
 
@@ -162,7 +231,7 @@ onMounted(load)
     </q-banner>
 
     <q-card flat bordered class="q-mb-lg">
-      <q-expansion-item icon="tune" label="Область поиска" :caption="settings ? `${selectedServerIDs.length ? `${selectedServerIDs.length} подключений` : 'все подключения'}, ${settings.expanded_targets} DNS-целей, ${settings.expanded_addresses} IPv4-адресов · ${settings.source === 'database' ? 'из web' : 'из YAML'}` : 'загрузка…'">
+      <q-expansion-item icon="tune" label="Область поиска" :caption="scopeCaption">
         <q-card-section>
           <div class="row q-col-gutter-md">
             <div class="col-12">
@@ -170,13 +239,25 @@ onMounted(load)
                 label="Подключения виртуализации" hint="Пусто — все включённые. Для выбранных проверяются Manager/Engine, гипервизоры и адреса работающих ВМ." />
             </div>
             <div class="col-12 col-md-6">
-              <q-input v-model="targetLines" type="textarea" autogrow outlined label="DNS-имена и URL" hint="По одному на строку: gitlab.example.org, https://gitlab.example.org или node-[01-20].example.org" />
+              <q-input v-model="portSpec" outlined label="Порты поиска" hint="Через запятую; диапазоны разрешены: 80, 443, 3000-3010. Не более 256 портов." />
+            </div>
+            <div class="col-12">
+              <div class="row items-center q-gutter-sm">
+                <q-toggle v-model="scanAdditionalTargets" color="primary" label="Дополнительные ручные цели" />
+                <q-badge :color="scanAdditionalTargets ? 'positive' : 'grey-7'">
+                  {{ scanAdditionalTargets ? 'Включены' : 'Выключены' }}
+                </q-badge>
+              </div>
+              <div class="text-caption text-grey-7 q-ml-sm">Включает поиск по указанным ниже DNS-именам и IPv4-диапазонам после сохранения настроек. Стандартный поиск по ВМ и приватным /24 автосетям подключённой виртуализации работает всегда.</div>
             </div>
             <div class="col-12 col-md-6">
-              <q-input v-model="rangeLines" type="textarea" autogrow outlined label="IPv4-диапазоны" hint="По одному на строку: 10.249.254.0/24 или 10.249.254.10-10.249.254.50" />
+              <q-input v-model="targetLines" type="textarea" autogrow outlined label="Дополнительные DNS-имена и URL" :disable="!scanAdditionalTargets" hint="По одному на строку: gitlab.example.org, https://gitlab.example.org или node-[01-20].example.org" />
+            </div>
+            <div class="col-12 col-md-6">
+              <q-input v-model="rangeLines" type="textarea" autogrow outlined label="Дополнительные IPv4-диапазоны" :disable="!scanAdditionalTargets" hint="По одному на строку: 10.249.254.0/24 или 10.249.254.10-10.249.254.50" />
             </div>
             <div class="col-12 col-sm-6 col-md-3">
-              <q-input v-model.number="maxAddresses" type="number" outlined label="Предел целей" :min="settings?.min_addresses || 1" :max="settings?.max_addresses || 65536" />
+              <q-input v-model.number="maxAddresses" type="number" outlined label="Предел адресов" hint="Общий предел для автосетей и дополнительных диапазонов" :min="settings?.min_addresses || 1" :max="settings?.max_addresses || 65536" />
             </div>
             <div class="col-12 col-sm-6 col-md-3">
               <q-select v-model="pageSize" :options="pageSizeOptions" outlined label="Строк на странице" />

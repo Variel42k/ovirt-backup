@@ -13,18 +13,21 @@ import (
 const (
 	DiscoveryMinAddresses = 1
 	DiscoveryMaxAddresses = 65536
+	DiscoveryMaxPorts     = 256
 )
 
 // DiscoverySettings is the operator-controlled scan scope. Targets accept
 // exact DNS names/URLs and one numeric range such as node-[01-20].example.org.
 // AddressRanges accept IPv4 CIDRs and inclusive start-end ranges.
 type DiscoverySettings struct {
-	WebTargets    []string  `json:"web_targets"`
-	AddressRanges []string  `json:"address_ranges"`
-	ServerIDs     []string  `json:"server_ids"`
-	MaxAddresses  int       `json:"max_addresses"`
-	UpdatedBy     string    `json:"updated_by,omitempty"`
-	UpdatedAt     time.Time `json:"updated_at,omitempty"`
+	WebTargets            []string  `json:"web_targets"`
+	AddressRanges         []string  `json:"address_ranges"`
+	ServerIDs             []string  `json:"server_ids"`
+	WebPorts              []int     `json:"web_ports"`
+	ScanAdditionalTargets bool      `json:"scan_additional_targets"`
+	MaxAddresses          int       `json:"max_addresses"`
+	UpdatedBy             string    `json:"updated_by,omitempty"`
+	UpdatedAt             time.Time `json:"updated_at,omitempty"`
 }
 
 func (s DiscoverySettings) Validate() error {
@@ -52,6 +55,19 @@ func (s DiscoverySettings) Validate() error {
 			return fmt.Errorf("подключение виртуализации %q указано несколько раз", serverID)
 		}
 		seenServers[serverID] = true
+	}
+	if len(s.WebPorts) > DiscoveryMaxPorts {
+		return fmt.Errorf("список web-портов содержит %d значений, предел %d", len(s.WebPorts), DiscoveryMaxPorts)
+	}
+	seenPorts := make(map[int]bool, len(s.WebPorts))
+	for _, port := range s.WebPorts {
+		if port < 1 || port > 65535 {
+			return fmt.Errorf("некорректный web-порт %d", port)
+		}
+		if seenPorts[port] {
+			return fmt.Errorf("web-порт %d указан несколько раз", port)
+		}
+		seenPorts[port] = true
 	}
 	return nil
 }
@@ -168,14 +184,17 @@ func ExpandDiscoveryAddressRanges(values []string, limit int) ([]string, error) 
 }
 
 type DiscoveryScan struct {
-	ID           string     `json:"id"`
-	Status       RunStatus  `json:"status"`
-	StartedAt    time.Time  `json:"started_at"`
-	CompletedAt  *time.Time `json:"completed_at,omitempty"`
-	Error        string     `json:"error,omitempty"`
-	VMCount      int        `json:"vm_count"`
-	ServiceCount int        `json:"service_count"`
-	BackupCount  int        `json:"backup_count"`
+	ID             string     `json:"id"`
+	Status         RunStatus  `json:"status"`
+	StartedAt      time.Time  `json:"started_at"`
+	CompletedAt    *time.Time `json:"completed_at,omitempty"`
+	Error          string     `json:"error,omitempty"`
+	VMCount        int        `json:"vm_count"`
+	ServiceCount   int        `json:"service_count"`
+	BackupCount    int        `json:"backup_count"`
+	Phase          string     `json:"phase,omitempty"`
+	ProbeTotal     int        `json:"probe_total"`
+	ProbeCompleted int        `json:"probe_completed"`
 }
 
 type DiscoveredService struct {

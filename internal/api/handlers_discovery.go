@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"net/http"
 
@@ -13,6 +14,7 @@ type discoverySettingsResponse struct {
 	Source            string                  `json:"source"`
 	MinAddresses      int                     `json:"min_addresses"`
 	MaxAddresses      int                     `json:"max_addresses"`
+	MaxPorts          int                     `json:"max_ports"`
 	ExpandedTargets   int                     `json:"expanded_targets"`
 	ExpandedAddresses int                     `json:"expanded_addresses"`
 }
@@ -36,6 +38,7 @@ func (s *Server) discoverySettingsResponse(r *http.Request) (discoverySettingsRe
 	}
 	return discoverySettingsResponse{Value: settings, Source: source,
 		MinAddresses: model.DiscoveryMinAddresses, MaxAddresses: model.DiscoveryMaxAddresses,
+		MaxPorts:        model.DiscoveryMaxPorts,
 		ExpandedTargets: len(targets), ExpandedAddresses: len(addresses)}, nil
 }
 
@@ -53,7 +56,9 @@ func (s *Server) handleDiscoveryScan(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, badRequest("поиск сервисов не настроен"))
 		return
 	}
-	snapshot, err := s.discovery.Scan(r.Context())
+	// A network scan can outlive the browser/proxy request. Keep it running so
+	// a disconnected client cannot leave the latest snapshot half-populated.
+	snapshot, err := s.discovery.Scan(context.WithoutCancel(r.Context()))
 	if errors.Is(err, discovery.ErrScanRunning) {
 		writeJSON(w, http.StatusConflict, errorResponse{Error: err.Error(), Code: "discovery_busy"})
 		return

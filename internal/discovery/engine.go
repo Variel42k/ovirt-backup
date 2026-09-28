@@ -39,11 +39,17 @@ func (e *Engine) EffectiveSettings(ctx context.Context) (model.DiscoverySettings
 		return model.DiscoverySettings{}, false, err
 	}
 	if overridden {
+		if len(stored.WebPorts) == 0 {
+			stored.WebPorts = append([]int(nil), e.cfg.WebPorts...)
+		}
 		return stored, true, nil
 	}
 	defaults := model.DiscoverySettings{WebTargets: append([]string(nil), e.cfg.WebTargets...),
-		AddressRanges: append([]string(nil), e.cfg.WebNetworks...),
-		ServerIDs:     append([]string(nil), e.cfg.ServerIDs...), MaxAddresses: e.cfg.WebMaxAddresses}
+		AddressRanges:         append([]string(nil), e.cfg.WebNetworks...),
+		ServerIDs:             append([]string(nil), e.cfg.ServerIDs...),
+		WebPorts:              append([]int(nil), e.cfg.WebPorts...),
+		ScanAdditionalTargets: e.cfg.ScanAdditionalTargets,
+		MaxAddresses:          e.cfg.WebMaxAddresses}
 	return defaults, false, defaults.Validate()
 }
 
@@ -94,7 +100,7 @@ func (e *Engine) Scan(ctx context.Context) (*model.DiscoverySnapshot, error) {
 		return nil, ErrScanRunning
 	}
 	now := time.Now().UTC()
-	scan := &model.DiscoveryScan{ID: uuid.NewString(), Status: model.RunRunning, StartedAt: now}
+	scan := &model.DiscoveryScan{ID: uuid.NewString(), Status: model.RunRunning, StartedAt: now, Phase: "Чтение инвентаря"}
 	if err := e.store.CreateDiscoveryScan(ctx, scan); err != nil {
 		return nil, err
 	}
@@ -103,6 +109,11 @@ func (e *Engine) Scan(ctx context.Context) (*model.DiscoverySnapshot, error) {
 		scan.Status, scan.CompletedAt = status, &done
 		if cause != nil {
 			scan.Error = cause.Error()
+		}
+		if status == model.RunSucceeded || status == model.RunPartial {
+			scan.Phase = "Завершено"
+		} else {
+			scan.Phase = "Ошибка"
 		}
 		_ = e.store.FinishDiscoveryScan(context.WithoutCancel(ctx), scan)
 	}
@@ -137,6 +148,10 @@ func (e *Engine) Scan(ctx context.Context) (*model.DiscoverySnapshot, error) {
 		}
 	}
 	scan.VMCount = len(vms)
+	if err := e.store.UpdateDiscoveryScanProgress(ctx, scan); err != nil {
+		finish(model.RunFailed, err)
+		return nil, err
+	}
 	hosts, err := e.store.ListHosts(ctx, "")
 	if err != nil {
 		finish(model.RunFailed, err)
@@ -148,28 +163,73 @@ func (e *Engine) Scan(ctx context.Context) (*model.DiscoverySnapshot, error) {
 		return nil, err
 	}
 	scanCfg := e.cfg
-	scanCfg.WebTargets, scanCfg.WebNetworks, scanCfg.ServerIDs, scanCfg.WebMaxAddresses =
-		settings.WebTargets, settings.AddressRanges, settings.ServerIDs, settings.MaxAddresses
-	externalTargets, err := expandWebTargets(scanCfg)
-	if err != nil {
-		finish(model.RunFailed, err)
-		return nil, err
-	}
+	scanCfg.WebTargets, scanCfg.WebNetworks, scanCfg.ServerIDs, scanCfg.WebPorts,
+		scanCfg.ScanAdditionalTargets, scanCfg.WebMaxAddresses = settings.WebTargets,
+		settings.AddressRanges, settings.ServerIDs, settings.WebPorts,
+		settings.ScanAdditionalTargets, settings.MaxAddresses
 	virtualizationTargets, err := virtualizationWebTargets(servers, hosts, scanCfg)
 	if err != nil {
 		finish(model.RunFailed, err)
 		return nil, err
 	}
-	services := e.scanVMs(ctx, vms, guest, mergeWebTargets(virtualizationTargets, externalTargets), scanCfg)
-	for _, service := range services {
-		service.ID, service.ScanID = uuid.NewString(), scan.ID
-		if err := e.store.AddDiscoveredService(ctx, service); err != nil {
+	// Inventory-backed targets are the standard scan. Run and persist them
+	// first so a large optional network range cannot hide dynamic VM results.
+	services := e.scanVMs(ctx, vms, guest, virtualizationTargets, scanCfg,
+		e.phaseProgress(ctx, scan, "Проверка ВМ и платформ виртуализации"))
+	if err := e.persistServices(ctx, scan, services); err != nil {
+		finish(model.RunFailed, err)
+		return nil, err
+	}
+	dynamicTargets, truncated := dynamicInventoryTargets(vms, hosts, servers, scanCfg)
+	dynamicTargets = webTargetsWithout(dynamicTargets, mergeWebTargets(virtualizationTargets, vmInventoryTargets(vms, scanCfg)))
+	if truncated {
+		e.log.Warn().Int("предел адресов", scanCfg.WebMaxAddresses).
+			Msg("часть автоматически найденных сетей не вошла в область поиска")
+	}
+	dynamicServices := e.scanVMs(ctx, nil, nil, dynamicTargets, scanCfg,
+		e.phaseProgress(ctx, scan, "Сканирование автоматически найденных сетей"))
+	if err := e.persistServices(ctx, scan, dynamicServices); err != nil {
+		finish(model.RunFailed, err)
+		return nil, err
+	}
+	services = append(services, dynamicServices...)
+	inventoryTargets := mergeWebTargets(virtualizationTargets, vmInventoryTargets(vms, scanCfg), dynamicTargets)
+	hostnameTargets := webTargetsWithout(discoveredHostnameTargets(services, scanCfg), inventoryTargets)
+	hostnameServices := e.scanVMs(ctx, nil, nil, hostnameTargets, scanCfg,
+		e.phaseProgress(ctx, scan, "Проверка DNS-имён из HTTP и TLS"))
+	if err := e.persistServices(ctx, scan, hostnameServices); err != nil {
+		finish(model.RunFailed, err)
+		return nil, err
+	}
+	services = append(services, hostnameServices...)
+	if settings.ScanAdditionalTargets {
+		externalTargets, err := expandWebTargets(scanCfg)
+		if err != nil {
 			finish(model.RunFailed, err)
 			return nil, err
 		}
+		excluded := mergeWebTargets(inventoryTargets, hostnameTargets)
+		additional := e.scanVMs(ctx, nil, nil, webTargetsWithout(externalTargets, excluded), scanCfg,
+			e.phaseProgress(ctx, scan, "Сканирование дополнительных целей"))
+		if err := e.persistServices(ctx, scan, additional); err != nil {
+			finish(model.RunFailed, err)
+			return nil, err
+		}
+		services = append(services, additional...)
+		additionalHostnameTargets := webTargetsWithout(discoveredHostnameTargets(additional, scanCfg),
+			mergeWebTargets(excluded, externalTargets))
+		additionalHostnameServices := e.scanVMs(ctx, nil, nil, additionalHostnameTargets, scanCfg,
+			e.phaseProgress(ctx, scan, "Проверка DNS-имён дополнительных целей"))
+		if err := e.persistServices(ctx, scan, additionalHostnameServices); err != nil {
+			finish(model.RunFailed, err)
+			return nil, err
+		}
+		services = append(services, additionalHostnameServices...)
 	}
-	scan.ServiceCount = len(services)
+	backupProgress := e.phaseProgress(ctx, scan, "Поиск существующих резервных копий")
+	backupProgress(0, 1)
 	backups, backupErr := e.scanBackups(ctx, scan.ID, services)
+	backupProgress(1, 1)
 	for _, backup := range backups {
 		if err := e.store.AddDiscoveredBackup(ctx, backup); err != nil {
 			finish(model.RunFailed, err)
@@ -194,7 +254,48 @@ func (e *Engine) Scan(ctx context.Context) (*model.DiscoverySnapshot, error) {
 	return &model.DiscoverySnapshot{Scan: scan, Services: services, Backups: backups}, nil
 }
 
-func (e *Engine) scanVMs(ctx context.Context, vms []*model.VM, guest *guestProbe, externalTargets []webTarget, scanCfg config.DiscoveryConfig) []*model.DiscoveredService {
+func (e *Engine) persistServices(ctx context.Context, scan *model.DiscoveryScan, services []*model.DiscoveredService) error {
+	for _, service := range services {
+		service.ID, service.ScanID = uuid.NewString(), scan.ID
+		if err := e.store.AddDiscoveredService(ctx, service); err != nil {
+			return err
+		}
+		scan.ServiceCount++
+	}
+	return e.store.UpdateDiscoveryScanProgress(ctx, scan)
+}
+
+func (e *Engine) phaseProgress(ctx context.Context, scan *model.DiscoveryScan, phase string) func(int, int) {
+	var lastWrite time.Time
+	return func(completed, total int) {
+		scan.Phase, scan.ProbeCompleted, scan.ProbeTotal = phase, completed, total
+		if completed == 0 || completed == total || time.Since(lastWrite) >= 500*time.Millisecond {
+			_ = e.store.UpdateDiscoveryScanProgress(context.WithoutCancel(ctx), scan)
+			lastWrite = time.Now()
+		}
+	}
+}
+
+func scanJobCount(vms []*model.VM, guest *guestProbe, externalTargets []webTarget, scanCfg config.DiscoveryConfig) int {
+	total := len(externalTargets)
+	for _, vm := range vms {
+		if !vm.Running() {
+			continue
+		}
+		addresses := uniqueStrings(vm.IPAddresses)
+		if len(addresses) > 0 {
+			total += len(addresses) * len(scanCfg.WebPorts)
+			if guest != nil {
+				total++
+			}
+		} else if strings.TrimSpace(vm.Name) != "" {
+			total += len(scanCfg.WebPorts)
+		}
+	}
+	return total
+}
+
+func (e *Engine) scanVMs(ctx context.Context, vms []*model.VM, guest *guestProbe, externalTargets []webTarget, scanCfg config.DiscoveryConfig, progress func(int, int)) []*model.DiscoveredService {
 	type result struct{ service *model.DiscoveredService }
 	jobs := make(chan func() *model.DiscoveredService)
 	results := make(chan result)
@@ -202,15 +303,17 @@ func (e *Engine) scanVMs(ctx context.Context, vms []*model.VM, guest *guestProbe
 	if workers < 1 {
 		workers = 1
 	}
+	total := scanJobCount(vms, guest, externalTargets, scanCfg)
+	if progress != nil {
+		progress(0, total)
+	}
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for job := range jobs {
-				if service := job(); service != nil {
-					results <- result{service}
-				}
+				results <- result{job()}
 			}
 		}()
 	}
@@ -221,12 +324,24 @@ func (e *Engine) scanVMs(ctx context.Context, vms []*model.VM, guest *guestProbe
 				continue
 			}
 			vm := vm
-			for _, address := range uniqueStrings(vm.IPAddresses) {
+			addresses := uniqueStrings(vm.IPAddresses)
+			for _, address := range addresses {
 				address := address
 				for _, port := range scanCfg.WebPorts {
 					port := port
 					jobs <- func() *model.DiscoveredService {
 						service, _ := probeWeb(ctx, vm, address, port, scanCfg.WebTimeout)
+						return service
+					}
+				}
+			}
+			// Some guests do not report an IP. Their inventory name is still a
+			// dynamic target when it is resolvable by the service DNS.
+			if len(addresses) == 0 && strings.TrimSpace(vm.Name) != "" {
+				for _, port := range scanCfg.WebPorts {
+					port := port
+					jobs <- func() *model.DiscoveredService {
+						service, _ := probeWebTarget(ctx, webTarget{VM: vm, Host: vm.Name, Port: port, Source: "web"}, scanCfg.WebTimeout)
 						return service
 					}
 				}
@@ -245,8 +360,15 @@ func (e *Engine) scanVMs(ctx context.Context, vms []*model.VM, guest *guestProbe
 	}()
 	go func() { wg.Wait(); close(results) }()
 	var out []*model.DiscoveredService
+	completed := 0
 	for item := range results {
-		out = append(out, item.service)
+		completed++
+		if item.service != nil {
+			out = append(out, item.service)
+		}
+		if progress != nil {
+			progress(completed, total)
+		}
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].VMName != out[j].VMName {

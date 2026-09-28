@@ -419,9 +419,12 @@ discovery:
   # Для каждого выбранного подключения проверяются его Manager/Engine,
   # гипервизоры и адреса работающих ВМ.
   server_ids: []
+  # Дополнительные ручные цели выключены по умолчанию. Стандартный поиск
+  # всегда получает адреса динамически из инвентаря виртуализации.
+  scan_additional_targets: false
   web_max_addresses: 1024
   web_timeout: 5s
-  max_parallel: 16
+  max_parallel: 64
   backup_storage_target_id: ""
   backup_prefix: ""
   backup_max_objects: 100000

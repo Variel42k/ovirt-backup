@@ -14,11 +14,12 @@ import (
 
 // Кто подключается — значение метки component.
 const (
-	Libvirt  = "libvirt"   // соединение пула libvirt с хостом KVM
-	DBDump   = "db-dump"   // помощник логических дампов на хосте СУБД
-	Proxmox  = "proxmox"   // помощник канала данных на узле Proxmox
-	SFTPRepo = "sftp-repo" // хранилище копий SFTP
-	HostKey  = "host-key"  // чтение ключа хоста без входа
+	Libvirt   = "libvirt"   // соединение пула libvirt с хостом KVM
+	DBDump    = "db-dump"   // помощник логических дампов на хосте СУБД
+	Proxmox   = "proxmox"   // помощник канала данных на узле Proxmox
+	SFTPRepo  = "sftp-repo" // хранилище копий SFTP
+	HostKey   = "host-key"  // чтение ключа хоста без входа
+	Discovery = "discovery" // ограниченный помощник инвентаризации гостя
 )
 
 type key struct{ host, component string }

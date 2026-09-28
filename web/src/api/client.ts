@@ -26,6 +26,7 @@ import type {
   Dashboard,
   Disk,
   DiskSample,
+	DiscoverySnapshot,
   DRReadiness,
   EngineConfigRun,
   EngineConfigJob,
@@ -276,6 +277,8 @@ http.interceptors.response.use(
 const unwrap = <T>(data: ListResponse<T>): T[] => data.items ?? []
 
 export const api = {
+	getDiscovery: () => http.get<DiscoverySnapshot>('/discovery').then((r) => r.data),
+	runDiscovery: () => http.post<DiscoverySnapshot>('/discovery/scan', undefined, { timeout: 15 * 60_000 }).then((r) => r.data),
   // Аутентификация
   login: (username: string, password: string) =>
     http.post('/auth/login', { username, password }).then((r) => r.data),

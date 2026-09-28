@@ -401,3 +401,25 @@ file_backup:
   #   name: Данные приложений
   #   path: /srv/applications
   #   restore_roots: [/srv/restore]
+
+# Поиск приложений на ВМ и существующих ОС-бэкапов. По умолчанию выключен:
+# сначала добавьте BACKUPDATA как отдельное SMB-хранилище с учётной записью
+# только на чтение и укажите его id ниже.
+discovery:
+  enabled: false
+  interval: 24h
+  web_ports: [80, 443, 8080, 8081, 8443]
+  web_timeout: 5s
+  max_parallel: 16
+  backup_storage_target_id: ""
+  backup_prefix: ""
+  backup_max_objects: 100000
+  # Старше этого срока — предупреждение в разделе и общем списке оповещений.
+  backup_max_age: 48h
+  guest:
+    enabled: false
+    username: jhvirt-discovery
+    port: 22
+    private_key_file: /run/secrets/discovery_private_key
+    known_hosts_file: /app/config/discovery_known_hosts
+    timeout: 15s

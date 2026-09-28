@@ -36,6 +36,7 @@ type Config struct {
 	Cluster          ClusterConfig          `mapstructure:"cluster"`
 	Backup           BackupConfig           `mapstructure:"backup"`
 	FileBackup       FileBackupConfig       `mapstructure:"file_backup"`
+	Discovery        DiscoveryConfig        `mapstructure:"discovery"`
 	Scheduler        SchedulerConfig        `mapstructure:"scheduler"`
 	DisasterRecovery DisasterRecoveryConfig `mapstructure:"disaster_recovery"`
 }
@@ -636,6 +637,31 @@ type FileBackupConfig struct {
 	Roots   []FileBackupRoot `mapstructure:"roots"`
 }
 
+// DiscoveryConfig controls read-only application and backup discovery.
+// Credentials for BACKUPDATA stay in an ordinary encrypted StorageTarget;
+// guest access uses a separate key file and known_hosts trust store.
+type DiscoveryConfig struct {
+	Enabled               bool                 `mapstructure:"enabled"`
+	Interval              time.Duration        `mapstructure:"interval"`
+	WebPorts              []int                `mapstructure:"web_ports"`
+	WebTimeout            time.Duration        `mapstructure:"web_timeout"`
+	MaxParallel           int                  `mapstructure:"max_parallel"`
+	BackupStorageTargetID string               `mapstructure:"backup_storage_target_id"`
+	BackupPrefix          string               `mapstructure:"backup_prefix"`
+	BackupMaxObjects      int                  `mapstructure:"backup_max_objects"`
+	BackupMaxAge          time.Duration        `mapstructure:"backup_max_age"`
+	Guest                 DiscoveryGuestConfig `mapstructure:"guest"`
+}
+
+type DiscoveryGuestConfig struct {
+	Enabled        bool          `mapstructure:"enabled"`
+	Username       string        `mapstructure:"username"`
+	Port           int           `mapstructure:"port"`
+	PrivateKeyFile string        `mapstructure:"private_key_file"`
+	KnownHostsFile string        `mapstructure:"known_hosts_file"`
+	Timeout        time.Duration `mapstructure:"timeout"`
+}
+
 func (f FileBackupConfig) Root(id string) (FileBackupRoot, bool) {
 	for _, root := range f.Roots {
 		if root.ID == id {
@@ -1001,6 +1027,47 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("disaster_recovery: max age must be positive and check_interval at least 1m")
 		}
 	}
+	if c.Discovery.Enabled {
+		if c.Discovery.Interval < time.Minute {
+			return fmt.Errorf("discovery.interval must be at least 1m")
+		}
+		if c.Discovery.WebTimeout < time.Second || c.Discovery.WebTimeout > time.Minute {
+			return fmt.Errorf("discovery.web_timeout must be between 1s and 1m")
+		}
+		if c.Discovery.MaxParallel < 1 || c.Discovery.MaxParallel > 128 {
+			return fmt.Errorf("discovery.max_parallel must be between 1 and 128")
+		}
+		for _, port := range c.Discovery.WebPorts {
+			if port < 1 || port > 65535 {
+				return fmt.Errorf("discovery.web_ports contains invalid port %d", port)
+			}
+		}
+		if c.Discovery.BackupMaxObjects < 1 {
+			return fmt.Errorf("discovery.backup_max_objects must be positive")
+		}
+		if c.Discovery.BackupMaxAge <= 0 {
+			return fmt.Errorf("discovery.backup_max_age must be positive")
+		}
+		if c.Discovery.Guest.Enabled {
+			if strings.TrimSpace(c.Discovery.Guest.Username) == "" ||
+				strings.TrimSpace(c.Discovery.Guest.PrivateKeyFile) == "" ||
+				strings.TrimSpace(c.Discovery.Guest.KnownHostsFile) == "" {
+				return fmt.Errorf("discovery.guest requires username, private_key_file and known_hosts_file")
+			}
+			for name, path := range map[string]string{
+				"discovery.guest.private_key_file": c.Discovery.Guest.PrivateKeyFile,
+				"discovery.guest.known_hosts_file": c.Discovery.Guest.KnownHostsFile,
+			} {
+				info, err := os.Stat(path)
+				if err != nil || !info.Mode().IsRegular() {
+					return fmt.Errorf("%s %q must be a readable regular file", name, path)
+				}
+				if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
+					return fmt.Errorf("%s %q must have mode 0600", name, path)
+				}
+			}
+		}
+	}
 	if c.Server.Port < 1 || c.Server.Port > 65535 {
 		return fmt.Errorf("server.port out of range: %d", c.Server.Port)
 	}
@@ -1210,5 +1277,20 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("scheduler.timezone", "UTC")
 	v.SetDefault("file_backup.enabled", true)
 	v.SetDefault("file_backup.roots", []map[string]any{})
+	v.SetDefault("discovery.enabled", false)
+	v.SetDefault("discovery.interval", "24h")
+	v.SetDefault("discovery.web_ports", []int{80, 443, 8080, 8081, 8443})
+	v.SetDefault("discovery.web_timeout", "5s")
+	v.SetDefault("discovery.max_parallel", 16)
+	v.SetDefault("discovery.backup_storage_target_id", "")
+	v.SetDefault("discovery.backup_prefix", "")
+	v.SetDefault("discovery.backup_max_objects", 100000)
+	v.SetDefault("discovery.backup_max_age", "48h")
+	v.SetDefault("discovery.guest.enabled", false)
+	v.SetDefault("discovery.guest.username", "jhvirt-discovery")
+	v.SetDefault("discovery.guest.port", 22)
+	v.SetDefault("discovery.guest.private_key_file", "")
+	v.SetDefault("discovery.guest.known_hosts_file", "")
+	v.SetDefault("discovery.guest.timeout", "15s")
 	v.SetDefault("scheduler.catch_up_missed", true)
 }

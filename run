@@ -570,7 +570,7 @@ cmd_build() {
     # готовые артефакты публикуются в dist только в самом конце.
     trap 'rm -rf "$BUILD_TMP"' 0
     trap 'exit 1' HUP INT TERM
-    mkdir -p "$OUT/bin" "$OUT/config" "$OUT/web" "$OUT/systemd" "$OUT/compose" "$OUT/docs" "$OUT/proxmox" "$OUT/guest-hooks" "$OUT/db-dump"
+    mkdir -p "$OUT/bin" "$OUT/config" "$OUT/web" "$OUT/systemd" "$OUT/compose" "$OUT/docs" "$OUT/proxmox" "$OUT/guest-hooks" "$OUT/db-dump" "$OUT/discovery"
 
     if [ "$SKIP_WEB" -eq 0 ]; then
         step "веб-интерфейс"
@@ -609,6 +609,8 @@ cmd_build() {
         deploy/db-dump/db-dump-k8s.conf.example deploy/db-dump/k8s-rbac.yaml \
         deploy/db-dump/README.md "$OUT/db-dump/"
     chmod 0755 "$OUT/db-dump/jhvirt-db-dump" "$OUT/db-dump/setup.sh"
+    cp deploy/discovery/jhvirt-discovery deploy/discovery/README.md "$OUT/discovery/"
+    chmod 0755 "$OUT/discovery/jhvirt-discovery"
     chmod 0755 "$OUT/guest-hooks/linux/install.sh" "$OUT/guest-hooks/linux/fsfreeze-hook" \
         "$OUT/guest-hooks/linux/fsfreeze-hook.d/"*
 
@@ -658,7 +660,7 @@ cmd_build() {
         cd "$BUILD_TMP"
         # Одной строкой намеренно: перенос строки здесь уже дважды не переживал
         # правку файла и превращался в аргумент tar с именем «n».
-        EXECUTABLES="$NAME/bin $NAME/install.sh $NAME/proxmox $NAME/db-dump/jhvirt-db-dump $NAME/db-dump/setup.sh $NAME/guest-hooks/linux/install.sh $NAME/guest-hooks/linux/fsfreeze-hook $NAME/guest-hooks/linux/fsfreeze-hook.d"
+        EXECUTABLES="$NAME/bin $NAME/install.sh $NAME/proxmox $NAME/db-dump/jhvirt-db-dump $NAME/db-dump/setup.sh $NAME/discovery/jhvirt-discovery $NAME/guest-hooks/linux/install.sh $NAME/guest-hooks/linux/fsfreeze-hook $NAME/guest-hooks/linux/fsfreeze-hook.d"
         set -f
         tar cf "$ARCHIVE" $(for path in $EXECUTABLES; do printf -- '--exclude=%s ' "$path"; done) "$NAME"
         tar rf "$ARCHIVE" --mode=0755 $EXECUTABLES

@@ -2,6 +2,11 @@
 
 База: `/api/v1`. Ответы — JSON в UTF-8. Коллекции обёрнуты в `{"items": [...], "total": N}`.
 
+Поиск приложений: `GET /discovery` возвращает последний снимок, а
+`POST /discovery/scan` запускает новый read-only обход ВМ и настроенного
+BACKUPDATA. Для чтения требуется `monitoring.read`, для запуска —
+`servers.write`.
+
 ## Аутентификация
 
 Сессионная cookie после `POST /auth/login` либо токен доступа в заголовке

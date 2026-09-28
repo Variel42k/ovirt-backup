@@ -25,6 +25,7 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/backup"
 	"github.com/Variel42k/ovirt-backup/internal/config"
 	"github.com/Variel42k/ovirt-backup/internal/dbdump"
+	"github.com/Variel42k/ovirt-backup/internal/discovery"
 	"github.com/Variel42k/ovirt-backup/internal/dispatch"
 	drcheck "github.com/Variel42k/ovirt-backup/internal/dr"
 	"github.com/Variel42k/ovirt-backup/internal/events"
@@ -340,6 +341,7 @@ func run() error {
 	dispatcher.SetProxmoxPool(proxmoxPool)
 	fileBackupEngine := filebackup.New(st, *cfg, cipher, log)
 	dbDumpEngine := dbdump.New(st, *cfg, cipher, log)
+	discoveryEngine := discovery.New(st, cfg.Discovery, log)
 	dispatcher.SetTelemetryMonitor(dbDumpEngine)
 	dbDumpEngine.RecoverInterrupted(ctx)
 
@@ -403,7 +405,7 @@ func run() error {
 	// запустились бы по два раза, а авто-восстановление подралось бы за
 	// действия над ВМ. Переносы в очереди этого не боятся, они разбираются
 	// арендой, и потому идут на всех экземплярах.
-	background := newBackgroundParts(sched, mon, log)
+	background := newBackgroundParts(sched, mon, discoveryEngine, log)
 
 	if cfg.Cluster.LeaderElection {
 		leaderDone := make(chan struct{})
@@ -438,6 +440,7 @@ func run() error {
 		Logs: logs, Quality: qualityService, Replicator: replicator, Notifier: notifier,
 		Notifications: notificationManager, DR: drChecker,
 		FileBackup: fileBackupEngine, DBDump: dbDumpEngine, AuditFile: auditFile,
+		Discovery: discoveryEngine,
 	})
 
 	// Сроки согласования: эскалация на резервную группу и закрытие заявок,
@@ -522,17 +525,18 @@ func openRecoveryToken(path string) (io.Reader, func() error, error) {
 // подралось бы за действия над одной ВМ. Переносы в очереди сюда не входят:
 // они разбираются арендой и безопасны на всех экземплярах.
 type backgroundParts struct {
-	sched *scheduler.Scheduler
-	mon   *monitor.Monitor
-	log   zerolog.Logger
+	sched     *scheduler.Scheduler
+	mon       *monitor.Monitor
+	discovery *discovery.Engine
+	log       zerolog.Logger
 
 	mu      sync.Mutex
 	cancel  context.CancelFunc
 	stopped chan struct{}
 }
 
-func newBackgroundParts(sched *scheduler.Scheduler, mon *monitor.Monitor, log zerolog.Logger) *backgroundParts {
-	return &backgroundParts{sched: sched, mon: mon, log: log}
+func newBackgroundParts(sched *scheduler.Scheduler, mon *monitor.Monitor, discoveryEngine *discovery.Engine, log zerolog.Logger) *backgroundParts {
+	return &backgroundParts{sched: sched, mon: mon, discovery: discoveryEngine, log: log}
 }
 
 func (b *backgroundParts) start(ctx context.Context) error {
@@ -550,7 +554,11 @@ func (b *backgroundParts) start(ctx context.Context) error {
 	stopped := make(chan struct{})
 	go func() {
 		defer close(stopped)
-		b.mon.Run(runCtx)
+		var workers sync.WaitGroup
+		workers.Add(2)
+		go func() { defer workers.Done(); b.mon.Run(runCtx) }()
+		go func() { defer workers.Done(); b.discovery.Run(runCtx) }()
+		workers.Wait()
 	}()
 	b.cancel, b.stopped = cancel, stopped
 	return nil

@@ -3,6 +3,7 @@ package ovirt
 import (
 	"bytes"
 	"encoding/json"
+	"net"
 	"strconv"
 	"strings"
 	"time"
@@ -259,7 +260,8 @@ type VM struct {
 	} `json:"guest_operating_system,omitempty"`
 	ReportedDevices *struct {
 		ReportedDevice []struct {
-			IPs *struct {
+			Name string `json:"name"`
+			IPs  *struct {
 				IP []struct {
 					Address string `json:"address"`
 					Version string `json:"version"`
@@ -289,20 +291,36 @@ func (v *VM) IPs() []string {
 		return nil
 	}
 	var out []string
+	seen := map[string]bool{}
 	for _, dev := range v.ReportedDevices.ReportedDevice {
+		if virtualGuestInterface(dev.Name) {
+			continue
+		}
 		if dev.IPs == nil {
 			continue
 		}
 		for _, ip := range dev.IPs.IP {
-			a := ip.Address
-			if a == "" || a == "127.0.0.1" || a == "::1" ||
-				strings.HasPrefix(a, "fe80:") || strings.HasPrefix(a, "169.254.") {
+			a := strings.TrimSpace(ip.Address)
+			parsed := net.ParseIP(a)
+			if parsed == nil || parsed.IsLoopback() || parsed.IsUnspecified() || parsed.IsMulticast() ||
+				parsed.IsLinkLocalUnicast() || seen[a] {
 				continue
 			}
+			seen[a] = true
 			out = append(out, a)
 		}
 	}
 	return out
+}
+
+func virtualGuestInterface(name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	for _, prefix := range []string{"docker", "virbr", "veth", "cni", "flannel", "cali", "tunl", "br-"} {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // HasGuestAgent reports whether the guest agent is responding, which decides

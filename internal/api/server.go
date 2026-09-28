@@ -19,6 +19,7 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/auditlog"
 	"github.com/Variel42k/ovirt-backup/internal/config"
 	"github.com/Variel42k/ovirt-backup/internal/dbdump"
+	"github.com/Variel42k/ovirt-backup/internal/discovery"
 	"github.com/Variel42k/ovirt-backup/internal/dispatch"
 	drcheck "github.com/Variel42k/ovirt-backup/internal/dr"
 	"github.com/Variel42k/ovirt-backup/internal/events"
@@ -60,6 +61,7 @@ type Server struct {
 	dr            *drcheck.Checker
 	fileBackup    *filebackup.Engine
 	dbDump        *dbdump.Engine
+	discovery     *discovery.Engine
 	hostHelper    *hosthelper.Client
 	metricsToken  []byte
 	storageMounts func() []string
@@ -112,6 +114,7 @@ type Deps struct {
 	DR            *drcheck.Checker
 	FileBackup    *filebackup.Engine
 	DBDump        *dbdump.Engine
+	Discovery     *discovery.Engine
 	// StorageMounts supplies browsable mount roots for local repositories. Production
 	// uses repo.BrowsableStorageMounts; tests may provide isolated temporary roots.
 	StorageMounts func() []string
@@ -145,6 +148,7 @@ func New(d Deps) *Server {
 		dr:            d.DR, metricsToken: metricsToken,
 		fileBackup:    d.FileBackup,
 		dbDump:        d.DBDump,
+		discovery:     d.Discovery,
 		hostHelper:    hosthelper.New(os.Getenv("JHV_HOST_HELPER_SOCKET")),
 		storageMounts: d.StorageMounts,
 		logins:        newLoginLimiter(),
@@ -214,6 +218,8 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /dashboard", s.perm(model.PermMonitoringRead, s.handleDashboard))
 	mux.HandleFunc("GET /events", s.perm(model.PermMonitoringRead, s.handleEvents))
 	mux.HandleFunc("GET /audit", s.perm(model.PermAuditRead, s.handleAudit))
+	mux.HandleFunc("GET /discovery", s.perm(model.PermMonitoringRead, s.handleDiscoverySnapshot))
+	mux.HandleFunc("POST /discovery/scan", s.perm(model.PermServersWrite, s.handleDiscoveryScan))
 
 	// Подключения к движкам.
 	mux.HandleFunc("GET /servers", s.perm(model.PermServersRead, s.handleListServers))

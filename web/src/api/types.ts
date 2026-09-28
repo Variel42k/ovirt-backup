@@ -713,6 +713,7 @@ export interface EngineConfigRun {
   status: RunStatus
   repo_key?: string
   size_bytes: number
+  stale: boolean
   sha256?: string
   encrypted: boolean
   section_count: number
@@ -1080,6 +1081,7 @@ export interface BootReport {
   elapsed?: string
   guest_os?: string
   hostname?: string
+  hostnames?: string[]
   image_bytes?: number
   notes?: string[]
 }
@@ -1507,4 +1509,53 @@ export interface BackupTelemetry {
   databases: DBStatsSample[]
   disks: DiskSample[]
   impact?: IOImpact
+}
+
+export interface DiscoveryScan {
+  id: string
+  status: RunStatus
+  started_at: string
+  completed_at?: string
+  error?: string
+  vm_count: number
+  service_count: number
+  backup_count: number
+}
+
+export interface DiscoveredService {
+  id: string
+  scan_id: string
+  server_id: string
+  vm_id: string
+  vm_name: string
+  address: string
+  port?: number
+  scheme?: string
+  hostname?: string
+  name: string
+  product?: string
+  source: 'web' | 'guest'
+  evidence?: string
+  proxy: boolean
+  data_paths?: string[]
+  backup_paths?: string[]
+  detected_at: string
+}
+
+export interface DiscoveredBackup {
+  id: string
+  scan_id: string
+  storage_target_id: string
+  path: string
+  latest_object?: string
+  latest_at?: string
+  size_bytes: number
+  matched_service_id?: string
+  detected_at: string
+}
+
+export interface DiscoverySnapshot {
+  scan?: DiscoveryScan
+  services: DiscoveredService[]
+  backups: DiscoveredBackup[]
 }

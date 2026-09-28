@@ -898,7 +898,7 @@ virsh -c qemu:///system list --all
 
 Сколько раз служба входила на каждый хост, видно по метрике
 `ovirt_backup_ssh_connections_total` с метками `host` и `component`: `libvirt`,
-`db-dump`, `proxmox`, `sftp-repo`, `host-key`.
+`db-dump`, `proxmox`, `sftp-repo`, `discovery`, `host-key`.
 
 Если входов больше, соединение рвёт что-то между службой и хостом:
 

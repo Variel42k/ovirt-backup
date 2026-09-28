@@ -3,6 +3,8 @@ package libvirtx
 import (
 	"context"
 	"fmt"
+	"net"
+	"strings"
 
 	golibvirt "github.com/digitalocean/go-libvirt"
 
@@ -84,6 +86,9 @@ func (c *Conn) FetchInventory(ctx context.Context, serverID string) (*Inventory,
 			GuestAgent:  parsed.GuestAgent,
 		}
 		if parsed.State.Running() {
+			vm.IPAddresses = c.domainAddresses(dom, parsed.GuestAgent)
+		}
+		if parsed.State.Running() {
 			memoryUsed += vm.MemoryBytes
 		}
 
@@ -124,6 +129,50 @@ func (c *Conn) FetchInventory(ctx context.Context, serverID string) (*Inventory,
 
 	inv.Host.MemoryUsed = memoryUsed
 	return inv, nil
+}
+
+// domainAddresses prefers qemu-agent data and falls back to DHCP leases.
+// Container bridges and link-local addresses are not service endpoints.
+func (c *Conn) domainAddresses(dom golibvirt.Domain, agent bool) []string {
+	sources := []golibvirt.DomainInterfaceAddressesSource{golibvirt.DomainInterfaceAddressesSrcLease}
+	if agent {
+		sources = append([]golibvirt.DomainInterfaceAddressesSource{golibvirt.DomainInterfaceAddressesSrcAgent}, sources...)
+	}
+	for _, source := range sources {
+		interfaces, err := c.lv.DomainInterfaceAddresses(dom, uint32(source), 0)
+		if err != nil {
+			continue
+		}
+		seen := map[string]bool{}
+		var out []string
+		for _, iface := range interfaces {
+			if virtualInterfaceName(iface.Name) {
+				continue
+			}
+			for _, addr := range iface.Addrs {
+				ip := net.ParseIP(strings.TrimSpace(addr.Addr))
+				if ip == nil || ip.IsLoopback() || ip.IsUnspecified() || ip.IsMulticast() || ip.IsLinkLocalUnicast() || seen[ip.String()] {
+					continue
+				}
+				seen[ip.String()] = true
+				out = append(out, ip.String())
+			}
+		}
+		if len(out) > 0 {
+			return out
+		}
+	}
+	return nil
+}
+
+func virtualInterfaceName(name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	for _, prefix := range []string{"docker", "virbr", "veth", "cni", "flannel", "cali", "tunl", "br-"} {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // blockSize asks libvirt how large a disk actually is. The domain XML does not

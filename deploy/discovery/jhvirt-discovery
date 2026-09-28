@@ -1,0 +1,84 @@
+#!/bin/sh
+set -eu
+
+# This helper is intended for ForceCommand in authorized_keys. It only reads
+# process/service metadata and never accepts a path or shell fragment from the
+# caller.
+case "${SSH_ORIGINAL_COMMAND:-$*}" in
+  ""|"probe"|"/usr/local/sbin/jhvirt-discovery probe") ;;
+  *) echo '{"error":"unsupported command"}' >&2; exit 64 ;;
+esac
+
+exec python3 - <<'PY'
+import json, os, re, subprocess
+
+def run(argv, limit=1024*1024):
+    try:
+        p = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                           stderr=subprocess.DEVNULL, timeout=10, check=False)
+        return p.stdout[:limit].decode("utf-8", "replace")
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+report = {"hostname": os.uname().nodename, "containers": [], "services": [], "mounts": [], "cron": []}
+
+for runtime in ("docker", "podman"):
+    raw = run([runtime, "ps", "--format", "{{json .}}"])
+    for line in raw.splitlines()[:200]:
+        try:
+            item = json.loads(line)
+            report["containers"].append({"name": item.get("Names", ""), "image": item.get("Image", "")})
+        except (ValueError, TypeError):
+            pass
+    if raw:
+        break
+
+units = run(["systemctl", "list-units", "--type=service", "--state=running", "--no-legend", "--no-pager"])
+for line in units.splitlines()[:300]:
+    fields = line.split(None, 4)
+    if not fields or not fields[0].endswith(".service"):
+        continue
+    name = fields[0]
+    props = run(["systemctl", "show", name, "--property=Description", "--property=ExecStart", "--no-pager"], 65536)
+    values = dict(part.split("=", 1) for part in props.splitlines() if "=" in part)
+    command = values.get("ExecStart", "")
+    paths = []
+    for value in re.findall(r"(?<![A-Za-z0-9_.-])(/[A-Za-z0-9_./@+-]+)", command):
+        if not value.startswith(("/usr/", "/bin/", "/sbin/", "/lib/", "/run/")):
+            paths.append(value)
+    report["services"].append({"name": name, "description": values.get("Description", ""),
+                               "exec": command[:2000], "data_paths": sorted(set(paths))[:32]})
+
+try:
+    with open("/proc/self/mountinfo", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            left, sep, right = line.partition(" - ")
+            lf, rf = left.split(), right.split()
+            if sep and len(lf) >= 5 and len(rf) >= 2:
+                source, target, kind = rf[1], lf[4], rf[0]
+                if kind in ("cifs", "nfs", "nfs4") or "backup" in (source+target).lower():
+                    report["mounts"].append({"source": source, "target": target, "type": kind})
+except OSError:
+    pass
+
+interesting = re.compile(r"backup|rsync|pg_dump|mysqldump|mongodump|tar |truenas|backupdata", re.I)
+cron_files = ["/etc/crontab"]
+for directory in ("/etc/cron.d", "/var/spool/cron", "/var/spool/cron/crontabs"):
+    try:
+        cron_files.extend(os.path.join(directory, name) for name in os.listdir(directory))
+    except OSError:
+        pass
+for filename in cron_files[:200]:
+    try:
+        with open(filename, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and interesting.search(line):
+                    report["cron"].append((filename + ": " + line)[:2000])
+    except OSError:
+        pass
+
+for key in ("containers", "services", "mounts", "cron"):
+    report[key] = report[key][:500]
+print(json.dumps(report, ensure_ascii=False, separators=(",", ":")))
+PY

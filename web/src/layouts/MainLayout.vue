@@ -47,6 +47,7 @@ const allLinks = [
   { name: 'dashboard', label: 'Обзор', icon: 'dashboard', perm: 'monitoring.read', group: '' },
   { name: 'servers', label: 'Виртуализация', icon: 'dns', perm: 'servers.read', group: 'Инфраструктура' },
   { name: 'storages', label: 'Хранилища', icon: 'inventory_2', perm: 'storages.read', group: 'Инфраструктура' },
+  { name: 'discovery', label: 'Поиск сервисов', icon: 'travel_explore', perm: 'monitoring.read', group: 'Инфраструктура' },
   { name: 'jobs', label: 'Задания ВМ', icon: 'event_repeat', perm: 'jobs.read', group: 'Защита данных' },
 	{ name: 'file-backups', label: 'Файловые задания', icon: 'folder_copy', perm: 'file_backups.read', group: 'Защита данных' },
   { name: 'db-dumps', label: 'Дампы СУБД', icon: 'storage', perm: 'jobs.read', group: 'Защита данных' },

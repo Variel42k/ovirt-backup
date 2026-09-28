@@ -220,6 +220,9 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /audit", s.perm(model.PermAuditRead, s.handleAudit))
 	mux.HandleFunc("GET /discovery", s.perm(model.PermMonitoringRead, s.handleDiscoverySnapshot))
 	mux.HandleFunc("POST /discovery/scan", s.perm(model.PermServersWrite, s.handleDiscoveryScan))
+	mux.HandleFunc("GET /discovery/settings", s.perm(model.PermMonitoringRead, s.handleGetDiscoverySettings))
+	mux.HandleFunc("PUT /discovery/settings", s.perm(model.PermServersAdmin, s.handleSetDiscoverySettings))
+	mux.HandleFunc("DELETE /discovery/settings", s.perm(model.PermServersAdmin, s.handleResetDiscoverySettings))
 
 	// Подключения к движкам.
 	mux.HandleFunc("GET /servers", s.perm(model.PermServersRead, s.handleListServers))

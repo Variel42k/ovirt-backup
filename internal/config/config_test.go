@@ -76,6 +76,21 @@ func TestLegacyFileBackupSwitchCannotDisableFeature(t *testing.T) {
 	}
 }
 
+func TestDiscoveryNetworkScopeIsBounded(t *testing.T) {
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Discovery.WebNetworks = []string{"10.249.254.0/24"}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("bounded discovery network rejected: %v", err)
+	}
+	cfg.Discovery.WebNetworks = []string{"10.0.0.0/8"}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "IPv4") {
+		t.Fatalf("oversized discovery network accepted: %v", err)
+	}
+}
+
 // temp_dir входит в разрешённые корни всегда: иначе восстановление в файл не
 // работало бы из коробки.
 func TestRestoreRootsAlwaysIncludeTempDir(t *testing.T) {

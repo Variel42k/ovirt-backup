@@ -644,6 +644,10 @@ type DiscoveryConfig struct {
 	Enabled               bool                 `mapstructure:"enabled"`
 	Interval              time.Duration        `mapstructure:"interval"`
 	WebPorts              []int                `mapstructure:"web_ports"`
+	WebTargets            []string             `mapstructure:"web_targets"`
+	WebNetworks           []string             `mapstructure:"web_networks"`
+	ServerIDs             []string             `mapstructure:"server_ids"`
+	WebMaxAddresses       int                  `mapstructure:"web_max_addresses"`
 	WebTimeout            time.Duration        `mapstructure:"web_timeout"`
 	MaxParallel           int                  `mapstructure:"max_parallel"`
 	BackupStorageTargetID string               `mapstructure:"backup_storage_target_id"`
@@ -1027,44 +1031,49 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("disaster_recovery: max age must be positive and check_interval at least 1m")
 		}
 	}
-	if c.Discovery.Enabled {
-		if c.Discovery.Interval < time.Minute {
-			return fmt.Errorf("discovery.interval must be at least 1m")
+	if c.Discovery.Enabled && c.Discovery.Interval < time.Minute {
+		return fmt.Errorf("discovery.interval must be at least 1m")
+	}
+	// Manual discovery uses the same settings even when the periodic worker is
+	// disabled, so validate its read-only scan scope unconditionally.
+	if c.Discovery.WebTimeout < time.Second || c.Discovery.WebTimeout > time.Minute {
+		return fmt.Errorf("discovery.web_timeout must be between 1s and 1m")
+	}
+	if c.Discovery.MaxParallel < 1 || c.Discovery.MaxParallel > 128 {
+		return fmt.Errorf("discovery.max_parallel must be between 1 and 128")
+	}
+	for _, port := range c.Discovery.WebPorts {
+		if port < 1 || port > 65535 {
+			return fmt.Errorf("discovery.web_ports contains invalid port %d", port)
 		}
-		if c.Discovery.WebTimeout < time.Second || c.Discovery.WebTimeout > time.Minute {
-			return fmt.Errorf("discovery.web_timeout must be between 1s and 1m")
+	}
+	if err := (model.DiscoverySettings{WebTargets: c.Discovery.WebTargets,
+		AddressRanges: c.Discovery.WebNetworks, ServerIDs: c.Discovery.ServerIDs,
+		MaxAddresses: c.Discovery.WebMaxAddresses}).Validate(); err != nil {
+		return fmt.Errorf("discovery: %w", err)
+	}
+	if c.Discovery.BackupMaxObjects < 1 {
+		return fmt.Errorf("discovery.backup_max_objects must be positive")
+	}
+	if c.Discovery.BackupMaxAge <= 0 {
+		return fmt.Errorf("discovery.backup_max_age must be positive")
+	}
+	if c.Discovery.Guest.Enabled {
+		if strings.TrimSpace(c.Discovery.Guest.Username) == "" ||
+			strings.TrimSpace(c.Discovery.Guest.PrivateKeyFile) == "" ||
+			strings.TrimSpace(c.Discovery.Guest.KnownHostsFile) == "" {
+			return fmt.Errorf("discovery.guest requires username, private_key_file and known_hosts_file")
 		}
-		if c.Discovery.MaxParallel < 1 || c.Discovery.MaxParallel > 128 {
-			return fmt.Errorf("discovery.max_parallel must be between 1 and 128")
-		}
-		for _, port := range c.Discovery.WebPorts {
-			if port < 1 || port > 65535 {
-				return fmt.Errorf("discovery.web_ports contains invalid port %d", port)
+		for name, path := range map[string]string{
+			"discovery.guest.private_key_file": c.Discovery.Guest.PrivateKeyFile,
+			"discovery.guest.known_hosts_file": c.Discovery.Guest.KnownHostsFile,
+		} {
+			info, err := os.Stat(path)
+			if err != nil || !info.Mode().IsRegular() {
+				return fmt.Errorf("%s %q must be a readable regular file", name, path)
 			}
-		}
-		if c.Discovery.BackupMaxObjects < 1 {
-			return fmt.Errorf("discovery.backup_max_objects must be positive")
-		}
-		if c.Discovery.BackupMaxAge <= 0 {
-			return fmt.Errorf("discovery.backup_max_age must be positive")
-		}
-		if c.Discovery.Guest.Enabled {
-			if strings.TrimSpace(c.Discovery.Guest.Username) == "" ||
-				strings.TrimSpace(c.Discovery.Guest.PrivateKeyFile) == "" ||
-				strings.TrimSpace(c.Discovery.Guest.KnownHostsFile) == "" {
-				return fmt.Errorf("discovery.guest requires username, private_key_file and known_hosts_file")
-			}
-			for name, path := range map[string]string{
-				"discovery.guest.private_key_file": c.Discovery.Guest.PrivateKeyFile,
-				"discovery.guest.known_hosts_file": c.Discovery.Guest.KnownHostsFile,
-			} {
-				info, err := os.Stat(path)
-				if err != nil || !info.Mode().IsRegular() {
-					return fmt.Errorf("%s %q must be a readable regular file", name, path)
-				}
-				if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
-					return fmt.Errorf("%s %q must have mode 0600", name, path)
-				}
+			if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
+				return fmt.Errorf("%s %q must have mode 0600", name, path)
 			}
 		}
 	}
@@ -1280,6 +1289,10 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("discovery.enabled", false)
 	v.SetDefault("discovery.interval", "24h")
 	v.SetDefault("discovery.web_ports", []int{80, 443, 8080, 8081, 8443})
+	v.SetDefault("discovery.web_targets", []string{})
+	v.SetDefault("discovery.web_networks", []string{})
+	v.SetDefault("discovery.server_ids", []string{})
+	v.SetDefault("discovery.web_max_addresses", 1024)
 	v.SetDefault("discovery.web_timeout", "5s")
 	v.SetDefault("discovery.max_parallel", 16)
 	v.SetDefault("discovery.backup_storage_target_id", "")

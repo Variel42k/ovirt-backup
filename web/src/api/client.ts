@@ -27,6 +27,8 @@ import type {
   Disk,
   DiskSample,
 	DiscoverySnapshot,
+	DiscoverySettings,
+	DiscoverySettingsResponse,
   DRReadiness,
   EngineConfigRun,
   EngineConfigJob,
@@ -279,6 +281,9 @@ const unwrap = <T>(data: ListResponse<T>): T[] => data.items ?? []
 export const api = {
 	getDiscovery: () => http.get<DiscoverySnapshot>('/discovery').then((r) => r.data),
 	runDiscovery: () => http.post<DiscoverySnapshot>('/discovery/scan', undefined, { timeout: 15 * 60_000 }).then((r) => r.data),
+	getDiscoverySettings: () => http.get<DiscoverySettingsResponse>('/discovery/settings').then((r) => r.data),
+	setDiscoverySettings: (payload: DiscoverySettings) => http.put<DiscoverySettingsResponse>('/discovery/settings', payload).then((r) => r.data),
+	resetDiscoverySettings: () => http.delete<DiscoverySettingsResponse>('/discovery/settings').then((r) => r.data),
   // Аутентификация
   login: (username: string, password: string) =>
     http.post('/auth/login', { username, password }).then((r) => r.data),

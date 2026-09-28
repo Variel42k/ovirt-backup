@@ -19,30 +19,60 @@ const maxProbeBody = 64 << 10
 
 var titlePattern = regexp.MustCompile(`(?is)<title[^>]*>\s*([^<]{1,200})\s*</title>`)
 
+type webTarget struct {
+	VM         *model.VM
+	ServerID   string
+	ObjectName string
+	Host       string
+	Port       int
+	Scheme     string
+	Path       string
+	Source     string
+}
+
 func probeWeb(ctx context.Context, vm *model.VM, address string, port int, timeout time.Duration) (*model.DiscoveredService, error) {
+	return probeWebTarget(ctx, webTarget{VM: vm, Host: address, Port: port, Source: "web"}, timeout)
+}
+
+func probeWebTarget(ctx context.Context, target webTarget, timeout time.Duration) (*model.DiscoveredService, error) {
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
-	ip := net.ParseIP(strings.TrimSpace(address))
-	if ip == nil || ip.IsUnspecified() || ip.IsLoopback() || ip.IsMulticast() || ip.IsLinkLocalUnicast() {
-		return nil, fmt.Errorf("неподходящий адрес %q", address)
+	host := strings.TrimSpace(target.Host)
+	address, err := resolveProbeHost(ctx, host)
+	if err != nil {
+		return nil, err
 	}
-	scheme := "http"
-	if port == 443 || port == 8443 || port == 9443 {
+	scheme := target.Scheme
+	if scheme == "" {
+		scheme = "http"
+	}
+	if target.Scheme == "" && (target.Port == 443 || target.Port == 8443 || target.Port == 9443) {
 		scheme = "https"
 	}
-	hostPort := net.JoinHostPort(ip.String(), fmt.Sprint(port))
+	path := target.Path
+	if path == "" {
+		path = "/"
+	}
+	hostPort := net.JoinHostPort(host, fmt.Sprint(target.Port))
+	dialAddress := net.JoinHostPort(address, fmt.Sprint(target.Port))
+	tlsConfig := &tls.Config{InsecureSkipVerify: true} // #nosec G402 -- see below
+	if net.ParseIP(host) == nil {
+		tlsConfig.ServerName = host
+	}
 	transport := &http.Transport{
-		Proxy:               nil,
-		DialContext:         (&net.Dialer{Timeout: timeout}).DialContext,
+		Proxy: nil,
+		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return (&net.Dialer{Timeout: timeout}).DialContext(ctx, network, dialAddress)
+		},
 		TLSHandshakeTimeout: timeout,
 		// Discovery connects by inventory IP before it knows the certificate
 		// name. The certificate is evidence, not a trust decision; no secrets or
 		// state-changing request are sent on this connection.
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // #nosec G402
+		TLSClientConfig: tlsConfig,
 	}
 	client := &http.Client{Transport: transport, Timeout: timeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, scheme+"://"+hostPort+"/", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, scheme+"://"+hostPort+path, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -56,13 +86,23 @@ func probeWeb(ctx context.Context, vm *model.VM, address string, port int, timeo
 	if err != nil {
 		return nil, err
 	}
+	if scheme == "http" && strings.Contains(strings.ToLower(string(body)), "plain http request was sent to https port") {
+		target.Scheme = "https"
+		return probeWebTarget(ctx, target, timeout)
+	}
 	names := []string{}
+	if net.ParseIP(host) == nil {
+		names = append(names, host)
+	}
 	if resp.TLS != nil && len(resp.TLS.PeerCertificates) > 0 {
 		cert := resp.TLS.PeerCertificates[0]
 		names = append(names, cert.DNSNames...)
 		if cert.Subject.CommonName != "" {
 			names = append(names, cert.Subject.CommonName)
 		}
+	}
+	if location, locationErr := resp.Location(); locationErr == nil && location.Hostname() != "" && net.ParseIP(location.Hostname()) == nil {
+		names = append(names, location.Hostname())
 	}
 	names = uniqueStrings(names)
 	product, evidence := identifyProduct(resp.Header, string(body))
@@ -86,21 +126,64 @@ func probeWeb(ctx context.Context, vm *model.VM, address string, port int, timeo
 	}
 	if evidence == "" {
 		evidence = fmt.Sprintf("HTTP %d", resp.StatusCode)
+		if location := resp.Header.Get("Location"); location != "" {
+			evidence += " → " + location
+		}
+	}
+	serverID, vmID, vmName := "", "", ""
+	if target.VM != nil {
+		serverID, vmID, vmName = target.VM.ServerID, target.VM.ID, target.VM.Name
+	} else {
+		serverID, vmName = target.ServerID, target.ObjectName
+	}
+	if target.Source == "" {
+		target.Source = "web"
 	}
 	return &model.DiscoveredService{
-		ServerID: vm.ServerID, VMID: vm.ID, VMName: vm.Name, Address: ip.String(), Port: port,
-		Scheme: scheme, Hostname: hostname, Hostnames: names, Name: name, Product: product, Source: "web",
+		ServerID: serverID, VMID: vmID, VMName: vmName, Address: address, Port: target.Port,
+		Scheme: scheme, Hostname: hostname, Hostnames: names, Name: name, Product: product, Source: target.Source,
 		Evidence: evidence, Proxy: len(names) > 1, DetectedAt: time.Now().UTC(),
 	}, nil
 }
 
+func resolveProbeHost(ctx context.Context, host string) (string, error) {
+	if ip := net.ParseIP(host); ip != nil {
+		if unsuitableProbeIP(ip) {
+			return "", fmt.Errorf("неподходящий адрес %q", host)
+		}
+		return ip.String(), nil
+	}
+	addresses, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
+	if err != nil {
+		return "", fmt.Errorf("не удалось разрешить %q: %w", host, err)
+	}
+	for _, ip := range addresses {
+		if !unsuitableProbeIP(ip) {
+			return ip.String(), nil
+		}
+	}
+	return "", fmt.Errorf("у %q нет подходящего сетевого адреса", host)
+}
+
+func unsuitableProbeIP(ip net.IP) bool {
+	return ip.IsUnspecified() || ip.IsLoopback() || ip.IsMulticast() || ip.IsLinkLocalUnicast()
+}
+
 func identifyProduct(header http.Header, body string) (string, string) {
-	joined := strings.ToLower(body + "\n" + header.Get("Server") + "\n" + header.Get("X-Powered-By") + "\n" + header.Get("X-Gitlab-Meta"))
+	if header.Get("X-Gitlab-Meta") != "" {
+		return "GitLab", "заголовок X-GitLab-Meta"
+	}
+	for _, cookie := range header.Values("Set-Cookie") {
+		if strings.Contains(strings.ToLower(cookie), "_gitlab_session=") {
+			return "GitLab", "cookie _gitlab_session"
+		}
+	}
+	joined := strings.ToLower(body + "\n" + header.Get("Server") + "\n" + header.Get("X-Powered-By") + "\n" + header.Get("Location"))
 	checks := []struct {
 		needles []string
 		product string
 	}{
-		{[]string{"x-gitlab-meta", "gitlab", "gon.gitlab_url"}, "GitLab"},
+		{[]string{"gitlab", "gon.gitlab_url"}, "GitLab"},
 		{[]string{"nexus repository", "nexus-content-security-policy", "sonatype"}, "Nexus Repository"},
 		{[]string{"wiki.js", "wikijs"}, "Wiki.js"},
 		{[]string{"testit", "test it"}, "TestIT"},

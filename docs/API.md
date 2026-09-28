@@ -4,8 +4,13 @@
 
 Поиск приложений: `GET /discovery` возвращает последний снимок, а
 `POST /discovery/scan` запускает новый read-only обход ВМ и настроенного
-BACKUPDATA. Для чтения требуется `monitoring.read`, для запуска —
-`servers.write`.
+BACKUPDATA. `GET /discovery/settings` показывает эффективную область поиска,
+`PUT` сохраняет выбранные подключения виртуализации (`server_ids`), DNS/URL и
+IPv4-диапазоны из web, `DELETE` возвращает настройки из YAML. Пустой
+`server_ids` означает все включённые подключения; поиск охватывает их
+Manager/Engine, гипервизоры и работающие ВМ. Для чтения требуется
+`monitoring.read`, для запуска — `servers.write`, для изменения области —
+`servers.admin`.
 
 ## Аутентификация
 

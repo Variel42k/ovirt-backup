@@ -17,6 +17,16 @@ func TestIdentifyProduct(t *testing.T) {
 	}
 }
 
+func TestIdentifyGitLabFromRedirectHeaders(t *testing.T) {
+	header := http.Header{}
+	header.Set("X-Gitlab-Meta", `{"correlation_id":"test","version":"1"}`)
+	header.Set("Location", "https://gitlab.example.org/users/sign_in")
+	product, evidence := identifyProduct(header, "redirected")
+	if product != "GitLab" || evidence == "" {
+		t.Fatalf("product=%q evidence=%q", product, evidence)
+	}
+}
+
 func TestMatchServiceUsesVMAndProductNames(t *testing.T) {
 	services := []*model.DiscoveredService{{ID: "git", Product: "GitLab", VMName: "adv-gitlab"}}
 	for _, folder := range []string{"gitlab-nightly", "adv_gitlab_backup"} {

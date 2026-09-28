@@ -409,6 +409,17 @@ discovery:
   enabled: false
   interval: 24h
   web_ports: [80, 443, 8080, 8081, 8443]
+  # Начальные значения области поиска. После сохранения на web-странице
+  # настройки хранятся в PostgreSQL; сброс возвращает этот YAML.
+  # Поддерживаются точные URL/имена и диапазоны node-[01-20].example.local.
+  web_targets: []
+  # IPv4: CIDR либо включительный диапазон начало-конец.
+  web_networks: []
+  # UUID подключений виртуализации. Пусто — искать во всех включённых.
+  # Для каждого выбранного подключения проверяются его Manager/Engine,
+  # гипервизоры и адреса работающих ВМ.
+  server_ids: []
+  web_max_addresses: 1024
   web_timeout: 5s
   max_parallel: 16
   backup_storage_target_id: ""

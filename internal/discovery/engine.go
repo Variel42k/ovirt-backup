@@ -33,6 +33,38 @@ func New(st *store.Store, cfg config.DiscoveryConfig, log zerolog.Logger) *Engin
 	return &Engine{store: st, cfg: cfg, log: log, gate: make(chan struct{}, 1)}
 }
 
+func (e *Engine) EffectiveSettings(ctx context.Context) (model.DiscoverySettings, bool, error) {
+	stored, overridden, err := e.store.DiscoverySettings(ctx)
+	if err != nil {
+		return model.DiscoverySettings{}, false, err
+	}
+	if overridden {
+		return stored, true, nil
+	}
+	defaults := model.DiscoverySettings{WebTargets: append([]string(nil), e.cfg.WebTargets...),
+		AddressRanges: append([]string(nil), e.cfg.WebNetworks...),
+		ServerIDs:     append([]string(nil), e.cfg.ServerIDs...), MaxAddresses: e.cfg.WebMaxAddresses}
+	return defaults, false, defaults.Validate()
+}
+
+func (e *Engine) SetSettings(ctx context.Context, settings model.DiscoverySettings, actor string) error {
+	if err := settings.Validate(); err != nil {
+		return err
+	}
+	servers, err := e.store.ListServers(ctx)
+	if err != nil {
+		return err
+	}
+	if _, err := selectDiscoveryServers(servers, settings.ServerIDs); err != nil {
+		return err
+	}
+	return e.store.SetDiscoverySettings(ctx, settings, actor)
+}
+
+func (e *Engine) ResetSettings(ctx context.Context) error {
+	return e.store.ResetDiscoverySettings(ctx)
+}
+
 func (e *Engine) Run(ctx context.Context) {
 	if !e.cfg.Enabled {
 		return
@@ -74,18 +106,61 @@ func (e *Engine) Scan(ctx context.Context) (*model.DiscoverySnapshot, error) {
 		}
 		_ = e.store.FinishDiscoveryScan(context.WithoutCancel(ctx), scan)
 	}
-	vms, err := e.store.ListVMs(ctx, "")
+	settings, _, err := e.EffectiveSettings(ctx)
 	if err != nil {
 		finish(model.RunFailed, err)
 		return nil, err
 	}
+	allServers, err := e.store.ListServers(ctx)
+	if err != nil {
+		finish(model.RunFailed, err)
+		return nil, err
+	}
+	servers, err := selectDiscoveryServers(allServers, settings.ServerIDs)
+	if err != nil {
+		finish(model.RunFailed, err)
+		return nil, err
+	}
+	selectedServerIDs := make(map[string]bool, len(servers))
+	for _, server := range servers {
+		selectedServerIDs[server.ID] = true
+	}
+	allVMs, err := e.store.ListVMs(ctx, "")
+	if err != nil {
+		finish(model.RunFailed, err)
+		return nil, err
+	}
+	var vms []*model.VM
+	for _, vm := range allVMs {
+		if selectedServerIDs[vm.ServerID] {
+			vms = append(vms, vm)
+		}
+	}
 	scan.VMCount = len(vms)
+	hosts, err := e.store.ListHosts(ctx, "")
+	if err != nil {
+		finish(model.RunFailed, err)
+		return nil, err
+	}
 	guest, err := newGuestProbe(e.cfg.Guest)
 	if err != nil {
 		finish(model.RunFailed, err)
 		return nil, err
 	}
-	services := e.scanVMs(ctx, vms, guest)
+	scanCfg := e.cfg
+	scanCfg.WebTargets, scanCfg.WebNetworks, scanCfg.ServerIDs, scanCfg.WebMaxAddresses =
+		settings.WebTargets, settings.AddressRanges, settings.ServerIDs, settings.MaxAddresses
+	externalTargets, err := expandWebTargets(scanCfg)
+	if err != nil {
+		finish(model.RunFailed, err)
+		return nil, err
+	}
+	virtualizationTargets, err := virtualizationWebTargets(servers, hosts, scanCfg)
+	if err != nil {
+		finish(model.RunFailed, err)
+		return nil, err
+	}
+	services := e.scanVMs(ctx, vms, guest, mergeWebTargets(virtualizationTargets, externalTargets), scanCfg)
 	for _, service := range services {
 		service.ID, service.ScanID = uuid.NewString(), scan.ID
 		if err := e.store.AddDiscoveredService(ctx, service); err != nil {
@@ -119,11 +194,11 @@ func (e *Engine) Scan(ctx context.Context) (*model.DiscoverySnapshot, error) {
 	return &model.DiscoverySnapshot{Scan: scan, Services: services, Backups: backups}, nil
 }
 
-func (e *Engine) scanVMs(ctx context.Context, vms []*model.VM, guest *guestProbe) []*model.DiscoveredService {
+func (e *Engine) scanVMs(ctx context.Context, vms []*model.VM, guest *guestProbe, externalTargets []webTarget, scanCfg config.DiscoveryConfig) []*model.DiscoveredService {
 	type result struct{ service *model.DiscoveredService }
 	jobs := make(chan func() *model.DiscoveredService)
 	results := make(chan result)
-	workers := e.cfg.MaxParallel
+	workers := scanCfg.MaxParallel
 	if workers < 1 {
 		workers = 1
 	}
@@ -148,16 +223,23 @@ func (e *Engine) scanVMs(ctx context.Context, vms []*model.VM, guest *guestProbe
 			vm := vm
 			for _, address := range uniqueStrings(vm.IPAddresses) {
 				address := address
-				for _, port := range e.cfg.WebPorts {
+				for _, port := range scanCfg.WebPorts {
 					port := port
 					jobs <- func() *model.DiscoveredService {
-						service, _ := probeWeb(ctx, vm, address, port, e.cfg.WebTimeout)
+						service, _ := probeWeb(ctx, vm, address, port, scanCfg.WebTimeout)
 						return service
 					}
 				}
 			}
 			if guest != nil && len(vm.IPAddresses) > 0 {
 				jobs <- func() *model.DiscoveredService { return e.probeGuestVM(ctx, guest, vm) }
+			}
+		}
+		for _, target := range externalTargets {
+			target := target
+			jobs <- func() *model.DiscoveredService {
+				service, _ := probeWebTarget(ctx, target, scanCfg.WebTimeout)
+				return service
 			}
 		}
 	}()

@@ -46,6 +46,7 @@ func TestBuiltinRolesKeepTheirAccess(t *testing.T) {
 		{"GET", "/alerts", []model.Role{model.RoleAdmin, model.RoleOperator, model.RoleViewer}},
 		{"GET", "/coverage", []model.Role{model.RoleAdmin, model.RoleOperator, model.RoleViewer}},
 		{"GET", "/dashboard", []model.Role{model.RoleAdmin, model.RoleOperator, model.RoleViewer}},
+		{"GET", "/discovery/settings", []model.Role{model.RoleAdmin, model.RoleOperator, model.RoleViewer}},
 
 		// Повседневные действия: оператор и администратор.
 		{"POST", "/jobs", []model.Role{model.RoleAdmin, model.RoleOperator}},
@@ -61,6 +62,8 @@ func TestBuiltinRolesKeepTheirAccess(t *testing.T) {
 		{"GET", "/api-tokens", []model.Role{model.RoleAdmin}},
 		{"GET", "/roles", []model.Role{model.RoleAdmin}},
 		{"GET", "/permissions", []model.Role{model.RoleAdmin}},
+		{"PUT", "/discovery/settings", []model.Role{model.RoleAdmin}},
+		{"DELETE", "/discovery/settings", []model.Role{model.RoleAdmin}},
 
 		// Закрытое от оператора и раньше: журнал службы, аудит, параметры,
 		// аварийная готовность, настройки доставки оповещений.

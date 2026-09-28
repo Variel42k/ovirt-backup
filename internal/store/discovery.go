@@ -5,9 +5,49 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/Variel42k/ovirt-backup/internal/model"
 )
+
+func (s *Store) DiscoverySettings(ctx context.Context) (model.DiscoverySettings, bool, error) {
+	row := s.db.QueryRow(ctx, `SELECT web_targets,address_ranges,server_ids,max_addresses,updated_by,updated_at FROM discovery_settings WHERE id=1`)
+	var out model.DiscoverySettings
+	var targets, ranges, serverIDs string
+	if err := row.Scan(&targets, &ranges, &serverIDs, &out.MaxAddresses, &out.UpdatedBy, &out.UpdatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return model.DiscoverySettings{}, false, nil
+		}
+		return model.DiscoverySettings{}, false, fmt.Errorf("read discovery settings: %w", err)
+	}
+	out.WebTargets, out.AddressRanges, out.ServerIDs = decodeStrings(targets), decodeStrings(ranges), decodeStrings(serverIDs)
+	out.UpdatedAt = utc(out.UpdatedAt)
+	return out, true, nil
+}
+
+func (s *Store) SetDiscoverySettings(ctx context.Context, settings model.DiscoverySettings, actor string) error {
+	if err := settings.Validate(); err != nil {
+		return err
+	}
+	_, err := s.db.Exec(ctx, `INSERT INTO discovery_settings
+		(id,web_targets,address_ranges,server_ids,max_addresses,updated_by,updated_at) VALUES (1,?,?,?,?,?,?)
+		ON CONFLICT (id) DO UPDATE SET web_targets=EXCLUDED.web_targets,
+		address_ranges=EXCLUDED.address_ranges,server_ids=EXCLUDED.server_ids,max_addresses=EXCLUDED.max_addresses,
+		updated_by=EXCLUDED.updated_by,updated_at=EXCLUDED.updated_at`,
+		encodeJSON(settings.WebTargets), encodeJSON(settings.AddressRanges), encodeJSON(settings.ServerIDs),
+		settings.MaxAddresses, actor, time.Now().UTC())
+	if err != nil {
+		return fmt.Errorf("save discovery settings: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) ResetDiscoverySettings(ctx context.Context) error {
+	if _, err := s.db.Exec(ctx, `DELETE FROM discovery_settings WHERE id=1`); err != nil {
+		return fmt.Errorf("reset discovery settings: %w", err)
+	}
+	return nil
+}
 
 func (s *Store) CreateDiscoveryScan(ctx context.Context, scan *model.DiscoveryScan) error {
 	_, err := s.db.Exec(ctx, `INSERT INTO discovery_scans (id,status,started_at,error,vm_count,service_count,backup_count) VALUES (?,?,?,?,?,?,?)`,

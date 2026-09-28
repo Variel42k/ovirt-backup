@@ -1534,7 +1534,7 @@ export interface DiscoveredService {
   hostname?: string
   name: string
   product?: string
-  source: 'web' | 'guest'
+  source: 'web' | 'guest' | 'configured' | 'network' | 'virtualization_manager' | 'virtualization_host'
   evidence?: string
   proxy: boolean
   data_paths?: string[]
@@ -1558,4 +1558,22 @@ export interface DiscoverySnapshot {
   scan?: DiscoveryScan
   services: DiscoveredService[]
   backups: DiscoveredBackup[]
+}
+
+export interface DiscoverySettings {
+  web_targets: string[]
+  address_ranges: string[]
+  server_ids: string[]
+  max_addresses: number
+  updated_by?: string
+  updated_at?: string
+}
+
+export interface DiscoverySettingsResponse {
+  value: DiscoverySettings
+  source: 'config' | 'database'
+  min_addresses: number
+  max_addresses: number
+  expanded_targets: number
+  expanded_addresses: number
 }

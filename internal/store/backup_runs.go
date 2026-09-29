@@ -122,6 +122,14 @@ func (s *Store) SetRunProgress(ctx context.Context, runID string, progress int, 
 	return err
 }
 
+// SetRunSnapshot сразу записывает временный снапшот запуска: если служба
+// перезапустится посреди бэкапа, уборка при старте должна знать, какой
+// снапшот удалить, а не ждать фоновой уборки по метке.
+func (s *Store) SetRunSnapshot(ctx context.Context, runID, snapshotID string) error {
+	_, err := s.db.Exec(ctx, `UPDATE backup_runs SET snapshot_id=? WHERE id=?`, snapshotID, runID)
+	return err
+}
+
 // GetBackupRun loads a run without its disks.
 func (s *Store) GetBackupRun(ctx context.Context, id string) (*model.BackupRun, error) {
 	row := s.db.QueryRow(ctx, `SELECT `+runSelectColumns+` FROM backup_runs WHERE id=?`, id)

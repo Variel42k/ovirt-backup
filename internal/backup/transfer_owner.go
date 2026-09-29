@@ -59,6 +59,16 @@ func ownTransfer(transferID string, owners map[string]string, runs []*model.Back
 	return runID, true
 }
 
+// persistRunSnapshot записывает снапшот запуска в базу сразу после создания.
+func (e *Engine) persistRunSnapshot(ctx context.Context, run *model.BackupRun) {
+	saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if err := e.store.SetRunSnapshot(saveCtx, run.ID, run.SnapshotID); err != nil {
+		e.log.Warn().Err(err).Str("run", run.ID).Str("snapshot", run.SnapshotID).
+			Msg("снапшот запуска не записан — при перезапуске службы его уберёт только фоновая уборка")
+	}
+}
+
 // transferCancelWait — сколько ждать, пока движок закроет отменённую
 // передачу. Диск освобождается только после этого, поэтому удаление
 // снапшота или новая передача раньше получили бы 409.

@@ -403,7 +403,21 @@ export interface LeftoverReport {
   removable: number
   blocked?: string
   manual_steps?: ManualStep[]
+  /** Что движок без Backup API показывает о занятости дисков ВМ. */
+  disks?: DiskLockReport[]
+  /** Последние события движка по ВМ — его журнал через API. */
+  engine_events?: string[]
   checked_at: string
+}
+
+export interface DiskLockReport {
+  disk_id: string
+  alias: string
+  status?: string
+  transfers?: string[]
+  locked_volumes?: string[]
+  busy_snapshots?: string[]
+  summary: string
 }
 
 export interface LeftoverCleanupResult {

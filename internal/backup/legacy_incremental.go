@@ -69,6 +69,7 @@ func (e *Engine) runLegacyQcow2(ctx context.Context, client *ovirt.Client, backe
 		return nil, fmt.Errorf("создание следующего snapshot QCOW2: %w", err)
 	}
 	run.SnapshotID = snapshot.ID
+	e.persistRunSnapshot(ctx, run)
 	completed := false
 	defer func() {
 		_ = window.Thaw()
@@ -130,7 +131,7 @@ func (e *Engine) runLegacyQcow2(ctx context.Context, client *ovirt.Client, backe
 				parentReader.Close()
 				return nil, fmt.Errorf("сборка локальной основы %s: %w", disk.AliasOrName(), err)
 			}
-			layerCtx := withVolumeDisk(withTransferOwner(copyCtx, run), vm.ID, disk)
+			layerCtx := withVolumeDisk(withTransferOwner(copyCtx, run), vm, disk)
 			downloaded, err := e.downloadQcowLayer(layerCtx, client, imageID, overlay)
 			if lockErr, ok := asDiskLocked(err); ok {
 				e.setManualSteps(run, legacyLockSteps(srv, vm.ID, lockErr))

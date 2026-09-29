@@ -379,7 +379,7 @@ func (e *Engine) copyLegacyChainDisk(ctx context.Context, client *ovirt.Client, 
 	total := disk.ProvisionedSize.Int64()
 	// Тома скачиваются передачами этого диска: по нему служба спрашивает
 	// движок, что держит диск, если он отвечает 409.
-	ctx = withVolumeDisk(withTransferOwner(ctx, run), vm.ID, disk)
+	ctx = withVolumeDisk(withTransferOwner(ctx, run), vm, disk)
 	rawPath, downloaded, err := e.materializeLegacyChain(ctx, client, top, formats, workDir, func(done int64) {
 		pct := 0
 		if total > 0 {

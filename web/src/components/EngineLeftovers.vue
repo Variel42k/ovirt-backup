@@ -10,7 +10,7 @@
 import { computed, ref } from 'vue'
 import { useQuasar } from 'quasar'
 import { api, errorMessage, notifyError, notifyOk } from '@/api/client'
-import type { Leftover, LeftoverCleanupResult, LeftoverReport } from '@/api/types'
+import type { DiskLockReport, Leftover, LeftoverCleanupResult, LeftoverReport } from '@/api/types'
 import { dateTime } from '@/api/format'
 import { useAuthStore } from '@/stores/auth'
 import ManualSteps from '@/components/ManualSteps.vue'
@@ -36,6 +36,10 @@ const kindIcon: Record<Leftover['kind'], string> = {
   snapshot: 'photo_camera',
 }
 
+/** Движок показывает, что диск чем-то занят. */
+function diskBusy(disk: DiskLockReport): boolean {
+  return Boolean(disk.transfers?.length || disk.locked_volumes?.length || disk.busy_snapshots?.length) || disk.status === 'locked'
+}
 const canClean = computed(() => auth.can('backups.write') && (report.value?.removable ?? 0) > 0 && !report.value?.blocked)
 
 async function check() {
@@ -134,6 +138,32 @@ async function cleanup() {
           </q-item-section>
         </q-item>
       </q-list>
+
+      <template v-if="report.disks?.length">
+        <div class="text-subtitle2 q-mt-md">Что движок показывает о дисках</div>
+        <q-list bordered separator dense class="rounded-borders" data-testid="leftovers-disk-locks">
+          <q-item v-for="disk in report.disks" :key="disk.disk_id">
+            <q-item-section avatar>
+              <q-icon :name="diskBusy(disk) ? 'lock' : 'lock_open'" :color="diskBusy(disk) ? 'warning' : 'positive'" />
+            </q-item-section>
+            <q-item-section>
+              <q-item-label>
+                {{ disk.alias }}
+                <q-badge outline color="grey-8" class="q-ml-xs">{{ disk.status || 'статус неизвестен' }}</q-badge>
+              </q-item-label>
+              <q-item-label caption class="jhv-wrap">{{ disk.summary }}</q-item-label>
+            </q-item-section>
+          </q-item>
+        </q-list>
+        <div class="jhv-reason q-mt-xs">
+          Движок oVirt 4.3 может держать диск и без видимой причины. Тогда отметка «свободен» здесь не гарантирует,
+          что снапшот удалится: это покажет «Убрать остатки» — при отказе движка там будет сказано, что держит диск.
+        </div>
+      </template>
+      <template v-if="report.engine_events?.length">
+        <div class="text-subtitle2 q-mt-md">Последние события движка по ВМ</div>
+        <div v-for="(event, index) in report.engine_events" :key="index" class="text-caption jhv-wrap">{{ event }}</div>
+      </template>
     </template>
 
     <template v-if="result">

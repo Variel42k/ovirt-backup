@@ -1557,6 +1557,7 @@ func (e *Engine) runSnapshot(ctx context.Context, client *ovirt.Client, backend 
 		return nil, fmt.Errorf("создание снапшота: %w", err)
 	}
 	run.SnapshotID = snap.ID
+	e.persistRunSnapshot(ctx, run)
 
 	retain := p.LegacyMode == model.LegacyIncrementalQcow2
 	retainedSuccess := false

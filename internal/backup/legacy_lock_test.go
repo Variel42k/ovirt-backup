@@ -51,6 +51,11 @@ func startFakeLockedEngine(t *testing.T, f *fakeLockedEngine) *ovirt.Client {
 	mux.HandleFunc("GET /ovirt-engine/api/disks/d1", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"id":"d1","alias":"ADV-GITLAB_Disk1","status":"` + f.diskState + `"}`))
 	})
+	mux.HandleFunc("GET /ovirt-engine/api/events", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"event":[` +
+			`{"id":"2","severity":"normal","time":1790712000000,"description":"Image Download with disk ADV-GITLAB_Disk1 succeeded."},` +
+			`{"id":"1","severity":"normal","time":1790711000000,"description":"VM other-vm started."}]}`))
+	})
 	mux.HandleFunc("GET /ovirt-engine/api/vms/vm1/snapshots", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"snapshot":[{"id":"s1","description":"jhvirt-backup","snapshot_status":"ok"}]}`))
 	})
@@ -73,7 +78,8 @@ func fastLockProbes(t *testing.T) {
 }
 
 func lockCtx() context.Context {
-	return withVolumeDisk(context.Background(), "vm1", ovirt.Disk{ID: "d1", Alias: "ADV-GITLAB_Disk1"})
+	return withVolumeDisk(context.Background(), &model.VM{ID: "vm1", Name: "ADV-GITLAB"},
+		ovirt.Disk{ID: "d1", Alias: "ADV-GITLAB_Disk1"})
 }
 
 func TestOpenVolumeTransferWaitsUntilEngineReleasesDisk(t *testing.T) {
@@ -114,9 +120,10 @@ func TestOpenVolumeTransferDiagnosesLock(t *testing.T) {
 			contains: []string{"тома в статусе locked: vol-1", "unlock_entity.sh"},
 		},
 		{
-			name:        "причины не видно",
-			fake:        func() *fakeLockedEngine { return &fakeLockedEngine{conflicts: -1, diskState: "ok", volumeState: "ok"} },
-			contains:    []string{"незавершённых передач диска нет", "перезапуском службы ovirt-engine"},
+			name: "причины не видно",
+			fake: func() *fakeLockedEngine { return &fakeLockedEngine{conflicts: -1, diskState: "ok", volumeState: "ok"} },
+			contains: []string{"незавершённых передач диска нет", "перезапуском службы ovirt-engine",
+				"Последние события движка", "Image Download with disk ADV-GITLAB_Disk1 succeeded"},
 			restartStep: true,
 		},
 	}
@@ -137,13 +144,19 @@ func TestOpenVolumeTransferDiagnosesLock(t *testing.T) {
 				}
 			}
 			steps := legacyLockSteps(&model.Server{Name: "ovirt", EngineURL: "https://engine.example"}, "vm1", lockErr)
-			var restart, logGrep bool
+			var restart, logGrep, apiEvents bool
 			for _, s := range steps {
 				restart = restart || strings.Contains(s.Command, "systemctl restart ovirt-engine")
 				logGrep = logGrep || strings.Contains(s.Command, "engine.log")
+				apiEvents = apiEvents || (strings.Contains(s.Command, "/events?max=300") &&
+					strings.Contains(s.Command, "ADV-GITLAB_Disk1") && s.Where == anywhere)
 			}
-			if restart != tc.restartStep || !logGrep {
-				t.Fatalf("команды: перезапуск=%v (want %v), журнал=%v", restart, tc.restartStep, logGrep)
+			if restart != tc.restartStep || !logGrep || !apiEvents {
+				t.Fatalf("команды: перезапуск=%v (want %v), журнал=%v, события через API=%v",
+					restart, tc.restartStep, logGrep, apiEvents)
+			}
+			if strings.Contains(err.Error(), "other-vm") {
+				t.Fatalf("в диагноз попали события чужой ВМ: %v", err)
 			}
 		})
 	}

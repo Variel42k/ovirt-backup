@@ -61,7 +61,24 @@ type LeftoverReport struct {
 	Blocked string `json:"blocked,omitempty"`
 	// ManualSteps — команды для того, что служба не трогает.
 	ManualSteps []model.ManualStep `json:"manual_steps,omitempty"`
-	CheckedAt   time.Time          `json:"checked_at"`
+	// Disks — что движок показывает о занятости дисков ВМ. Только для движков
+	// без Backup API: там диск бывает занят без видимой причины.
+	Disks []DiskLockReport `json:"disks,omitempty"`
+	// EngineEvents — последние события движка по ВМ (журнал движка через API).
+	EngineEvents []string  `json:"engine_events,omitempty"`
+	CheckedAt    time.Time `json:"checked_at"`
+}
+
+// DiskLockReport — что движок показывает о занятости диска.
+type DiskLockReport struct {
+	DiskID        string   `json:"disk_id"`
+	Alias         string   `json:"alias"`
+	Status        string   `json:"status,omitempty"`
+	Transfers     []string `json:"transfers,omitempty"`
+	LockedVolumes []string `json:"locked_volumes,omitempty"`
+	BusySnapshots []string `json:"busy_snapshots,omitempty"`
+	// Summary — одной строкой для интерфейса.
+	Summary string `json:"summary"`
 }
 
 // CleanupAction — что служба сделала по кнопке.
@@ -100,6 +117,9 @@ type leftoverScan struct {
 	transferOwners map[string]string
 	diskIDs        []string
 	busyVM         bool
+	// diskLocks и events — только для движков без Backup API.
+	diskLocks []DiskLockReport
+	events    []string
 }
 
 func (e *Engine) scanLeftovers(ctx context.Context, serverID, vmID string) (*leftoverScan, error) {
@@ -166,14 +186,22 @@ func (e *Engine) scanLeftovers(ctx context.Context, serverID, vmID string) (*lef
 	if disks, err := client.ListVMDisks(ctx, vm.ID); err == nil {
 		for _, d := range disks {
 			sc.diskIDs = append(sc.diskIDs, d.ID)
+			if !srv.SupportsCBT {
+				st := probeDiskLock(ctx, client, volumeDisk{vmID: vm.ID, vmName: vm.Name, diskID: d.ID, alias: d.AliasOrName()})
+				sc.diskLocks = append(sc.diskLocks, diskLockReport(d, st))
+			}
 		}
+	}
+	if !srv.SupportsCBT {
+		sc.events = recentEngineEvents(ctx, client, 10, vm.Name)
 	}
 	return sc, nil
 }
 
 // report превращает собранное состояние в отчёт для оператора.
 func (e *Engine) report(sc *leftoverScan) *LeftoverReport {
-	rep := &LeftoverReport{ServerID: sc.srv.ID, VMID: sc.vm.ID, VMName: sc.vm.Name, CheckedAt: time.Now().UTC()}
+	rep := &LeftoverReport{ServerID: sc.srv.ID, VMID: sc.vm.ID, VMName: sc.vm.Name, CheckedAt: time.Now().UTC(),
+		Disks: sc.diskLocks, EngineEvents: sc.events}
 	if sc.busyVM {
 		rep.Blocked = "идёт бэкап этой ВМ — он сам убирает за собой; дождитесь его окончания"
 	}

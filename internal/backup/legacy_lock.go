@@ -33,14 +33,18 @@ import (
 
 // volumeDisk — чей том скачивается: по нему опрашивается блокировка.
 type volumeDisk struct {
-	vmID, diskID, alias string
+	vmID, vmName, diskID, alias string
 }
 
 type volumeDiskKey struct{}
 
 // withVolumeDisk помечает контекст диском, тома которого скачиваются.
-func withVolumeDisk(ctx context.Context, vmID string, disk ovirt.Disk) context.Context {
-	return context.WithValue(ctx, volumeDiskKey{}, volumeDisk{vmID: vmID, diskID: disk.ID, alias: disk.AliasOrName()})
+func withVolumeDisk(ctx context.Context, vm *model.VM, disk ovirt.Disk) context.Context {
+	d := volumeDisk{diskID: disk.ID, alias: disk.AliasOrName()}
+	if vm != nil {
+		d.vmID, d.vmName = vm.ID, vm.Name
+	}
+	return context.WithValue(ctx, volumeDiskKey{}, d)
 }
 
 func volumeDiskFrom(ctx context.Context) (volumeDisk, bool) {
@@ -60,6 +64,9 @@ type diskLockState struct {
 	BusySnapshots []string
 	// Transfers — незавершённые передачи этого диска.
 	Transfers []ovirt.ImageTransfer
+	// Events — последние события движка по ВМ и диску (его журнал через API):
+	// по ним видно, чем закончилась передача, не заходя на хост движка.
+	Events []string
 	// ProbeError — движок не ответил на часть запросов: картина неполная.
 	ProbeError string
 }
@@ -132,8 +139,47 @@ func probeDiskLock(ctx context.Context, client *ovirt.Client, d volumeDisk) disk
 	} else {
 		errs = append(errs, "передачи: "+err.Error())
 	}
+	st.Events = recentEngineEvents(ctx, client, legacyLockEvents, d.alias, d.vmName)
 	st.ProbeError = strings.Join(errs, "; ")
 	return st
+}
+
+// legacyLockEvents — сколько последних событий движка показывать.
+const legacyLockEvents = 6
+
+// recentEngineEvents — последние события журнала движка, где упомянуты ВМ
+// или диск, новые сверху. Журнал движка доступен через REST API с теми же
+// правами, что у службы, — доступ к хосту движка не нужен.
+func recentEngineEvents(ctx context.Context, client *ovirt.Client, limit int, needles ...string) []string {
+	events, err := client.ListEvents(ctx, 300, "")
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, ev := range events {
+		match := false
+		for _, n := range needles {
+			if n != "" && strings.Contains(ev.Description, n) {
+				match = true
+				break
+			}
+		}
+		if !match {
+			continue
+		}
+		line := ev.Description
+		if at := ev.Time.Time(); !at.IsZero() {
+			line = at.Local().Format("02.01 15:04:05") + " " + line
+		}
+		if ev.Severity != "" && ev.Severity != "normal" {
+			line += " [" + ev.Severity + "]"
+		}
+		out = append(out, line)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
 }
 
 func containsString(list []string, s string) bool {
@@ -156,9 +202,13 @@ type diskLockedError struct {
 func (e *diskLockedError) Unwrap() error { return e.cause }
 
 func (e *diskLockedError) Error() string {
-	return fmt.Sprintf("движок %s не отпускал диск %s для передачи следующего тома (HTTP 409 «disks are locked»). "+
+	msg := fmt.Sprintf("движок %s не отпускал диск %s для передачи следующего тома (HTTP 409 «disks are locked»). "+
 		"Что показывал движок: %s. %s",
 		humanDuration(e.waited), e.disk.alias, e.state, e.diagnosis())
+	if len(e.state.Events) > 0 {
+		msg += ". Последние события движка: " + strings.Join(e.state.Events, "; ")
+	}
+	return msg
 }
 
 // diagnosis объясняет, что делать, по тому, что показал движок.
@@ -174,12 +224,14 @@ func (e *diskLockedError) diagnosis() string {
 			"Повторите бэкап, когда снапшот выйдет из статуса locked"
 	case len(st.LockedVolumes) > 0 || st.DiskStatus == "locked":
 		return "Тома диска остались в статусе locked в базе движка, хотя передач и операций со снапшотами нет: " +
-			"движок 4.3 не снял блокировку после завершения передачи. Проверьте engine.log по диску и, если " +
-			"операций с ним действительно нет, снимите блокировку командой unlock_entity.sh из блока «Что сделать вручную»"
+			"движок 4.3 не снял блокировку после завершения передачи. Через API её не снять: нужен " +
+			"unlock_entity.sh на хосте движка — передайте команду из блока «Что сделать вручную» администратору oVirt"
 	default:
 		return "Движок не показывает причину ни в передачах, ни в статусах диска и снапшотов: блокировку держит " +
-			"незавершённая внутренняя команда движка (после передачи предыдущего тома). Она видна только в " +
-			"engine.log; снимается перезапуском службы ovirt-engine — ВМ при этом продолжают работать"
+			"незавершённая внутренняя команда движка (после передачи предыдущего тома). Через API её не снять; " +
+			"она снимается перезапуском службы ovirt-engine (ВМ продолжают работать) — это делает администратор " +
+			"oVirt с доступом к хосту движка. Проверить, отпустил ли движок диск, можно кнопкой «Проверить» в " +
+			"остатках бэкапов ВМ: там видны передачи, статусы и события движка"
 	}
 }
 
@@ -286,11 +338,26 @@ func (e *Engine) releaseOwnRunTransfers(ctx context.Context, client *ovirt.Clien
 }
 
 // legacyLockSteps — команды для оператора, когда движок так и не отпустил диск.
+// Сначала — то, что выполняется через REST API движка с сервера службы; шаги
+// на хосте движка помечены: без доступа к нему их выполняет администратор oVirt.
 func legacyLockSteps(srv *model.Server, vmID string, lockErr *diskLockedError) []model.ManualStep {
+	cmd := newEngineCommands(srv)
 	steps := EngineUnlockSteps(srv, vmID, nil, lockErr.state.Transfers, []string{lockErr.disk.diskID})
+	needle := lockErr.disk.alias
+	if needle == "" {
+		needle = lockErr.disk.diskID
+	}
 	steps = append(steps, model.ManualStep{
-		Title: "Посмотреть в журнале движка, что делал с диском",
-		Where: "хост движка",
+		Title: "События движка по диску (журнал движка через API)",
+		Where: anywhere,
+		Detail: "Доступ к хосту движка не нужен. Видно, чем закончилась передача тома и что движок делал с " +
+			"диском дальше: «Image Download … succeeded», ошибки, операции со снапшотами.",
+		Command: cmd.curl + " " + shellQuote(cmd.api+"/events?max=300") +
+			" | grep -oE '\"description\" *: *\"[^\"]*" + strings.ReplaceAll(needle, "'", "") + "[^\"]*\"' | head -20",
+	})
+	steps = append(steps, model.ManualStep{
+		Title: "Посмотреть в журнале на хосте движка, что держит диск",
+		Where: "хост движка (если доступа нет — передайте администратору oVirt)",
 		Detail: "Последние записи по диску: какая команда его заблокировала и чем она закончилась. " +
 			"Ищите TransferDiskImageCommand, CreateSnapshot, RemoveSnapshot и строки с EngineLock.",
 		Command: "sudo grep " + shellQuote(lockErr.disk.diskID) + " /var/log/ovirt-engine/engine.log | tail -60",
@@ -298,11 +365,12 @@ func legacyLockSteps(srv *model.Server, vmID string, lockErr *diskLockedError) [
 	if !lockErr.state.visibleCause() {
 		steps = append(steps, model.ManualStep{
 			Title: "Если причины не видно: перезапустить службу движка",
-			Where: "хост движка, root",
+			Where: "хост движка, root (если доступа нет — передайте администратору oVirt)",
 			Risky: true,
-			Detail: "Блокировку держит незавершённая команда в памяти движка. Перезапуск ovirt-engine её снимает; " +
-				"ВМ продолжают работать, но идущие через движок операции (миграции, снапшоты, передачи) прервутся, " +
-				"а портал будет недоступен пару минут. Выполняйте, когда на движке нет других операций.",
+			Detail: "Блокировку держит незавершённая команда в памяти движка, через API её не снять. Перезапуск " +
+				"ovirt-engine её снимает; ВМ продолжают работать, но идущие через движок операции (миграции, " +
+				"снапшоты, передачи) прервутся, а портал будет недоступен пару минут. Выполняйте, когда на движке " +
+				"нет других операций.",
 			Command: "sudo systemctl restart ovirt-engine",
 		})
 	}
@@ -323,4 +391,14 @@ func (e *Engine) setManualSteps(run *model.BackupRun, steps []model.ManualStep) 
 	e.manualMu.Lock()
 	run.ManualSteps = steps
 	e.manualMu.Unlock()
+}
+
+// diskLockReport переводит состояние диска в строку отчёта об остатках.
+func diskLockReport(d ovirt.Disk, st diskLockState) DiskLockReport {
+	r := DiskLockReport{DiskID: d.ID, Alias: d.AliasOrName(), Status: st.DiskStatus,
+		LockedVolumes: st.LockedVolumes, BusySnapshots: st.BusySnapshots, Summary: st.String()}
+	for _, t := range st.Transfers {
+		r.Transfers = append(r.Transfers, fmt.Sprintf("%s (фаза %s)", t.ID, t.Phase))
+	}
+	return r
 }

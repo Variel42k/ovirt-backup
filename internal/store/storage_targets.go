@@ -18,7 +18,7 @@ const storageColumns = `id, name, kind, enabled, base_path, endpoint, region, bu
 	password_enc, private_key_enc, host_key, rate_limit, last_check_at, last_check_ok,
 	last_check_msg, free_bytes, used_bytes, created_at, updated_at,
 	object_lock_enabled, object_lock_days, share, domain, insecure_tls, trust_any_host_key,
-	insecure_tls_since`
+	insecure_tls_since, read_only`
 
 // storageSelectColumns — то же плюс итог проверки неизменяемости.
 //
@@ -55,13 +55,13 @@ func (s *Store) CreateStorageTarget(ctx context.Context, t *model.StorageTarget)
 	}
 
 	_, err = s.db.Exec(ctx, `INSERT INTO storage_targets (`+storageColumns+`)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		t.ID, t.Name, string(t.Kind), t.Enabled, t.BasePath, t.Endpoint, t.Region, t.Bucket,
 		t.Prefix, t.AccessKey, secretKey, t.UseSSL, t.PathStyle, t.StorageClass, t.Host, t.Port,
 		t.Username, password, privateKey, t.HostKey, t.RateLimit, t.LastCheckAt,
 		t.LastCheckOK, t.LastCheckMsg, t.FreeBytes, t.UsedBytes, t.CreatedAt,
 		t.UpdatedAt, t.ObjectLockEnabled, t.ObjectLockDays, t.Share, t.Domain, t.InsecureTLS,
-		t.TrustAnyHostKey, t.InsecureTLSSince)
+		t.TrustAnyHostKey, t.InsecureTLSSince, t.ReadOnly)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return fmt.Errorf("%w: хранилище %q", ErrConflict, t.Name)
@@ -120,13 +120,13 @@ func (s *Store) UpdateStorageTarget(ctx context.Context, t *model.StorageTarget)
 		access_key=?, secret_key_enc=?, use_ssl=?, path_style=?, storage_class=?, host=?, port=?,
 		username=?, password_enc=?, private_key_enc=?, host_key=?, rate_limit=?, updated_at=?,
 		object_lock_enabled=?, object_lock_days=?, share=?, domain=?, insecure_tls=?,
-		trust_any_host_key=?, insecure_tls_since=?
+		trust_any_host_key=?, insecure_tls_since=?, read_only=?
 		WHERE id=?`,
 		t.Name, string(t.Kind), t.Enabled, t.BasePath, t.Endpoint, t.Region, t.Bucket, t.Prefix,
 		t.AccessKey, secretKey, t.UseSSL, t.PathStyle, t.StorageClass, t.Host, t.Port, t.Username,
 		password, privateKey, t.HostKey, t.RateLimit, t.UpdatedAt,
 		t.ObjectLockEnabled, t.ObjectLockDays, t.Share, t.Domain, t.InsecureTLS,
-		t.TrustAnyHostKey, t.InsecureTLSSince, t.ID)
+		t.TrustAnyHostKey, t.InsecureTLSSince, t.ReadOnly, t.ID)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return fmt.Errorf("%w: хранилище %q", ErrConflict, t.Name)
@@ -252,7 +252,7 @@ func (s *Store) scanStorageTarget(row rowScanner) (*model.StorageTarget, error) 
 		&t.Host, &t.Port, &t.Username, &password, &privateKey, &t.HostKey, &t.RateLimit,
 		&lastCheck, &t.LastCheckOK, &t.LastCheckMsg, &t.FreeBytes, &t.UsedBytes, &createdAt, &updatedAt,
 		&t.ObjectLockEnabled, &t.ObjectLockDays, &t.Share, &t.Domain, &t.InsecureTLS,
-		&t.TrustAnyHostKey, &insecureSince,
+		&t.TrustAnyHostKey, &insecureSince, &t.ReadOnly,
 		&t.ImmutabilityState, &t.ImmutabilityDetail, &immutabilityChecked)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound

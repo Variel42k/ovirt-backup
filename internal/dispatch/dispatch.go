@@ -121,6 +121,9 @@ func (d *Dispatcher) executeLibvirt(ctx context.Context, srv *model.Server, req 
 	if !target.Enabled {
 		return nil, fmt.Errorf("хранилище %q отключено", target.Name)
 	}
+	if target.ReadOnly {
+		return nil, fmt.Errorf("хранилище %q подключено только для чтения", target.Name)
+	}
 
 	conn, err := d.libvirt.ForServer(ctx, srv)
 	if err != nil {

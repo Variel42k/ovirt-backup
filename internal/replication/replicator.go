@@ -145,6 +145,9 @@ func (r *Replicator) QueueRun(ctx context.Context, runID string, targetIDs []str
 		if !target.Enabled {
 			return nil, fmt.Errorf("хранилище назначения %q отключено", target.Name)
 		}
+		if target.ReadOnly {
+			return nil, fmt.Errorf("хранилище назначения %q подключено только для чтения", target.Name)
+		}
 		for _, link := range chain {
 			if link.ChainIndex > run.ChainIndex {
 				break
@@ -413,6 +416,9 @@ func (r *Replicator) copy(ctx context.Context, copy *model.BackupCopy, attempt *
 	}
 	if !destinationTarget.Enabled {
 		return fmt.Errorf("хранилище %q отключено", destinationTarget.Name)
+	}
+	if destinationTarget.ReadOnly {
+		return fmt.Errorf("хранилище %q подключено только для чтения", destinationTarget.Name)
 	}
 
 	sourceCopy, sourceTarget, err := r.healthySource(ctx, run, copy.StorageTargetID)

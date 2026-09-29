@@ -53,6 +53,22 @@ func TestNewSMBValidatesSettings(t *testing.T) {
 	}
 }
 
+func TestReadOnlySMBRejectsMutationsBeforeConnecting(t *testing.T) {
+	backend := newTestSMB(t, &model.StorageTarget{
+		Host: "nas.invalid", Share: "backups", Username: "reader", ReadOnly: true,
+	})
+	ctx := context.Background()
+	if _, err := backend.Put(ctx, "new", bytes.NewReader(nil), 0); !errors.Is(err, ErrReadOnly) {
+		t.Fatalf("Put: получена ошибка %v, ожидалась ErrReadOnly", err)
+	}
+	if err := backend.Delete(ctx, "old"); !errors.Is(err, ErrReadOnly) {
+		t.Fatalf("Delete: получена ошибка %v, ожидалась ErrReadOnly", err)
+	}
+	if _, err := backend.DeletePrefix(ctx, "old/"); !errors.Is(err, ErrReadOnly) {
+		t.Fatalf("DeletePrefix: получена ошибка %v, ожидалась ErrReadOnly", err)
+	}
+}
+
 // Оператор вставляет имя папки как \\nas\backups или /backups — лишние
 // разделители по краям это не ошибка настройки, а привычка.
 func TestNewSMBTrimsShareAndDefaultsPort(t *testing.T) {

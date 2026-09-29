@@ -354,6 +354,9 @@ func (e *Engine) execute(ctx context.Context, job *model.DBDumpJob, run *model.D
 	if !target.Enabled {
 		return fail(fmt.Errorf("хранилище %q отключено", target.Name))
 	}
+	if target.ReadOnly {
+		return fail(fmt.Errorf("хранилище %q подключено только для чтения", target.Name))
+	}
 	backend, err := repo.Open(ctx, target)
 	if err != nil {
 		return fail(fmt.Errorf("открытие хранилища %q: %w", target.Name, err))

@@ -51,6 +51,9 @@ func (s *Server) validateEngineConfigJob(ctx context.Context, job *model.EngineC
 	if err != nil || !target.Enabled {
 		return badRequest("репозиторий не найден или отключён")
 	}
+	if target.ReadOnly {
+		return badRequest("репозиторий %q подключён только для чтения", target.Name)
+	}
 	if job.Schedule != "" {
 		location := s.cfg.Location()
 		if s.scheduler != nil {

@@ -23,6 +23,10 @@ import (
 // ErrNotExist is returned by Get, GetRange and Stat for a missing object.
 var ErrNotExist = errors.New("объект не найден в хранилище")
 
+// ErrReadOnly is returned when a caller attempts to mutate a repository that
+// was deliberately connected for catalog, verification and restore only.
+var ErrReadOnly = errors.New("хранилище подключено только для чтения")
+
 // ObjectInfo describes one stored object.
 type ObjectInfo struct {
 	Key      string    `json:"key"`
@@ -69,8 +73,8 @@ type Backend interface {
 	// (0, 0, nil) — the caller treats that as "unknown", not as "full".
 	Usage(ctx context.Context) (free int64, used int64, err error)
 
-	// Check verifies the target is reachable and writable, by round-tripping a
-	// small probe object.
+	// Check verifies the configured access mode. Writable targets round-trip a
+	// small probe object; read-only targets perform a non-mutating read probe.
 	Check(ctx context.Context) error
 
 	// Close releases connections.

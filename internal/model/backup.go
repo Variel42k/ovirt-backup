@@ -131,6 +131,9 @@ type StorageTarget struct {
 	Name    string      `json:"name"`
 	Kind    StorageKind `json:"kind"`
 	Enabled bool        `json:"enabled"`
+	// ReadOnly подключает существующий репозиторий только для просмотра,
+	// проверки и восстановления. Новые копии и retention в него не пишут.
+	ReadOnly bool `json:"read_only"`
 
 	// Local
 	BasePath string `json:"base_path,omitempty"`

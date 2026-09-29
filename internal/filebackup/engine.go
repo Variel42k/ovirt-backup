@@ -164,6 +164,12 @@ func (e *Engine) execute(ctx context.Context, job *model.FileBackupJob, run *mod
 	if err != nil {
 		return fail(err)
 	}
+	if !target.Enabled {
+		return fail(fmt.Errorf("хранилище %q отключено", target.Name))
+	}
+	if target.ReadOnly {
+		return fail(fmt.Errorf("хранилище %q подключено только для чтения", target.Name))
+	}
 	backend, err := repo.Open(ctx, target)
 	if err != nil {
 		return fail(err)
@@ -172,7 +178,7 @@ func (e *Engine) execute(ctx context.Context, job *model.FileBackupJob, run *mod
 		mirrors := make([]repo.Backend, 0, len(job.StorageTargetIDs)-1)
 		for _, targetID := range job.StorageTargetIDs[1:] {
 			mirrorTarget, targetErr := e.store.GetStorageTarget(ctx, targetID)
-			if targetErr != nil || !mirrorTarget.Enabled {
+			if targetErr != nil || !mirrorTarget.Enabled || mirrorTarget.ReadOnly {
 				continue // finishCopies will retry/fill it from the primary
 			}
 			mirrorBackend, openErr := repo.Open(ctx, mirrorTarget)

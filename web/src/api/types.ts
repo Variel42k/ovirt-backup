@@ -246,6 +246,7 @@ export interface StorageTarget {
   name: string
   kind: StorageKind
   enabled: boolean
+  read_only: boolean
   base_path?: string
   endpoint?: string
   region?: string

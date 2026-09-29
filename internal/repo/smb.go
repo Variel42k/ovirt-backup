@@ -35,6 +35,7 @@ type smbBackend struct {
 	addr      string
 	shareName string
 	basePath  string
+	readOnly  bool
 	dialer    *smb2.Dialer
 
 	mu      sync.Mutex
@@ -73,6 +74,7 @@ func newSMB(target *model.StorageTarget) (Backend, error) {
 		addr:      net.JoinHostPort(target.Host, fmt.Sprint(port)),
 		shareName: share,
 		basePath:  strings.Trim(strings.ReplaceAll(target.BasePath, `\`, "/"), "/"),
+		readOnly:  target.ReadOnly,
 		dialer: &smb2.Dialer{
 			Initiator: &smb2.NTLMInitiator{
 				User:     target.Username,
@@ -181,6 +183,9 @@ func (s *smbBackend) mkdirAll(share *smb2.Share, dir string) error {
 }
 
 func (s *smbBackend) Put(ctx context.Context, key string, r io.Reader, size int64) (int64, error) {
+	if s.readOnly {
+		return 0, ErrReadOnly
+	}
 	share, err := s.mount(ctx)
 	if err != nil {
 		return 0, err
@@ -264,6 +269,9 @@ func (s *smbBackend) Stat(ctx context.Context, key string) (ObjectInfo, error) {
 }
 
 func (s *smbBackend) Delete(ctx context.Context, key string) error {
+	if s.readOnly {
+		return ErrReadOnly
+	}
 	share, err := s.mount(ctx)
 	if err != nil {
 		return err
@@ -275,6 +283,9 @@ func (s *smbBackend) Delete(ctx context.Context, key string) error {
 }
 
 func (s *smbBackend) DeletePrefix(ctx context.Context, prefix string) (int, error) {
+	if s.readOnly {
+		return 0, ErrReadOnly
+	}
 	objects, err := s.List(ctx, prefix)
 	if err != nil {
 		return 0, err
@@ -407,6 +418,23 @@ func (s *smbBackend) Check(ctx context.Context) error {
 	share, err := s.mount(ctx)
 	if err != nil {
 		return err
+	}
+	if s.readOnly {
+		target := s.basePath
+		if target == "" {
+			target = "."
+		}
+		info, err := share.Stat(target)
+		if err != nil {
+			return fmt.Errorf("чтение каталога %s в сетевой папке %s: %w", target, s.shareName, err)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("путь %s в сетевой папке %s не является каталогом", target, s.shareName)
+		}
+		if _, err := share.ReadDir(target); err != nil {
+			return fmt.Errorf("просмотр каталога %s в сетевой папке %s: %w", target, s.shareName, err)
+		}
+		return nil
 	}
 	if err := s.mkdirAll(share, s.basePath); err != nil {
 		return fmt.Errorf("создание каталога %s в сетевой папке %s: %w", s.basePath, s.shareName, err)

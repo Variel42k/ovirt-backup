@@ -15,9 +15,10 @@ import (
 // storagePayload is the write shape of a backup repository. Secrets are
 // write-only: they go in through this struct and never come back out.
 type storagePayload struct {
-	Name    string `json:"name"`
-	Kind    string `json:"kind"`
-	Enabled *bool  `json:"enabled"`
+	Name     string `json:"name"`
+	Kind     string `json:"kind"`
+	Enabled  *bool  `json:"enabled"`
+	ReadOnly *bool  `json:"read_only"`
 
 	BasePath string `json:"base_path"`
 
@@ -60,6 +61,9 @@ type storagePayload struct {
 func (p storagePayload) apply(dst *model.StorageTarget) {
 	dst.Name = p.Name
 	dst.Kind = model.StorageKind(p.Kind)
+	if p.ReadOnly != nil {
+		dst.ReadOnly = *p.ReadOnly
+	}
 	dst.BasePath = p.BasePath
 	dst.Endpoint = p.Endpoint
 	dst.Region = p.Region
@@ -191,6 +195,9 @@ func (p storagePayload) validate(isNew bool) error {
 		}
 	default:
 		return badRequest("неизвестный тип хранилища: %q", p.Kind)
+	}
+	if p.ReadOnly != nil && *p.ReadOnly && model.StorageKind(p.Kind) != model.StorageSMB {
+		return badRequest("режим только чтения пока поддерживается только для SMB/CIFS")
 	}
 	if p.InsecureTLS && model.StorageKind(p.Kind) != model.StorageWebDAV {
 		return badRequest("отключение проверки сертификата доступно только для WebDAV")
@@ -516,6 +523,10 @@ func (s *Server) handleCheckImmutability(w http.ResponseWriter, r *http.Request)
 	target, err := s.store.GetStorageTarget(r.Context(), r.PathValue("id"))
 	if err != nil {
 		s.writeError(w, r, err)
+		return
+	}
+	if target.ReadOnly {
+		s.writeError(w, r, badRequest("хранилище %q подключено только для чтения", target.Name))
 		return
 	}
 

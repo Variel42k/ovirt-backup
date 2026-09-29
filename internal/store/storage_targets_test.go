@@ -19,7 +19,7 @@ func TestStorageTargetRoundTripKeepsEveryField(t *testing.T) {
 			ID: "smb-1", Name: "шара NAS", Kind: model.StorageSMB, Enabled: true,
 			Host: "nas.example.org", Port: 445, Share: "backups", Domain: "EXAMPLE",
 			Username: "svc-backup", Password: "пароль шары", BasePath: "jhvirt",
-			RateLimit: 50 << 20,
+			RateLimit: 50 << 20, ReadOnly: true,
 		},
 		{
 			ID: "dav-1", Name: "Nextcloud", Kind: model.StorageWebDAV, Enabled: true,
@@ -58,6 +58,9 @@ func TestStorageTargetRoundTripKeepsEveryField(t *testing.T) {
 		if got.InsecureTLS != want.InsecureTLS {
 			t.Errorf("хранилище %s: InsecureTLS %v, ожидалось %v",
 				want.ID, got.InsecureTLS, want.InsecureTLS)
+		}
+		if got.ReadOnly != want.ReadOnly {
+			t.Errorf("хранилище %s: ReadOnly %v, ожидалось %v", want.ID, got.ReadOnly, want.ReadOnly)
 		}
 		if got.Port != want.Port || got.RateLimit != want.RateLimit {
 			t.Errorf("хранилище %s: порт %d и лимит %d, ожидались %d и %d",

@@ -1265,7 +1265,8 @@ func (s *Scheduler) pruneExpired(ctx context.Context) {
 	}
 }
 
-// checkStorageTargets verifies each repository is reachable and writable.
+// checkStorageTargets verifies each repository in its configured access mode:
+// writable targets round-trip a probe, read-only targets list their root.
 // Discovering that the backup target died only when a backup fails is too late.
 func (s *Scheduler) checkStorageTargets(ctx context.Context) {
 	targets, err := s.store.ListStorageTargets(ctx)

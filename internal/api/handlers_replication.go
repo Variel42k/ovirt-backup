@@ -160,6 +160,10 @@ func (s *Server) handleChangeJobPrimary(w http.ResponseWriter, r *http.Request) 
 		s.writeError(w, r, badRequest("хранилище %q отключено", target.Name))
 		return
 	}
+	if target.ReadOnly {
+		s.writeError(w, r, badRequest("хранилище %q подключено только для чтения", target.Name))
+		return
+	}
 	job, err = s.store.ChangeJobPrimary(r.Context(), id, payload.StorageTargetID)
 	if err != nil {
 		s.writeError(w, r, err)

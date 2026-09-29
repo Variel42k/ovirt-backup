@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { api, notifyError, notifyEvent } from '@/api/client'
-import type { DiscoverySettingsResponse, DiscoverySnapshot, DiscoveredBackup, DiscoveredService } from '@/api/types'
+import { statusColor, vmStatus } from '@/api/format'
+import type { DiscoverySettingsResponse, DiscoverySnapshot, DiscoveredBackup, DiscoveredService, VM } from '@/api/types'
 import { useAuthStore } from '@/stores/auth'
 import { useAppStore } from '@/stores/app'
 
@@ -9,6 +10,9 @@ const auth = useAuthStore()
 const app = useAppStore()
 const loading = ref(false)
 const scanning = ref(false)
+const vmLoading = ref(false)
+const vmLoadError = ref('')
+const inventoryVMs = ref<VM[]>([])
 const settingsSaving = ref(false)
 const snapshot = ref<DiscoverySnapshot>({ services: [], backups: [] })
 const filter = ref('')
@@ -24,7 +28,9 @@ const savedPageSize = Number(localStorage.getItem('jhvirt:discovery:page-size'))
 const pageSize = ref(pageSizeOptions.includes(savedPageSize) ? savedPageSize : 20)
 const servicePagination = ref({ page: 1, rowsPerPage: pageSize.value })
 const backupPagination = ref({ page: 1, rowsPerPage: pageSize.value })
+const vmPagination = ref({ page: 1, rowsPerPage: pageSize.value })
 let scanPollTimer: number | undefined
+let vmLoadVersion = 0
 
 const scanProgress = computed(() => {
   const scan = snapshot.value.scan
@@ -37,6 +43,17 @@ const services = computed(() => {
   if (!q) return snapshot.value.services
   return snapshot.value.services.filter((item) => [item.vm_name, item.name, item.product, item.hostname, item.address]
     .some((value) => String(value ?? '').toLowerCase().includes(q)))
+})
+const virtualMachines = computed(() => {
+  const q = filter.value.trim().toLowerCase()
+  const scope = new Set(selectedServerIDs.value)
+  return inventoryVMs.value
+    .filter((item) => scope.size === 0 || scope.has(item.server_id))
+    .filter((item) => !q || [
+      item.name, item.description, item.cluster_name, item.host_name, item.status,
+      ...(item.ip_addresses || []), ...(item.tags || []), app.serverName(item.server_id),
+    ].some((value) => String(value ?? '').toLowerCase().includes(q)))
+    .sort((a, b) => app.serverName(a.server_id).localeCompare(app.serverName(b.server_id)) || a.name.localeCompare(b.name))
 })
 const serviceById = computed(() => new Map(snapshot.value.services.map((item) => [item.id, item])))
 const serverOptions = computed(() => app.servers.map((server) => {
@@ -60,6 +77,14 @@ const serviceColumns = [
   { name: 'source', label: 'Источник', field: 'source', align: 'left' as const },
   { name: 'details', label: 'Признаки и пути', field: 'evidence', align: 'left' as const },
 ]
+const vmColumns = [
+  { name: 'name', label: 'Виртуальная машина', field: 'name', align: 'left' as const, sortable: true },
+  { name: 'server', label: 'Подключение', field: 'server_id', align: 'left' as const, sortable: true },
+  { name: 'status', label: 'Состояние', field: 'status', align: 'left' as const, sortable: true },
+  { name: 'placement', label: 'Кластер / хост', field: 'cluster_name', align: 'left' as const, sortable: true },
+  { name: 'addresses', label: 'Адреса', field: 'ip_addresses', align: 'left' as const },
+  { name: 'actions', label: '', field: 'id', align: 'right' as const },
+]
 const backupColumns = [
   { name: 'path', label: 'Каталог', field: 'path', align: 'left' as const, sortable: true },
   { name: 'latest', label: 'Последняя копия', field: 'latest_at', align: 'left' as const, sortable: true },
@@ -81,6 +106,11 @@ function formatBytes(value: number) {
 function matched(row: DiscoveredBackup) {
   const item = row.matched_service_id ? serviceById.value.get(row.matched_service_id) : undefined
   return item ? `${item.product || item.name} — ${item.vm_name}` : 'не определён'
+}
+function vmRowKey(row: VM) { return `${row.server_id}:${row.id}` }
+function vmSupportsBackup(row: VM) {
+  const server = app.servers.find((item) => item.id === row.server_id)
+  return Boolean(server && app.serverSupports(server, 'supports_backup'))
 }
 function sourceLabel(source: DiscoveredService['source']) {
   if (source === 'guest') return 'из гостя'
@@ -104,14 +134,36 @@ function sourceColor(source: DiscoveredService['source']) {
 }
 async function load() {
   loading.value = true
+  const serverLoad = auth.can('servers.read') && app.servers.length === 0 ? app.loadServers() : Promise.resolve()
+  const discoveryLoad = Promise.all([api.getDiscovery(), api.getDiscoverySettings()])
+  let serversLoaded = true
+  try { await serverLoad }
+  catch (err) { serversLoaded = false; notifyError(err, 'Не удалось загрузить список подключений') }
+  await loadVMInventory()
+  if (!serversLoaded) vmLoadError.value = 'Не удалось загрузить список подключений'
   try {
-    const serverLoad = auth.can('servers.read') && app.servers.length === 0 ? app.loadServers() : Promise.resolve()
-    const [discovery, currentSettings] = await Promise.all([api.getDiscovery(), api.getDiscoverySettings(), serverLoad])
+    const [discovery, currentSettings] = await discoveryLoad
     snapshot.value = discovery
     applySettings(currentSettings)
     if (discovery.scan?.status === 'running') startScanPolling()
   } catch (err) { notifyError(err, 'Не удалось загрузить результаты поиска') }
   finally { loading.value = false }
+}
+async function loadVMInventory() {
+  const version = ++vmLoadVersion
+  vmLoadError.value = ''
+  if (!auth.can('servers.read')) {
+    inventoryVMs.value = []
+    vmLoading.value = false
+    return
+  }
+  vmLoading.value = true
+  const settled = await Promise.allSettled(app.servers.map((server) => api.listVMs(server.id)))
+  if (version !== vmLoadVersion) return
+  inventoryVMs.value = settled.flatMap((result) => result.status === 'fulfilled' ? result.value : [])
+  const failed = settled.filter((result) => result.status === 'rejected').length
+  if (failed > 0) vmLoadError.value = `Не удалось загрузить ВМ из подключений: ${failed} из ${settled.length}`
+  vmLoading.value = false
 }
 function stopScanPolling() {
   if (scanPollTimer !== undefined) window.clearInterval(scanPollTimer)
@@ -129,7 +181,11 @@ function startScanPolling() {
 async function scan() {
   scanning.value = true
   startScanPolling()
-  try { snapshot.value = await api.runDiscovery(); notifyEvent('info', 'Поиск сервисов завершён') }
+  try {
+    snapshot.value = await api.runDiscovery()
+    await loadVMInventory()
+    notifyEvent('info', 'Поиск сервисов завершён')
+  }
   catch (err) { notifyError(err, 'Поиск сервисов не выполнен') }
   finally {
     stopScanPolling()
@@ -172,6 +228,7 @@ async function saveSettings() {
       scan_additional_targets: scanAdditionalTargets.value,
       max_addresses: Number(maxAddresses.value),
     }))
+    vmPagination.value.page = 1
     notifyEvent('info', 'Область поиска сохранена')
   } catch (err) { notifyError(err, 'Не удалось сохранить область поиска') }
   finally { settingsSaving.value = false }
@@ -180,6 +237,7 @@ async function resetSettings() {
   settingsSaving.value = true
   try {
     applySettings(await api.resetDiscoverySettings())
+    vmPagination.value.page = 1
     notifyEvent('info', 'Восстановлены настройки из YAML')
   } catch (err) { notifyError(err, 'Не удалось сбросить область поиска') }
   finally { settingsSaving.value = false }
@@ -188,8 +246,13 @@ watch(pageSize, (value) => {
   localStorage.setItem('jhvirt:discovery:page-size', String(value))
   servicePagination.value = { page: 1, rowsPerPage: value }
   backupPagination.value = { page: 1, rowsPerPage: value }
+  vmPagination.value = { page: 1, rowsPerPage: value }
 })
-watch(filter, () => { servicePagination.value.page = 1 })
+watch(filter, () => {
+  servicePagination.value.page = 1
+  vmPagination.value.page = 1
+})
+watch(selectedServerIDs, () => { vmPagination.value.page = 1 }, { deep: true })
 onMounted(load)
 onUnmounted(() => {
   stopScanPolling()
@@ -200,8 +263,8 @@ onUnmounted(() => {
   <q-page padding>
     <div class="row items-start q-col-gutter-md q-mb-lg">
       <div class="col-12 col-md">
-        <div class="text-h5">Поиск сервисов и резервных копий</div>
-        <div class="text-grey-7">Веб-признаки на ВМ, точная карта из гостя и содержимое настроенного BACKUPDATA.</div>
+        <div class="text-h5">Поиск систем, сервисов и резервных копий</div>
+        <div class="text-grey-7">Инвентарь ВМ, веб-признаки из гостя и содержимое настроенного BACKUPDATA.</div>
       </div>
       <div class="col-12 col-md-auto">
         <div class="discovery-actions">
@@ -269,6 +332,69 @@ onUnmounted(() => {
           </div>
         </q-card-section>
       </q-expansion-item>
+    </q-card>
+
+    <q-card flat bordered class="q-mb-lg">
+      <q-card-section>
+        <div class="text-h6">Виртуальные машины</div>
+        <div class="text-caption text-grey-7">
+          Все ВМ выбранных подключений, включая выключенные и не имеющие обнаруженных веб-сервисов.
+        </div>
+      </q-card-section>
+      <q-banner v-if="vmLoadError" dense class="bg-orange-1 text-orange-10 q-mx-md q-mb-md">
+        <template #avatar><q-icon name="warning" color="warning" /></template>{{ vmLoadError }}
+      </q-banner>
+      <q-table
+        v-if="auth.can('servers.read')"
+        v-model:pagination="vmPagination"
+        flat
+        :rows="virtualMachines"
+        :columns="vmColumns"
+        :row-key="vmRowKey"
+        :loading="vmLoading"
+        :rows-per-page-options="pageSizeOptions"
+        no-data-label="Виртуальные машины не найдены"
+      >
+        <template #body-cell-name="props">
+          <q-td :props="props">
+            <router-link class="text-primary text-weight-medium" :to="{ name: 'vm', params: { serverId: props.row.server_id, vmId: props.row.id } }">
+              {{ props.row.name }}
+            </router-link>
+            <div v-if="props.row.description" class="text-caption text-grey-7">{{ props.row.description }}</div>
+          </q-td>
+        </template>
+        <template #body-cell-server="props"><q-td :props="props">{{ app.serverName(props.row.server_id) }}</q-td></template>
+        <template #body-cell-status="props">
+          <q-td :props="props"><q-chip dense :color="statusColor(props.row.status)" text-color="white">{{ vmStatus(props.row.status) }}</q-chip></q-td>
+        </template>
+        <template #body-cell-placement="props">
+          <q-td :props="props">
+            <div>{{ props.row.cluster_name || '—' }}</div>
+            <div class="text-caption text-grey-7">{{ props.row.host_name || 'хост не назначен' }}</div>
+          </q-td>
+        </template>
+        <template #body-cell-addresses="props"><q-td :props="props">{{ props.row.ip_addresses?.join(', ') || '—' }}</q-td></template>
+        <template #body-cell-actions="props">
+          <q-td :props="props">
+            <q-btn
+              v-if="auth.can('backups.write') && vmSupportsBackup(props.row)"
+              flat dense no-caps color="primary" icon="play_arrow" label="Разовый"
+              :to="{ name: 'vm', params: { serverId: props.row.server_id, vmId: props.row.id }, query: { action: 'backup' } }"
+            />
+            <q-btn
+              v-if="auth.can('jobs.write') && vmSupportsBackup(props.row)"
+              flat dense no-caps color="primary" icon="event_repeat" label="План"
+              :to="{ name: 'vm', params: { serverId: props.row.server_id, vmId: props.row.id }, query: { action: 'schedule' } }"
+            />
+            <q-btn
+              v-if="!vmSupportsBackup(props.row) || (!auth.can('backups.write') && !auth.can('jobs.write'))"
+              flat dense no-caps label="Открыть"
+              :to="{ name: 'vm', params: { serverId: props.row.server_id, vmId: props.row.id } }"
+            />
+          </q-td>
+        </template>
+      </q-table>
+      <q-banner v-else dense class="bg-grey-2">Для просмотра ВМ требуется право «Чтение серверов».</q-banner>
     </q-card>
 
     <q-card flat bordered class="q-mb-lg">

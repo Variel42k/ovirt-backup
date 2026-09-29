@@ -36,7 +36,9 @@ export const useAppStore = defineStore('app', () => {
     { flush: 'sync' },
   )
 
-  const enabledStorages = computed(() => storages.value.filter((s) => s.enabled))
+  // Список назначений для новых записей. Read-only хранилища остаются в общем
+  // списке для каталога и восстановления, но в задания попасть не должны.
+  const enabledStorages = computed(() => storages.value.filter((s) => s.enabled && !s.read_only))
   const onlineServers = computed(() => servers.value.filter((s) => s.state === 'online'))
 
   function backupTypeTitle(value?: string): string {

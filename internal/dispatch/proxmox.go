@@ -47,6 +47,9 @@ func (d *Dispatcher) executeProxmox(ctx context.Context, srv *model.Server, req 
 	if !target.Enabled {
 		return nil, fmt.Errorf("хранилище %q отключено", target.Name)
 	}
+	if target.ReadOnly {
+		return nil, fmt.Errorf("хранилище %q подключено только для чтения", target.Name)
+	}
 	client, err := d.proxmox.ForServer(srv)
 	if err != nil {
 		return nil, err
@@ -290,6 +293,10 @@ func (d *Dispatcher) openProxmoxBackends(ctx context.Context, primary *model.Sto
 		targets = append(targets, target)
 		if !target.Enabled {
 			failed[target.Name] = errors.New("хранилище отключено")
+			continue
+		}
+		if target.ReadOnly {
+			failed[target.Name] = errors.New("хранилище подключено только для чтения")
 			continue
 		}
 		opened, openErr := repo.Open(ctx, target)

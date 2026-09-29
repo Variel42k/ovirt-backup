@@ -35,6 +35,7 @@ const emptyForm = () => ({
   name: '',
   kind: 'local' as StorageKind,
   enabled: true,
+  read_only: false,
   base_path: '',
   endpoint: '',
   region: '',
@@ -130,6 +131,7 @@ function onKindChange(kind: StorageKind) {
     scannedHostFingerprint.value = ''
   }
   if (kind !== 'webdav') form.value.insecure_tls = false
+  if (kind !== 'smb') form.value.read_only = false
   if (kind !== 's3') {
     form.value.object_lock_enabled = false
     form.value.object_lock_days = 0
@@ -335,9 +337,39 @@ async function save() {
   if (formError.value) return
   saving.value = true
   try {
+    // GET возвращает id, результаты проверок и признаки сохранённых секретов.
+    // Они не входят в write DTO: сервер строго отвергает неизвестные поля.
 	const payload = {
-      ...form.value,
+      name: form.value.name,
+      kind: form.value.kind,
+      enabled: form.value.enabled,
+      read_only: form.value.read_only,
+      base_path: form.value.base_path,
+      endpoint: form.value.endpoint,
+      region: form.value.region,
+      bucket: form.value.bucket,
+      prefix: form.value.prefix,
+      access_key: form.value.access_key,
+      secret_key: form.value.secret_key,
+      use_ssl: form.value.use_ssl,
+      path_style: form.value.path_style,
+      storage_class: form.value.storage_class,
+      object_lock_enabled: form.value.object_lock_enabled,
       object_lock_days: form.value.object_lock_enabled ? form.value.object_lock_days : 0,
+      host: form.value.host,
+      port: form.value.port,
+      username: form.value.username,
+      password: form.value.password,
+      clear_password: form.value.clear_password,
+      private_key: form.value.private_key,
+      clear_private_key: form.value.clear_private_key,
+      host_key: form.value.host_key,
+      clear_host_key: form.value.clear_host_key,
+      trust_any_host_key: form.value.trust_any_host_key,
+      share: form.value.share,
+      domain: form.value.domain,
+      insecure_tls: form.value.insecure_tls,
+      rate_limit: form.value.rate_limit,
     }
     if (editing.value) {
 		await api.updateStorage(editing.value.id, payload)
@@ -652,6 +684,7 @@ function location(target: StorageTarget): string {
         <q-td :props="props">
           {{ props.row.name }}
           <q-badge v-if="!props.row.enabled" color="grey-7" class="q-ml-sm">выключено</q-badge>
+          <q-badge v-if="props.row.read_only" color="blue-grey-7" class="q-ml-sm">только чтение</q-badge>
           <q-badge
             v-if="props.row.kind === 'sftp' && props.row.password_stored"
             color="warning"
@@ -748,10 +781,10 @@ function location(target: StorageTarget): string {
             :disable="Boolean(checking) || Boolean(checkingImmutability)"
             @click="check(props.row)"
           >
-            <q-tooltip>Проверить доступность и запись</q-tooltip>
+            <q-tooltip>{{ props.row.read_only ? 'Проверить подключение и чтение' : 'Проверить доступность и запись' }}</q-tooltip>
           </q-btn>
           <q-btn
-            v-if="auth.can('storages.write')"
+            v-if="auth.can('storages.write') && !props.row.read_only"
             flat
             dense
             round
@@ -920,10 +953,19 @@ function location(target: StorageTarget): string {
               <q-input
                 v-model="form.base_path"
                 label="Путь внутри папки"
-                hint="Необязательно. Позволяет делить одну шару с другими данными; каталог создаётся автоматически"
+                :hint="form.read_only
+                  ? 'Необязательно. Каталог должен уже существовать и быть доступен для просмотра'
+                  : 'Необязательно. Позволяет делить одну шару с другими данными; каталог создаётся автоматически'"
                 outlined
                 dense
               />
+            </div>
+            <div class="col-12">
+              <q-toggle v-model="form.read_only" label="Подключить только для чтения" />
+              <div class="jhv-reason">
+                Проверка не создаёт служебные файлы. Хранилище можно просматривать, импортировать
+                из него каталог и использовать для восстановления, но нельзя выбирать для новых бэкапов.
+              </div>
             </div>
             <div class="col-12">
               <div class="jhv-reason">
@@ -1106,7 +1148,10 @@ function location(target: StorageTarget): string {
             />
           </div>
           <div class="col-12">
-            <q-toggle v-model="form.enabled" label="Хранилище доступно для заданий" />
+            <q-toggle
+              v-model="form.enabled"
+              :label="form.read_only ? 'Хранилище доступно для чтения и восстановления' : 'Хранилище доступно для заданий'"
+            />
           </div>
         </q-card-section>
 

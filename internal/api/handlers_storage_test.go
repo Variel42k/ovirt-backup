@@ -126,6 +126,30 @@ func TestStorageUpdateKeepsSecretsOptional(t *testing.T) {
 	}
 }
 
+func TestStorageReadOnlyIsLimitedToSMB(t *testing.T) {
+	readOnly := true
+	smb := storagePayload{
+		Name: "архив", Kind: string(model.StorageSMB), ReadOnly: &readOnly,
+		Host: "nas.example.org", Share: "backups", Username: "reader", Password: "secret",
+	}
+	if err := smb.validate(true); err != nil {
+		t.Fatalf("SMB только для чтения отвергнут: %v", err)
+	}
+	target := &model.StorageTarget{}
+	smb.apply(target)
+	if !target.ReadOnly {
+		t.Fatal("режим только чтения не перенесён в модель")
+	}
+
+	webdav := storagePayload{
+		Name: "dav", Kind: string(model.StorageWebDAV), ReadOnly: &readOnly,
+		Endpoint: "https://nas.example.org/dav", Username: "reader", Password: "secret",
+	}
+	if err := webdav.validate(true); err == nil || !strings.Contains(err.Error(), "только для SMB") {
+		t.Fatalf("режим только чтения для WebDAV принят: %v", err)
+	}
+}
+
 func TestStorageWriteOnlyInheritanceHonoursExplicitClear(t *testing.T) {
 	existing := &model.StorageTarget{
 		SecretKey: "secret", Password: "password", PrivateKey: "private", HostKey: "host",

@@ -226,6 +226,9 @@ func (s *Server) validateDBDumpJob(ctx context.Context, job *model.DBDumpJob) er
 		if !target.Enabled {
 			return badRequest("хранилище %q отключено", target.Name)
 		}
+		if target.ReadOnly {
+			return badRequest("хранилище %q подключено только для чтения", target.Name)
+		}
 	}
 	if job.Schedule != "" {
 		location := s.cfg.Location()

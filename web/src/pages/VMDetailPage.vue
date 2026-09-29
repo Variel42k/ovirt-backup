@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useQuasar } from 'quasar'
+import { useRoute } from 'vue-router'
 import { api, errorMessage, notifyError, notifyOk } from '@/api/client'
 import {
   ago, bytes, consistencyOptions, dateTime, freezeByHint, freezeByOptions, runStatus, statusColor, usesOVirtAPI, vmStatus,
@@ -19,6 +20,7 @@ import type { BackupOption, BackupRun, Consistency, Disk, FreezeBy, Recommendati
 const props = defineProps<{ serverId: string; vmId: string }>()
 
 const $q = useQuasar()
+const route = useRoute()
 const app = useAppStore()
 const auth = useAuthStore()
 
@@ -108,6 +110,15 @@ async function load() {
   } finally {
     if (sequence === pageLoadSequence) loading.value = false
   }
+  if (sequence === pageLoadSequence) await focusRequestedAction()
+}
+
+async function focusRequestedAction() {
+  const action = String(route.query.action ?? '')
+  const id = action === 'backup' ? 'adhoc-backup' : action === 'schedule' ? 'schedule-presets' : ''
+  if (!id) return
+  await nextTick()
+  document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
 
 async function loadRecommendation() {
@@ -235,6 +246,7 @@ function applyPreset(preset: SchedulePreset) {
 }
 
 watch(() => [props.serverId, props.vmId], load)
+watch(() => route.query.action, focusRequestedAction)
 watch(selectedStorage, () => {
   if (!loading.value) void loadRecommendation()
 })
@@ -273,7 +285,7 @@ onMounted(load)
 
     <div v-if="vm || !pageError" class="row q-col-gutter-md">
       <div class="col-12 col-lg-8">
-        <q-card flat bordered>
+        <q-card id="adhoc-backup" flat bordered>
           <q-banner v-if="!backupSupported" dense class="bg-blue-1">
             <template #avatar><q-icon name="info" color="primary" /></template>
             Для Proxmox VE сейчас доступны инвентарь, мониторинг и управление ВМ.
@@ -607,7 +619,7 @@ onMounted(load)
           </q-card-section>
         </q-card>
 
-        <q-card flat bordered class="q-mt-md">
+        <q-card id="schedule-presets" flat bordered class="q-mt-md">
           <q-card-section class="text-subtitle1">Готовые расписания</q-card-section>
           <q-separator />
           <q-list separator>

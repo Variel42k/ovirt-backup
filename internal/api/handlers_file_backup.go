@@ -86,6 +86,9 @@ func (s *Server) validateFileBackupJob(ctx context.Context, job *model.FileBacku
 		if !target.Enabled {
 			return badRequest("storage target %q is disabled", target.Name)
 		}
+		if target.ReadOnly {
+			return badRequest("storage target %q is read-only", target.Name)
+		}
 	}
 	if job.Schedule != "" {
 		location := s.cfg.Location()

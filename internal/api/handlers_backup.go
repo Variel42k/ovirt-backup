@@ -155,6 +155,9 @@ func (s *Server) validateJob(ctx context.Context, job *model.BackupJob) error {
 		if !target.Enabled {
 			return badRequest("хранилище %q отключено", target.Name)
 		}
+		if target.ReadOnly {
+			return badRequest("хранилище %q подключено только для чтения", target.Name)
+		}
 	}
 	if job.Schedule != "" {
 		loc := s.cfg.Location()

@@ -55,6 +55,9 @@ func (e *Engine) snapshotEngineConfig(ctx context.Context, jobID, serverID, targ
 	if !target.Enabled {
 		return fail(fmt.Errorf("хранилище %q отключено", target.Name))
 	}
+	if target.ReadOnly {
+		return fail(fmt.Errorf("хранилище %q подключено только для чтения", target.Name))
+	}
 	client, err := e.pool.ForServer(srv)
 	if err != nil {
 		return fail(err)

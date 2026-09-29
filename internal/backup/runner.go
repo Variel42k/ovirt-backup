@@ -205,6 +205,9 @@ func (e *Engine) Execute(ctx context.Context, req RunRequest) (*model.BackupRun,
 	if !target.Enabled {
 		return nil, fmt.Errorf("хранилище %q отключено", target.Name)
 	}
+	if target.ReadOnly {
+		return nil, fmt.Errorf("хранилище %q подключено только для чтения", target.Name)
+	}
 
 	run := &model.BackupRun{
 		ID:              uuid.NewString(),
@@ -300,6 +303,11 @@ func (e *Engine) Execute(ctx context.Context, req RunRequest) (*model.BackupRun,
 			if !mirrorTarget.Enabled {
 				mirrorFailures[mirrorTarget.Name] = fmt.Errorf("хранилище отключено")
 				log.Warn().Str("хранилище", id).Msg("зеркало отключено, бэкап идёт без него")
+				continue
+			}
+			if mirrorTarget.ReadOnly {
+				mirrorFailures[mirrorTarget.Name] = fmt.Errorf("хранилище подключено только для чтения")
+				log.Warn().Str("хранилище", id).Msg("зеркало только для чтения, бэкап идёт без него")
 				continue
 			}
 			mirrorBackend, openErr := repo.Open(ctx, mirrorTarget)

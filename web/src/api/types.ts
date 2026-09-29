@@ -1079,6 +1079,109 @@ export interface BootVerifyOptions {
   boot_engine_id?: string
   boot_cluster_id?: string
   boot_storage_domain_id?: string
+  /** Площадка проверки вместо ручного выбора хоста или движка. */
+  target_id?: string
+}
+
+/** Площадка проверки загрузкой: KVM-хост или движок с кластером и доменами по приоритету. */
+export interface VerifyTarget {
+  id: string
+  name: string
+  kind: 'kvm' | 'engine'
+  server_id: string
+  cluster_id?: string
+  storage_domain_ids: string[]
+  memory_mib: number
+  vcpus: number
+  timeout_sec: number
+  max_parallel: number
+  keep_on_failure: boolean
+  created_at: string
+  updated_at: string
+  /** Кто ссылается на площадку: пока список не пуст, удалить её нельзя. */
+  used_by?: { jobs?: string[]; schedules?: string[] }
+}
+
+export type VerifyTargetPayload = Omit<VerifyTarget, 'id' | 'created_at' | 'updated_at' | 'used_by'>
+
+/** Какой домен площадки проверка выбрала бы сейчас. */
+export interface VerifyTargetCapacity {
+  kind: 'kvm' | 'engine'
+  domains: BootDomainCheck[]
+  chosen_id?: string
+  message: string
+  need_data: number
+  need_full: number
+  basis?: string
+}
+
+/** Расписание проверки загрузкой последних копий. */
+export interface VerifySchedule {
+  id: string
+  name: string
+  enabled: boolean
+  target_id: string
+  server_id: string
+  vm_ids: string[]
+  storage_target_id?: string
+  schedule: string
+  max_age_hours: number
+  last_run_at?: string
+  last_status?: RunStatus
+  last_detail?: string
+  next_run_at?: string
+  running?: boolean
+  created_at: string
+  updated_at: string
+}
+
+export type VerifySchedulePayload = Pick<VerifySchedule,
+  'name' | 'enabled' | 'target_id' | 'server_id' | 'vm_ids' | 'storage_target_id' | 'schedule' | 'max_age_hours'>
+
+/** Запись журнала проверок загрузкой. */
+export interface BootCheck extends VerifyRun {
+  target_id?: string
+  triggered_by?: string
+  server_id: string
+  vm_id: string
+  vm_name: string
+  job_name?: string
+  backup_created_at: string
+  target_name?: string
+  summary?: string
+  problems?: string[]
+  duration?: string
+  host?: string
+  check_vm_name?: string
+  started: boolean
+  agent_replied: boolean
+  guest_os?: string
+  hostname?: string
+  elapsed?: string
+  notes?: string[]
+}
+
+/** Объект, оставшийся от проверки загрузкой. */
+export interface VerifyLeftover {
+  kind: 'engine_vm' | 'kvm_domain' | 'kvm_image'
+  server_id: string
+  server_name: string
+  ref: string
+  name: string
+  state?: string
+  size_bytes?: number
+  created_at?: string
+  verify_id?: string
+  verify_status?: RunStatus
+  source_vm_name?: string
+  active: boolean
+  reason: string
+}
+
+export interface VerifyLeftoverScan {
+  items: VerifyLeftover[]
+  errors?: string[]
+  scanned: number
 }
 
 /** Оценка домена хранения для проверочной ВМ в движке. */

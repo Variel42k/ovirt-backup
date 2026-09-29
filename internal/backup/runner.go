@@ -40,6 +40,8 @@ type Engine struct {
 	// единственный способ обойти направление зависимостей: пробный запуск
 	// живёт в internal/kvm, который сам построен на этом пакете.
 	external map[model.VerifyMode]ExternalVerifier
+	// verifyGate — ограничитель проверок по площадкам (см. SetVerifyGate).
+	verifyGate VerifyGate
 
 	// heavy ограничивает число одновременных проверок и восстановлений.
 	//

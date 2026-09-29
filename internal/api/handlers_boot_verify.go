@@ -1,12 +1,15 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 
 	"github.com/Variel42k/ovirt-backup/internal/backup"
+	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
 // Предварительный анализ для проверки загрузкой через движок: куда в движке
@@ -48,10 +51,21 @@ func (s *Server) handleBootTargets(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, badRequest("проверочную ВМ через движок можно поднять только в oVirt и его производных"))
 		return
 	}
+	resp, err := s.bootTargets(ctx, engine, r.URL.Query())
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// bootTargets собирает кластеры и домены движка с оценкой места под
+// проверочную ВМ; объём берётся по копии (run_id, copy_id) или по ВМ из
+// инвентаря (server_id, vm_ids).
+func (s *Server) bootTargets(ctx context.Context, engine *model.Server, q url.Values) (bootTargetsResponse, error) {
 	resp := bootTargetsResponse{EngineID: engine.ID, EngineName: engine.Name, NeedData: -1, NeedFull: -1,
 		Clusters: []bootCluster{}, Domains: []backup.BootDomainCheck{}}
 
-	q := r.URL.Query()
 	switch {
 	case q.Get("run_id") != "":
 		data, full, sizeErr := s.engine.RestoreSizeEstimate(ctx, q.Get("run_id"), q.Get("copy_id"))
@@ -62,7 +76,7 @@ func (s *Server) handleBootTargets(w http.ResponseWriter, r *http.Request) {
 			resp.Basis = "по данным выбранной копии"
 		}
 	case q.Get("server_id") != "":
-		data, full, n, sizeErr := s.vmDiskEstimate(r, q.Get("server_id"), splitIDs(q.Get("vm_ids")))
+		data, full, n, sizeErr := s.vmDiskEstimate(ctx, q.Get("server_id"), splitIDs(q.Get("vm_ids")))
 		switch {
 		case sizeErr != nil:
 			resp.Basis = "диски ВМ прочитать не удалось: " + sizeErr.Error()
@@ -77,16 +91,14 @@ func (s *Server) handleBootTargets(w http.ResponseWriter, r *http.Request) {
 
 	clusters, err := s.store.ListClusters(ctx, engine.ID)
 	if err != nil {
-		s.writeError(w, r, err)
-		return
+		return resp, err
 	}
 	for _, c := range clusters {
 		resp.Clusters = append(resp.Clusters, bootCluster{ID: c.ID, Name: c.Name})
 	}
 	domains, err := s.store.ListStorageDomains(ctx, engine.ID)
 	if err != nil {
-		s.writeError(w, r, err)
-		return
+		return resp, err
 	}
 	for _, d := range domains {
 		if d.Type != "" && d.Type != "data" {
@@ -109,14 +121,14 @@ func (s *Server) handleBootTargets(w http.ResponseWriter, r *http.Request) {
 		}
 		return a.Available > b.Available
 	})
-	writeJSON(w, http.StatusOK, resp)
+	return resp, nil
 }
 
 // vmDiskEstimate — объём самой большой из ВМ по инвентарю: данные (занятое
 // место, не больше размера диска) и полный размер дисков. Пустой vmIDs —
 // все ВМ подключения. Возвращает и число учтённых ВМ.
-func (s *Server) vmDiskEstimate(r *http.Request, serverID string, vmIDs []string) (int64, int64, int, error) {
-	disks, err := s.store.ListDisks(r.Context(), serverID)
+func (s *Server) vmDiskEstimate(ctx context.Context, serverID string, vmIDs []string) (int64, int64, int, error) {
+	disks, err := s.store.ListDisks(ctx, serverID)
 	if err != nil {
 		return 0, 0, 0, err
 	}

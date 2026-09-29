@@ -276,7 +276,8 @@ export const consistencyOptions = [
  */
 /** Выбрано ли, где поднять проверочную ВМ пробного запуска. */
 export function bootTargetReady(o: { boot_host_id?: string; boot_engine_id?: string;
-  boot_cluster_id?: string; boot_storage_domain_id?: string }): boolean {
+  boot_cluster_id?: string; boot_storage_domain_id?: string; target_id?: string }): boolean {
+  if (o.target_id) return true
   if (o.boot_engine_id) return Boolean(o.boot_cluster_id && o.boot_storage_domain_id)
   return Boolean(o.boot_host_id)
 }

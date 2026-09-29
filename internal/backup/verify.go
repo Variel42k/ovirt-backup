@@ -106,6 +106,14 @@ func (e *Engine) RegisterVerifier(mode model.VerifyMode, fn ExternalVerifier) {
 	e.external[mode] = fn
 }
 
+// VerifyGate ограничивает запуск проверки до очереди тяжёлых операций:
+// например, не больше N проверочных ВМ на одной площадке. Возвращает функцию
+// освобождения места.
+type VerifyGate func(ctx context.Context, mode model.VerifyMode, opts model.VerifyOptions) (release func(), err error)
+
+// SetVerifyGate устанавливает ограничитель проверок.
+func (e *Engine) SetVerifyGate(gate VerifyGate) { e.verifyGate = gate }
+
 // Verify checks a stored backup and records the outcome.
 //
 // Every mode answers a different question, and the cheap ones do not imply the
@@ -133,18 +141,33 @@ func (e *Engine) VerifyCopy(ctx context.Context, runID, copyID string, mode mode
 	// нажал кнопку и должен увидеть результат нажатия сразу, а не гадать,
 	// дошло ли оно, пока впереди стоят две другие проверки.
 	record := &model.VerifyRun{
-		ID:        uuid.NewString(),
-		RunID:     runID,
-		CopyID:    copyID,
-		Mode:      mode,
-		Status:    model.RunPending,
-		CreatedAt: time.Now().UTC(),
+		ID:          uuid.NewString(),
+		RunID:       runID,
+		CopyID:      copyID,
+		TargetID:    opts.TargetID,
+		TriggeredBy: opts.TriggeredBy,
+		Mode:        mode,
+		Status:      model.RunPending,
+		CreatedAt:   time.Now().UTC(),
 	}
 	if err := e.store.CreateVerifyRun(ctx, record); err != nil {
 		return nil, err
 	}
 
 	log := e.log.With().Str("verify", record.ID).Str("backup", runID).Str("режим", string(mode)).Logger()
+
+	// Место на площадке занимается раньше общей очереди: иначе проверки,
+	// ждущие занятую площадку, держали бы места бэкапов и восстановлений.
+	if e.verifyGate != nil {
+		release, err := e.verifyGate(ctx, mode, opts)
+		if err != nil {
+			record.Status = model.RunFailed
+			record.Error = err.Error()
+			_ = e.store.UpdateVerifyRun(context.WithoutCancel(ctx), record)
+			return record, err
+		}
+		defer release()
+	}
 
 	if err := e.acquireHeavy(ctx); err != nil {
 		record.Status = model.RunFailed

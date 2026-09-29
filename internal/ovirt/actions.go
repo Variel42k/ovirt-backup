@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -75,6 +76,15 @@ func (c *Client) GetVMState(ctx context.Context, vmID string) (*VM, error) {
 		return nil, err
 	}
 	return &vm, nil
+}
+
+// SearchVMs ищет ВМ запросом поиска движка, например name=jhv-verify-*.
+func (c *Client) SearchVMs(ctx context.Context, query string) ([]VM, error) {
+	var list vmList
+	if err := c.get(ctx, "/vms", &list, withQuery(url.Values{"search": {query}})); err != nil {
+		return nil, err
+	}
+	return list.VM, nil
 }
 
 // WaitVMStatus polls until the VM reaches one of the wanted statuses.

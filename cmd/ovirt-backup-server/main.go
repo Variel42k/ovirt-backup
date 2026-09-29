@@ -383,6 +383,7 @@ func run() error {
 	qualityService := quality.New(st, cfg.Monitor.BackupQuality, cfg.Location())
 	replicator := replication.New(st, cfg.Backup.ReplicationWorkers, bus, log)
 	replicator.SetVerifier(func(ctx context.Context, runID, copyID string, mode model.VerifyMode, opts model.VerifyOptions) error {
+		opts.TriggeredBy = model.VerifyTriggerReplication
 		_, err := dispatcher.VerifyCopy(ctx, runID, copyID, mode, opts)
 		return err
 	})

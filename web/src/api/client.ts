@@ -544,6 +544,30 @@ export const api = {
   /** Кластеры и домены хранения движка для проверочной ВМ, с оценкой места. */
   bootTargets: (engineId: string, params: { run_id?: string; copy_id?: string; server_id?: string; vm_ids?: string }) =>
     http.get<import('./types').BootTargets>(`/boot-verify/engines/${engineId}/targets`, { params }).then((r) => r.data),
+  // Раздел «Проверка ВМ»
+  listVerifyTargets: () =>
+    http.get<ListResponse<import('./types').VerifyTarget>>('/verify/targets').then((r) => unwrap(r.data)),
+  createVerifyTarget: (payload: import('./types').VerifyTargetPayload) =>
+    http.post<import('./types').VerifyTarget>('/verify/targets', payload).then((r) => r.data),
+  updateVerifyTarget: (id: string, payload: import('./types').VerifyTargetPayload) =>
+    http.put<import('./types').VerifyTarget>(`/verify/targets/${id}`, payload).then((r) => r.data),
+  deleteVerifyTarget: (id: string) => http.delete(`/verify/targets/${id}`).then(() => undefined),
+  verifyTargetCapacity: (id: string, params: { run_id?: string; copy_id?: string; server_id?: string; vm_ids?: string } = {}) =>
+    http.get<import('./types').VerifyTargetCapacity>(`/verify/targets/${id}/capacity`, { params }).then((r) => r.data),
+  listVerifySchedules: () =>
+    http.get<ListResponse<import('./types').VerifySchedule>>('/verify/schedules').then((r) => unwrap(r.data)),
+  createVerifySchedule: (payload: import('./types').VerifySchedulePayload) =>
+    http.post<import('./types').VerifySchedule>('/verify/schedules', payload).then((r) => r.data),
+  updateVerifySchedule: (id: string, payload: import('./types').VerifySchedulePayload) =>
+    http.put<import('./types').VerifySchedule>(`/verify/schedules/${id}`, payload).then((r) => r.data),
+  deleteVerifySchedule: (id: string) => http.delete(`/verify/schedules/${id}`).then(() => undefined),
+  runVerifySchedule: (id: string) => http.post(`/verify/schedules/${id}/run`, {}).then((r) => r.data),
+  listBootChecks: (params: Record<string, string | number> = {}) =>
+    http.get<ListResponse<import('./types').BootCheck>>('/verify/checks', { params }).then((r) => unwrap(r.data)),
+  listVerifyLeftovers: () =>
+    http.get<import('./types').VerifyLeftoverScan>('/verify/leftovers', { timeout: 120_000 }).then((r) => r.data),
+  removeVerifyLeftover: (payload: { kind: string; server_id: string; ref: string }) =>
+    http.post('/verify/leftovers/remove', payload, { timeout: 300_000 }).then(() => undefined),
   verifyRun: (id: string, mode: string, options: Partial<BootVerifyOptions> & { copy_id?: string } = {}) =>
     http.post<VerifyRun>(`/backups/${id}/verify`, { mode, ...options }, { timeout: 300_000 }).then((r) => r.data),
   listVerifications: (runId?: string) =>

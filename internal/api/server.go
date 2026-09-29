@@ -327,6 +327,21 @@ func (s *Server) routes(mux *http.ServeMux) {
 	// Проверка и восстановление.
 	mux.HandleFunc("POST /backups/{id}/verify", s.perm(model.PermBackupsWrite, s.handleVerifyRun))
 	mux.HandleFunc("GET /boot-verify/engines/{id}/targets", s.perm(model.PermBackupsRead, s.handleBootTargets))
+
+	// Раздел «Проверка ВМ»: площадки, расписания, журнал и остатки проверок загрузкой.
+	mux.HandleFunc("GET /verify/targets", s.perm(model.PermBackupsRead, s.handleListVerifyTargets))
+	mux.HandleFunc("POST /verify/targets", s.perm(model.PermJobsWrite, s.handleCreateVerifyTarget))
+	mux.HandleFunc("PUT /verify/targets/{id}", s.perm(model.PermJobsWrite, s.handleUpdateVerifyTarget))
+	mux.HandleFunc("DELETE /verify/targets/{id}", s.perm(model.PermJobsWrite, s.handleDeleteVerifyTarget))
+	mux.HandleFunc("GET /verify/targets/{id}/capacity", s.perm(model.PermBackupsRead, s.handleVerifyTargetCapacity))
+	mux.HandleFunc("GET /verify/schedules", s.perm(model.PermBackupsRead, s.handleListVerifySchedules))
+	mux.HandleFunc("POST /verify/schedules", s.perm(model.PermJobsWrite, s.handleCreateVerifySchedule))
+	mux.HandleFunc("PUT /verify/schedules/{id}", s.perm(model.PermJobsWrite, s.handleUpdateVerifySchedule))
+	mux.HandleFunc("DELETE /verify/schedules/{id}", s.perm(model.PermJobsWrite, s.handleDeleteVerifySchedule))
+	mux.HandleFunc("POST /verify/schedules/{id}/run", s.perm(model.PermBackupsWrite, s.handleRunVerifySchedule))
+	mux.HandleFunc("GET /verify/checks", s.perm(model.PermBackupsRead, s.handleListBootChecks))
+	mux.HandleFunc("GET /verify/leftovers", s.perm(model.PermBackupsRead, s.handleListVerifyLeftovers))
+	mux.HandleFunc("POST /verify/leftovers/remove", s.perm(model.PermBackupsWrite, s.handleRemoveVerifyLeftover))
 	mux.HandleFunc("GET /verifications", s.perm(model.PermBackupsRead, s.handleListVerifications))
 	mux.HandleFunc("GET /verifications/{id}", s.perm(model.PermBackupsRead, s.handleGetVerification))
 	mux.HandleFunc("POST /backups/{id}/restore", s.perm(model.PermBackupsWrite, s.handleRestore))

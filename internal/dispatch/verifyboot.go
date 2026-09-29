@@ -33,6 +33,21 @@ func (d *Dispatcher) registerVerifiers() {
 }
 
 func (d *Dispatcher) verifyBoot(ctx context.Context, req backup.ExternalVerifyRequest) error {
+	d.activeVerify.Store(req.Record.ID, struct{}{})
+	defer d.activeVerify.Delete(req.Record.ID)
+
+	if req.Options.TargetID != "" {
+		opts, note, err := d.applyVerifyTarget(ctx, req)
+		if err != nil {
+			return err
+		}
+		req.Options = opts
+		defer func() {
+			if req.Report.Boot != nil {
+				req.Report.Boot.Notes = append(req.Report.Boot.Notes, note)
+			}
+		}()
+	}
 	if req.Options.OnEngine() {
 		return d.verifyBootOnEngine(ctx, req)
 	}
@@ -105,6 +120,7 @@ func (d *Dispatcher) verifyBoot(ctx context.Context, req backup.ExternalVerifyRe
 		Timeout:       timeout,
 		KeepOnFailure: opts.KeepOnFailure,
 		Name:          set.Leaf.VMName,
+		DomainName:    verifyVMName(set.Leaf.VMName, req.Record.ID),
 	}, log)
 	if err != nil {
 		if !opts.KeepOnFailure {

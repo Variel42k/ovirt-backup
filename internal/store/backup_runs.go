@@ -600,7 +600,8 @@ func (s *Store) ListBackupDisks(ctx context.Context, runID string) ([]model.Back
 	return out, rows.Err()
 }
 
-const verifyColumns = `id, run_id, mode, status, progress, details, error, started_at, ended_at, created_at, copy_id`
+const verifyColumns = `id, run_id, mode, status, progress, details, error, started_at, ended_at, created_at, copy_id,
+	target_id, triggered_by`
 
 // CreateVerifyRun records a verification request.
 func (s *Store) CreateVerifyRun(ctx context.Context, v *model.VerifyRun) error {
@@ -610,9 +611,9 @@ func (s *Store) CreateVerifyRun(ctx context.Context, v *model.VerifyRun) error {
 	if v.CreatedAt.IsZero() {
 		v.CreatedAt = time.Now().UTC()
 	}
-	_, err := s.db.Exec(ctx, `INSERT INTO verify_runs (`+verifyColumns+`) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+	_, err := s.db.Exec(ctx, `INSERT INTO verify_runs (`+verifyColumns+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		v.ID, v.RunID, string(v.Mode), string(v.Status), v.Progress, jsonOrNull(v.Details), v.Error,
-		v.StartedAt, v.EndedAt, v.CreatedAt, nullString(v.CopyID))
+		v.StartedAt, v.EndedAt, v.CreatedAt, nullString(v.CopyID), nullString(v.TargetID), v.TriggeredBy)
 	if err != nil {
 		return fmt.Errorf("insert verify run: %w", err)
 	}
@@ -673,9 +674,9 @@ func scanVerify(row rowScanner) (*model.VerifyRun, error) {
 		startedAt, endedAt sql.NullTime
 		createdAt          time.Time
 	)
-	var copyID sql.NullString
+	var copyID, targetID sql.NullString
 	err := row.Scan(&v.ID, &v.RunID, &mode, &status, &v.Progress, &v.Details, &v.Error,
-		&startedAt, &endedAt, &createdAt, &copyID)
+		&startedAt, &endedAt, &createdAt, &copyID, &targetID, &v.TriggeredBy)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -684,6 +685,7 @@ func scanVerify(row rowScanner) (*model.VerifyRun, error) {
 	}
 	v.Mode = model.VerifyMode(mode)
 	v.CopyID = copyID.String
+	v.TargetID = targetID.String
 	v.Status = model.RunStatus(status)
 	v.StartedAt = nullTime(startedAt)
 	v.EndedAt = nullTime(endedAt)

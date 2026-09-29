@@ -76,7 +76,17 @@ type RestoreVMRequest struct {
 	// проверка загрузкой сама сверяет место по объёму данных — диски
 	// тонкие, и полный размер для пробной ВМ избыточен.
 	SkipCapacityCheck bool `json:"-"`
+	// Description заменяет описание новой ВМ в движке: по нему служба узнаёт
+	// свои проверочные ВМ среди остатков.
+	Description string `json:"-"`
 }
+
+// VerifyVMMarker начинает описание проверочной ВМ в движке; за ним следует
+// идентификатор проверки.
+const VerifyVMMarker = "jhv-verify:"
+
+// VerifyVMPrefix начинает имя любой проверочной ВМ, домена и образа.
+const VerifyVMPrefix = "jhv-verify-"
 
 // RestoreVMNetworkMapping maps one saved NIC to an oVirt vNIC profile or a
 // libvirt network/bridge. MAC is intentionally not accepted: the target

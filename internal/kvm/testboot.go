@@ -52,6 +52,9 @@ type BootTest struct {
 	KeepOnFailure bool
 	// Name используется в имени временного домена.
 	Name string
+	// DomainName задаёт имя временного домена целиком; пусто — из Name и
+	// времени запуска. По имени служба находит брошенные проверочные ВМ.
+	DomainName string
 }
 
 // BootDisk is one disposable image attached to the test domain.
@@ -238,7 +241,10 @@ func (d *Driver) RunBootTest(ctx context.Context, test BootTest, log zerolog.Log
 		return nil, err
 	}
 
-	domainName := fmt.Sprintf("jhv-verify-%s-%d", sanitiseName(test.Name), time.Now().Unix())
+	domainName := test.DomainName
+	if domainName == "" {
+		domainName = fmt.Sprintf("jhv-verify-%s-%d", sanitiseName(test.Name), time.Now().Unix())
+	}
 	result := &BootTestResult{DomainName: domainName}
 
 	xml := bootTestDomainXML(domainName, test)

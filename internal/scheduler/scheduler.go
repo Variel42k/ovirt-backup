@@ -350,6 +350,10 @@ func (s *Scheduler) reload(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("загрузка заданий дампов СУБД: %w", err)
 	}
+	verifySchedules, err := s.store.ListVerifySchedules(ctx)
+	if err != nil {
+		return fmt.Errorf("загрузка расписаний проверок: %w", err)
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -452,8 +456,10 @@ func (s *Scheduler) reload(ctx context.Context) error {
 		active++
 	}
 
+	active += s.registerVerifySchedules(verifySchedules, timezone, loc)
+
 	s.log.Info().Int("активных заданий", active).
-		Int("всего", len(jobs)+len(fileJobs)+len(engineJobs)+len(dbJobs)).Msg("расписание перечитано")
+		Int("всего", len(jobs)+len(fileJobs)+len(engineJobs)+len(dbJobs)+len(verifySchedules)).Msg("расписание перечитано")
 	return nil
 }
 
@@ -1031,7 +1037,8 @@ func (s *Scheduler) executeOne(ctx context.Context, req backup.RunRequest, job *
 		if copyErr != nil {
 			s.log.Warn().Err(copyErr).Str("run", run.ID).Msg("не удалось определить основную копию для проверки")
 			s.raiseVerifyAlert(ctx, run, copyErr)
-		} else if _, err := s.engine.VerifyCopy(ctx, run.ID, primary.ID, req.VerifyAfter, req.VerifyOptions); err != nil {
+		} else if _, err := s.engine.VerifyCopy(ctx, run.ID, primary.ID, req.VerifyAfter,
+			jobVerifyOptions(req.VerifyOptions)); err != nil {
 			s.log.Warn().Err(err).Str("run", run.ID).Msg("проверка после бэкапа не пройдена")
 			s.raiseVerifyAlert(ctx, run, err)
 		}

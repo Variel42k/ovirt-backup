@@ -94,6 +94,9 @@ func (d *Dispatcher) verifyBootOnEngine(ctx context.Context, req backup.External
 		// Неполная копия проверяется как есть: отчёт скажет, что вышло.
 		Confirm:   true,
 		MemoryMiB: opts.MemoryMiB, VCPUs: opts.VCPUs, SkipCapacityCheck: true,
+		// По метке служба узнаёт свою проверочную ВМ среди остатков.
+		Description: fmt.Sprintf("%s%s проверочная ВМ пробного запуска из копии %s; служба удаляет её сама",
+			model.VerifyVMMarker, req.Record.ID, set.Leaf.ID),
 	}
 	// Ни одного сетевого интерфейса: копия боевой системы не должна
 	// встретиться в сети с оригиналом даже отключённой картой.

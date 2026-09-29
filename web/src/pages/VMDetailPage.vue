@@ -55,6 +55,7 @@ const verifyOptions = ref({
   boot_engine_id: '',
   boot_cluster_id: '',
   boot_storage_domain_id: '',
+  target_id: '',
   disk_id: '',
   memory_mib: 0,
   vcpus: 0,
@@ -166,7 +167,7 @@ async function loadRecommendation() {
     // Без агента заморозка невозможна вовсе, поэтому выбранный раньше уровень
     // сбрасывается; выбор оператора в остальном не трогаем.
     if (!result.assessment.guest_agent) consistency.value = 'crash'
-    if (!verifyOptions.value.boot_host_id && !verifyOptions.value.boot_engine_id) {
+    if (!verifyOptions.value.boot_host_id && !verifyOptions.value.boot_engine_id && !verifyOptions.value.target_id) {
       const source = app.servers.find((s) => s.id === props.serverId)
       verifyOptions.value.boot_host_id = source?.kind === 'kvm' ? source.id : ''
     }
@@ -516,6 +517,7 @@ onMounted(load)
               v-model:engine-id="verifyOptions.boot_engine_id"
               v-model:cluster-id="verifyOptions.boot_cluster_id"
               v-model:domain-id="verifyOptions.boot_storage_domain_id"
+              v-model:target-id="verifyOptions.target_id"
               :source-server-id="serverId"
               :vm-ids="[vmId]"
             />
@@ -537,11 +539,11 @@ onMounted(load)
               </div>
               <q-toggle
                 v-model="verifyOptions.keep_on_failure"
-                :label="verifyOptions.boot_engine_id
-                  ? 'Оставить неудачную проверочную ВМ в движке для диагностики'
-                  : 'Оставить неудачную ВМ и образ для диагностики'"
+                :label="verifyOptions.boot_host_id
+                  ? 'Оставить неудачную ВМ и образ для диагностики'
+                  : 'Оставить неудачную проверочную ВМ для диагностики'"
               />
-              <q-banner v-if="!verifyOptions.boot_engine_id" dense class="bg-blue-1">
+              <q-banner v-if="verifyOptions.boot_host_id" dense class="bg-blue-1">
                 <template #avatar><q-icon name="lan" color="primary" /></template>
                 Проверочная ВМ запускается со всеми дисками, без сетевых интерфейсов и удаляется после проверки.
               </q-banner>

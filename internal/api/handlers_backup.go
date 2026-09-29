@@ -786,6 +786,8 @@ type verifyRequest struct {
 	BootEngineID        string `json:"boot_engine_id"`
 	BootClusterID       string `json:"boot_cluster_id"`
 	BootStorageDomainID string `json:"boot_storage_domain_id"`
+	// Площадка проверки вместо ручного выбора.
+	TargetID string `json:"target_id"`
 }
 
 func (s *Server) handleVerifyRun(w http.ResponseWriter, r *http.Request) {
@@ -815,6 +817,9 @@ func (s *Server) handleVerifyRun(w http.ResponseWriter, r *http.Request) {
 		BootEngineID:        req.BootEngineID,
 		BootClusterID:       req.BootClusterID,
 		BootStorageDomainID: req.BootStorageDomainID,
+
+		TargetID:    req.TargetID,
+		TriggeredBy: model.VerifyTriggerManual,
 	}
 
 	// The boot test starts a copy of a real system. Refusing an unusable
@@ -894,6 +899,9 @@ func (s *Server) validateBootOptions(ctx context.Context, sourceServerID string,
 	}
 	if err := opts.Validate(); err != nil {
 		return badRequest("параметры пробного запуска: %v", err)
+	}
+	if opts.TargetID != "" {
+		return s.validateVerifyTargetUse(ctx, sourceServerID, opts.TargetID)
 	}
 	if opts.OnEngine() {
 		return s.validateBootEngine(ctx, sourceServerID, opts)

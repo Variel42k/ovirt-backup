@@ -46,6 +46,12 @@ type Dispatcher struct {
 	telemetry []interface {
 		MonitorBackup(context.Context, *model.BackupRun) func()
 	}
+	// targetSlots — очереди площадок проверки (см. verifyGate).
+	targetSlotsMu sync.Mutex
+	targetSlots   map[string]chan struct{}
+	// activeVerify — проверки загрузкой, идущие в этом процессе: их
+	// проверочные ВМ — не остатки.
+	activeVerify sync.Map
 }
 
 // SetProxmoxPool enables the native Proxmox data path while keeping New
@@ -65,6 +71,7 @@ func New(engine *backup.Engine, st *store.Store, pool *libvirtx.Pool,
 	cfg config.BackupConfig, cipher *secret.Cipher, log zerolog.Logger) *Dispatcher {
 	d := &Dispatcher{Engine: engine, store: st, libvirt: pool, cfg: cfg, cipher: cipher, log: log}
 	d.registerVerifiers()
+	engine.SetVerifyGate(d.verifyGate)
 	return d
 }
 

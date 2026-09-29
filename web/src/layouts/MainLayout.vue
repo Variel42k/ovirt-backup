@@ -52,6 +52,7 @@ const allLinks = [
 	{ name: 'file-backups', label: 'Файловые задания', icon: 'folder_copy', perm: 'file_backups.read', group: 'Защита данных' },
   { name: 'db-dumps', label: 'Дампы СУБД', icon: 'storage', perm: 'jobs.read', group: 'Защита данных' },
   { name: 'backups', label: 'Точки восстановления', icon: 'backup', perm: 'backups.read', group: 'Защита данных' },
+  { name: 'verify', label: 'Проверка ВМ', icon: 'fact_check', perm: 'backups.read', group: 'Защита данных' },
   { name: 'coverage', label: 'Покрытие защитой', icon: 'shield', perm: 'monitoring.read', group: 'Защита данных' },
   { name: 'retention', label: 'Правила хранения', icon: 'auto_delete', perm: 'backups.read', group: 'Защита данных' },
   { name: 'engine-config', label: 'Конфигурация Engine', icon: 'account_tree', perm: 'engine_config.read', group: 'Защита данных' },

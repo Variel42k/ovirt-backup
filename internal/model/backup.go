@@ -463,6 +463,14 @@ type VerifyOptions struct {
 	// ВМ: кластер и домен хранения для её дисков.
 	BootClusterID       string `json:"boot_cluster_id,omitempty"`
 	BootStorageDomainID string `json:"boot_storage_domain_id,omitempty"`
+
+	// TargetID — площадка проверки (VerifyTarget) вместо ручного выбора хоста
+	// или движка. Ресурсы, ожидание и «оставлять неудачные» берутся только
+	// из площадки.
+	TargetID string `json:"target_id,omitempty"`
+	// TriggeredBy — кто запустил проверку (job, schedule, manual), для журнала.
+	// В задании не хранится.
+	TriggeredBy string `json:"-"`
 }
 
 // OnEngine сообщает, что проверочная ВМ поднимается в движке oVirt, а не на
@@ -473,6 +481,9 @@ func (o VerifyOptions) OnEngine() bool { return o.BootEngineID != "" }
 // could exhaust a hypervisor because of a typo. Zero keeps the verifier's
 // documented default.
 func (o VerifyOptions) Validate() error {
+	if o.TargetID != "" && (o.BootHostID != "" || o.BootEngineID != "") {
+		return fmt.Errorf("укажите либо площадку проверки, либо хост или движок вручную")
+	}
 	if o.BootEngineID != "" && o.BootHostID != "" {
 		return fmt.Errorf("укажите либо KVM-хост, либо движок для проверочной ВМ, но не оба")
 	}
@@ -1041,12 +1052,15 @@ type BackupDisk struct {
 
 // VerifyRun is one verification pass over a stored backup.
 type VerifyRun struct {
-	ID       string     `json:"id"`
-	RunID    string     `json:"run_id"`
-	CopyID   string     `json:"copy_id,omitempty"`
-	Mode     VerifyMode `json:"mode"`
-	Status   RunStatus  `json:"status"`
-	Progress int        `json:"progress"`
+	ID     string `json:"id"`
+	RunID  string `json:"run_id"`
+	CopyID string `json:"copy_id,omitempty"`
+	// TargetID — площадка проверки загрузкой; TriggeredBy — кто запустил.
+	TargetID    string     `json:"target_id,omitempty"`
+	TriggeredBy string     `json:"triggered_by,omitempty"`
+	Mode        VerifyMode `json:"mode"`
+	Status      RunStatus  `json:"status"`
+	Progress    int        `json:"progress"`
 	// Details содержит машинно-читаемый отчёт: сколько чанков проверено,
 	// какие расхождения найдены.
 	Details   string     `json:"details,omitempty"`

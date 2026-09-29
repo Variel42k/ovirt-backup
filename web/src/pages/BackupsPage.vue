@@ -483,6 +483,7 @@ const verifyForm = ref({
   boot_engine_id: '',
   boot_cluster_id: '',
   boot_storage_domain_id: '',
+  target_id: '',
   disk_id: '',
   memory_mib: 0,
   vcpus: 0,
@@ -527,6 +528,7 @@ async function verify(run: BackupRun) {
   verifyForm.value.boot_engine_id = usesOVirtAPI(own?.kind) && !bootHosts.value.length ? own?.id ?? '' : ''
   verifyForm.value.boot_cluster_id = ''
   verifyForm.value.boot_storage_domain_id = ''
+  verifyForm.value.target_id = ''
 	verifyDisks.value = selected.disks ?? []
   verifyOpen.value = true
 
@@ -552,7 +554,8 @@ async function submitVerify() {
           boot_engine_id: verifyForm.value.boot_engine_id,
           boot_cluster_id: verifyForm.value.boot_cluster_id,
           boot_storage_domain_id: verifyForm.value.boot_storage_domain_id,
-          disk_id: verifyForm.value.boot_engine_id ? '' : verifyForm.value.disk_id,
+          target_id: verifyForm.value.target_id,
+          disk_id: verifyForm.value.boot_engine_id || verifyForm.value.target_id ? '' : verifyForm.value.disk_id,
           memory_mib: verifyForm.value.memory_mib,
           vcpus: verifyForm.value.vcpus,
           timeout_sec: verifyForm.value.timeout_sec,
@@ -1919,6 +1922,7 @@ const replicationColumns = [
               v-model:engine-id="verifyForm.boot_engine_id"
               v-model:cluster-id="verifyForm.boot_cluster_id"
               v-model:domain-id="verifyForm.boot_storage_domain_id"
+              v-model:target-id="verifyForm.target_id"
               :source-server-id="verifyTarget.server_id"
               :run-id="verifyTarget.id"
               :copy-id="verifyForm.copy_id"
@@ -1926,7 +1930,7 @@ const replicationColumns = [
 
             <template v-if="verifyForm.boot_host_id || verifyForm.boot_engine_id">
               <q-select
-                v-if="!verifyForm.boot_engine_id"
+                v-if="verifyForm.boot_host_id"
                 v-model="verifyForm.disk_id"
                 :options="[
                   { label: 'Все диски ВМ (рекомендуется)', value: '' },
@@ -1965,12 +1969,12 @@ const replicationColumns = [
 
               <q-toggle
                 v-model="verifyForm.keep_on_failure"
-                :label="verifyForm.boot_engine_id
-                  ? 'Оставить проверочную ВМ в движке, если проверка не прошла'
-                  : 'Оставить ВМ и образ на гипервизоре, если проверка не прошла'"
+                :label="verifyForm.boot_host_id
+                  ? 'Оставить ВМ и образ на гипервизоре, если проверка не прошла'
+                  : 'Оставить проверочную ВМ, если проверка не прошла'"
               />
 
-              <q-banner v-if="!verifyForm.boot_engine_id" dense class="bg-blue-1">
+              <q-banner v-if="verifyForm.boot_host_id" dense class="bg-blue-1">
                 <template #avatar><q-icon name="info" color="primary" /></template>
                 ВМ создаётся <b>без сетевых интерфейсов</b> и удаляется вместе с образом после
                 проверки: копия боевой системы не должна попасть в сеть, которую считает своей.

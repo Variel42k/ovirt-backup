@@ -207,8 +207,9 @@ func (e *Engine) RestoreVM(ctx context.Context, req *model.RestoreVMRequest) (*R
 	}
 
 	vm, err := client.CreateVM(ctx, ovirt.CreateVMRequest{
-		Name:        plan.NewName,
-		Description: fmt.Sprintf("Восстановлена из копии %s от %s", plan.RunID, plan.Created.Format(time.RFC3339)),
+		Name: plan.NewName,
+		Description: firstNonEmpty(req.Description,
+			fmt.Sprintf("Восстановлена из копии %s от %s", plan.RunID, plan.Created.Format(time.RFC3339))),
 		ClusterID:   req.ClusterID,
 		MemoryBytes: overrideMemory(req.MemoryMiB, profileMemoryBytes(profile)),
 		VCPUs:       overrideVCPUs(req.VCPUs, profileVCPUs(profile)),

@@ -97,6 +97,7 @@ const emptyForm = () => ({
     boot_engine_id: '',
     boot_cluster_id: '',
     boot_storage_domain_id: '',
+    target_id: '',
     disk_id: '',
     memory_mib: 0,
     vcpus: 0,
@@ -401,7 +402,9 @@ function changeServer(serverID: string) {
   form.value.ova_directory = ''
   maxJobStep.value = 1
   const source = app.servers.find((server) => server.id === serverID)
-  form.value.verify_options.boot_host_id = source?.kind === 'kvm' ? source.id : ''
+  if (!form.value.verify_options.target_id) {
+    form.value.verify_options.boot_host_id = source?.kind === 'kvm' ? source.id : ''
+  }
   if (source?.kind === 'proxmox') {
     form.value.export_qcow2 = false
     form.value.verify_after = 'chain'
@@ -670,7 +673,8 @@ async function preview(job: BackupJob) {
 
 watch(() => form.value.server_id, (serverID) => {
   void loadVMs()
-  if (!form.value.verify_options.boot_host_id && !form.value.verify_options.boot_engine_id) {
+  const options = form.value.verify_options
+  if (!options.boot_host_id && !options.boot_engine_id && !options.target_id) {
     const source = app.servers.find((s) => s.id === serverID)
     form.value.verify_options.boot_host_id = source?.kind === 'kvm' ? source.id : ''
   }
@@ -1418,6 +1422,7 @@ const columns = [
                 v-model:engine-id="form.verify_options.boot_engine_id"
                 v-model:cluster-id="form.verify_options.boot_cluster_id"
                 v-model:domain-id="form.verify_options.boot_storage_domain_id"
+                v-model:target-id="form.verify_options.target_id"
                 :source-server-id="form.server_id"
                 :vm-ids="form.vm_ids"
               />
@@ -1442,12 +1447,12 @@ const columns = [
               <div class="col-12">
                 <q-toggle
                   v-model="form.verify_options.keep_on_failure"
-                  :label="form.verify_options.boot_engine_id
-                    ? 'Оставлять неудачную проверочную ВМ в движке для диагностики'
-                    : 'Оставлять неудачную ВМ и образ для диагностики'"
+                  :label="form.verify_options.boot_host_id
+                    ? 'Оставлять неудачную ВМ и образ для диагностики'
+                    : 'Оставлять неудачную проверочную ВМ для диагностики'"
                 />
               </div>
-              <div v-if="!form.verify_options.boot_engine_id" class="col-12">
+              <div v-if="form.verify_options.boot_host_id" class="col-12">
                 <q-banner dense class="bg-blue-1">
                   <template #avatar><q-icon name="lan" color="primary" /></template>
                   Проверочная ВМ запускается со всеми дисками, но без сетевых интерфейсов. При включённом сохранении

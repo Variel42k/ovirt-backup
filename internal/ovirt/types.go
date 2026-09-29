@@ -259,7 +259,9 @@ type VM struct {
 		} `json:"version"`
 	} `json:"guest_operating_system,omitempty"`
 	// Fqdn — имя гостя по данным агента; пусто, пока агент не ответил.
-	Fqdn            string `json:"fqdn,omitempty"`
+	Fqdn string `json:"fqdn,omitempty"`
+	// CreationTime — когда ВМ создана, миллисекунды Unix.
+	CreationTime    Num `json:"creation_time,omitempty"`
 	ReportedDevices *struct {
 		ReportedDevice []struct {
 			Name string `json:"name"`

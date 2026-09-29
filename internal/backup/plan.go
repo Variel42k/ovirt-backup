@@ -399,6 +399,10 @@ func buildOptions(a Assessment) []Option {
 	// incremental: остальные движок (4.4.5+) отдаёт в том же бэкапе целиком.
 	backupAPI := a.backupAPI()
 	incrementalReady := a.incrementalReady()
+	// oVirt 4.3 has no native Backup API, but the service can still build an
+	// incremental chain from ordinary snapshots. The operator chooses between
+	// reading and comparing the full image and retaining a QCOW2 snapshot base.
+	legacyIncremental := !a.Libvirt && !a.EngineSupportsCBT && a.DiskCount > 0
 	mixed := incrementalReady && !a.Libvirt && a.CBTEnabled < a.DiskCount
 	hasHistory := a.BackupCount > 0
 	rawNames, rawUsed := a.rawDiskNames()
@@ -425,7 +429,7 @@ func buildOptions(a Assessment) []Option {
 		{
 			Type:            model.BackupIncremental,
 			Title:           model.BackupIncremental.Title(),
-			Available:       incrementalReady,
+			Available:       incrementalReady || legacyIncremental,
 			Impact:          "ВМ продолжает работать; читаются только изменённые блоки",
 			EstimatedBytes:  incrementEstimate,
 			SuggestedVerify: model.VerifyChain,
@@ -433,7 +437,7 @@ func buildOptions(a Assessment) []Option {
 		{
 			Type:            model.BackupDifferential,
 			Title:           model.BackupDifferential.Title(),
-			Available:       incrementalReady,
+			Available:       incrementalReady || legacyIncremental,
 			Impact:          "ВМ продолжает работать; читается всё, что изменилось с последнего полного",
 			EstimatedBytes:  incrementEstimate * 5,
 			SuggestedVerify: model.VerifyChain,
@@ -487,8 +491,10 @@ func buildOptions(a Assessment) []Option {
 		case model.BackupIncremental:
 			switch {
 			case o.Blocker != "":
-			case !a.EngineSupportsCBT:
-				o.Blocker = "движок не поддерживает Backup API"
+			case legacyIncremental:
+				o.Rationale = "совместимый режим для oVirt без Backup API: сравнение читает весь снимок, " +
+					"а цепочка QCOW2 передаёт только новый слой; способ выбирается в параметрах задания"
+				o.Impact = "ВМ продолжает работать; нагрузка зависит от выбранного режима: полное чтение или передача слоя QCOW2"
 			case a.CBTPossible == 0:
 				o.Blocker = fmt.Sprintf(
 					"инкремент опирается на карту изменённых блоков, а её негде хранить: " +
@@ -516,8 +522,10 @@ func buildOptions(a Assessment) []Option {
 			}
 		case model.BackupDifferential:
 			switch {
-			case !a.EngineSupportsCBT:
-				o.Blocker = "движок не поддерживает Backup API"
+			case legacyIncremental:
+				o.Rationale = "совместимый разностный режим для oVirt без Backup API сравнивает полный снимок " +
+					"с последней полной основой; цепочка QCOW2 для разностной копии недоступна"
+				o.Impact = "ВМ продолжает работать; временный снимок читается целиком и сравнивается с полной основой"
 			case a.CBTPossible == 0:
 				o.Blocker = "разностный бэкап тоже опирается на карту изменённых блоков, " +
 					"а формат дисков её не поддерживает"

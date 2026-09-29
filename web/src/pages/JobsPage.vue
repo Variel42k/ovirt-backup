@@ -69,6 +69,7 @@ const emptyForm = () => ({
   type: '',
   full_every: 7,
   fallback_type: 'snapshot',
+  legacy_incremental_mode: 'compare' as 'compare' | 'qcow2_chain' | '',
   schedule: '0 1 * * *',
   max_duration_minutes: 0,
   max_read_mbps: 0,
@@ -131,6 +132,7 @@ const isProxmoxJob = computed(() => jobServer.value?.kind === 'proxmox')
 const isKvmJob = computed(() => jobServer.value?.kind === 'kvm')
 // Заморозку силами движка умеет только Backup API oVirt и его производных.
 const isOVirtJob = computed(() => usesOVirtAPI(jobServer.value?.kind))
+const isLegacyOVirtJob = computed(() => isOVirtJob.value && jobServer.value?.supports_cbt === false)
 // Что будет, если заявленный уровень не достигнут. Формулировка — об итоге для
 // копии: «прервать запуск» читалось так, будто служба оборвёт идущий бэкап.
 const requireConsistencyOptions = [
@@ -668,6 +670,11 @@ watch(() => [...form.value.cluster_ids], () => void loadBackupOptions())
 watch(() => [...form.value.tags], () => void loadBackupOptions())
 watch(() => [...form.value.exclude_vm_ids], () => void loadBackupOptions())
 watch(() => form.value.storage_target_ids[0] ?? '', () => void loadBackupOptions())
+watch(() => form.value.type, (type) => {
+  if (type === 'differential' && form.value.legacy_incremental_mode === 'qcow2_chain') {
+    form.value.legacy_incremental_mode = 'compare'
+  }
+})
 
 async function applyRouteIntent() {
 	if (route.query.create === '1' && auth.can('jobs.write')) {
@@ -1074,6 +1081,22 @@ const columns = [
               >
                 <template #append><HelpButton article="changed-blocks" label="Как отслеживаются изменения" /></template>
               </q-select>
+            </div>
+            <div v-if="needsFullEvery && isLegacyOVirtJob" class="col-12">
+              <q-select
+                v-model="form.legacy_incremental_mode"
+                :options="[
+                  { label: 'Сравнение блоков — безопаснее, но диск читается целиком', value: 'compare' },
+                  { label: 'Цепочка QCOW2 (экспериментально) — передаётся только слой изменений', value: 'qcow2_chain', disable: form.type === 'differential' || !app.meta?.capabilities.qemu_img },
+                  { label: 'Не использовать — выполнять полный снапшот', value: '' },
+                ]"
+                emit-value
+                map-options
+                label="Для oVirt без нативного CBT (4.3 и старше)"
+                outlined
+                dense
+                hint="QCOW2-режим оставляет один служебный snapshot; другие snapshots между запусками разрывают цепочку"
+              />
             </div>
           </template>
 

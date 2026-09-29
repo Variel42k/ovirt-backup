@@ -60,3 +60,19 @@ func TestValidateRejectsUnknownConsistency(t *testing.T) {
 		t.Fatalf("application level must be accepted: %v", err)
 	}
 }
+
+func TestValidateLegacyIncrementalMode(t *testing.T) {
+	job := BackupJob{Name: "legacy", ServerID: "s", StorageTargetIDs: []string{"t"},
+		Type: BackupIncremental, FullEvery: 7, VMIDs: []string{"vm"}, LegacyIncrementalMode: LegacyIncrementalCompare}
+	if err := job.Validate(); err != nil {
+		t.Fatalf("compare должен быть допустим: %v", err)
+	}
+	job.LegacyIncrementalMode = "unknown"
+	if err := job.Validate(); err == nil {
+		t.Fatal("неизвестный совместимый режим должен отклоняться")
+	}
+	job.Type, job.LegacyIncrementalMode = BackupDifferential, LegacyIncrementalQcow2
+	if err := job.Validate(); err == nil {
+		t.Fatal("разностный QCOW2-режим должен отклоняться")
+	}
+}

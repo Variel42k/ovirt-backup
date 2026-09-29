@@ -45,6 +45,7 @@ func (c *Client) FetchInventory(ctx context.Context, serverID string) (*Inventor
 	if err != nil {
 		return nil, fmt.Errorf("виртуальные машины: %w", err)
 	}
+	fillVMPlacementNames(vms, inv.Hosts, inv.Clusters)
 	inv.VMs = vms
 
 	if inv.Disks, err = c.listDisks(ctx, serverID, attachments); err != nil {
@@ -64,6 +65,29 @@ func (c *Client) FetchInventory(ctx context.Context, serverID string) (*Inventor
 	}
 
 	return inv, nil
+}
+
+// fillVMPlacementNames completes the compact VM collection response from the
+// host and cluster lists already fetched in the same inventory pass. oVirt can
+// return only the referenced object ID when reported_devices is followed, so
+// relying on vm.host.name makes the whole Host column disappear.
+func fillVMPlacementNames(vms []*model.VM, hosts []*model.Host, clusters []*model.Cluster) {
+	hostNames := make(map[string]string, len(hosts))
+	for _, host := range hosts {
+		hostNames[host.ID] = host.Name
+	}
+	clusterNames := make(map[string]string, len(clusters))
+	for _, cluster := range clusters {
+		clusterNames[cluster.ID] = cluster.Name
+	}
+	for _, vm := range vms {
+		if vm.HostName == "" && vm.HostID != "" {
+			vm.HostName = hostNames[vm.HostID]
+		}
+		if vm.ClusterName == "" && vm.ClusterID != "" {
+			vm.ClusterName = clusterNames[vm.ClusterID]
+		}
+	}
 }
 
 // ListClusters returns the engine's clusters.

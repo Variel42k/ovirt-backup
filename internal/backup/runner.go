@@ -126,6 +126,9 @@ type RunRequest struct {
 	FullEvery int
 	// FallbackType используется, когда выбранный тип недоступен для этой ВМ.
 	FallbackType model.BackupType
+	// LegacyIncrementalMode selects a compatibility path for oVirt engines
+	// without native CBT. Empty preserves the historical snapshot fallback.
+	LegacyIncrementalMode model.LegacyIncrementalMode
 
 	StorageTargetID string
 	// MirrorTargetIDs — хранилища, в которые те же данные пишутся за один
@@ -210,19 +213,20 @@ func (e *Engine) Execute(ctx context.Context, req RunRequest) (*model.BackupRun,
 	}
 
 	run := &model.BackupRun{
-		ID:              uuid.NewString(),
-		JobRunID:        req.JobRunID,
-		JobID:           req.JobID,
-		JobName:         req.JobName,
-		ServerID:        srv.ID,
-		VMID:            vm.ID,
-		VMName:          vm.Name,
-		Type:            req.Type,
-		Status:          model.RunPending,
-		StorageTargetID: target.ID,
-		Encrypted:       req.Encrypt,
-		Compression:     e.Compression(),
-		CreatedAt:       time.Now().UTC(),
+		ID:                    uuid.NewString(),
+		JobRunID:              req.JobRunID,
+		JobID:                 req.JobID,
+		JobName:               req.JobName,
+		ServerID:              srv.ID,
+		VMID:                  vm.ID,
+		VMName:                vm.Name,
+		Type:                  req.Type,
+		Status:                model.RunPending,
+		StorageTargetID:       target.ID,
+		Encrypted:             req.Encrypt,
+		Compression:           e.Compression(),
+		LegacyIncrementalMode: req.LegacyIncrementalMode,
+		CreatedAt:             time.Now().UTC(),
 	}
 
 	log := e.log.With().
@@ -242,6 +246,7 @@ func (e *Engine) Execute(ctx context.Context, req RunRequest) (*model.BackupRun,
 		return e.failRun(ctx, run, err)
 	}
 	run.Type = plan.Type
+	run.LegacyIncrementalMode = plan.LegacyMode
 	run.ParentRunID = plan.ParentRunID
 	run.ChainID = plan.ChainID
 	run.ChainIndex = plan.ChainIndex
@@ -363,15 +368,19 @@ func (e *Engine) Execute(ctx context.Context, req RunRequest) (*model.BackupRun,
 
 	var manifests []*DiskManifest
 	var vmConfig []byte
-	switch run.Type {
-	case model.BackupFull, model.BackupIncremental, model.BackupDifferential:
+	switch {
+	case plan.LegacyMode == model.LegacyIncrementalQcow2 && run.Type.NeedsParent():
+		manifests, err = e.runLegacyQcow2(execCtx, client, backend, srv, vm, run, req, disks, plan)
+	case plan.LegacyMode != "":
+		manifests, err = e.runSnapshot(execCtx, client, backend, srv, vm, run, req, disks, plan)
+	case run.Type == model.BackupFull || run.Type == model.BackupIncremental || run.Type == model.BackupDifferential:
 		manifests, err = e.runCBT(execCtx, client, backend, srv, vm, run, req, disks, plan)
-	case model.BackupSnapshot:
-		manifests, err = e.runSnapshot(execCtx, client, backend, srv, vm, run, req, disks)
-	case model.BackupConfig:
+	case run.Type == model.BackupSnapshot:
+		manifests, err = e.runSnapshot(execCtx, client, backend, srv, vm, run, req, disks, plan)
+	case run.Type == model.BackupConfig:
 		run.DiskCount = 0
 		vmConfig, err = e.storeVMConfig(execCtx, client, backend, vm.ID, run)
-	case model.BackupOVA:
+	case run.Type == model.BackupOVA:
 		err = e.runOVA(execCtx, client, vm, run, req)
 	default:
 		err = fmt.Errorf("неизвестный тип бэкапа: %q", run.Type)
@@ -546,7 +555,8 @@ type plan struct {
 	// FullDisks — диски инкрементального запуска, которые копируются целиком,
 	// с причиной (смешанный бэкап oVirt 4.4.5+). Их манифест помечается
 	// полным и становится новой основой диска (см. EffectiveChain).
-	FullDisks map[string]string
+	FullDisks  map[string]string
+	LegacyMode model.LegacyIncrementalMode
 }
 
 // markFullDisk отмечает диск инкрементального запуска, который копируется
@@ -580,8 +590,18 @@ func (e *Engine) resolvePlan(ctx context.Context, client *ovirt.Client, srv *mod
 		fallback = model.BackupSnapshot
 	}
 
+	if !srv.SupportsCBT && req.LegacyIncrementalMode != "" && req.Type.NeedsParent() {
+		return e.resolveLegacyPlan(ctx, client, srv, req, disks, p)
+	}
+
 	if !srv.SupportsCBT {
+		if req.LegacyIncrementalMode != "" {
+			if err := e.validateLegacyMode(req, disks); err != nil {
+				return p, err
+			}
+		}
 		p.Type = fallback
+		p.LegacyMode = req.LegacyIncrementalMode
 		p.Note = fmt.Sprintf("движок %s не поддерживает инкрементальный бэкап — используется «%s»",
 			srv.Name, fallback.Title())
 		return p, nil
@@ -688,6 +708,92 @@ func (e *Engine) resolvePlan(ctx context.Context, client *ovirt.Client, srv *mod
 	return p, nil
 }
 
+func (e *Engine) resolveLegacyPlan(ctx context.Context, client *ovirt.Client, srv *model.Server,
+	req RunRequest, disks []ovirt.Disk, p plan) (plan, error) {
+	mode := req.LegacyIncrementalMode
+	if err := e.validateLegacyMode(req, disks); err != nil {
+		return p, err
+	}
+
+	parent, err := e.store.LatestLegacyRun(ctx, req.ServerID, req.VMID, req.StorageTargetID,
+		req.Type == model.BackupDifferential)
+	if errors.Is(err, store.ErrNotFound) {
+		p.Type = model.BackupSnapshot
+		p.LegacyMode = mode
+		p.Note = "опорной точки для совместимого инкремента нет — создаётся полная основа через снапшот"
+		return p, nil
+	}
+	if err != nil {
+		return p, fmt.Errorf("поиск основы совместимого инкремента: %w", err)
+	}
+	missing, err := e.disksMissingIn(ctx, parent, disks)
+	if err != nil {
+		return p, fmt.Errorf("проверка дисков основы: %w", err)
+	}
+	if len(missing) > 0 {
+		p.Type = model.BackupSnapshot
+		p.LegacyMode = mode
+		p.Note = "в основе нет всех дисков ВМ — создаётся новая полная основа через снапшот"
+		return p, nil
+	}
+	if req.FullEvery > 0 && parent.ChainIndex+1 >= req.FullEvery {
+		p.Type = model.BackupSnapshot
+		p.LegacyMode = mode
+		p.Note = fmt.Sprintf("длина совместимой цепочки достигла %d — создаётся новая полная основа", req.FullEvery)
+		return p, nil
+	}
+	qcowBaseMissing := mode == model.LegacyIncrementalQcow2 &&
+		(parent.LegacyIncrementalMode != model.LegacyIncrementalQcow2 || parent.SnapshotID == "")
+	if !qcowBaseMissing && mode == model.LegacyIncrementalQcow2 {
+		if client == nil {
+			return p, fmt.Errorf("цепочка QCOW2: клиент oVirt недоступен для проверки опорного snapshot")
+		}
+		if _, getErr := client.GetSnapshot(ctx, req.VMID, parent.SnapshotID); ovirt.IsNotFound(getErr) {
+			qcowBaseMissing = true
+		} else if getErr != nil {
+			return p, fmt.Errorf("проверка опорного snapshot QCOW2 %s: %w", parent.SnapshotID, getErr)
+		}
+	}
+	if qcowBaseMissing {
+		p.Type = model.BackupSnapshot
+		p.LegacyMode = mode
+		p.Note = "основа несовместима с выбранным режимом — создаётся новая полная основа через снапшот"
+		return p, nil
+	}
+	p.ParentRunID = parent.ID
+	p.ChainID = parent.ChainID
+	p.ChainIndex = parent.ChainIndex + 1
+	p.ChunkSize = e.chainChunkSize(ctx, parent, p.ChunkSize)
+	p.LegacyMode = mode
+	p.Note = map[model.LegacyIncrementalMode]string{
+		model.LegacyIncrementalCompare: "совместимый инкремент: полный снимок будет прочитан и сравнен с предыдущей точкой",
+		model.LegacyIncrementalQcow2:   "совместимый инкремент: будет передан только новый слой QCOW2",
+	}[mode]
+	return p, nil
+}
+
+func (e *Engine) validateLegacyMode(req RunRequest, disks []ovirt.Disk) error {
+	mode := req.LegacyIncrementalMode
+	if !mode.Valid() {
+		return fmt.Errorf("неизвестный совместимый режим инкремента: %q", mode)
+	}
+	if mode != model.LegacyIncrementalQcow2 {
+		return nil
+	}
+	if req.Type == model.BackupDifferential {
+		return fmt.Errorf("цепочка QCOW2 не поддерживает разностный режим; выберите сравнение блоков")
+	}
+	if _, err := FindQemuImg(e.cfg.QemuImgPath); err != nil {
+		return fmt.Errorf("цепочка QCOW2: %w", err)
+	}
+	for _, d := range disks {
+		if d.Format != "cow" && d.Format != "qcow2" {
+			return fmt.Errorf("цепочка QCOW2 недоступна: диск %s имеет формат %s", d.AliasOrName(), d.Format)
+		}
+	}
+	return nil
+}
+
 // disksMissingIn — диски из disks, которых нет среди успешно сохранённых в
 // запуске parent.
 func (e *Engine) disksMissingIn(ctx context.Context, parent *model.BackupRun, disks []ovirt.Disk) ([]string, error) {
@@ -732,6 +838,47 @@ func (e *Engine) chainChunkSize(ctx context.Context, parent *model.BackupRun, fa
 		return fallback
 	}
 	return m.ChunkSize
+}
+
+// parentDiskReader opens the effective disk image at a previous restore point.
+// Compatibility incrementals use it as their source of truth because oVirt
+// 4.3 cannot provide an engine checkpoint or a dirty-block map.
+func (e *Engine) parentDiskReader(ctx context.Context, backend repo.Backend, parentID, diskID string) (*ChainReader, error) {
+	var runs []*model.BackupRun
+	seen := map[string]bool{}
+	for id := parentID; id != ""; {
+		if seen[id] {
+			return nil, fmt.Errorf("цикл в цепочке бэкапов у %s", id)
+		}
+		seen[id] = true
+		run, err := e.store.GetBackupRunFull(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		runs = append(runs, run)
+		id = run.ParentRunID
+	}
+	for left, right := 0, len(runs)-1; left < right; left, right = left+1, right-1 {
+		runs[left], runs[right] = runs[right], runs[left]
+	}
+	manifests := make([]*DiskManifest, 0, len(runs))
+	for _, run := range runs {
+		for _, disk := range run.Disks {
+			if disk.DiskID != diskID || disk.Status != model.RunSucceeded || disk.ManifestKey == "" {
+				continue
+			}
+			manifest, err := loadDiskManifest(ctx, backend, disk.ManifestKey)
+			if err != nil {
+				return nil, err
+			}
+			manifests = append(manifests, manifest)
+			break
+		}
+	}
+	if len(manifests) == 0 {
+		return nil, fmt.Errorf("в цепочке нет сохранённого диска %s", diskID)
+	}
+	return NewChainReader(backend, e.cipher, manifests)
 }
 
 // selectDisks returns the data disks of a VM that should be backed up, together
@@ -1337,7 +1484,7 @@ func (e *Engine) event(ctx context.Context, run *model.BackupRun, kind model.Run
 // engines without changed block tracking.
 func (e *Engine) runSnapshot(ctx context.Context, client *ovirt.Client, backend repo.Backend,
 	srv *model.Server, vm *model.VM, run *model.BackupRun, req RunRequest,
-	disks []ovirt.Disk) ([]*DiskManifest, error) {
+	disks []ovirt.Disk, p plan) ([]*DiskManifest, error) {
 
 	diskIDs := make([]string, 0, len(disks))
 	for _, d := range disks {
@@ -1367,20 +1514,34 @@ func (e *Engine) runSnapshot(ctx context.Context, client *ovirt.Client, backend 
 	}
 	run.SnapshotID = snap.ID
 
-	defer func() {
-		// Removing the snapshot triggers a merge on the hypervisor; leaving it
-		// behind grows the disk chain until the VM eventually stalls.
-		cleanCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Minute)
-		defer cancel()
-		if err := client.DeleteSnapshotWhenReady(cleanCtx, vm.ID, snap.ID, 10*time.Minute); err != nil {
-			e.log.Error().Err(err).Str("snapshot", snap.ID).Str("vm", vm.Name).
-				Msg("не удалось удалить временный снапшот — удалите его вручную")
-			return
-		}
-		if err := client.WaitSnapshotGone(cleanCtx, vm.ID, snap.ID, 30*time.Minute); err != nil {
-			e.log.Warn().Err(err).Str("snapshot", snap.ID).Msg("слияние снапшота ещё идёт")
-		}
-	}()
+	retain := p.LegacyMode == model.LegacyIncrementalQcow2
+	retainedSuccess := false
+	if !retain {
+		defer func() {
+			// Removing the snapshot triggers a merge on the hypervisor; leaving it
+			// behind grows the disk chain until the VM eventually stalls.
+			cleanCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Minute)
+			defer cancel()
+			if err := client.DeleteSnapshotWhenReady(cleanCtx, vm.ID, snap.ID, 10*time.Minute); err != nil {
+				e.log.Error().Err(err).Str("snapshot", snap.ID).Str("vm", vm.Name).
+					Msg("не удалось удалить временный снапшот — удалите его вручную")
+				return
+			}
+			if err := client.WaitSnapshotGone(cleanCtx, vm.ID, snap.ID, 30*time.Minute); err != nil {
+				e.log.Warn().Err(err).Str("snapshot", snap.ID).Msg("слияние снапшота ещё идёт")
+			}
+		}()
+	}
+	if retain {
+		defer func() {
+			if retainedSuccess {
+				return
+			}
+			cleanCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Minute)
+			defer cancel()
+			_ = client.DeleteSnapshotWhenReady(cleanCtx, vm.ID, snap.ID, 10*time.Minute)
+		}()
+	}
 	// Register after snapshot cleanup so a failed first thaw is retried before
 	// a potentially long snapshot merge starts during unwinding.
 	defer func() { _ = window.Thaw() }()
@@ -1411,19 +1572,31 @@ func (e *Engine) runSnapshot(ctx context.Context, client *ovirt.Client, backend 
 		}
 	}
 
-	return e.copyDisksGuarded(ctx, client, run, domains, func(ctx context.Context) ([]*DiskManifest, error) {
-		return e.copyDisks(ctx, client, backend, srv, vm, run, req, disks, plan{
-			Type:      model.BackupSnapshot,
-			ChunkSize: int64(e.cfg.ChunkSize),
-		}, func(d ovirt.Disk) ovirt.TransferRequest {
+	manifests, err := e.copyDisksGuarded(ctx, client, run, domains, func(ctx context.Context) ([]*DiskManifest, error) {
+		copyPlan := p
+		if copyPlan.Type == "" {
+			copyPlan.Type = model.BackupSnapshot
+		}
+		if copyPlan.ChunkSize <= 0 {
+			copyPlan.ChunkSize = int64(e.cfg.ChunkSize)
+		}
+		extentContext := imageio.ContextZero
+		if p.LegacyMode == model.LegacyIncrementalCompare && run.Type.NeedsParent() {
+			extentContext = "compare"
+		}
+		return e.copyDisks(ctx, client, backend, srv, vm, run, req, disks, copyPlan, func(d ovirt.Disk) ovirt.TransferRequest {
 			return ovirt.TransferRequest{
 				SnapshotID:        imageByDisk[d.ID],
 				Direction:         "download",
 				Format:            "raw",
 				InactivityTimeout: e.cfg.Transfer.InactivityTimeout,
 			}
-		}, imageio.ContextZero)
+		}, extentContext)
 	})
+	if err == nil {
+		retainedSuccess = true
+	}
+	return manifests, err
 }
 
 // transferFactory builds the transfer request for one disk.
@@ -1479,7 +1652,7 @@ func (e *Engine) copyDisks(ctx context.Context, client *ovirt.Client, backend re
 				diskContext, diskType = imageio.ContextZero, model.BackupFull
 			}
 			manifest, read, stored, err := e.copyOneDisk(ctx, client, backend, srv, vm, run, req,
-				disk, index, chunkSize, factory(disk), diskContext, diskType, pacer)
+				disk, index, chunkSize, factory(disk), diskContext, diskType, p, pacer)
 
 			mu.Lock()
 			defer mu.Unlock()
@@ -1543,7 +1716,7 @@ func (e *Engine) copyDisks(ctx context.Context, client *ovirt.Client, backend re
 func (e *Engine) copyOneDisk(ctx context.Context, client *ovirt.Client, backend repo.Backend,
 	srv *model.Server, vm *model.VM, run *model.BackupRun, req RunRequest,
 	disk ovirt.Disk, index int, chunkSize int64, transferReq ovirt.TransferRequest,
-	extentContext string, diskType model.BackupType, pacer *ReadPacer) (*DiskManifest, int64, int64, error) {
+	extentContext string, diskType model.BackupType, p plan, pacer *ReadPacer) (*DiskManifest, int64, int64, error) {
 
 	if transferReq.DiskID == "" && transferReq.SnapshotID == "" {
 		return nil, 0, 0, fmt.Errorf("для диска %s не удалось определить источник передачи", disk.AliasOrName())
@@ -1580,6 +1753,15 @@ func (e *Engine) copyOneDisk(ctx context.Context, client *ovirt.Client, backend 
 	ready, err := client.WaitTransferReady(ctx, transfer.ID, 10*time.Minute)
 	if err != nil {
 		return nil, 0, 0, err
+	}
+
+	var parentReader *ChainReader
+	if p.LegacyMode == model.LegacyIncrementalCompare && run.ParentRunID != "" {
+		parentReader, err = e.parentDiskReader(ctx, backend, run.ParentRunID, disk.ID)
+		if err != nil {
+			return nil, 0, 0, fmt.Errorf("чтение основы диска %s: %w", disk.AliasOrName(), err)
+		}
+		defer parentReader.Close()
 	}
 
 	dataURL := ovirt.DataURL(ready, e.cfg.Transfer.PreferProxy)
@@ -1691,6 +1873,19 @@ func (e *Engine) copyOneDisk(ctx context.Context, client *ovirt.Client, backend 
 		Alternate:     alternate,
 		Keepalive: func(ctx context.Context) error {
 			return client.ExtendTransfer(ctx, transferID)
+		},
+		Compare: func(ctx context.Context, index int64, current []byte) (bool, error) {
+			if parentReader == nil {
+				return true, nil
+			}
+			previous, err := parentReader.ReadChunk(ctx, index)
+			if err != nil {
+				return false, err
+			}
+			if previous == nil && allZero(current) {
+				return false, nil
+			}
+			return !bytes.Equal(previous, current), nil
 		},
 		OnProgress: func(logical int64) {
 			if time.Since(lastReport) < 2*time.Second {
@@ -1828,32 +2023,33 @@ func (e *Engine) writeRunManifest(ctx context.Context, backend repo.Backend, srv
 	}
 
 	doc := RunManifest{
-		Format:           FormatName,
-		Version:          FormatVersion,
-		RunID:            run.ID,
-		JobID:            run.JobID,
-		JobName:          run.JobName,
-		ChainID:          run.ChainID,
-		ParentRunID:      run.ParentRunID,
-		ChainIndex:       run.ChainIndex,
-		Type:             run.Type,
-		ServerID:         srv.ID,
-		ServerName:       srv.Name,
-		VMID:             vm.ID,
-		VMName:           vm.Name,
-		EngineBackupID:   run.EngineBackupID,
-		FromCheckpointID: run.FromCheckpointID,
-		ToCheckpointID:   run.ToCheckpointID,
-		SnapshotID:       run.SnapshotID,
-		CreatedAt:        run.CreatedAt,
-		EndedAt:          time.Now().UTC(),
-		Compression:      run.Compression,
-		Encrypted:        run.Encrypted,
-		Consistency:      run.Consistency,
-		ConsistencyNote:  run.ConsistencyNote,
-		LogicalBytes:     run.ReadBytes,
-		StoredBytes:      run.StoredBytes,
-		VMProfile:        ProfileFromOVirtConfig(vmConfig, vm, manifests),
+		Format:                FormatName,
+		Version:               FormatVersion,
+		RunID:                 run.ID,
+		JobID:                 run.JobID,
+		JobName:               run.JobName,
+		ChainID:               run.ChainID,
+		ParentRunID:           run.ParentRunID,
+		ChainIndex:            run.ChainIndex,
+		Type:                  run.Type,
+		ServerID:              srv.ID,
+		ServerName:            srv.Name,
+		VMID:                  vm.ID,
+		VMName:                vm.Name,
+		EngineBackupID:        run.EngineBackupID,
+		FromCheckpointID:      run.FromCheckpointID,
+		ToCheckpointID:        run.ToCheckpointID,
+		SnapshotID:            run.SnapshotID,
+		LegacyIncrementalMode: run.LegacyIncrementalMode,
+		CreatedAt:             run.CreatedAt,
+		EndedAt:               time.Now().UTC(),
+		Compression:           run.Compression,
+		Encrypted:             run.Encrypted,
+		Consistency:           run.Consistency,
+		ConsistencyNote:       run.ConsistencyNote,
+		LogicalBytes:          run.ReadBytes,
+		StoredBytes:           run.StoredBytes,
+		VMProfile:             ProfileFromOVirtConfig(vmConfig, vm, manifests),
 	}
 	if len(vmConfig) > 0 {
 		doc.ConfigKey = repo.VMConfigKey(run.RepoPath)

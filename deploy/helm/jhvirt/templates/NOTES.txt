@@ -1,0 +1,17 @@
+jhvirt has been installed.
+
+Check rollout:
+  kubectl -n {{ .Release.Namespace }} rollout status deployment/{{ include "jhvirt.fullname" . }}
+
+Check readiness:
+  kubectl -n {{ .Release.Namespace }} port-forward service/{{ include "jhvirt.fullname" . }} 8080:{{ .Values.service.port }}
+  curl http://127.0.0.1:8080/readyz
+
+{{- if not .Values.ingress.enabled }}
+Ingress is disabled. Enable ingress or keep using port-forward for access.
+{{- end }}
+
+The encryption key in Secret {{ .Values.appSecret.existingSecret }} is part of
+your disaster-recovery set. Losing it makes stored credentials and encrypted
+backup data unreadable.
+

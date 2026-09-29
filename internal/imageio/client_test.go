@@ -38,6 +38,22 @@ func TestLongRequestsOutliveRequestTimeout(t *testing.T) {
 	}
 }
 
+func TestDownloadReadsWholeTransfer(t *testing.T) {
+	want := []byte("qcow2-layer")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.Header.Get("Range") != "" {
+			t.Fatalf("ожидался обычный GET без Range, получено %s %q", r.Method, r.Header.Get("Range"))
+		}
+		_, _ = w.Write(want)
+	}))
+	t.Cleanup(srv.Close)
+	var got bytes.Buffer
+	n, err := New(srv.URL, srv.Client()).Download(context.Background(), &got)
+	if err != nil || n != int64(len(want)) || !bytes.Equal(got.Bytes(), want) {
+		t.Fatalf("Download: n=%d data=%q err=%v", n, got.Bytes(), err)
+	}
+}
+
 // Так отвечал node-01, когда движок закрыл передачу посреди копирования.
 func TestIsTicketGone(t *testing.T) {
 	gone := &Error{Status: http.StatusForbidden, Method: "GET", URL: "https://node-01:54322/images/t",

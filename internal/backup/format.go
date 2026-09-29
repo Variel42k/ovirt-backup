@@ -200,10 +200,11 @@ type RunManifest struct {
 	VMID       string `json:"vm_id"`
 	VMName     string `json:"vm_name"`
 
-	EngineBackupID   string `json:"engine_backup_id,omitempty"`
-	FromCheckpointID string `json:"from_checkpoint_id,omitempty"`
-	ToCheckpointID   string `json:"to_checkpoint_id,omitempty"`
-	SnapshotID       string `json:"snapshot_id,omitempty"`
+	EngineBackupID        string                      `json:"engine_backup_id,omitempty"`
+	FromCheckpointID      string                      `json:"from_checkpoint_id,omitempty"`
+	ToCheckpointID        string                      `json:"to_checkpoint_id,omitempty"`
+	SnapshotID            string                      `json:"snapshot_id,omitempty"`
+	LegacyIncrementalMode model.LegacyIncrementalMode `json:"legacy_incremental_mode,omitempty"`
 
 	CreatedAt time.Time `json:"created_at"`
 	EndedAt   time.Time `json:"ended_at"`

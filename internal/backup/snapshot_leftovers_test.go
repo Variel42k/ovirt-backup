@@ -29,12 +29,21 @@ func snapshotAt(id, description, status string, age time.Duration) ovirt.Snapsho
 // запуска, чужой, занятый операцией или слишком свежий без записи в базе —
 // остаются.
 func TestLeftoverSnapshotRules(t *testing.T) {
+	now := time.Now().UTC()
 	runs := []*model.BackupRun{
 		{ID: "done", Status: model.RunFailed},
 		{ID: "live", Status: model.RunRunning},
 		{ID: "recorded", Status: model.RunSucceeded, SnapshotID: "snap-rec"},
 		{ID: "engine-backup", Status: model.RunFailed, SnapshotID: "snap-eng"},
 		{ID: "engine-live", Status: model.RunRunning, SnapshotID: "snap-eng-live"},
+		{ID: "qcow-leaf", Status: model.RunSucceeded, SnapshotID: "snap-qcow-leaf",
+			LegacyIncrementalMode: model.LegacyIncrementalQcow2, StorageTargetID: "repo-a", CreatedAt: now.Add(-time.Hour)},
+		{ID: "config-new", Type: model.BackupConfig, Status: model.RunSucceeded,
+			StorageTargetID: "repo-a", CreatedAt: now.Add(-30 * time.Minute)},
+		{ID: "qcow-old", Status: model.RunSucceeded, SnapshotID: "snap-qcow-old",
+			LegacyIncrementalMode: model.LegacyIncrementalQcow2, StorageTargetID: "repo-b", CreatedAt: now.Add(-2 * time.Hour)},
+		{ID: "compare-new", Type: model.BackupIncremental, Status: model.RunSucceeded, ParentRunID: "qcow-old",
+			LegacyIncrementalMode: model.LegacyIncrementalCompare, StorageTargetID: "repo-b", CreatedAt: now.Add(-time.Hour)},
 	}
 	active := ovirt.Snapshot{ID: "a", Description: "Active VM", SnapshotType: "active", SnapshotStatus: "ok"}
 	cases := []struct {
@@ -56,6 +65,8 @@ func TestLeftoverSnapshotRules(t *testing.T) {
 		{"снапшот движка под бэкап", snapshotAt("snap-eng", "Auto-generated for Backup VM dtseven", "ok", time.Hour), true},
 		{"снапшот движка под идущий бэкап", snapshotAt("snap-eng-live", "Auto-generated for Backup VM dtseven", "ok", time.Hour), false},
 		{"снапшот движка, бэкап ещё закрывается", snapshotAt("snap-eng", "Auto-generated for Backup VM dtseven", "locked", time.Hour), false},
+		{"текущая основа QCOW2 сохраняется", snapshotAt("snap-qcow-leaf", "jhvirt backup qcow-leaf", "ok", time.Hour), false},
+		{"основа QCOW2 после новой точки удаляется", snapshotAt("snap-qcow-old", "jhvirt backup qcow-old", "ok", 2*time.Hour), true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

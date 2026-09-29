@@ -1,0 +1,233 @@
+{{- include "jhvirt.validateValues" . }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "jhvirt.fullname" . }}
+  labels:
+    {{- include "jhvirt.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      {{- include "jhvirt.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "jhvirt.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "jhvirt.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        - name: prepare-secrets
+          image: "{{ .Values.image.repository }}:{{ default .Chart.AppVersion .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              cp /database-source/database-url /prepared/database-url
+              cp /app-source/secret.key /prepared/secret.key
+              {{ if .Values.appSecret.bootstrapPasswordKey }}
+              cp /app-source/bootstrap-password /prepared/bootstrap-password
+              {{ end }}
+              {{ if .Values.appSecret.oidcClientSecretKey }}
+              cp /app-source/oidc-client-secret /prepared/oidc-client-secret
+              {{ end }}
+              {{ if .Values.appSecret.metricsTokenKey }}
+              cp /app-source/metrics-token /prepared/metrics-token
+              {{ end }}
+              chmod 0600 /prepared/*
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: database-source
+              mountPath: /database-source
+              readOnly: true
+            - name: app-source
+              mountPath: /app-source
+              readOnly: true
+            - name: prepared-secrets
+              mountPath: /prepared
+      containers:
+        - name: jhvirt
+          image: "{{ .Values.image.repository }}:{{ default .Chart.AppVersion .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["-config", "/app/config/kubernetes.yaml"]
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          env:
+            - name: JHV_SERVER_ADDR
+              value: "0.0.0.0"
+            - name: JHV_SERVER_PORT
+              value: "8080"
+            - name: JHV_SERVER_EXTERNAL_URL
+              value: {{ .Values.externalURL | quote }}
+            - name: JHV_DATABASE_URL_FILE
+              value: /run/jhvirt-secrets/database-url
+            - name: JHV_SECRETS_KEY_FILE
+              value: /run/jhvirt-secrets/secret.key
+            - name: JHV_SCHEDULER_TIMEZONE
+              value: {{ .Values.timezone | quote }}
+            - name: TZ
+              value: {{ .Values.timezone | quote }}
+            {{- if .Values.appSecret.bootstrapPasswordKey }}
+            - name: JHV_AUTH_BOOTSTRAP_PASSWORD_FILE
+              value: /run/jhvirt-secrets/bootstrap-password
+            {{- end }}
+            {{- if .Values.appSecret.oidcClientSecretKey }}
+            - name: JHV_AUTH_OIDC_CLIENT_SECRET_FILE
+              value: /run/jhvirt-secrets/oidc-client-secret
+            {{- end }}
+            {{- if .Values.appSecret.metricsTokenKey }}
+            - name: JHV_METRICS_TOKEN_FILE
+              value: /run/jhvirt-secrets/metrics-token
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            {{- toYaml .Values.startupProbe | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 5"]
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /app/config/kubernetes.yaml
+              subPath: kubernetes.yaml
+              readOnly: true
+            - name: prepared-secrets
+              mountPath: /run/jhvirt-secrets
+              readOnly: true
+            - name: data
+              mountPath: /app/data
+            - name: work
+              mountPath: /work
+            - name: tmp
+              mountPath: /tmp
+            {{- if .Values.backupStorage.enabled }}
+            - name: backups
+              mountPath: /backups
+            {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "jhvirt.fullname" . }}
+        - name: database-source
+          secret:
+            secretName: {{ .Values.database.existingSecret }}
+            # The non-root init container can read the projected source and
+            # rewrites it as owner-only 0600 in the in-memory prepared volume.
+            defaultMode: 0444
+            items:
+              - key: {{ .Values.database.urlKey }}
+                path: database-url
+        - name: app-source
+          secret:
+            secretName: {{ .Values.appSecret.existingSecret }}
+            defaultMode: 0444
+            items:
+              - key: {{ .Values.appSecret.keyKey }}
+                path: secret.key
+              {{- if .Values.appSecret.bootstrapPasswordKey }}
+              - key: {{ .Values.appSecret.bootstrapPasswordKey }}
+                path: bootstrap-password
+              {{- end }}
+              {{- if .Values.appSecret.oidcClientSecretKey }}
+              - key: {{ .Values.appSecret.oidcClientSecretKey }}
+                path: oidc-client-secret
+              {{- end }}
+              {{- if .Values.appSecret.metricsTokenKey }}
+              - key: {{ .Values.appSecret.metricsTokenKey }}
+                path: metrics-token
+              {{- end }}
+        - name: prepared-secrets
+          emptyDir:
+            medium: Memory
+        - name: data
+          emptyDir: {}
+        - name: work
+          {{ if .Values.workVolume.sizeLimit }}
+          emptyDir:
+            sizeLimit: {{ .Values.workVolume.sizeLimit }}
+          {{ else }}
+          emptyDir: {}
+          {{ end }}
+        - name: tmp
+          emptyDir: {}
+        {{- if .Values.backupStorage.enabled }}
+        - name: backups
+          persistentVolumeClaim:
+            claimName: {{ default (printf "%s-backups" (include "jhvirt.fullname" .)) .Values.backupStorage.existingClaim }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.affinity }}
+      affinity:
+        {{- toYaml .Values.affinity | nindent 8 }}
+      {{- else }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "jhvirt.selectorLabels" . | nindent 20 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+

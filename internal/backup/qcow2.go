@@ -2,6 +2,7 @@ package backup
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -85,4 +86,69 @@ func QemuImgInfo(ctx context.Context, configured, path string) (string, error) {
 		return "", fmt.Errorf("qemu-img info: %w", err)
 	}
 	return string(out), nil
+}
+
+// Qcow2BackingFile returns the backing reference embedded in an overlay. An
+// empty result means the downloaded qcow2 is self-contained.
+func Qcow2BackingFile(ctx context.Context, configured, path string) (string, error) {
+	raw, err := QemuImgInfo(ctx, configured, path)
+	if err != nil {
+		return "", err
+	}
+	var info struct {
+		Backing string `json:"backing-filename"`
+		Full    string `json:"full-backing-filename"`
+	}
+	if err := json.Unmarshal([]byte(raw), &info); err != nil {
+		return "", fmt.Errorf("qemu-img info: разбор JSON: %w", err)
+	}
+	if info.Backing != "" {
+		return info.Backing, nil
+	}
+	return info.Full, nil
+}
+
+// backingMatchesImage compares path components rather than substrings so one
+// volume UUID cannot accidentally match a longer, unrelated UUID.
+func backingMatchesImage(backing, imageID string) bool {
+	if backing == "" || imageID == "" {
+		return false
+	}
+	for _, part := range strings.FieldsFunc(backing, func(r rune) bool { return r == '/' || r == '\\' }) {
+		if part == imageID || strings.TrimSuffix(part, ".raw") == imageID ||
+			strings.TrimSuffix(part, ".qcow2") == imageID {
+			return true
+		}
+	}
+	return false
+}
+
+// RebaseQcow2 replaces the inaccessible oVirt backing reference in a copied
+// overlay with the locally reconstructed parent image. -u only edits metadata;
+// the overlay's guest data is not rewritten.
+func RebaseQcow2(ctx context.Context, configured, overlay, parentRaw string) error {
+	bin, err := FindQemuImg(configured)
+	if err != nil {
+		return err
+	}
+	cmd := exec.CommandContext(ctx, bin, "rebase", "-u", "-f", "qcow2", "-F", "raw", "-b", parentRaw, overlay)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("qemu-img rebase: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// ConvertQcow2ToRaw materialises an overlay and its local backing image.
+func ConvertQcow2ToRaw(ctx context.Context, configured, src, dst string) error {
+	bin, err := FindQemuImg(configured)
+	if err != nil {
+		return err
+	}
+	cmd := exec.CommandContext(ctx, bin, "convert", "-p", "-f", "qcow2", "-O", "raw", "-S", "4k", src, dst)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("qemu-img convert qcow2->raw: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }

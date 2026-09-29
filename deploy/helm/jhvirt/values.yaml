@@ -1,0 +1,139 @@
+# The chart intentionally does not install PostgreSQL. Use a managed cluster or
+# an operator-managed PostgreSQL and keep its DSN in an existing Secret.
+replicaCount: 1
+
+image:
+  repository: ovirt-backup
+  pullPolicy: IfNotPresent
+  tag: ""
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# Public browser URL. TLS is normally terminated by Ingress.
+externalURL: ""
+timezone: UTC
+
+database:
+  existingSecret: ""
+  urlKey: url
+
+# This Secret must contain the stable AES key used to encrypt credentials and
+# backup chunks. Its value is a base64-encoded 32-byte key (openssl rand -base64 32).
+appSecret:
+  existingSecret: ""
+  keyKey: secret.key
+  bootstrapPasswordKey: ""
+  oidcClientSecretKey: ""
+  metricsTokenKey: ""
+
+# Merged with built-in application defaults. Maps can be extended from a
+# separate values file, including auth.oidc.role_mapping and trusted proxies.
+config:
+  server:
+    serve_spa: true
+  database:
+    run_migrations_on_startup: true
+  cluster:
+    leader_election: true
+    poll_interval: 15s
+  logging:
+    level: info
+    format: json
+    file: ""
+  backup:
+    temp_dir: /work
+    restore_dirs: []
+  monitor:
+    remediation:
+      archive_dir: /app/data/remediation-archives
+  disaster_recovery:
+    enabled: false
+
+serviceAccount:
+  create: true
+  automount: false
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  fsGroupChangePolicy: OnRootMismatch
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+service:
+  type: ClusterIP
+  port: 8080
+  annotations: {}
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: jhvirt.example.org
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits: {}
+
+# Local storage is disabled by default. For more than one replica the claim
+# must be ReadWriteMany and shared=true must explicitly acknowledge that fact.
+backupStorage:
+  enabled: false
+  shared: false
+  existingClaim: ""
+  storageClass: ""
+  accessModes: ["ReadWriteOnce"]
+  size: 100Gi
+  annotations: {}
+
+workVolume:
+  sizeLimit: ""
+
+terminationGracePeriodSeconds: 300
+
+startupProbe:
+  failureThreshold: 60
+  periodSeconds: 5
+  timeoutSeconds: 3
+readinessProbe:
+  failureThreshold: 3
+  periodSeconds: 10
+  timeoutSeconds: 5
+livenessProbe:
+  failureThreshold: 3
+  periodSeconds: 20
+  timeoutSeconds: 3
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
+
+extraEnv: []
+

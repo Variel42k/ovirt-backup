@@ -29,6 +29,12 @@ import (
 //go:embed migrations/*.sql
 var migrationFS embed.FS
 
+// migrationLockKey serializes schema changes across application replicas.
+// Kubernetes may start several pods at once, and every pod sees the same set
+// of unapplied migrations. A session advisory lock keeps that race out of the
+// migration engine without introducing a Kubernetes-specific dependency.
+const migrationLockKey int64 = 7_240_120
+
 // DB wraps *sql.DB.
 type DB struct {
 	*sql.DB
@@ -117,19 +123,36 @@ func (db *DB) InTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
 // files are named NNNN_description.sql and applied in numeric order; each file
 // runs inside its own transaction.
 func (db *DB) Migrate(ctx context.Context) error {
-	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
+	lockConn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("migration lock connection: %w", err)
+	}
+	if _, err := lockConn.ExecContext(ctx, `SELECT pg_advisory_lock($1)`, migrationLockKey); err != nil {
+		_ = lockConn.Close()
+		return fmt.Errorf("acquire migration lock: %w", err)
+	}
+	defer func() {
+		// Closing the dedicated connection releases the lock even when the
+		// explicit unlock fails because the caller context was cancelled.
+		unlockCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, _ = lockConn.ExecContext(unlockCtx, `SELECT pg_advisory_unlock($1)`, migrationLockKey)
+		_ = lockConn.Close()
+	}()
+
+	if _, err := lockConn.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
 		version    INTEGER PRIMARY KEY,
 		name       TEXT NOT NULL,
 		applied_at TIMESTAMPTZ NOT NULL
 	)`); err != nil {
 		return fmt.Errorf("create schema_migrations: %w", err)
 	}
-	if err := db.upgradeMigrationsTable(ctx); err != nil {
+	if err := db.upgradeMigrationsTable(ctx, lockConn); err != nil {
 		return err
 	}
 
 	applied := map[int]bool{}
-	rows, err := db.QueryContext(ctx, `SELECT version FROM schema_migrations`)
+	rows, err := lockConn.QueryContext(ctx, `SELECT version FROM schema_migrations`)
 	if err != nil {
 		return fmt.Errorf("read schema_migrations: %w", err)
 	}
@@ -171,7 +194,7 @@ func (db *DB) Migrate(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("read migration %s: %w", name, err)
 		}
-		err = db.InTx(ctx, func(tx *sql.Tx) error {
+		err = inConnTx(ctx, lockConn, func(tx *sql.Tx) error {
 			if _, err := tx.ExecContext(ctx, string(body)); err != nil {
 				return fmt.Errorf("apply %s: %w", name, err)
 			}
@@ -184,6 +207,24 @@ func (db *DB) Migrate(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func inConnTx(ctx context.Context, conn *sql.Conn, fn func(tx *sql.Tx) error) error {
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if p := recover(); p != nil {
+			_ = tx.Rollback()
+			panic(p)
+		}
+	}()
+	if err := fn(tx); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
 }
 
 func migrationVersion(name string) (int, error) {
@@ -205,9 +246,9 @@ func migrationVersion(name string) (int, error) {
 // пишет сам применятель, и до собственной очереди 0007 таблица успела бы
 // принять шесть записей уже нового типа в колонку старого. Поэтому свою
 // таблицу применятель приводит в порядок сам, до того как что-то в неё пишет.
-func (db *DB) upgradeMigrationsTable(ctx context.Context) error {
+func (db *DB) upgradeMigrationsTable(ctx context.Context, conn *sql.Conn) error {
 	var dataType string
-	err := db.QueryRowContext(ctx, `SELECT data_type FROM information_schema.columns
+	err := conn.QueryRowContext(ctx, `SELECT data_type FROM information_schema.columns
 		WHERE table_schema = current_schema() AND table_name = 'schema_migrations'
 		  AND column_name = 'applied_at'`).Scan(&dataType)
 	if err != nil {
@@ -216,7 +257,7 @@ func (db *DB) upgradeMigrationsTable(ctx context.Context) error {
 	if dataType != "bigint" {
 		return nil
 	}
-	if _, err := db.ExecContext(ctx, `ALTER TABLE schema_migrations
+	if _, err := conn.ExecContext(ctx, `ALTER TABLE schema_migrations
 		ALTER COLUMN applied_at TYPE TIMESTAMPTZ USING to_timestamp(applied_at / 1000.0)`); err != nil {
 		return fmt.Errorf("перевод schema_migrations.applied_at в TIMESTAMPTZ: %w", err)
 	}

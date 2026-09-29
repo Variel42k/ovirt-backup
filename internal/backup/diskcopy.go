@@ -45,6 +45,9 @@ type copyParams struct {
 	// карты экстентов это больше сохранённого, а прогресс должен идти по
 	// прочитанному.
 	OnProgress func(readDone int64)
+	// Compare keeps only chunks that differ from a parent image. It is used by
+	// oVirt compatibility mode when no dirty bitmap exists.
+	Compare func(ctx context.Context, index int64, current []byte) (bool, error)
 }
 
 // extentsRetryDelay — пауза перед повторным запросом карты экстентов.
@@ -139,7 +142,15 @@ func copyDisk(ctx context.Context, p copyParams) (copyResult, error) {
 		return networkRetryWindow
 	}
 
-	extents, err := src.Extents(ctx, p.ExtentContext)
+	var extents []imageio.Extent
+	var err error
+	if p.Compare != nil {
+		// Old engines have no dirty map. Read the entire logical image and let
+		// Compare decide which chunks carry new information.
+		extents = []imageio.Extent{{Start: 0, Length: p.VirtualSize, Dirty: true}}
+	} else {
+		extents, err = src.Extents(ctx, p.ExtentContext)
+	}
 	for err != nil && ctx.Err() == nil {
 		// Хост недоступен — карту спрашиваем через прокси, а не читаем
 		// весь диск: без сети чтение всё равно не пойдёт.
@@ -214,6 +225,15 @@ func copyDisk(ctx context.Context, p copyParams) (copyResult, error) {
 			from := group.Starts[i] - group.Offset
 			length := group.Lengths[i]
 			chunk := buf[from : from+length]
+			if p.Compare != nil {
+				keep, compareErr := p.Compare(ctx, index, chunk)
+				if compareErr != nil {
+					return res, compareErr
+				}
+				if !keep {
+					continue
+				}
+			}
 			if skipZero && allZero(chunk) {
 				continue
 			}

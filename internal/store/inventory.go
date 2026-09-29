@@ -274,20 +274,26 @@ func (s *Store) ListHosts(ctx context.Context, serverID string) ([]*model.Host, 
 	return out, rows.Err()
 }
 
-const vmColumns = `id, server_id, name, description, cluster_id, cluster_name, host_id, host_name,
-	status, pause_status, memory_bytes, cpu_cores, os_type, ha_enabled, guest_agent, ip_addresses,
-	provider_tags, local_tags, disk_count, desired_state, remediation_opt_out, failure_count, seen_at`
+const vmColumns = `v.id, v.server_id, v.name, v.description, v.cluster_id,
+	COALESCE(NULLIF(v.cluster_name, ''), clusters.name, ''), v.host_id,
+	COALESCE(NULLIF(v.host_name, ''), hosts.name, ''), v.status, v.pause_status, v.memory_bytes,
+	v.cpu_cores, v.os_type, v.ha_enabled, v.guest_agent, v.ip_addresses, v.provider_tags,
+	v.local_tags, v.disk_count, v.desired_state, v.remediation_opt_out, v.failure_count, v.seen_at`
+
+const vmFrom = ` FROM vms v
+	LEFT JOIN hosts ON hosts.server_id=v.server_id AND hosts.id=v.host_id
+	LEFT JOIN clusters ON clusters.server_id=v.server_id AND clusters.id=v.cluster_id`
 
 // ListVMs returns the cached VMs of a server, or of every server when serverID
 // is empty.
 func (s *Store) ListVMs(ctx context.Context, serverID string) ([]*model.VM, error) {
-	query := `SELECT ` + vmColumns + ` FROM vms`
+	query := `SELECT ` + vmColumns + vmFrom
 	args := []any{}
 	if serverID != "" {
-		query += ` WHERE server_id=?`
+		query += ` WHERE v.server_id=?`
 		args = append(args, serverID)
 	}
-	query += ` ORDER BY name`
+	query += ` ORDER BY v.name`
 
 	rows, err := s.db.Query(ctx, query, args...)
 	if err != nil {
@@ -308,7 +314,7 @@ func (s *Store) ListVMs(ctx context.Context, serverID string) ([]*model.VM, erro
 
 // GetVM loads one cached VM.
 func (s *Store) GetVM(ctx context.Context, serverID, id string) (*model.VM, error) {
-	row := s.db.QueryRow(ctx, `SELECT `+vmColumns+` FROM vms WHERE server_id=? AND id=?`, serverID, id)
+	row := s.db.QueryRow(ctx, `SELECT `+vmColumns+vmFrom+` WHERE v.server_id=? AND v.id=?`, serverID, id)
 	return scanVM(row)
 }
 

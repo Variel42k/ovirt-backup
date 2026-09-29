@@ -1,10 +1,12 @@
 # Развёртывание
 
-Поддерживаются два production-варианта:
+Поддерживаются три production-варианта:
 
-1. Docker Compose v2 или `docker-compose` v1: приложение и PostgreSQL работают
+1. Kubernetes через Helm: приложение масштабируется в несколько pod, а
+   PostgreSQL предоставляется отдельно; см. [KUBERNETES.md](KUBERNETES.md).
+2. Docker Compose v2 или `docker-compose` v1: приложение и PostgreSQL работают
    в контейнерах.
-2. Нативная служба systemd: приложение работает как `jhvirt.service`,
+3. Нативная служба systemd: приложение работает как `jhvirt.service`,
    PostgreSQL может быть локальной или внешней.
 
 Podman не поддерживается. Установщик отличает настоящий Docker от

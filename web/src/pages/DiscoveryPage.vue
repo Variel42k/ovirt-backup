@@ -28,9 +28,17 @@ const savedPageSize = Number(localStorage.getItem('jhvirt:discovery:page-size'))
 const pageSize = ref(pageSizeOptions.includes(savedPageSize) ? savedPageSize : 20)
 const servicePagination = ref({ page: 1, rowsPerPage: pageSize.value })
 const backupPagination = ref({ page: 1, rowsPerPage: pageSize.value })
-const vmPagination = ref({ page: 1, rowsPerPage: pageSize.value })
 let scanPollTimer: number | undefined
 let vmLoadVersion = 0
+
+interface DiscoveredSystemRow {
+  key: string
+  name: string
+  serverID: string
+  vm?: VM
+  addresses: string[]
+  services: DiscoveredService[]
+}
 
 const scanProgress = computed(() => {
   const scan = snapshot.value.scan
@@ -38,22 +46,62 @@ const scanProgress = computed(() => {
   return Math.min(1, scan.probe_completed / scan.probe_total)
 })
 
-const services = computed(() => {
-  const q = filter.value.trim().toLowerCase()
-  if (!q) return snapshot.value.services
-  return snapshot.value.services.filter((item) => [item.vm_name, item.name, item.product, item.hostname, item.address]
-    .some((value) => String(value ?? '').toLowerCase().includes(q)))
-})
-const virtualMachines = computed(() => {
+const systems = computed(() => {
   const q = filter.value.trim().toLowerCase()
   const scope = new Set(selectedServerIDs.value)
-  return inventoryVMs.value
-    .filter((item) => scope.size === 0 || scope.has(item.server_id))
-    .filter((item) => !q || [
-      item.name, item.description, item.cluster_name, item.host_name, item.status,
-      ...(item.ip_addresses || []), ...(item.tags || []), app.serverName(item.server_id),
+  const rows: DiscoveredSystemRow[] = []
+  const vmRows = new Map<string, DiscoveredSystemRow>()
+  const externalRows = new Map<string, DiscoveredSystemRow>()
+
+  for (const vm of inventoryVMs.value) {
+    if (scope.size > 0 && !scope.has(vm.server_id)) continue
+    const key = `${vm.server_id}:${vm.id}`
+    const row: DiscoveredSystemRow = {
+      key: `vm:${key}`,
+      name: vm.name,
+      serverID: vm.server_id,
+      vm,
+      addresses: [...(vm.ip_addresses || [])],
+      services: [],
+    }
+    rows.push(row)
+    vmRows.set(key, row)
+  }
+
+  for (const service of snapshot.value.services) {
+    if (scope.size > 0 && service.server_id && !scope.has(service.server_id)) continue
+    const vmKey = `${service.server_id || ''}:${service.vm_id || ''}`
+    let row = service.vm_id ? vmRows.get(vmKey) : undefined
+    if (!row) {
+      const identity = service.vm_id || service.hostname || service.address || service.id
+      const key = `external:${service.server_id || ''}:${identity}`
+      row = externalRows.get(key)
+      if (!row) {
+        row = {
+          key,
+          name: service.vm_name || service.hostname || service.address || service.product || service.name,
+          serverID: service.server_id || '',
+          addresses: [],
+          services: [],
+        }
+        externalRows.set(key, row)
+        rows.push(row)
+      }
+    }
+    if (service.address && !row.addresses.includes(service.address)) row.addresses.push(service.address)
+    row.services.push(service)
+  }
+
+  return rows
+    .filter((row) => !q || [
+      row.name, row.vm?.description, row.vm?.cluster_name, row.vm?.host_name, row.vm?.status,
+      ...(row.vm?.tags || []), ...row.addresses, app.serverName(row.serverID),
+      ...row.services.flatMap((service) => [
+        service.name, service.product, service.hostname, service.address, service.evidence,
+        ...(service.hostnames || []), ...(service.data_paths || []), ...(service.backup_paths || []),
+      ]),
     ].some((value) => String(value ?? '').toLowerCase().includes(q)))
-    .sort((a, b) => app.serverName(a.server_id).localeCompare(app.serverName(b.server_id)) || a.name.localeCompare(b.name))
+    .sort((a, b) => app.serverName(a.serverID).localeCompare(app.serverName(b.serverID)) || a.name.localeCompare(b.name))
 })
 const serviceById = computed(() => new Map(snapshot.value.services.map((item) => [item.id, item])))
 const serverOptions = computed(() => app.servers.map((server) => {
@@ -71,18 +119,10 @@ const scopeCaption = computed(() => {
 })
 
 const serviceColumns = [
-  { name: 'vm', label: 'Объект виртуализации', field: 'vm_name', align: 'left' as const, sortable: true },
-  { name: 'service', label: 'Сервис', field: (row: DiscoveredService) => row.product || row.name, align: 'left' as const, sortable: true },
-  { name: 'endpoint', label: 'Адрес', field: (row: DiscoveredService) => row.hostname || row.address, align: 'left' as const },
-  { name: 'source', label: 'Источник', field: 'source', align: 'left' as const },
-  { name: 'details', label: 'Признаки и пути', field: 'evidence', align: 'left' as const },
-]
-const vmColumns = [
-  { name: 'name', label: 'Виртуальная машина', field: 'name', align: 'left' as const, sortable: true },
-  { name: 'server', label: 'Подключение', field: 'server_id', align: 'left' as const, sortable: true },
-  { name: 'status', label: 'Состояние', field: 'status', align: 'left' as const, sortable: true },
-  { name: 'placement', label: 'Кластер / хост', field: 'cluster_name', align: 'left' as const, sortable: true },
-  { name: 'addresses', label: 'Адреса', field: 'ip_addresses', align: 'left' as const },
+  { name: 'system', label: 'Система / ВМ', field: (row: DiscoveredSystemRow) => row.name, align: 'left' as const, sortable: true },
+  { name: 'addresses', label: 'IP-адреса', field: (row: DiscoveredSystemRow) => row.addresses.join(', '), align: 'left' as const },
+  { name: 'placement', label: 'Подключение / хост', field: (row: DiscoveredSystemRow) => row.vm?.host_name || '', align: 'left' as const, sortable: true },
+  { name: 'services', label: 'Найденные сервисы', field: (row: DiscoveredSystemRow) => row.services.length, align: 'left' as const, sortable: true },
   { name: 'actions', label: '', field: 'id', align: 'right' as const },
 ]
 const backupColumns = [
@@ -107,7 +147,6 @@ function matched(row: DiscoveredBackup) {
   const item = row.matched_service_id ? serviceById.value.get(row.matched_service_id) : undefined
   return item ? `${item.product || item.name} — ${item.vm_name}` : 'не определён'
 }
-function vmRowKey(row: VM) { return `${row.server_id}:${row.id}` }
 function vmSupportsBackup(row: VM) {
   const server = app.servers.find((item) => item.id === row.server_id)
   return Boolean(server && app.serverSupports(server, 'supports_backup'))
@@ -228,7 +267,7 @@ async function saveSettings() {
       scan_additional_targets: scanAdditionalTargets.value,
       max_addresses: Number(maxAddresses.value),
     }))
-    vmPagination.value.page = 1
+    servicePagination.value.page = 1
     notifyEvent('info', 'Область поиска сохранена')
   } catch (err) { notifyError(err, 'Не удалось сохранить область поиска') }
   finally { settingsSaving.value = false }
@@ -237,7 +276,7 @@ async function resetSettings() {
   settingsSaving.value = true
   try {
     applySettings(await api.resetDiscoverySettings())
-    vmPagination.value.page = 1
+    servicePagination.value.page = 1
     notifyEvent('info', 'Восстановлены настройки из YAML')
   } catch (err) { notifyError(err, 'Не удалось сбросить область поиска') }
   finally { settingsSaving.value = false }
@@ -246,13 +285,9 @@ watch(pageSize, (value) => {
   localStorage.setItem('jhvirt:discovery:page-size', String(value))
   servicePagination.value = { page: 1, rowsPerPage: value }
   backupPagination.value = { page: 1, rowsPerPage: value }
-  vmPagination.value = { page: 1, rowsPerPage: value }
 })
-watch(filter, () => {
-  servicePagination.value.page = 1
-  vmPagination.value.page = 1
-})
-watch(selectedServerIDs, () => { vmPagination.value.page = 1 }, { deep: true })
+watch(filter, () => { servicePagination.value.page = 1 })
+watch(selectedServerIDs, () => { servicePagination.value.page = 1 }, { deep: true })
 onMounted(load)
 onUnmounted(() => {
   stopScanPolling()
@@ -336,74 +371,102 @@ onUnmounted(() => {
 
     <q-card flat bordered class="q-mb-lg">
       <q-card-section>
-        <div class="text-h6">Виртуальные машины</div>
+        <div class="text-h6">Системы и найденные сервисы</div>
         <div class="text-caption text-grey-7">
-          Все ВМ выбранных подключений, включая выключенные и не имеющие обнаруженных веб-сервисов.
+          Каждая ВМ показана одной строкой вместе с IP-адресами и обнаруженными на ней сервисами.
         </div>
       </q-card-section>
       <q-banner v-if="vmLoadError" dense class="bg-orange-1 text-orange-10 q-mx-md q-mb-md">
         <template #avatar><q-icon name="warning" color="warning" /></template>{{ vmLoadError }}
       </q-banner>
+      <q-banner v-if="!auth.can('servers.read')" dense class="bg-grey-2 q-mx-md q-mb-md">
+        Без права «Чтение серверов» отображаются только объекты, найденные последним поиском.
+      </q-banner>
       <q-table
-        v-if="auth.can('servers.read')"
-        v-model:pagination="vmPagination"
+        v-model:pagination="servicePagination"
         flat
-        :rows="virtualMachines"
-        :columns="vmColumns"
-        :row-key="vmRowKey"
-        :loading="vmLoading"
+        :rows="systems"
+        :columns="serviceColumns"
+        row-key="key"
+        :loading="loading || vmLoading"
         :rows-per-page-options="pageSizeOptions"
-        no-data-label="Виртуальные машины не найдены"
+        no-data-label="Системы и сервисы не найдены"
       >
-        <template #body-cell-name="props">
+        <template #body-cell-system="props">
           <q-td :props="props">
-            <router-link class="text-primary text-weight-medium" :to="{ name: 'vm', params: { serverId: props.row.server_id, vmId: props.row.id } }">
+            <router-link
+              v-if="props.row.vm"
+              class="text-primary text-weight-medium"
+              :to="{ name: 'vm', params: { serverId: props.row.vm.server_id, vmId: props.row.vm.id } }"
+            >
               {{ props.row.name }}
             </router-link>
-            <div v-if="props.row.description" class="text-caption text-grey-7">{{ props.row.description }}</div>
+            <span v-else class="text-weight-medium">{{ props.row.name }}</span>
+            <q-chip
+              v-if="props.row.vm"
+              dense
+              class="q-ml-sm"
+              :color="statusColor(props.row.vm.status)"
+              text-color="white"
+            >
+              {{ vmStatus(props.row.vm.status) }}
+            </q-chip>
+            <div v-if="props.row.vm?.description" class="text-caption text-grey-7">{{ props.row.vm.description }}</div>
+            <div v-if="!props.row.vm" class="text-caption text-grey-7">объект вне инвентаря виртуализации</div>
           </q-td>
         </template>
-        <template #body-cell-server="props"><q-td :props="props">{{ app.serverName(props.row.server_id) }}</q-td></template>
-        <template #body-cell-status="props">
-          <q-td :props="props"><q-chip dense :color="statusColor(props.row.status)" text-color="white">{{ vmStatus(props.row.status) }}</q-chip></q-td>
+        <template #body-cell-addresses="props">
+          <q-td :props="props">
+            <div v-for="address in props.row.addresses" :key="address" class="discovery-address">{{ address }}</div>
+            <span v-if="!props.row.addresses.length">—</span>
+          </q-td>
         </template>
         <template #body-cell-placement="props">
           <q-td :props="props">
-            <div>{{ props.row.cluster_name || '—' }}</div>
-            <div class="text-caption text-grey-7">{{ props.row.host_name || 'хост не назначен' }}</div>
+            <div>{{ props.row.serverID ? app.serverName(props.row.serverID) : 'вне подключения' }}</div>
+            <div v-if="props.row.vm" class="text-caption text-grey-7">
+              {{ props.row.vm.cluster_name || 'кластер не указан' }} · {{ props.row.vm.host_name || 'хост не назначен' }}
+            </div>
           </q-td>
         </template>
-        <template #body-cell-addresses="props"><q-td :props="props">{{ props.row.ip_addresses?.join(', ') || '—' }}</q-td></template>
+        <template #body-cell-services="props">
+          <q-td :props="props" class="discovery-services">
+            <div v-if="!props.row.services.length" class="text-grey-6">сервисы не обнаружены</div>
+            <div v-for="service in props.row.services" :key="service.id" class="discovery-service">
+              <div>
+                <span class="text-weight-medium">{{ service.product || service.name }}</span>
+                <q-badge class="q-ml-sm" :color="sourceColor(service.source)">{{ sourceLabel(service.source) }}</q-badge>
+                <q-badge v-if="service.proxy" class="q-ml-xs" color="warning" text-color="black">прокси</q-badge>
+              </div>
+              <a v-if="service.port" :href="endpoint(service)" target="_blank" rel="noopener">{{ endpoint(service) }}</a>
+              <div v-else class="text-caption">{{ service.address }}</div>
+              <div v-if="service.evidence" class="text-caption text-grey-7">{{ service.evidence }}</div>
+              <div v-if="service.hostnames?.length" class="text-caption text-grey-7">TLS/DNS: {{ service.hostnames.join(', ') }}</div>
+              <div v-for="item in [...(service.data_paths || []), ...(service.backup_paths || [])]" :key="item" class="text-caption text-grey-7">{{ item }}</div>
+            </div>
+          </q-td>
+        </template>
         <template #body-cell-actions="props">
           <q-td :props="props">
-            <q-btn
-              v-if="auth.can('backups.write') && vmSupportsBackup(props.row)"
-              flat dense no-caps color="primary" icon="play_arrow" label="Разовый"
-              :to="{ name: 'vm', params: { serverId: props.row.server_id, vmId: props.row.id }, query: { action: 'backup' } }"
-            />
-            <q-btn
-              v-if="auth.can('jobs.write') && vmSupportsBackup(props.row)"
-              flat dense no-caps color="primary" icon="event_repeat" label="План"
-              :to="{ name: 'vm', params: { serverId: props.row.server_id, vmId: props.row.id }, query: { action: 'schedule' } }"
-            />
-            <q-btn
-              v-if="!vmSupportsBackup(props.row) || (!auth.can('backups.write') && !auth.can('jobs.write'))"
-              flat dense no-caps label="Открыть"
-              :to="{ name: 'vm', params: { serverId: props.row.server_id, vmId: props.row.id } }"
-            />
+            <template v-if="props.row.vm">
+              <q-btn
+                v-if="auth.can('backups.write') && vmSupportsBackup(props.row.vm)"
+                flat dense no-caps color="primary" icon="play_arrow" label="Разовый"
+                :to="{ name: 'vm', params: { serverId: props.row.vm.server_id, vmId: props.row.vm.id }, query: { action: 'backup' } }"
+              />
+              <q-btn
+                v-if="auth.can('jobs.write') && vmSupportsBackup(props.row.vm)"
+                flat dense no-caps color="primary" icon="event_repeat" label="План"
+                :to="{ name: 'vm', params: { serverId: props.row.vm.server_id, vmId: props.row.vm.id }, query: { action: 'schedule' } }"
+              />
+              <q-btn
+                v-if="!vmSupportsBackup(props.row.vm) || (!auth.can('backups.write') && !auth.can('jobs.write'))"
+                flat dense no-caps label="Открыть"
+                :to="{ name: 'vm', params: { serverId: props.row.vm.server_id, vmId: props.row.vm.id } }"
+              />
+            </template>
           </q-td>
         </template>
-      </q-table>
-      <q-banner v-else dense class="bg-grey-2">Для просмотра ВМ требуется право «Чтение серверов».</q-banner>
-    </q-card>
-
-    <q-card flat bordered class="q-mb-lg">
-      <q-card-section class="text-h6">Найденные сервисы</q-card-section>
-      <q-table v-model:pagination="servicePagination" flat :rows="services" :columns="serviceColumns" row-key="id" :loading="loading" :rows-per-page-options="pageSizeOptions">
-        <template #body-cell-vm="props"><q-td :props="props">{{ props.row.vm_name || 'вне инвентаря' }}</q-td></template>
-        <template #body-cell-endpoint="props"><q-td :props="props"><a v-if="props.row.port" :href="endpoint(props.row)" target="_blank" rel="noopener">{{ endpoint(props.row) }}</a><span v-else>{{ props.row.address }}</span><q-badge v-if="props.row.proxy" class="q-ml-sm" color="warning" text-color="black">прокси</q-badge></q-td></template>
-        <template #body-cell-source="props"><q-td :props="props"><q-badge :color="sourceColor(props.row.source)">{{ sourceLabel(props.row.source) }}</q-badge></q-td></template>
-        <template #body-cell-details="props"><q-td :props="props"><div>{{ props.row.evidence }}</div><div v-if="props.row.hostnames?.length" class="text-caption text-grey-7">TLS/DNS: {{ props.row.hostnames.join(', ') }}</div><div v-for="item in [...(props.row.data_paths || []), ...(props.row.backup_paths || [])]" :key="item" class="text-caption text-grey-7">{{ item }}</div></q-td></template>
       </q-table>
     </q-card>
 
@@ -432,6 +495,21 @@ onUnmounted(() => {
 
 .discovery-scan {
   flex: 0 0 auto;
+}
+
+.discovery-address {
+  white-space: nowrap;
+}
+
+.discovery-services {
+  min-width: 340px;
+  white-space: normal;
+}
+
+.discovery-service + .discovery-service {
+  border-top: 1px solid rgba(0, 0, 0, 0.08);
+  margin-top: 8px;
+  padding-top: 8px;
 }
 
 @media (max-width: 599px) {

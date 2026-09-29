@@ -32,9 +32,10 @@ type jobPayload struct {
 	ExcludeVMIDs   []string `json:"exclude_vm_ids"`
 	ExcludeDiskIDs []string `json:"exclude_disk_ids"`
 
-	Type         string `json:"type"`
-	FullEvery    int    `json:"full_every"`
-	FallbackType string `json:"fallback_type"`
+	Type                  string `json:"type"`
+	FullEvery             int    `json:"full_every"`
+	FallbackType          string `json:"fallback_type"`
+	LegacyIncrementalMode string `json:"legacy_incremental_mode"`
 
 	Schedule string `json:"schedule"`
 	// MaxDurationMinutes ограничивает длительность запуска; 0 — без предела.
@@ -79,6 +80,7 @@ func (p jobPayload) apply(dst *model.BackupJob) {
 	dst.ExcludeDiskIDs = p.ExcludeDiskIDs
 	dst.Type = model.BackupType(p.Type)
 	dst.FullEvery = p.FullEvery
+	dst.LegacyIncrementalMode = model.LegacyIncrementalMode(strings.TrimSpace(p.LegacyIncrementalMode))
 	dst.Schedule = p.Schedule
 	dst.MaxDuration = time.Duration(p.MaxDurationMinutes) * time.Minute
 	dst.StorageTargetIDs = p.StorageTargetIDs
@@ -119,6 +121,18 @@ func (s *Server) validateJob(ctx context.Context, job *model.BackupJob) error {
 	}
 	if !srv.Kind.SupportsBackup() {
 		return badRequest("резервное копирование %s в этой версии не поддерживается", srv.Kind.Title())
+	}
+	if job.LegacyIncrementalMode != "" && !srv.Kind.UsesOVirtAPI() {
+		return badRequest("совместимый инкремент предназначен только для oVirt и его производных")
+	}
+	if !srv.SupportsCBT && job.LegacyIncrementalMode == model.LegacyIncrementalQcow2 {
+		if len(job.StorageTargetIDs) > 1 && job.StorageMode != model.StorageModeCopy &&
+			job.StorageMode != model.StorageModeParallel {
+			return badRequest("цепочка QCOW2 не поддерживает независимые запуски в несколько хранилищ; выберите режим copy или parallel")
+		}
+		if _, err := backup.FindQemuImg(s.cfg.Backup.QemuImgPath); err != nil {
+			return badRequest("цепочка QCOW2: %v", err)
+		}
 	}
 	if job.FreezeBy.NeedsEngine() && !srv.Kind.UsesOVirtAPI() {
 		return badRequest("заморозку силами движка поддерживает только oVirt и его производные: "+
@@ -378,11 +392,12 @@ func (s *Server) handlePreviewJob(w http.ResponseWriter, r *http.Request) {
 
 // adHocRequest starts one backup outside any job.
 type adHocRequest struct {
-	ServerID        string `json:"server_id"`
-	VMID            string `json:"vm_id"`
-	Type            string `json:"type"`
-	StorageTargetID string `json:"storage_target_id"`
-	Quiesce         bool   `json:"quiesce"`
+	ServerID              string `json:"server_id"`
+	VMID                  string `json:"vm_id"`
+	Type                  string `json:"type"`
+	LegacyIncrementalMode string `json:"legacy_incremental_mode"`
+	StorageTargetID       string `json:"storage_target_id"`
+	Quiesce               bool   `json:"quiesce"`
 	// Consistency и RequireConsistency — как у задания; пусто — из quiesce.
 	Consistency        string              `json:"consistency"`
 	RequireConsistency bool                `json:"require_consistency"`
@@ -420,6 +435,25 @@ func (s *Server) handleAdHocBackup(w http.ResponseWriter, r *http.Request) {
 	if !srv.Kind.SupportsBackup() {
 		s.writeError(w, r, badRequest("резервное копирование %s в этой версии не поддерживается", srv.Kind.Title()))
 		return
+	}
+	legacyMode := model.LegacyIncrementalMode(strings.TrimSpace(req.LegacyIncrementalMode))
+	if !legacyMode.Valid() {
+		s.writeError(w, r, badRequest("неизвестный совместимый режим инкремента: %q", legacyMode))
+		return
+	}
+	if legacyMode != "" && !srv.Kind.UsesOVirtAPI() {
+		s.writeError(w, r, badRequest("совместимый инкремент предназначен только для oVirt и его производных"))
+		return
+	}
+	if legacyMode == model.LegacyIncrementalQcow2 && model.BackupType(req.Type) == model.BackupDifferential {
+		s.writeError(w, r, badRequest("цепочка QCOW2 не поддерживает разностный режим"))
+		return
+	}
+	if !srv.SupportsCBT && legacyMode == model.LegacyIncrementalQcow2 {
+		if _, err := backup.FindQemuImg(s.cfg.Backup.QemuImgPath); err != nil {
+			s.writeError(w, r, badRequest("цепочка QCOW2: %v", err))
+			return
+		}
 	}
 	if srv.Kind.UsesProxmoxAPI() {
 		if !srv.HasProxmoxDataPlane() {
@@ -491,24 +525,25 @@ func (s *Server) handleAdHocBackup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	runReq := backup.RunRequest{
-		ServerID:           req.ServerID,
-		VMID:               req.VMID,
-		Type:               model.BackupType(req.Type),
-		FallbackType:       model.BackupSnapshot,
-		StorageTargetID:    req.StorageTargetID,
-		ExcludeDiskIDs:     req.ExcludeDisks,
-		Quiesce:            req.Quiesce,
-		Consistency:        consistency,
-		RequireConsistency: req.RequireConsistency && consistency.NeedsFreeze(),
-		MaxFreeze:          maxFreeze,
-		FreezeBy:           freezeBy,
-		FreezeMountpoints:  mountpoints,
-		Encrypt:            req.Encrypt,
-		VerifyAfter:        verifyMode,
-		VerifyOptions:      req.VerifyOptions,
-		OVAHostID:          req.OVAHostID,
-		OVADirectory:       req.OVADirectory,
-		TriggeredBy:        actor,
+		ServerID:              req.ServerID,
+		VMID:                  req.VMID,
+		Type:                  model.BackupType(req.Type),
+		FallbackType:          model.BackupSnapshot,
+		LegacyIncrementalMode: legacyMode,
+		StorageTargetID:       req.StorageTargetID,
+		ExcludeDiskIDs:        req.ExcludeDisks,
+		Quiesce:               req.Quiesce,
+		Consistency:           consistency,
+		RequireConsistency:    req.RequireConsistency && consistency.NeedsFreeze(),
+		MaxFreeze:             maxFreeze,
+		FreezeBy:              freezeBy,
+		FreezeMountpoints:     mountpoints,
+		Encrypt:               req.Encrypt,
+		VerifyAfter:           verifyMode,
+		VerifyOptions:         req.VerifyOptions,
+		OVAHostID:             req.OVAHostID,
+		OVADirectory:          req.OVADirectory,
+		TriggeredBy:           actor,
 	}
 	if req.RetainDays > 0 {
 		runReq.Retention = model.RetentionPolicy{MaxAge: time.Duration(req.RetainDays) * 24 * time.Hour}

@@ -218,6 +218,30 @@ func (c *Client) ReadRange(ctx context.Context, offset, length int64, w io.Write
 	return n, nil
 }
 
+// Download streams the complete representation exposed by a transfer ticket.
+// It is used for legacy qcow2 snapshot layers, whose length is the qcow2 file
+// length rather than the virtual disk size and therefore cannot be inferred by
+// the caller before the request.
+func (c *Client) Download(ctx context.Context, w io.Writer) (int64, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base, nil)
+	if err != nil {
+		return 0, err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("imageio полное чтение: %w", err)
+	}
+	defer drain(resp)
+	if resp.StatusCode != http.StatusOK {
+		return 0, errorFrom(resp, "GET", c.base)
+	}
+	n, err := io.Copy(w, resp.Body)
+	if err != nil {
+		return n, fmt.Errorf("imageio полное чтение тела: %w", err)
+	}
+	return n, nil
+}
+
 // WriteRange uploads length bytes from r at the given offset.
 func (c *Client) WriteRange(ctx context.Context, offset int64, r io.Reader, length int64, flush bool) error {
 	ctx, cancel := bound(ctx, c.limits.Block)

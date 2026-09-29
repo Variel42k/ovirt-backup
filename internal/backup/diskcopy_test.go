@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/http"
@@ -94,6 +95,41 @@ func TestIncrementalCopyWithoutMapFails(t *testing.T) {
 		ChunkSize: testChunkSize, VirtualSize: int64(len(image)), ExtentContext: imageio.ContextDirty})
 	if err == nil {
 		t.Fatal("инкремент без карты изменённых блоков должен завершаться ошибкой")
+	}
+}
+
+// Совместимый инкремент старого oVirt читает весь логический образ, но
+// публикует только чанки, отличающиеся от восстановленного родителя. Нулевой
+// новый чанк тоже обязан попасть в манифест: он перекрывает старые данные.
+func TestCompareCopyKeepsOnlyChangedChunksIncludingZero(t *testing.T) {
+	image := append(append(pattern('A', testChunkSize), make([]byte, testChunkSize)...), pattern('C', testChunkSize)...)
+	ctx := context.Background()
+	m := &DiskManifest{RunID: "inc", ChainID: "root", ParentRunID: "root", DiskID: "d", VirtualSize: int64(len(image))}
+	w, err := NewDiskWriter(ctx, m, WriterOptions{Backend: testBackend(t), DataKey: "compare.data",
+		ChunkSize: testChunkSize, Compression: CompressionNone})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := [][]byte{pattern('A', testChunkSize), pattern('B', testChunkSize), pattern('C', testChunkSize)}
+	res, err := copyDisk(ctx, copyParams{
+		Source: imageTicket(t, image, `[]`, 0), Writer: w,
+		ChunkSize: testChunkSize, VirtualSize: int64(len(image)), ExtentContext: imageio.ContextDirty,
+		Compare: func(_ context.Context, index int64, current []byte) (bool, error) {
+			return !bytes.Equal(parent[index], current), nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	final, err := w.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ReadBytes != int64(len(image)) || res.LogicalBytes != testChunkSize || res.ChunkCount != 1 {
+		t.Fatalf("прочитано %d, изменено %d в %d чанках", res.ReadBytes, res.LogicalBytes, res.ChunkCount)
+	}
+	if len(final.Chunks) != 1 || final.Chunks[0].Index != 1 {
+		t.Fatalf("сохранены чанки %+v, ожидался только обнулённый чанк 1", final.Chunks)
 	}
 }
 

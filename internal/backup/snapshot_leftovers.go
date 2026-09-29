@@ -61,6 +61,26 @@ func leftoverSnapshot(s ovirt.Snapshot, runs []*model.BackupRun, now time.Time) 
 	active := func(r *model.BackupRun) bool {
 		return r.Status == model.RunPending || r.Status == model.RunRunning
 	}
+	legacyQcowLeaf := func(r *model.BackupRun) bool {
+		if r.LegacyIncrementalMode != model.LegacyIncrementalQcow2 || r.Deleted ||
+			(r.Status != model.RunSucceeded && r.Status != model.RunPartial) {
+			return false
+		}
+		for _, child := range runs {
+			diskPoint := child.Type == model.BackupFull || child.Type == model.BackupIncremental ||
+				child.Type == model.BackupDifferential || child.Type == model.BackupSnapshot
+			// A successful newer point for the same repository supersedes this
+			// engine-side base even when it starts a fresh chain or switches to
+			// block comparison. Matching the target is important: two repositories
+			// may intentionally maintain independent chains for the same VM.
+			newerSameTarget := child.StorageTargetID == r.StorageTargetID && child.CreatedAt.After(r.CreatedAt)
+			if diskPoint && !child.Deleted && (child.Status == model.RunSucceeded || child.Status == model.RunPartial) &&
+				(child.ParentRunID == r.ID || newerSameTarget) {
+				return false
+			}
+		}
+		return true
+	}
 	// Снапшот записан за запуском — самый надёжный признак: так служба узнаёт
 	// и снапшот, который движок создал под бэкап со своим описанием.
 	for _, r := range runs {
@@ -70,6 +90,8 @@ func leftoverSnapshot(s ovirt.Snapshot, runs []*model.BackupRun, now time.Time) 
 		switch {
 		case active(r):
 			return r.ID, snapshotLive, "запуск ещё идёт"
+		case legacyQcowLeaf(r):
+			return r.ID, snapshotLive, "опорный snapshot совместимой QCOW2-цепочки"
 		case busy:
 			return r.ID, snapshotBusy, busyWhy
 		}
@@ -89,6 +111,8 @@ func leftoverSnapshot(s ovirt.Snapshot, runs []*model.BackupRun, now time.Time) 
 		switch {
 		case active(r):
 			return r.ID, snapshotLive, "запуск ещё идёт"
+		case legacyQcowLeaf(r):
+			return r.ID, snapshotLive, "опорный snapshot совместимой QCOW2-цепочки"
 		case busy:
 			return r.ID, snapshotBusy, busyWhy
 		}

@@ -1,0 +1,22 @@
+{{- if and .Values.backupStorage.enabled (not .Values.backupStorage.existingClaim) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "jhvirt.fullname" . }}-backups
+  labels:
+    {{- include "jhvirt.labels" . | nindent 4 }}
+  {{- with .Values.backupStorage.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  accessModes:
+    {{- toYaml .Values.backupStorage.accessModes | nindent 4 }}
+  {{- if .Values.backupStorage.storageClass }}
+  storageClassName: {{ .Values.backupStorage.storageClass | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.backupStorage.size }}
+{{- end }}
+

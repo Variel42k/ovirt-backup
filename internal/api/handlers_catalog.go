@@ -436,7 +436,8 @@ func (s *Server) importCatalogEntry(ctx context.Context, scan *model.CatalogScan
 		ChainIndex: doc.ChainIndex, StorageTargetID: scan.StorageTargetID, RepoPath: entry.RepoPath,
 		EngineBackupID: doc.EngineBackupID, FromCheckpointID: doc.FromCheckpointID,
 		ToCheckpointID: doc.ToCheckpointID, SnapshotID: doc.SnapshotID, DiskCount: len(doc.Disks),
-		LogicalBytes: doc.LogicalBytes, ReadBytes: doc.LogicalBytes, StoredBytes: doc.StoredBytes,
+		LegacyIncrementalMode: doc.LegacyIncrementalMode,
+		LogicalBytes:          doc.LogicalBytes, ReadBytes: doc.LogicalBytes, StoredBytes: doc.StoredBytes,
 		Progress: 100, Encrypted: doc.Encrypted, Compression: doc.Compression,
 		ConsistencyNote: doc.ConsistencyNote,
 		// Конфигурация ВМ — такой же объект хранилища, как манифест и данные.

@@ -24,8 +24,8 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
         -o /out/ovirt-backup-server ./cmd/ovirt-backup-server
 
 FROM docker.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
-# qemu-img нужен только для экспорта восстановленных образов в qcow2 и для
-# режима проверки «qemu-img check»; всё остальное работает без него.
+# qemu-img нужен для совместимой QCOW2-цепочки oVirt 4.3, экспорта
+# восстановленных образов в qcow2 и режима проверки «qemu-img check».
 RUN apk upgrade --no-cache && \
     apk add --no-cache ca-certificates tzdata qemu-img \
         'libblkid>=2.42.3-r1' 'libmount>=2.42.3-r1' && \

@@ -19,7 +19,7 @@ const runColumns = `id, job_run_id, job_id, job_name, server_id, vm_id, vm_name,
 	to_checkpoint_id, snapshot_id, disk_count, logical_bytes, read_bytes, stored_bytes, progress,
 	encrypted, compression, verify_status, verified_at, error, started_at, ended_at, expires_at,
 	deleted, created_at, skipped_disks, manifest_sha256, imported, consistency, consistency_note,
-	manual_steps`
+	manual_steps, legacy_incremental_mode`
 
 // runSelectColumns — то же плюс срок карантина.
 //
@@ -46,14 +46,14 @@ func (s *Store) CreateBackupRun(ctx context.Context, r *model.BackupRun) error {
 	}
 
 	_, err := s.db.Exec(ctx, `INSERT INTO backup_runs (`+runColumns+`)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		r.ID, nullString(r.JobRunID), r.JobID, r.JobName, r.ServerID, r.VMID, r.VMName, string(r.Type), string(r.Status),
 		r.ParentRunID, r.ChainID, r.ChainIndex, r.StorageTargetID, r.RepoPath, r.EngineBackupID,
 		r.FromCheckpointID, r.ToCheckpointID, r.SnapshotID, r.DiskCount, r.LogicalBytes,
 		r.ReadBytes, r.StoredBytes, r.Progress, r.Encrypted, r.Compression, string(r.VerifyStatus),
 		r.VerifiedAt, r.Error, r.StartedAt, r.EndedAt,
 		r.ExpiresAt, r.Deleted, r.CreatedAt, encodeSkipped(r.SkippedDisks), r.ManifestSHA256, r.Imported,
-		string(r.Consistency), r.ConsistencyNote, encodeManualSteps(r.ManualSteps))
+		string(r.Consistency), r.ConsistencyNote, encodeManualSteps(r.ManualSteps), string(r.LegacyIncrementalMode))
 	if err != nil {
 		return fmt.Errorf("insert backup run: %w", err)
 	}
@@ -96,7 +96,7 @@ func (s *Store) UpdateBackupRun(ctx context.Context, r *model.BackupRun) error {
 		logical_bytes=?, read_bytes=?, stored_bytes=?, progress=?, encrypted=?, compression=?,
 		verify_status=?, verified_at=?, error=?, started_at=?, ended_at=?, expires_at=?, deleted=?,
 		skipped_disks=?, manifest_sha256=?, imported=?, consistency=?, consistency_note=?,
-		manual_steps=?
+		manual_steps=?, legacy_incremental_mode=?
 		WHERE id=?`,
 		string(r.Status), r.ParentRunID, r.ChainID, r.ChainIndex, r.StorageTargetID, r.RepoPath,
 		r.EngineBackupID, r.FromCheckpointID, r.ToCheckpointID, r.SnapshotID, r.DiskCount,
@@ -104,7 +104,7 @@ func (s *Store) UpdateBackupRun(ctx context.Context, r *model.BackupRun) error {
 		string(r.VerifyStatus), r.VerifiedAt, r.Error, r.StartedAt,
 		r.EndedAt, r.ExpiresAt, r.Deleted,
 		encodeSkipped(r.SkippedDisks), r.ManifestSHA256, r.Imported,
-		string(r.Consistency), r.ConsistencyNote, encodeManualSteps(r.ManualSteps), r.ID)
+		string(r.Consistency), r.ConsistencyNote, encodeManualSteps(r.ManualSteps), string(r.LegacyIncrementalMode), r.ID)
 	if err != nil {
 		return fmt.Errorf("update backup run: %w", err)
 	}
@@ -264,6 +264,26 @@ func (s *Store) LatestUsableRun(ctx context.Context, serverID, vmID, targetID st
 
 	row := s.db.QueryRow(ctx, query, args...)
 	return scanRun(row)
+}
+
+// LatestLegacyRun selects a parent for an application-computed incremental.
+// Unlike LatestUsableRun it does not require an engine checkpoint: oVirt 4.3
+// has none. Snapshot roots count as full points for differential chains.
+func (s *Store) LatestLegacyRun(ctx context.Context, serverID, vmID, targetID string, onlyFull bool) (*model.BackupRun, error) {
+	query := `SELECT ` + runSelectColumns + ` FROM backup_runs
+		WHERE server_id=? AND vm_id=? AND storage_target_id=? AND deleted=?
+		  AND status IN (?, ?)`
+	args := []any{serverID, vmID, targetID, false, string(model.RunSucceeded), string(model.RunPartial)}
+	if onlyFull {
+		query += ` AND type IN (?, ?)`
+		args = append(args, string(model.BackupFull), string(model.BackupSnapshot))
+	} else {
+		query += ` AND type IN (?, ?, ?, ?)`
+		args = append(args, string(model.BackupFull), string(model.BackupIncremental),
+			string(model.BackupDifferential), string(model.BackupSnapshot))
+	}
+	query += ` ORDER BY created_at DESC LIMIT 1`
+	return scanRun(s.db.QueryRow(ctx, query, args...))
 }
 
 // CheckpointsInUse — checkpoint-ы ВМ, от которых ещё может считаться
@@ -447,12 +467,12 @@ func (s *Store) ListStaleRunningRuns(ctx context.Context) ([]*model.BackupRun, e
 
 func scanRun(row rowScanner) (*model.BackupRun, error) {
 	var (
-		r                                         model.BackupRun
-		typ, status, verifyStatus                 string
-		verifiedAt, startedAt, endedAt, expiresAt sql.NullTime
-		purgeAfter                                sql.NullTime
-		createdAt                                 time.Time
-		skipped, consistency, manualSteps         string
+		r                                             model.BackupRun
+		typ, status, verifyStatus                     string
+		verifiedAt, startedAt, endedAt, expiresAt     sql.NullTime
+		purgeAfter                                    sql.NullTime
+		createdAt                                     time.Time
+		skipped, consistency, manualSteps, legacyMode string
 	)
 	var jobRunID sql.NullString
 	err := row.Scan(&r.ID, &jobRunID, &r.JobID, &r.JobName, &r.ServerID, &r.VMID, &r.VMName, &typ, &status,
@@ -460,7 +480,7 @@ func scanRun(row rowScanner) (*model.BackupRun, error) {
 		&r.EngineBackupID, &r.FromCheckpointID, &r.ToCheckpointID, &r.SnapshotID, &r.DiskCount,
 		&r.LogicalBytes, &r.ReadBytes, &r.StoredBytes, &r.Progress, &r.Encrypted, &r.Compression,
 		&verifyStatus, &verifiedAt, &r.Error, &startedAt, &endedAt, &expiresAt, &r.Deleted, &createdAt,
-		&skipped, &r.ManifestSHA256, &r.Imported, &consistency, &r.ConsistencyNote, &manualSteps, &purgeAfter)
+		&skipped, &r.ManifestSHA256, &r.Imported, &consistency, &r.ConsistencyNote, &manualSteps, &legacyMode, &purgeAfter)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -481,6 +501,7 @@ func scanRun(row rowScanner) (*model.BackupRun, error) {
 	r.SkippedDisks = decodeSkipped(skipped)
 	r.Consistency = model.Consistency(consistency)
 	r.ManualSteps = decodeManualSteps(manualSteps)
+	r.LegacyIncrementalMode = model.LegacyIncrementalMode(legacyMode)
 	return &r, nil
 }
 

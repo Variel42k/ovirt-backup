@@ -313,6 +313,8 @@ export interface BackupJob {
   type: string
   full_every: number
   fallback_type: string
+  /** Совместимый инкремент для oVirt без нативного CBT. */
+  legacy_incremental_mode?: 'compare' | 'qcow2_chain' | ''
   schedule: string
   max_duration?: number
   storage_target_ids: string[]
@@ -441,6 +443,8 @@ export interface BackupRun {
   repo_path: string
   from_checkpoint_id?: string
   to_checkpoint_id?: string
+  snapshot_id?: string
+  legacy_incremental_mode?: 'compare' | 'qcow2_chain'
   disk_count: number
   /** Достигнутый уровень; пусто у точек, снятых до появления уровней. */
   consistency?: Consistency
@@ -1536,6 +1540,7 @@ export interface DiscoveredService {
   port?: number
   scheme?: string
   hostname?: string
+  hostnames?: string[]
   name: string
   product?: string
   source: 'web' | 'guest' | 'configured' | 'network' | 'dynamic_network' | 'discovered_hostname' | 'virtualization_manager' | 'virtualization_host'

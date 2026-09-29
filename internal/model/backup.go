@@ -11,6 +11,25 @@ import (
 // what the engine is asked to produce, not just in how much data is copied.
 type BackupType string
 
+// LegacyIncrementalMode selects how an oVirt engine without the native
+// Backup API produces an incremental chain.
+type LegacyIncrementalMode string
+
+const (
+	// LegacyIncrementalCompare reads a complete temporary snapshot and keeps
+	// only chunks that differ from the parent restore point. It is the safest
+	// compatibility mode: no snapshot remains on the engine between runs.
+	LegacyIncrementalCompare LegacyIncrementalMode = "compare"
+	// LegacyIncrementalQcow2 keeps one service snapshot and downloads the next
+	// qcow2 overlay. This saves source-side I/O, but requires qcow2 disks and
+	// qemu-img on the backup server.
+	LegacyIncrementalQcow2 LegacyIncrementalMode = "qcow2_chain"
+)
+
+func (m LegacyIncrementalMode) Valid() bool {
+	return m == "" || m == LegacyIncrementalCompare || m == LegacyIncrementalQcow2
+}
+
 const (
 	// BackupFull — полная копия через oVirt Backup API. Создаёт checkpoint,
 	// от которого затем считаются инкременты. ВМ не останавливается.
@@ -474,6 +493,9 @@ type BackupJob struct {
 	FullEvery int        `json:"full_every"`
 	// Fallback, если для диска недоступен CBT (raw-диск, старый движок).
 	FallbackType BackupType `json:"fallback_type"`
+	// LegacyIncrementalMode enables a compatibility implementation on oVirt
+	// 4.3 and older engines instead of degrading every run to a full snapshot.
+	LegacyIncrementalMode LegacyIncrementalMode `json:"legacy_incremental_mode,omitempty"`
 
 	Schedule string `json:"schedule"` // cron-выражение (5 или 6 полей), пусто — только вручную
 	// Максимальная длительность запуска; по истечении задание отменяется.
@@ -590,6 +612,12 @@ func (j *BackupJob) Validate() error {
 	default:
 		return fmt.Errorf("неизвестный тип бэкапа: %q", j.Type)
 	}
+	if !j.LegacyIncrementalMode.Valid() {
+		return fmt.Errorf("неизвестный совместимый режим инкремента: %q", j.LegacyIncrementalMode)
+	}
+	if j.LegacyIncrementalMode == LegacyIncrementalQcow2 && j.Type == BackupDifferential {
+		return fmt.Errorf("цепочка QCOW2 поддерживает только последовательные инкременты; для разностной копии выберите сравнение блоков")
+	}
 	if j.Type.NeedsParent() && j.FullEvery <= 0 {
 		return fmt.Errorf("для типа %q нужно задать full_every > 0", j.Type)
 	}
@@ -676,6 +704,9 @@ type BackupRun struct {
 	FromCheckpointID string `json:"from_checkpoint_id,omitempty"`
 	ToCheckpointID   string `json:"to_checkpoint_id,omitempty"`
 	SnapshotID       string `json:"snapshot_id,omitempty"`
+	// LegacyIncrementalMode records why SnapshotID may intentionally remain
+	// after a successful run. Empty means an ordinary temporary snapshot.
+	LegacyIncrementalMode LegacyIncrementalMode `json:"legacy_incremental_mode,omitempty"`
 
 	DiskCount int `json:"disk_count"`
 	// Consistency — уровень, которого запуск достиг на самом деле. Пусто у

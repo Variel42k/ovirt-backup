@@ -62,9 +62,9 @@ func TestRecommenderOffersHotBackupForAnyDisks(t *testing.T) {
 			full: true, inc: true, recommended: model.BackupIncremental,
 		},
 		{
-			name: "движок без Backup API: только снапшот",
+			name: "движок без Backup API: снапшот и совместимый инкремент",
 			a:    Assessment{EngineSupportsCBT: false, DiskCount: 1, CBTPossible: 1, CBTEnabled: 1},
-			full: false, inc: false, recommended: model.BackupSnapshot,
+			full: false, inc: true, recommended: model.BackupSnapshot, incWhy: "совместимый",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

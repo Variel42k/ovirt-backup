@@ -52,6 +52,22 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestMigrateWithSingleConnectionPool(t *testing.T) {
+	cfg := testdb.Config(t)
+	cfg.Postgres.MaxConns = 1
+	db, err := Open(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatalf("migrate with one connection: %v", err)
+	}
+}
+
 func TestServerRoundTripEncryptsPassword(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
@@ -308,6 +324,34 @@ func TestSyncVMsPreservesOperatorIntent(t *testing.T) {
 	}
 	if len(all) != 1 {
 		t.Errorf("len(vms) = %d, want 1 (vm-2 should have been pruned)", len(all))
+	}
+}
+
+func TestVMPlacementNamesFallBackToCachedInventory(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	srv := &model.Server{Name: "engine", EngineURL: "https://engine", Username: "u", Enabled: true}
+	if err := s.CreateServer(ctx, srv); err != nil {
+		t.Fatalf("create server: %v", err)
+	}
+	if err := s.SyncClusters(ctx, srv.ID, []*model.Cluster{{ID: "cluster-1", Name: "production"}}); err != nil {
+		t.Fatalf("sync clusters: %v", err)
+	}
+	if err := s.SyncHosts(ctx, srv.ID, []*model.Host{{ID: "host-1", Name: "hypervisor-01"}}); err != nil {
+		t.Fatalf("sync hosts: %v", err)
+	}
+	if err := s.SyncVMs(ctx, srv.ID, []*model.VM{{
+		ID: "vm-1", Name: "database", HostID: "host-1", ClusterID: "cluster-1", Status: "up",
+	}}); err != nil {
+		t.Fatalf("sync VMs: %v", err)
+	}
+
+	vm, err := s.GetVM(ctx, srv.ID, "vm-1")
+	if err != nil {
+		t.Fatalf("get VM: %v", err)
+	}
+	if vm.HostName != "hypervisor-01" || vm.ClusterName != "production" {
+		t.Fatalf("placement fallback was not applied: %#v", vm)
 	}
 }
 

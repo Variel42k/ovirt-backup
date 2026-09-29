@@ -38,6 +38,7 @@ let pageLoadSequence = 0
 
 const selectedStorage = ref<string | null>(null)
 const selectedType = ref<string>('')
+const legacyIncrementalMode = ref<'compare' | 'qcow2_chain'>('compare')
 const consistency = ref<Consistency>('crash')
 const requireConsistency = ref(false)
 // На oVirt по умолчанию замораживает движок: доли секунды на момент точки,
@@ -73,6 +74,8 @@ const backupPlanningAvailable = computed(() => backupSupported.value && auth.can
 const isProxmox = computed(() => sourceServer.value?.kind === 'proxmox')
 // Выбор «кто замораживает» есть только у oVirt: у KVM и Proxmox замораживает служба или vzdump.
 const isOVirt = computed(() => usesOVirtAPI(sourceServer.value?.kind))
+const isLegacyOVirt = computed(() => isOVirt.value && sourceServer.value?.supports_cbt === false)
+const usesLegacyIncremental = computed(() => isLegacyOVirt.value && ['incremental', 'differential'].includes(selectedType.value))
 const isKvm = computed(() => sourceServer.value?.kind === 'kvm')
 const consistencyChoices = computed(() => consistencyOptions.map((option) => ({
   ...option,
@@ -176,6 +179,7 @@ async function startBackup() {
       server_id: props.serverId,
       vm_id: props.vmId,
       type: selectedType.value,
+      legacy_incremental_mode: usesLegacyIncremental.value ? legacyIncrementalMode.value : undefined,
       storage_target_id: selectedStorage.value,
       // quiesce — для служб прежней версии, которые уровня не знают.
       quiesce: consistency.value !== 'crash',
@@ -229,6 +233,9 @@ function applyPreset(preset: SchedulePreset) {
         server_id: props.serverId,
         vm_ids: [props.vmId],
         type: preset.type,
+        legacy_incremental_mode: isLegacyOVirt.value && preset.type === 'incremental'
+          ? legacyIncrementalMode.value
+          : undefined,
         full_every: preset.full_every,
         schedule: preset.schedule,
         storage_target_ids: [selectedStorage.value],
@@ -249,6 +256,11 @@ watch(() => [props.serverId, props.vmId], load)
 watch(() => route.query.action, focusRequestedAction)
 watch(selectedStorage, () => {
   if (!loading.value) void loadRecommendation()
+})
+watch(selectedType, (type) => {
+  if (type === 'differential' && legacyIncrementalMode.value === 'qcow2_chain') {
+    legacyIncrementalMode.value = 'compare'
+  }
 })
 onMounted(load)
 </script>
@@ -358,6 +370,27 @@ onMounted(load)
               >
                 <template #append><HelpButton article="verify" label="Режимы проверки" /></template>
               </q-select>
+            </div>
+            <div v-if="usesLegacyIncremental" class="col-12">
+              <q-select
+                v-model="legacyIncrementalMode"
+                :options="[
+                  { label: 'Сравнение блоков — безопаснее, снимок читается целиком', value: 'compare' },
+                  {
+                    label: 'Цепочка QCOW2 (экспериментально) — передаётся только слой изменений',
+                    value: 'qcow2_chain',
+                    disable: selectedType === 'differential' || !app.meta?.capabilities.qemu_img,
+                  },
+                ]"
+                emit-value
+                map-options
+                label="Совместимый инкремент для oVirt без Backup API"
+                :hint="legacyIncrementalMode === 'qcow2_chain'
+                  ? 'Сохраняется один служебный snapshot; не создавайте другие snapshots между запусками'
+                  : 'Передаётся весь снимок, но в репозиторий записываются только изменившиеся блоки'"
+                outlined
+                dense
+              />
             </div>
             <div class="col-12 col-sm-4">
               <q-select

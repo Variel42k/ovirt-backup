@@ -1,0 +1,8 @@
+apiVersion: v2
+name: jhvirt
+description: jhvirt virtual infrastructure backup and management
+type: application
+version: 0.1.0
+appVersion: "dev"
+kubeVersion: ">=1.25.0-0"
+

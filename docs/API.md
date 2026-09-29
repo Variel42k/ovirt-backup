@@ -817,6 +817,7 @@ S3 endpoint не передаёт данные через сервис и пот
   "type": "incremental",
   "full_every": 7,
   "fallback_type": "snapshot",        // если CBT недоступен
+  "legacy_incremental_mode": "compare", // oVirt 4.3: compare|qcow2_chain|""
   "schedule": "0 1 * * *",
   "storage_target_ids": ["…"],
   "storage_mode": "copy",             // copy|parallel|separate
@@ -873,8 +874,10 @@ S3 endpoint не передаёт данные через сервис и пот
 | `GET` | `/restores` `/restores/{id}` | история, фаза, прогресс и результат восстановления |
 
 ```jsonc
-// POST /backups
-{ "server_id": "…", "vm_id": "…", "type": "full",
+// POST /backups; legacy_incremental_mode нужен только oVirt 4.3:
+// compare либо qcow2_chain (последний не поддерживает differential)
+{ "server_id": "…", "vm_id": "…", "type": "incremental",
+  "legacy_incremental_mode": "compare",
   "storage_target_id": "…", "consistency": "filesystem", "verify_after": "boot",
   "verify_options": { "boot_host_id": "…", "memory_mib": 0,
     "vcpus": 0, "timeout_sec": 300 },

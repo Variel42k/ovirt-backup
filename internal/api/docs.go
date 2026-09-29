@@ -54,6 +54,7 @@ var guidePlacements = map[string]guidePlacement{
 	"BUILD.md":             {"Начало работы", 40, "construction"},
 	"CONFIGURATION.md":     {"Настройка", 10, "tune"},
 	"INTEGRATIONS.md":      {"Настройка", 20, "hub"},
+	"KUBERNETES.md":        {"Настройка", 25, "deployed_code"},
 	"SERVICE-DISCOVERY.md": {"Настройка", 30, "travel_explore"},
 	"KEYCLOAK-AD.md":       {"Доступ и безопасность", 10, "badge"},
 	"ROLES.md":             {"Доступ и безопасность", 20, "admin_panel_settings"},

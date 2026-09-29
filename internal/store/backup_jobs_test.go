@@ -31,6 +31,7 @@ func TestBackupJobRoundTripKeepsBootVerifyOptions(t *testing.T) {
 		ID: "job-boot", Name: "boot every week", Enabled: true,
 		ServerID: srv.ID, Type: model.BackupFull,
 		StorageTargetIDs: []string{target.ID}, VerifyAfter: model.VerifyBoot,
+		LegacyIncrementalMode: model.LegacyIncrementalCompare,
 		VerifyOptions: model.VerifyOptions{
 			BootHostID: srv.ID, MemoryMiB: 4096, VCPUs: 4,
 			TimeoutSec: 900, KeepOnFailure: true,
@@ -47,9 +48,13 @@ func TestBackupJobRoundTripKeepsBootVerifyOptions(t *testing.T) {
 	if got.VerifyAfter != model.VerifyBoot || got.VerifyOptions != job.VerifyOptions {
 		t.Fatalf("параметры проверки потеряны: got %#v, want %#v", got.VerifyOptions, job.VerifyOptions)
 	}
+	if got.LegacyIncrementalMode != model.LegacyIncrementalCompare {
+		t.Fatalf("совместимый режим потерян: %q", got.LegacyIncrementalMode)
+	}
 
 	got.VerifyOptions.MemoryMiB = 8192
 	got.VerifyOptions.KeepOnFailure = false
+	got.LegacyIncrementalMode = model.LegacyIncrementalQcow2
 	if err := st.UpdateBackupJob(ctx, got); err != nil {
 		t.Fatalf("обновление задания: %v", err)
 	}
@@ -59,6 +64,9 @@ func TestBackupJobRoundTripKeepsBootVerifyOptions(t *testing.T) {
 	}
 	if again.VerifyOptions.MemoryMiB != 8192 || again.VerifyOptions.KeepOnFailure {
 		t.Fatalf("обновлённые параметры не сохранены: %#v", again.VerifyOptions)
+	}
+	if again.LegacyIncrementalMode != model.LegacyIncrementalQcow2 {
+		t.Fatalf("обновлённый совместимый режим не сохранён: %q", again.LegacyIncrementalMode)
 	}
 }
 

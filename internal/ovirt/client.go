@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -51,6 +52,11 @@ type Client struct {
 	authMu   sync.Mutex
 	token    string
 	tokenExp time.Time
+
+	// oVirt 4.3 knows inactivity_timeout, but not timeout_policy (added in
+	// 4.4). Once the engine confirms that older request shape, keep using it
+	// for this pooled client so every disk doesn't first receive HTTP 400.
+	legacyImageTransfer atomic.Bool
 
 	log zerolog.Logger
 }

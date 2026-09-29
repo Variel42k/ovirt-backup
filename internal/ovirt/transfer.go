@@ -2,7 +2,9 @@ package ovirt
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"time"
 )
 
@@ -53,7 +55,10 @@ func (c *Client) CreateTransfer(ctx context.Context, req TransferRequest) (*Imag
 		"direction":          req.Direction,
 		"format":             req.Format,
 		"inactivity_timeout": int(req.InactivityTimeout / time.Second),
-		"timeout_policy":     req.TimeoutPolicy,
+	}
+	legacyRequest := c.legacyImageTransfer.Load()
+	if !legacyRequest {
+		body["timeout_policy"] = req.TimeoutPolicy
 	}
 	switch {
 	case req.SnapshotID != "":
@@ -71,10 +76,27 @@ func (c *Client) CreateTransfer(ctx context.Context, req TransferRequest) (*Imag
 	}
 
 	var transfer ImageTransfer
-	if err := c.post(ctx, "/imagetransfers", body, &transfer); err != nil {
-		return nil, err
+	err := c.post(ctx, "/imagetransfers", body, &transfer)
+	if err == nil {
+		return &transfer, nil
 	}
-	return &transfer, nil
+
+	// timeout_policy (and its cancel value) appeared in oVirt 4.4. A 4.3
+	// engine rejects the entire ImageTransfer document with the generic
+	// "For correct usage" response. Retry the same request in the 4.3 shape;
+	// a rejected POST cannot have opened a transfer, so this cannot duplicate
+	// a session. Cache the successful downgrade for the remaining disks.
+	var apiErr *APIError
+	if !legacyRequest && errors.As(err, &apiErr) && apiErr.Status == http.StatusBadRequest {
+		delete(body, "timeout_policy")
+		transfer = ImageTransfer{}
+		if retryErr := c.post(ctx, "/imagetransfers", body, &transfer); retryErr != nil {
+			return nil, retryErr
+		}
+		c.legacyImageTransfer.Store(true)
+		return &transfer, nil
+	}
+	return nil, err
 }
 
 // GetTransfer reads the current state of a transfer.

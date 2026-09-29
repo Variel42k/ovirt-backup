@@ -4310,6 +4310,38 @@ prepare_docker_data_paths() {
                 "$POSTGRES_HELPER_IMAGE" test -w /target >/dev/null 2>&1 ||
                 die "контейнерный UID 10001 не получил право записи в $PDP_PATH"
         fi
+        if [ "$PDP_KEY" = JHV_RESTORE_DIR ]; then
+            # Compose хранит backup.temp_dir в /restores/.tmp. Проверки только
+            # корня недостаточно: каталог .tmp мог остаться от старого запуска
+            # с владельцем root и 0700, хотя сам /restores доступен UID 10001.
+            # Симлинк не исправляем от root — это могло бы поменять права у
+            # неожиданной цели за пределами scratch.
+            docker run --rm --network none --user root -v "$PDP_PATH:/target" \
+                "$POSTGRES_HELPER_IMAGE" test ! -L /target/.tmp >/dev/null 2>&1 ||
+                die "$PDP_PATH/.tmp является симлинком; задайте обычный каталог для временных образов"
+            if ! docker run --rm --network none --user 10001:10001 -v "$PDP_PATH:/target" \
+                    "$POSTGRES_HELPER_IMAGE" sh -c '
+                        mkdir -p /target/.tmp || exit
+                        probe=/target/.tmp/.jhv-permission-probe-$$
+                        mkdir "$probe" && rmdir "$probe"
+                    ' >/dev/null 2>&1; then
+                # Исправляем только после реальной неудачи. На NFS/CIFS chown
+                # может быть запрещён, хотя уже настроенные ACL дают запись.
+                docker run --rm --network none --user root -v "$PDP_PATH:/target" \
+                    "$POSTGRES_HELPER_IMAGE" sh -c '
+                        mkdir -p /target/.tmp
+                        chown 10001:10001 /target/.tmp
+                        chmod 0700 /target/.tmp
+                    ' >/dev/null 2>&1 || true
+                docker run --rm --network none --user 10001:10001 -v "$PDP_PATH:/target" \
+                    "$POSTGRES_HELPER_IMAGE" sh -c '
+                        probe=/target/.tmp/.jhv-permission-probe-$$
+                        mkdir "$probe" && rmdir "$probe"
+                    ' >/dev/null 2>&1 ||
+                    die "контейнерный UID 10001 не может создавать каталоги в $PDP_PATH/.tmp
+Проверьте UID/GID, ACL, NFS root_squash и метку SELinux у JHV_RESTORE_DIR."
+            fi
+        fi
         # Пустой каталог при переносе — почти всегда забытое хранилище: база
         # приехала и знает о копиях, а самих копий на новом узле нет. Служба
         # при этом поднимется и покажет их в списке, а «файл не найден» вылезет

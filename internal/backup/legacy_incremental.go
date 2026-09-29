@@ -22,6 +22,12 @@ import (
 func (e *Engine) runLegacyQcow2(ctx context.Context, client *ovirt.Client, backend repo.Backend,
 	srv *model.Server, vm *model.VM, run *model.BackupRun, req RunRequest,
 	disks []ovirt.Disk, p plan) ([]*DiskManifest, error) {
+	if _, err := FindQemuImg(e.cfg.QemuImgPath); err != nil {
+		return nil, fmt.Errorf("совместимая QCOW2-цепочка требует qemu-img: %w", err)
+	}
+	if err := checkTempWorkspace(e.cfg.TempDir); err != nil {
+		return nil, fmt.Errorf("совместимая QCOW2-цепочка требует локальный scratch: %w", err)
+	}
 
 	parent, err := e.store.GetBackupRun(ctx, run.ParentRunID)
 	if err != nil {
@@ -93,13 +99,7 @@ func (e *Engine) runLegacyQcow2(ctx context.Context, client *ovirt.Client, backe
 		imageByDisk[disk.ID] = disk.ImageID
 	}
 
-	tempBase := e.cfg.TempDir
-	if tempBase != "" {
-		if err := os.MkdirAll(tempBase, 0o750); err != nil {
-			return nil, err
-		}
-	}
-	workDir, err := os.MkdirTemp(tempBase, "jhvirt-legacy-qcow2-")
+	workDir, err := makeTempWorkspace(e.cfg.TempDir, "jhvirt-legacy-qcow2-")
 	if err != nil {
 		return nil, err
 	}

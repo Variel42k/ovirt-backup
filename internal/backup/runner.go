@@ -1502,13 +1502,19 @@ func (e *Engine) runSnapshot(ctx context.Context, client *ovirt.Client, backend 
 	// запуск останавливается здесь — до заморозки гостя и снапшота, а не после.
 	if !srv.SupportsCBT {
 		for _, d := range disks {
-			if d.Format != "cow" {
+			if d.Format != "cow" && d.Format != "qcow2" {
 				continue
 			}
 			if _, err := FindQemuImg(e.cfg.QemuImgPath); err != nil {
 				return nil, fmt.Errorf("диск %s в формате qcow2, а движок без Backup API отдаёт такой том как есть — "+
 					"образ собирается через qemu-img, установите его на сервер службы (backup.qemu_img_path): %w",
 					d.AliasOrName(), err)
+			}
+			// Проверяем scratch до заморозки гостя и создания снапшота. Иначе
+			// неверные права bind mount обнаруживаются только после операции на
+			// движке и оставляют ещё один остаток, который приходится удалять.
+			if err := checkTempWorkspace(e.cfg.TempDir); err != nil {
+				return nil, fmt.Errorf("диск %s требует локальной сборки qcow2: %w", d.AliasOrName(), err)
 			}
 			break
 		}

@@ -279,13 +279,7 @@ func (e *Engine) copyLegacyChainDisk(ctx context.Context, client *ovirt.Client, 
 		defer parent.Close()
 	}
 
-	tempBase := e.cfg.TempDir
-	if tempBase != "" {
-		if err := os.MkdirAll(tempBase, 0o750); err != nil {
-			return nil, 0, 0, err
-		}
-	}
-	workDir, err := os.MkdirTemp(tempBase, "jhvirt-legacy-chain-")
+	workDir, err := makeTempWorkspace(e.cfg.TempDir, "jhvirt-legacy-chain-")
 	if err != nil {
 		return nil, 0, 0, err
 	}

@@ -32,13 +32,7 @@ func (e *Engine) ExportQcow2Artifacts(ctx context.Context, backend repo.Backend,
 	if err != nil {
 		return 0, err
 	}
-	tempBase := e.cfg.TempDir
-	if tempBase != "" {
-		if err := os.MkdirAll(tempBase, 0o750); err != nil {
-			return 0, err
-		}
-	}
-	workDir, err := os.MkdirTemp(tempBase, "jhvirt-qcow2-")
+	workDir, err := makeTempWorkspace(e.cfg.TempDir, "jhvirt-qcow2-")
 	if err != nil {
 		return 0, err
 	}

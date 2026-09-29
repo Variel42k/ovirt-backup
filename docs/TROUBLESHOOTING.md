@@ -381,6 +381,21 @@ sudo systemctl daemon-reload
 sudo systemctl restart jhvirt
 ```
 
+В Docker временные образы oVirt 4.3 создаются в `/restores/.tmp`. Штатный
+установщик и обновление создают этот каталог с владельцем `10001:10001`,
+режимом `0700` и проверяют запись из непривилегированного контейнера. Если
+каталог был подключён или создан вручную, проверьте фактический host-путь:
+
+```bash
+sudo grep '^JHV_RESTORE_DIR=' /opt/jhvirt/compose/.env
+sudo docker compose --env-file /opt/jhvirt/compose/.env \
+  -f /opt/jhvirt/compose/docker-compose.yml exec -T ovirt-backup \
+  sh -c 'ls -ldn /restores /restores/.tmp; test -w /restores/.tmp'
+```
+
+Сам движок бэкапа также проверяет `backup.temp_dir` до заморозки ВМ и создания
+снапшота, поэтому неверные права больше не оставляют новый снапшот-остаток.
+
 ### Служба была остановлена до обновления и не запустилась
 
 Это штатно: обновление перезапускает только ранее активную службу.

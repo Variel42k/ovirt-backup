@@ -314,6 +314,19 @@ func (e *Engine) Recommend(ctx context.Context, serverID, vmID, storageTargetID 
 				"копия на горячую. Переведите их в qcow2, чтобы копировались только изменения",
 			names, humanBytes(used)))
 	}
+	// Движок без Backup API (oVirt 4.3) отдаёт том qcow2 файлом, и образ
+	// собирается через qemu-img. Без него бэкап такой ВМ не выполнится.
+	if !a.Libvirt && !srv.SupportsCBT && !a.QemuImgAvailable {
+		for _, d := range a.Disks {
+			if d.Format == "cow" && d.NotBackedUp == "" {
+				a.Warnings = append(a.Warnings, fmt.Sprintf(
+					"диск %s в формате qcow2, а движок без Backup API отдаёт такой том файлом: образ собирается "+
+						"через qemu-img, которого на сервере службы нет. Установите qemu-img (backup.qemu_img_path), "+
+						"иначе бэкап этой ВМ не выполнится", d.Alias))
+				break
+			}
+		}
+	}
 	if a.VMRunning && !a.GuestAgent {
 		a.Warnings = append(a.Warnings,
 			"гостевой агент не отвечает: заморозка файловых систем недоступна, копия будет crash-consistent")

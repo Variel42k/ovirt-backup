@@ -163,13 +163,23 @@ flowchart TD
 
 - **Сравнение блоков** — при каждом запуске временный snapshot читается целиком,
   но с родителем сравнивается по сетке чанков и в репозиторий записываются только
-  изменения. Это безопасный вариант для `raw` и `qcow2`; экономит место в
-  репозитории, но не сетевой трафик и не чтение СХД.
+  изменения. Годится для `raw` и `qcow2`; экономит место в репозитории, но не
+  сетевой трафик и не чтение СХД.
 - **Цепочка QCOW2** — только для дисков `cow/qcow2`. Служба сохраняет один
   опорный snapshot между запусками, загружает следующий слой в формате QCOW2,
   локально привязывает его к восстановленной основе через `qemu-img` и также
   публикует только изменённые чанки. После полной публикации новой точки старая
   основа сливается. При ошибке новая точка удаляется, а старая остаётся.
+
+**Как читается том на 4.3.** `ovirt-imageio` 1.x отдаёт файл тома как есть:
+у тома qcow2 это байты формата qcow2 одного слоя, а не содержимое диска.
+Поэтому том qcow2 — тонкий диск или любой диск, у которого уже есть снапшоты, —
+служба скачивает целиком вместе с цепочкой предков из снапшотов ВМ, связывает
+слои через `qemu-img` и раскладывает на чанки собранный сырой образ. Так
+работают и полная копия, и сравнение блоков, и основа цепочки QCOW2. Том raw
+без предков — это и есть диск: его служба читает диапазонами, как на 4.4. Для
+томов qcow2 нужны `qemu-img` и место в `backup.temp_dir` под тома цепочки и
+собранный разреженный образ самого большого диска.
 
 Первый запуск и каждый `full_every` создают новую полную основу. Разностный
 режим поддерживается только сравнением блоков. Для QCOW2 нужны `qemu-img` и
@@ -620,6 +630,7 @@ flowchart LR
 | влияние бэкапа на ВМ | `ComputeIOImpact` — [internal/model/io_impact.go](../internal/model/io_impact.go); ответ телеметрии — `handleRunTelemetry` в [internal/api/handlers_backup.go](../internal/api/handlers_backup.go); обычные замеры — `DiskSampleFilter.OnlyMonitoring` в [internal/store/iostats.go](../internal/store/iostats.go) |
 | тома гостя для выборочной заморозки | `Conn.GuestFilesystems` — [internal/libvirtx/guest_fs.go](../internal/libvirtx/guest_fs.go); `handleGuestFilesystems` — [internal/api/handlers_inventory.go](../internal/api/handlers_inventory.go); поле — [web/src/components/FreezeMountpointsField.vue](../web/src/components/FreezeMountpointsField.vue) |
 | очередь на место хранения | `PlaceLimiter` — [internal/backup/place_limiter.go](../internal/backup/place_limiter.go); oVirt — `Engine.waitDomains` в [internal/backup/storage_queue.go](../internal/backup/storage_queue.go); KVM — `Dispatcher.waitScratch` в [internal/dispatch/storage_queue.go](../internal/dispatch/storage_queue.go); настройка — `backup.max_runs_per_storage` в [config/ovirt-backup.yaml](../config/ovirt-backup.yaml) |
+| образ тома qcow2 на oVirt 4.3 | `materializeLegacyChain`, `downloadVolume`, `copyLegacyChainDisk` — [internal/backup/legacy_chain.go](../internal/backup/legacy_chain.go); выбор пути — `runSnapshot` и `copyDisks` в [internal/backup/runner.go](../internal/backup/runner.go) |
 | прогноз места до старта | `SpaceForecast`, `Engine.forecastSpace`, `peakWrites`, `Assessment.SetPlaceFree` — [internal/backup/space_forecast.go](../internal/backup/space_forecast.go); замеры записи — `Store.GuestWritesDuringRuns` в [internal/store/iostats.go](../internal/store/iostats.go); место под scratch на KVM — `Dispatcher.Recommend` в [internal/dispatch/space_forecast.go](../internal/dispatch/space_forecast.go); карточка — [web/src/components/SpaceForecastCard.vue](../web/src/components/SpaceForecastCard.vue) |
 | защита домена хранения oVirt | `DomainReserve`, `checkDomainsBeforeBackup`, `domainGuard`, `copyDisksGuarded` — [internal/backup/storage_guard.go](../internal/backup/storage_guard.go); место домена — `Client.GetStorageDomain` в [internal/ovirt/inventory.go](../internal/ovirt/inventory.go) |
 | замер места и статистика scratch в libvirt | `Conn.ScratchFree`, `Conn.BackupScratchUsage` — [internal/libvirtx/backup.go](../internal/libvirtx/backup.go) |

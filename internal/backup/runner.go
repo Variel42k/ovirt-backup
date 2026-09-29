@@ -557,6 +557,11 @@ type plan struct {
 	// полным и становится новой основой диска (см. EffectiveChain).
 	FullDisks  map[string]string
 	LegacyMode model.LegacyIncrementalMode
+	// LegacyChain — диски движка без Backup API, том снапшота которых в
+	// формате qcow2: imageio 4.3 отдаёт его как есть, и образ собирается из
+	// цепочки томов (legacy_chain.go). LegacyFormats — форматы томов ВМ.
+	LegacyChain   map[string]legacyVolume
+	LegacyFormats map[string]string
 }
 
 // markFullDisk отмечает диск инкрементального запуска, который копируется
@@ -1491,6 +1496,22 @@ func (e *Engine) runSnapshot(ctx context.Context, client *ovirt.Client, backend 
 		diskIDs = append(diskIDs, d.ID)
 	}
 
+	// Том qcow2 на движке без Backup API собирается через qemu-img. Без него
+	// запуск останавливается здесь — до заморозки гостя и снапшота, а не после.
+	if !srv.SupportsCBT {
+		for _, d := range disks {
+			if d.Format != "cow" {
+				continue
+			}
+			if _, err := FindQemuImg(e.cfg.QemuImgPath); err != nil {
+				return nil, fmt.Errorf("диск %s в формате qcow2, а движок без Backup API отдаёт такой том как есть — "+
+					"образ собирается через qemu-img, установите его на сервер службы (backup.qemu_img_path): %w",
+					d.AliasOrName(), err)
+			}
+			break
+		}
+	}
+
 	e.waitSnapshotOperations(ctx, client, vm, run)
 
 	// Записи гостя за время бэкапа копятся в слое снапшота на том же домене.
@@ -1570,6 +1591,30 @@ func (e *Engine) runSnapshot(ctx context.Context, client *ovirt.Client, backend 
 		if sd.ImageID != "" {
 			imageByDisk[sd.ID] = sd.ImageID
 		}
+	}
+	// Движок без Backup API отдаёт том qcow2 как есть: такие диски собираются
+	// из цепочки томов снапшота, а не читаются диапазонами.
+	for _, sd := range snapDisks {
+		if sd.ImageID == "" || !needsLegacyChain(srv, sd.Format) {
+			continue
+		}
+		if p.LegacyChain == nil {
+			p.LegacyChain = map[string]legacyVolume{}
+		}
+		p.LegacyChain[sd.ID] = legacyVolume{ImageID: sd.ImageID, Format: sd.Format}
+	}
+	if len(p.LegacyChain) > 0 {
+		if p.LegacyFormats, err = snapshotVolumeFormats(ctx, client, vm.ID); err != nil {
+			return nil, err
+		}
+		names := make([]string, 0, len(p.LegacyChain))
+		for _, d := range disks {
+			if _, ok := p.LegacyChain[d.ID]; ok {
+				names = append(names, d.AliasOrName())
+			}
+		}
+		e.log.Info().Str("vm", vm.Name).Strs("диски", names).
+			Msg("движок без Backup API: тома qcow2 скачиваются целиком и собираются через qemu-img")
 	}
 
 	manifests, err := e.copyDisksGuarded(ctx, client, run, domains, func(ctx context.Context) ([]*DiskManifest, error) {
@@ -1651,8 +1696,19 @@ func (e *Engine) copyDisks(ctx context.Context, client *ovirt.Client, backend re
 			if _, full := p.FullDisks[disk.ID]; full {
 				diskContext, diskType = imageio.ContextZero, model.BackupFull
 			}
-			manifest, read, stored, err := e.copyOneDisk(ctx, client, backend, srv, vm, run, req,
-				disk, index, chunkSize, factory(disk), diskContext, diskType, p, pacer)
+			var (
+				manifest     *DiskManifest
+				read, stored int64
+				err          error
+			)
+			if top, ok := p.LegacyChain[disk.ID]; ok {
+				compare := p.LegacyMode == model.LegacyIncrementalCompare && run.Type.NeedsParent()
+				manifest, read, stored, err = e.copyLegacyChainDisk(ctx, client, backend, srv, vm, run, req,
+					disk, index, chunkSize, top, p.LegacyFormats, compare)
+			} else {
+				manifest, read, stored, err = e.copyOneDisk(ctx, client, backend, srv, vm, run, req,
+					disk, index, chunkSize, factory(disk), diskContext, diskType, p, pacer)
+			}
 
 			mu.Lock()
 			defer mu.Unlock()

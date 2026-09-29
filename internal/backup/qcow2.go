@@ -127,11 +127,17 @@ func backingMatchesImage(backing, imageID string) bool {
 // overlay with the locally reconstructed parent image. -u only edits metadata;
 // the overlay's guest data is not rewritten.
 func RebaseQcow2(ctx context.Context, configured, overlay, parentRaw string) error {
+	return RebaseQcow2Onto(ctx, configured, overlay, parentRaw, "raw")
+}
+
+// RebaseQcow2Onto — то же для предка любого формата (raw или qcow2): так
+// связывается скачанная цепочка томов oVirt 4.3.
+func RebaseQcow2Onto(ctx context.Context, configured, overlay, parent, parentFormat string) error {
 	bin, err := FindQemuImg(configured)
 	if err != nil {
 		return err
 	}
-	cmd := exec.CommandContext(ctx, bin, "rebase", "-u", "-f", "qcow2", "-F", "raw", "-b", parentRaw, overlay)
+	cmd := exec.CommandContext(ctx, bin, "rebase", "-u", "-f", "qcow2", "-F", parentFormat, "-b", parent, overlay)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("qemu-img rebase: %w: %s", err, strings.TrimSpace(string(out)))

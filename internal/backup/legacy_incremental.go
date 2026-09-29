@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/Variel42k/ovirt-backup/internal/imageio"
 	"github.com/Variel42k/ovirt-backup/internal/model"
 	"github.com/Variel42k/ovirt-backup/internal/ovirt"
 	"github.com/Variel42k/ovirt-backup/internal/repo"
@@ -182,56 +181,10 @@ func (e *Engine) runLegacyQcow2(ctx context.Context, client *ovirt.Client, backe
 }
 
 func (e *Engine) downloadQcowLayer(ctx context.Context, client *ovirt.Client, imageID, path string) (int64, error) {
-	request := ovirt.TransferRequest{SnapshotID: imageID, Direction: "download", Format: "cow",
-		InactivityTimeout: e.cfg.Transfer.InactivityTimeout}
-	transfer, err := client.CreateTransfer(ctx, request)
+	n, err := e.downloadVolume(ctx, client, imageID, "cow", path, nil)
 	if err != nil {
-		return 0, fmt.Errorf("открытие передачи слоя QCOW2: %w", err)
+		return n, fmt.Errorf("слой QCOW2: %w", err)
 	}
-	success := false
-	defer func() {
-		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
-		defer cancel()
-		_ = client.CloseTransfer(closeCtx, transfer.ID, success)
-	}()
-	ready, err := client.WaitTransferReady(ctx, transfer.ID, 10*time.Minute)
-	if err != nil {
-		return 0, err
-	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o640)
-	if err != nil {
-		return 0, err
-	}
-	url := ovirt.DataURL(ready, e.cfg.Transfer.PreferProxy)
-	urls := []string{url}
-	if !e.cfg.Transfer.PreferProxy && ready.ProxyURL != "" && ready.ProxyURL != url {
-		urls = append(urls, ready.ProxyURL)
-	}
-	var n int64
-	for i, candidate := range urls {
-		if i > 0 {
-			if _, seekErr := file.Seek(0, io.SeekStart); seekErr != nil {
-				err = seekErr
-				break
-			}
-			if truncateErr := file.Truncate(0); truncateErr != nil {
-				err = truncateErr
-				break
-			}
-		}
-		source := imageio.New(candidate, client.DataHTTPClient()).WithTimeouts(e.imageioTimeouts(0))
-		n, err = source.Download(ctx, file)
-		if err == nil || !imageio.IsNetworkError(err) {
-			break
-		}
-	}
-	if closeErr := file.Close(); err == nil {
-		err = closeErr
-	}
-	if err != nil {
-		return n, err
-	}
-	success = true
 	return n, nil
 }
 
@@ -288,10 +241,15 @@ func (e *Engine) writeLegacyDelta(ctx context.Context, backend repo.Backend, srv
 		if int64(n) < length {
 			clear(currentChunk[n:])
 		}
-		previous, err := parent.ReadChunk(ctx, chunkIndex)
-		if err != nil {
-			writer.Abort(context.WithoutCancel(ctx), backend, err)
-			return nil, 0, err
+		// Без основы (полная копия) предыдущего содержимого нет: в
+		// репозиторий идут все непустые чанки.
+		var previous []byte
+		if parent != nil {
+			previous, err = parent.ReadChunk(ctx, chunkIndex)
+			if err != nil {
+				writer.Abort(context.WithoutCancel(ctx), backend, err)
+				return nil, 0, err
+			}
 		}
 		if (previous == nil && allZero(currentChunk)) || bytes.Equal(previous, currentChunk) {
 			continue

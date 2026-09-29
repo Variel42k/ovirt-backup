@@ -4,16 +4,21 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/rs/zerolog"
 
+	"github.com/Variel42k/ovirt-backup/internal/config"
 	"github.com/Variel42k/ovirt-backup/internal/model"
 	"github.com/Variel42k/ovirt-backup/internal/ovirt"
 )
@@ -100,6 +105,9 @@ type fakeLegacyEngine struct {
 	transfers []map[string]any
 	ranged    int
 	finalized int
+	// open — текущая передача ещё не закрыта: после finalize движок
+	// отвечает finished_success, как настоящий.
+	open bool
 }
 
 func startFakeLegacyEngine(t *testing.T, volume []byte) (*fakeLegacyEngine, *httptest.Server) {
@@ -114,15 +122,24 @@ func startFakeLegacyEngine(t *testing.T, volume []byte) (*fakeLegacyEngine, *htt
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		f.mu.Lock()
 		f.transfers = append(f.transfers, body)
+		f.open = true
 		f.mu.Unlock()
 		_, _ = w.Write([]byte(`{"id":"tr-1","phase":"initializing"}`))
 	})
 	mux.HandleFunc("GET /ovirt-engine/api/imagetransfers/tr-1", func(w http.ResponseWriter, _ *http.Request) {
+		f.mu.Lock()
+		open := f.open
+		f.mu.Unlock()
+		if !open {
+			_, _ = w.Write([]byte(`{"id":"tr-1","phase":"finished_success"}`))
+			return
+		}
 		_, _ = fmt.Fprintf(w, `{"id":"tr-1","phase":"transferring","transfer_url":"%s/images/ticket"}`, srv.URL)
 	})
 	mux.HandleFunc("POST /ovirt-engine/api/imagetransfers/tr-1/finalize", func(w http.ResponseWriter, _ *http.Request) {
 		f.mu.Lock()
 		f.finalized++
+		f.open = false
 		f.mu.Unlock()
 		_, _ = w.Write([]byte(`{}`))
 	})
@@ -177,6 +194,93 @@ func TestDownloadVolumeFetchesWholeVolume(t *testing.T) {
 	}
 }
 
+func TestDownloadVolumeReopensStalledLegacyTransfer(t *testing.T) {
+	volume := bytes.Repeat([]byte("complete-volume"), 1024)
+	var (
+		mu        sync.Mutex
+		created   int
+		cancelled = map[string]bool{}
+		finalized = map[string]bool{}
+	)
+	mux := http.NewServeMux()
+	var srv *httptest.Server
+	mux.HandleFunc("/ovirt-engine/sso/oauth/token", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"access_token":"token","exp":"9999999999999"}`))
+	})
+	mux.HandleFunc("POST /ovirt-engine/api/imagetransfers", func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		created++
+		id := "tr-" + strconv.Itoa(created)
+		mu.Unlock()
+		_, _ = fmt.Fprintf(w, `{"id":%q,"phase":"initializing"}`, id)
+	})
+	mux.HandleFunc("GET /ovirt-engine/api/imagetransfers/{id}", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		mu.Lock()
+		cancelledNow, finalizedNow := cancelled[id], finalized[id]
+		mu.Unlock()
+		switch {
+		case cancelledNow:
+			_, _ = fmt.Fprintf(w, `{"id":%q,"phase":"cancelled"}`, id)
+		case finalizedNow:
+			_, _ = fmt.Fprintf(w, `{"id":%q,"phase":"finished_success"}`, id)
+		default:
+			_, _ = fmt.Fprintf(w, `{"id":%q,"phase":"transferring","transfer_url":%q}`, id, srv.URL+"/images/"+id)
+		}
+	})
+	mux.HandleFunc("POST /ovirt-engine/api/imagetransfers/{id}/cancel", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		cancelled[r.PathValue("id")] = true
+		mu.Unlock()
+		_, _ = w.Write([]byte(`{}`))
+	})
+	mux.HandleFunc("POST /ovirt-engine/api/imagetransfers/{id}/finalize", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		finalized[r.PathValue("id")] = true
+		mu.Unlock()
+		_, _ = w.Write([]byte(`{}`))
+	})
+	mux.HandleFunc("GET /images/{id}", func(w http.ResponseWriter, r *http.Request) {
+		if r.PathValue("id") == "tr-1" {
+			_, _ = w.Write([]byte("incomplete"))
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+			return
+		}
+		_, _ = w.Write(volume)
+	})
+	srv = httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	client, err := ovirt.New(ovirt.Config{EngineURL: srv.URL, Username: "admin@internal", Password: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldWait, oldDelay := legacyTransferCloseWait, legacyVolumeRetryDelay
+	legacyTransferCloseWait, legacyVolumeRetryDelay = time.Second, time.Millisecond
+	t.Cleanup(func() {
+		legacyTransferCloseWait, legacyVolumeRetryDelay = oldWait, oldDelay
+	})
+	e := &Engine{cfg: config.BackupConfig{Transfer: config.TransferConfig{RequestTimeout: 40 * time.Millisecond}}, log: zerolog.Nop()}
+	path := filepath.Join(t.TempDir(), "layer.qcow2")
+	n, err := e.downloadVolume(context.Background(), client, "vol-top", "cow", path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != int64(len(volume)) || !bytes.Equal(got, volume) {
+		t.Fatalf("retry result: bytes=%d content_equal=%v", n, bytes.Equal(got, volume))
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if created != 2 || !cancelled["tr-1"] || !finalized["tr-2"] {
+		t.Fatalf("created=%d cancelled=%v finalized=%v", created, cancelled, finalized)
+	}
+}
+
 // Том raw без предков — это и есть диск: цепочка из одного тома собирается
 // без qemu-img.
 func TestMaterializeLegacyChainRawBase(t *testing.T) {
@@ -195,5 +299,68 @@ func TestMaterializeLegacyChainRawBase(t *testing.T) {
 	got, _ := os.ReadFile(path)
 	if n != int64(len(volume)) || !bytes.Equal(got, volume) {
 		t.Fatalf("образ из тома raw: %d байт, совпал %v", n, bytes.Equal(got, volume))
+	}
+}
+
+// Движок 4.3 принял finalize, но передача застряла в finalizing_success: диск
+// заблокирован, и следующий том получил бы 409 на 10 минут. Служба должна
+// сказать это сразу и не открывать новую передачу.
+func TestDownloadVolumeReportsTransferStuckAfterFinalize(t *testing.T) {
+	var (
+		mu      sync.Mutex
+		created int
+	)
+	mux := http.NewServeMux()
+	var srv *httptest.Server
+	mux.HandleFunc("/ovirt-engine/sso/oauth/token", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"access_token":"token","exp":"9999999999999"}`))
+	})
+	mux.HandleFunc("POST /ovirt-engine/api/imagetransfers", func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		created++
+		mu.Unlock()
+		_, _ = w.Write([]byte(`{"id":"tr-stuck","phase":"initializing"}`))
+	})
+	finalized := false
+	mux.HandleFunc("GET /ovirt-engine/api/imagetransfers/tr-stuck", func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		done := finalized
+		mu.Unlock()
+		if done {
+			_, _ = w.Write([]byte(`{"id":"tr-stuck","phase":"finalizing_success"}`))
+			return
+		}
+		_, _ = fmt.Fprintf(w, `{"id":"tr-stuck","phase":"transferring","transfer_url":%q}`, srv.URL+"/images/tr-stuck")
+	})
+	mux.HandleFunc("POST /ovirt-engine/api/imagetransfers/tr-stuck/finalize", func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		finalized = true
+		mu.Unlock()
+		_, _ = w.Write([]byte(`{}`))
+	})
+	mux.HandleFunc("GET /images/tr-stuck", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("volume"))
+	})
+	srv = httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	client, err := ovirt.New(ovirt.Config{EngineURL: srv.URL, Username: "admin@internal", Password: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldFinalize := legacyTransferFinalizeWait
+	legacyTransferFinalizeWait = time.Second
+	t.Cleanup(func() { legacyTransferFinalizeWait = oldFinalize })
+
+	e := &Engine{log: zerolog.Nop()}
+	_, err = e.downloadVolume(context.Background(), client, "vol-top", "cow", filepath.Join(t.TempDir(), "v.qcow2"), nil)
+	if !errors.Is(err, errTransferNotReleased) || !strings.Contains(err.Error(), "finalizing_success") ||
+		!strings.Contains(err.Error(), "tr-stuck") {
+		t.Fatalf("ошибка должна назвать передачу и фазу: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if created != 1 {
+		t.Fatalf("открыто передач: %d — повтор при заблокированном диске бессмыслен", created)
 	}
 }

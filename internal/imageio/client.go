@@ -10,10 +10,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -39,6 +41,25 @@ type Timeouts struct {
 	// Scan — контрольная сумма и обнуление: проходят по данным всего диска,
 	// время растёт с размером.
 	Scan time.Duration
+}
+
+// ErrReadIdleTimeout means that an HTTP response stayed open but delivered no
+// bytes for the configured Block interval. It is deliberately different from
+// a total request deadline: downloading a large volume may take hours while a
+// silent, half-open imageio stream must not hold a snapshot forever.
+var ErrReadIdleTimeout = errors.New("imageio read idle timeout")
+
+type activityReader struct {
+	io.Reader
+	touch func()
+}
+
+func (r activityReader) Read(p []byte) (int, error) {
+	n, err := r.Reader.Read(p)
+	if n > 0 {
+		r.touch()
+	}
+	return n, err
 }
 
 // New wraps a transfer URL. The HTTP client should carry the engine CA, which
@@ -223,20 +244,55 @@ func (c *Client) ReadRange(ctx context.Context, offset, length int64, w io.Write
 // length rather than the virtual disk size and therefore cannot be inferred by
 // the caller before the request.
 func (c *Client) Download(ctx context.Context, w io.Writer) (int64, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base, nil)
+	requestCtx := ctx
+	cancel := func() {}
+	var timer *time.Timer
+	var idleExpired atomic.Bool
+	if c.limits.Block > 0 {
+		requestCtx, cancel = context.WithCancel(ctx)
+		timer = time.AfterFunc(c.limits.Block, func() {
+			idleExpired.Store(true)
+			cancel()
+		})
+	}
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+		cancel()
+	}()
+
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, c.base, nil)
 	if err != nil {
 		return 0, err
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
+		if idleExpired.Load() && ctx.Err() == nil {
+			return 0, fmt.Errorf("%w: от imageio не получены заголовки за %s", ErrReadIdleTimeout, c.limits.Block)
+		}
 		return 0, fmt.Errorf("imageio полное чтение: %w", err)
 	}
 	defer drain(resp)
 	if resp.StatusCode != http.StatusOK {
 		return 0, errorFrom(resp, "GET", c.base)
 	}
-	n, err := io.Copy(w, resp.Body)
+	reader := io.Reader(resp.Body)
+	if timer != nil {
+		reader = activityReader{Reader: resp.Body, touch: func() {
+			if !idleExpired.Load() {
+				timer.Reset(c.limits.Block)
+			}
+		}}
+	}
+	n, err := io.Copy(w, reader)
+	if timer != nil {
+		timer.Stop()
+	}
 	if err != nil {
+		if idleExpired.Load() && ctx.Err() == nil {
+			return n, fmt.Errorf("%w: от imageio не получены данные за %s", ErrReadIdleTimeout, c.limits.Block)
+		}
 		return n, fmt.Errorf("imageio полное чтение тела: %w", err)
 	}
 	return n, nil
@@ -442,7 +498,15 @@ func IsNetworkError(err error) bool {
 		return false
 	}
 	var e *Error
-	return !errors.As(err, &e)
+	if errors.As(err, &e) {
+		return false
+	}
+	// Ошибка записи в локальный файл (нет места, только чтение) — не сеть:
+	// повтор или путь через прокси её не исправят. Остальное — обрыв,
+	// тайм-аут, замолчавший поток (ErrReadIdleTimeout), закрытое TLS- или
+	// HTTP/2-соединение — считается сетевым, как и раньше.
+	var pathErr *fs.PathError
+	return !errors.As(err, &pathErr)
 }
 
 func errorFrom(resp *http.Response, method, endpoint string) error {

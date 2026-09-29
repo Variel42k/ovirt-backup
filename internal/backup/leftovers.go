@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/Variel42k/ovirt-backup/internal/model"
@@ -90,8 +91,15 @@ type leftoverScan struct {
 	backups   []ovirt.Backup // открытые
 	transfers []ovirt.ImageTransfer
 	snaps     []ovirt.Snapshot
-	diskIDs   []string
-	busyVM    bool
+	// snapshotByTransferRef maps both a VM snapshot UUID and its disk-volume
+	// image_id values to that VM snapshot. oVirt 4.3 ImageTransfer uses the
+	// latter in transfer.snapshot.id.
+	snapshotByTransferRef map[string]string
+	// transferOwners — передачи, открытые запусками службы по этой ВМ
+	// (запись в хронологии): идентификатор передачи → запуск.
+	transferOwners map[string]string
+	diskIDs        []string
+	busyVM         bool
 }
 
 func (e *Engine) scanLeftovers(ctx context.Context, serverID, vmID string) (*leftoverScan, error) {
@@ -135,6 +143,25 @@ func (e *Engine) scanLeftovers(ctx context.Context, serverID, vmID string) (*lef
 	}
 	if sc.transfers, err = client.ListImageTransfers(ctx); err != nil {
 		return nil, fmt.Errorf("передачи образов: %w", err)
+	}
+	if sc.transferOwners, err = e.store.TransferOwners(ctx, srv.ID, vm.ID); err != nil {
+		e.log.Warn().Err(err).Str("vm", vm.Name).Msg("записи о передачах запусков недоступны")
+	}
+	sc.snapshotByTransferRef = map[string]string{}
+	ownedSnapshotIDs := map[string]bool{}
+	for _, b := range sc.backups {
+		if owner, _ := ownerOf(b, sc.runs); owner != "" && b.Snapshot.ID != "" {
+			ownedSnapshotIDs[b.Snapshot.ID] = true
+		}
+	}
+	for _, s := range sc.snaps {
+		owner, _, _ := leftoverSnapshot(s, sc.runs, time.Now())
+		if owner == "" && !ownedSnapshotIDs[s.ID] {
+			continue
+		}
+		for ref := range transferRefsForSnapshot(ctx, client, vm.ID, s) {
+			sc.snapshotByTransferRef[ref] = s.ID
+		}
 	}
 	if disks, err := client.ListVMDisks(ctx, vm.ID); err == nil {
 		for _, d := range disks {
@@ -195,6 +222,7 @@ func (e *Engine) report(sc *leftoverScan) *LeftoverReport {
 		if owner == "" {
 			continue // снапшоты администратора и чужие в отчёт не попадают
 		}
+		ownSnaps[s.ID] = true
 		item := Leftover{Kind: LeftoverSnapshot, ID: s.ID, Title: "Снапшот «" + s.Description + "»",
 			State: s.SnapshotStatus, Owner: owner, Ours: true, Reason: why}
 		if t := s.Date.Time(); !t.IsZero() {
@@ -203,7 +231,6 @@ func (e *Engine) report(sc *leftoverScan) *LeftoverReport {
 		if verdict == snapshotRemove {
 			item.Removable = !sc.busyVM
 			item.Reason = why + ": будет удалён; движок сольёт слои, это может занять время"
-			ownSnaps[s.ID] = true
 		}
 		rep.Items = append(rep.Items, item)
 	}
@@ -212,7 +239,12 @@ func (e *Engine) report(sc *leftoverScan) *LeftoverReport {
 		if t.Terminal() {
 			continue
 		}
-		ours := ownBackups[t.Backup.ID] || ownSnaps[t.Snapshot.ID]
+		snapshotID := sc.snapshotByTransferRef[t.Snapshot.ID]
+		if snapshotID == "" {
+			snapshotID = sc.snapshotByTransferRef[t.Image.ID]
+		}
+		_, recorded := ownTransfer(t.ID, sc.transferOwners, sc.runs)
+		ours := ownBackups[t.Backup.ID] || ownSnaps[snapshotID] || recorded
 		related := ours || slices.Contains(sc.diskIDs, t.Disk.ID)
 		if !related {
 			continue
@@ -221,6 +253,9 @@ func (e *Engine) report(sc *leftoverScan) *LeftoverReport {
 		if ours {
 			item.Removable = !sc.busyVM
 			item.Reason = "передача брошенного бэкапа или снапшота службы: будет отменена"
+			if recorded {
+				item.Reason = "передачу открыл запуск службы, который уже завершился; она держит диск — будет отменена"
+			}
 		} else {
 			item.Reason = "передача не связана с остатками службы — её мог открыть идущий бэкап или другая система"
 		}
@@ -310,17 +345,30 @@ func (e *Engine) CleanupLeftovers(ctx context.Context, serverID, vmID string) (*
 		if err == nil {
 			sc.snaps = snaps
 		}
+		// Сначала закрываются брошенные передачи: пока передача открыта,
+		// движок держит блокировку диска в памяти — в интерфейсе диск
+		// свободен, а удаление снапшота получает 409 «disks are locked».
+		refs := map[string]struct{}{}
+		for _, s := range sc.snaps {
+			if _, verdict, _ := leftoverSnapshot(s, sc.runs, time.Now()); verdict == snapshotRemove {
+				for ref := range transferRefsForSnapshot(ctx, client, vm.ID, s) {
+					refs[ref] = struct{}{}
+				}
+			}
+		}
+		abandoned := abandonedTransfers(sc.transfers, sc.transferOwners, sc.runs, refs, "")
+		transferErrs := e.cancelTransfersAndWait(ctx, client, abandoned)
+		for _, t := range abandoned {
+			action := CleanupAction{Kind: LeftoverTransfer, ID: t.ID, OK: true, Detail: "передача отменена, движок её закрыл"}
+			if err := transferErrs[t.ID]; err != nil {
+				action = CleanupAction{Kind: LeftoverTransfer, ID: t.ID, Detail: "передачу закрыть не удалось: " + err.Error()}
+			}
+			res.Actions = append(res.Actions, action)
+		}
 		for _, s := range sc.snaps {
 			owner, verdict, _ := leftoverSnapshot(s, sc.runs, time.Now())
 			if verdict != snapshotRemove {
 				continue
-			}
-			for _, t := range sc.transfers {
-				if t.Snapshot.ID == s.ID && !t.Terminal() {
-					ok := client.CancelTransfer(ctx, t.ID) == nil
-					res.Actions = append(res.Actions, CleanupAction{Kind: LeftoverTransfer, ID: t.ID, OK: ok,
-						Detail: map[bool]string{true: "передача отменена", false: "передачу отменить не удалось"}[ok]})
-				}
 			}
 			if err := client.DeleteSnapshotWhenReady(ctx, vm.ID, s.ID, 10*time.Minute); err != nil && !ovirt.IsNotFound(err) {
 				// HTTP 409 explicitly means that DELETE was rejected. A locked
@@ -328,7 +376,7 @@ func (e *Engine) CleanupLeftovers(ctx context.Context, serverID, vmID string) (*
 				// that our deletion started; report it honestly to the operator.
 				if ovirt.IsConflict(err) {
 					res.Actions = append(res.Actions, CleanupAction{Kind: LeftoverSnapshot, ID: s.ID,
-						Detail: fmt.Sprintf("удаление не запущено: %v", err)})
+						Detail: fmt.Sprintf("удаление не запущено: %v%s", err, lockHolderHint(ctx, client, sc.diskIDs, refs))})
 					continue
 				}
 				// Ответ мог потеряться, а движок — принять удаление (или его уже
@@ -356,4 +404,25 @@ func (e *Engine) CleanupLeftovers(ctx context.Context, serverID, vmID string) (*
 		res.After = e.report(after)
 	}
 	return res, nil
+}
+
+// lockHolderHint называет передачи, которые держат диск после уборки: их
+// служба не опознала как свои. В 4.3 это блокировка в памяти движка — в
+// интерфейсе диск выглядит свободным, и без подсказки 409 непонятен.
+func lockHolderHint(ctx context.Context, client *ovirt.Client, diskIDs []string, refs map[string]struct{}) string {
+	transfers, err := client.ListImageTransfers(ctx)
+	if err != nil {
+		return ""
+	}
+	holders := transfersOnDisks(transfers, diskIDs, refs)
+	if len(holders) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(holders))
+	for _, t := range holders {
+		parts = append(parts, fmt.Sprintf("%s (фаза %s)", t.ID, t.Phase))
+	}
+	return ". Диск держит незавершённая передача образа " + strings.Join(parts, ", ") +
+		": служба не открывала её или не может опознать как свою, поэтому не отменяет сама. " +
+		"Если передача брошена, отмените её командой из отчёта об остатках и повторите уборку"
 }

@@ -57,7 +57,7 @@ func (f *leftoverEngine) start(t *testing.T) *httptest.Server {
 		_, _ = fmt.Fprintf(w, `{"id":%q,"phase":"succeeded"}`, r.PathValue("id"))
 	})
 	mux.HandleFunc("GET /ovirt-engine/api/imagetransfers", func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"image_transfer":[{"id":"t-stuck","phase":"paused_system","snapshot":{"id":"s-eng"}}]}`))
+		_, _ = w.Write([]byte(`{"image_transfer":[{"id":"t-stuck","phase":"paused_system","snapshot":{"id":"image-s-eng"}}]}`))
 	})
 	mux.HandleFunc("POST /ovirt-engine/api/imagetransfers/{id}/cancel", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
@@ -89,6 +89,9 @@ func (f *leftoverEngine) start(t *testing.T) *httptest.Server {
 			return
 		}
 		_, _ = fmt.Fprintf(w, `{"id":%q,"snapshot_status":"ok"}`, r.PathValue("id"))
+	})
+	mux.HandleFunc("GET /ovirt-engine/api/vms/vm-1/snapshots/s-eng/disks", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"disk":[{"id":"d-1","image_id":"image-s-eng","format":"cow"}]}`))
 	})
 	mux.HandleFunc("DELETE /ovirt-engine/api/vms/vm-1/snapshots/{id}", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()

@@ -57,6 +57,10 @@ const (
 	// открыто столько горячих бэкапов, сколько разрешает
 	// backup.max_runs_per_storage: запуск ждёт очереди.
 	RunEventStorageQueue RunEventKind = "storage_queue"
+	// RunEventTransferOpened — служба открыла передачу образа; detail —
+	// идентификатор передачи. По нему уборка узнаёт свои брошенные передачи
+	// на движке без Backup API, где пометить передачу нечем.
+	RunEventTransferOpened RunEventKind = "transfer_opened"
 )
 
 // Title возвращает название этапа для интерфейса.
@@ -108,6 +112,8 @@ func (k RunEventKind) Title() string {
 		return "Инкремент снят полной копией"
 	case RunEventStorageQueue:
 		return "Ожидание очереди на хранилище"
+	case RunEventTransferOpened:
+		return "Открыта передача образа"
 	}
 	return string(k)
 }

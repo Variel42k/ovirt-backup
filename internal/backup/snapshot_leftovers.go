@@ -3,6 +3,7 @@ package backup
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -128,6 +129,151 @@ func leftoverSnapshot(s ovirt.Snapshot, runs []*model.BackupRun, now time.Time) 
 	return owner, snapshotRemove, "запуска нет в базе, снапшот старше " + unknownSnapshotAge.String()
 }
 
+// transferRefsForSnapshot returns every identifier with which oVirt may link
+// an ImageTransfer to a VM snapshot. In 4.3 transfer.snapshot.id is usually
+// the image_id of a disk volume, not the UUID returned by /vms/.../snapshots.
+// Comparing only the latter used to hide our abandoned transfer from cleanup,
+// leaving the disk locked indefinitely.
+func transferRefsForSnapshot(ctx context.Context, client *ovirt.Client, vmID string, s ovirt.Snapshot) map[string]struct{} {
+	refs := map[string]struct{}{s.ID: {}}
+	disks, err := client.ListSnapshotDisks(ctx, vmID, s.ID)
+	if err != nil {
+		return refs
+	}
+	for _, d := range disks {
+		if d.ImageID != "" {
+			refs[d.ImageID] = struct{}{}
+		}
+	}
+	return refs
+}
+
+func transferMatchesRefs(t ovirt.ImageTransfer, refs map[string]struct{}) bool {
+	_, bySnapshot := refs[t.Snapshot.ID]
+	_, byImage := refs[t.Image.ID]
+	return bySnapshot || byImage
+}
+
+// releaseLegacyTransferLeftovers cancels imageio tickets left by completed
+// snapshot runs before a new snapshot is created. This is especially
+// important on oVirt 4.3: it does not support timeout_policy=cancel, and a
+// paused or half-open ticket can keep the disk locked after the service was
+// restarted. Only tickets tied to a snapshot that is provably ours are
+// touched; unknown transfers are left for the administrator.
+func (e *Engine) releaseLegacyTransferLeftovers(ctx context.Context, client *ovirt.Client,
+	srv *model.Server, vm *model.VM, run *model.BackupRun, diskIDs []string) error {
+
+	transfers, err := client.ListImageTransfers(ctx)
+	if err != nil {
+		return fmt.Errorf("проверка старых передач образов: %w", err)
+	}
+	// Обычный случай — на движке нет ни одной незавершённой передачи:
+	// остальные запросы не нужны.
+	if !anyPendingTransfer(transfers) {
+		return nil
+	}
+	snaps, err := client.ListSnapshots(ctx, vm.ID)
+	if err != nil {
+		return fmt.Errorf("проверка старых снапшотов перед бэкапом: %w", err)
+	}
+	runs, err := e.store.ListBackupRuns(ctx, store.RunFilter{
+		ServerID: srv.ID, VMID: vm.ID, IncludeDeleted: true, Limit: 500,
+	})
+	if err != nil {
+		return fmt.Errorf("история запусков для проверки старых передач: %w", err)
+	}
+
+	ownedRefs := map[string]struct{}{}
+	for _, s := range snaps {
+		owner, verdict, _ := leftoverSnapshot(s, runs, time.Now())
+		if owner == "" || owner == run.ID || (verdict != snapshotRemove && verdict != snapshotBusy) {
+			continue
+		}
+		for ref := range transferRefsForSnapshot(ctx, client, vm.ID, s) {
+			ownedRefs[ref] = struct{}{}
+		}
+	}
+	owners, err := e.store.TransferOwners(ctx, srv.ID, vm.ID)
+	if err != nil {
+		e.log.Warn().Err(err).Str("vm", vm.Name).Msg("записи о передачах прошлых запусков недоступны")
+	}
+	abandoned := abandonedTransfers(transfers, owners, runs, ownedRefs, run.ID)
+
+	var failed []ovirt.ImageTransfer
+	errs := e.cancelTransfersAndWait(ctx, client, abandoned)
+	for _, t := range abandoned {
+		if errs[t.ID] != nil {
+			failed = append(failed, t)
+			continue
+		}
+		e.event(ctx, run, model.RunEventLeftoverClosed, 0,
+			fmt.Sprintf("отменена передача образа %s (фаза %s), оставленная предыдущим бэкапом: она держала диск", t.ID, t.Phase))
+	}
+	if len(failed) > 0 {
+		run.ManualSteps = EngineUnlockSteps(srv, vm.ID, nil, failed, diskIDs)
+		ids := make([]string, 0, len(failed))
+		for _, t := range failed {
+			ids = append(ids, t.ID)
+		}
+		return fmt.Errorf("диск удерживают передачи предыдущего snapshot-бэкапа %s; автоматическая отмена не завершилась, "+
+			"снапшот не создан, команды сохранены в карточке запуска", strings.Join(ids, ", "))
+	}
+
+	// Передача, которую служба не опознала как свою, держит блокировку диска
+	// в памяти движка: в интерфейсе диск выглядит свободным, а снапшот,
+	// созданный сейчас, нельзя будет ни прочитать, ни удалить (HTTP 409).
+	// Останавливаемся до снапшота и называем передачу.
+	if len(abandoned) > 0 {
+		if transfers, err = client.ListImageTransfers(ctx); err != nil {
+			return fmt.Errorf("проверка передач образов после отмены: %w", err)
+		}
+	}
+	vmRefs := map[string]struct{}{}
+	for _, s := range snaps {
+		for ref := range transferRefsForSnapshot(ctx, client, vm.ID, s) {
+			vmRefs[ref] = struct{}{}
+		}
+	}
+	blocking := transfersOnDisks(transfers, diskIDs, vmRefs)
+	if len(blocking) == 0 {
+		return nil
+	}
+	run.ManualSteps = EngineUnlockSteps(srv, vm.ID, nil, blocking, diskIDs)
+	parts := make([]string, 0, len(blocking))
+	for _, t := range blocking {
+		parts = append(parts, fmt.Sprintf("%s (фаза %s)", t.ID, t.Phase))
+	}
+	return fmt.Errorf("диск ВМ держит незавершённая передача образа %s, которую служба не открывала или не может "+
+		"опознать как свою: движок держит блокировку диска, пока передача не закрыта, хотя в интерфейсе диск "+
+		"выглядит свободным. Снапшот не создан. Если передача брошена (например, её открыла служба до "+
+		"обновления), отмените её командой из карточки запуска и повторите бэкап", strings.Join(parts, ", "))
+}
+
+// anyPendingTransfer — есть ли на движке незавершённые передачи.
+func anyPendingTransfer(transfers []ovirt.ImageTransfer) bool {
+	for _, t := range transfers {
+		if !t.Terminal() {
+			return true
+		}
+	}
+	return false
+}
+
+// transfersOnDisks — незавершённые передачи дисков ВМ: по диску или по тому
+// (image_id) любого её снапшота — движок 4.3 заполняет не все ссылки.
+func transfersOnDisks(transfers []ovirt.ImageTransfer, diskIDs []string, refs map[string]struct{}) []ovirt.ImageTransfer {
+	var out []ovirt.ImageTransfer
+	for _, t := range transfers {
+		if t.Terminal() {
+			continue
+		}
+		if slices.Contains(diskIDs, t.Disk.ID) || transferMatchesRefs(t, refs) {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
 // waitSnapshotOperations ждёт, пока на ВМ не останется снапшотов в операции
 // (создание, удаление со слиянием). Без этого бэкап сразу после уборки
 // получил бы 409: пока слияние идёт, диски заблокированы.
@@ -217,6 +363,7 @@ func (e *Engine) sweepLeftoverSnapshots(ctx context.Context, client *ovirt.Clien
 	}
 	run := &model.BackupRun{ID: runID}
 	var transfers []ovirt.ImageTransfer
+	var owners map[string]string
 	transfersLoaded := false
 
 	pending := 0
@@ -243,15 +390,16 @@ func (e *Engine) sweepLeftoverSnapshots(ctx context.Context, client *ovirt.Clien
 		// она не закончена. Передача брошенного запуска никому не нужна.
 		if !transfersLoaded {
 			transfers, _ = client.ListImageTransfers(ctx)
+			owners, _ = e.store.TransferOwners(ctx, srv.ID, vm.ID)
 			transfersLoaded = true
 		}
-		for _, t := range transfers {
-			if t.Snapshot.ID == s.ID && !t.Terminal() {
-				if err := client.CancelTransfer(ctx, t.ID); err == nil {
-					e.log.Info().Str("transfer", t.ID).Str("snapshot", s.ID).
-						Msg("отменена зависшая передача брошенного снапшота")
-				}
-			}
+		// Передачи своих завершившихся запусков (по записи в хронологии) и
+		// передачи томов этого снапшота: пока они открыты, движок держит диск.
+		refs := transferRefsForSnapshot(ctx, client, vm.ID, s)
+		abandoned := abandonedTransfers(transfers, owners, runs, refs, runID)
+		_ = e.cancelTransfersAndWait(ctx, client, abandoned)
+		if len(abandoned) > 0 {
+			transfers, _ = client.ListImageTransfers(ctx)
 		}
 		started := time.Now()
 		err := client.DeleteSnapshotWhenReady(ctx, vm.ID, s.ID, 10*time.Minute)

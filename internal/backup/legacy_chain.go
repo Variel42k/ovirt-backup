@@ -2,6 +2,7 @@ package backup
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -38,6 +39,36 @@ type legacyVolume struct {
 // legacyChainDepth — сколько слоёв допускается в цепочке. Больше — почти
 // наверняка ошибка разбора backing file, а не настоящая цепочка.
 const legacyChainDepth = 128
+
+// legacyVolumeDownloadAttempts bounds retries of a full-volume stream. oVirt
+// 4.3 imageio cannot resume these downloads with Range, so every new ticket
+// starts the current volume from byte zero.
+const legacyVolumeDownloadAttempts = 3
+
+var (
+	legacyTransferCloseWait = 2 * time.Minute
+	// legacyTransferFinalizeWait — сколько ждать завершения передачи после
+	// успешного finalize: движок 4.3 снимает блокировку диска только после
+	// этого, а следующий том цепочки — новая передача того же диска.
+	legacyTransferFinalizeWait = 10 * time.Minute
+	legacyVolumeRetryDelay     = 2 * time.Second
+)
+
+// errTransferNotReleased — движок не завершил передачу тома: диск остаётся
+// заблокированным, и повтор скачивания только получил бы 409.
+var errTransferNotReleased = errors.New("движок не освободил передачу тома")
+
+func transferNotReleased(cause error, transferID, phase string, err error) error {
+	if phase == "" {
+		phase = "неизвестна"
+	}
+	released := fmt.Errorf("%w: передача %s не завершилась (фаза %s): %v. Пока она открыта, движок держит диск — "+
+		"новая передача и удаление снапшота получат 409 «disks are locked»", errTransferNotReleased, transferID, phase, err)
+	if cause == nil {
+		return fmt.Errorf("том скачан, но %w", released)
+	}
+	return fmt.Errorf("%w; вдобавок %w", cause, released)
+}
 
 // snapshotVolumeFormats — формат каждого тома ВМ по её снапшотам. По нему
 // видно, как скачивать том и надо ли искать у него предка. Снапшот, диски
@@ -168,6 +199,38 @@ func (e *Engine) materializeLegacyChain(ctx context.Context, client *ovirt.Clien
 // в нём данных, а не весь размер диска.
 func (e *Engine) downloadVolume(ctx context.Context, client *ovirt.Client, imageID, format, path string,
 	onProgress func(int64)) (int64, error) {
+	var lastN int64
+	for attempt := 1; attempt <= legacyVolumeDownloadAttempts; attempt++ {
+		n, err := e.downloadVolumeAttempt(ctx, client, imageID, format, path, onProgress)
+		lastN = n
+		if err == nil {
+			return n, nil
+		}
+		// Не освобождённая движком передача держит диск: новая попытка
+		// получила бы 409, повторять бессмысленно.
+		if ctx.Err() != nil || errors.Is(err, errTransferNotReleased) || !imageio.IsNetworkError(err) {
+			return n, err
+		}
+		if attempt == legacyVolumeDownloadAttempts {
+			return n, fmt.Errorf("передача тома оборвалась после %d попыток; каждая попытка начиналась заново, так как imageio oVirt 4.3 не поддерживает продолжение: %w",
+				legacyVolumeDownloadAttempts, err)
+		}
+		if onProgress != nil {
+			onProgress(0)
+		}
+		e.log.Warn().Err(err).Str("том", imageID).Int("попытка", attempt).
+			Msg("поток imageio остановился — предыдущий билет закрыт, том будет скачан заново")
+		select {
+		case <-ctx.Done():
+			return lastN, ctx.Err()
+		case <-time.After(legacyVolumeRetryDelay):
+		}
+	}
+	return lastN, fmt.Errorf("исчерпаны попытки скачивания тома")
+}
+
+func (e *Engine) downloadVolumeAttempt(ctx context.Context, client *ovirt.Client, imageID, format, path string,
+	onProgress func(int64)) (n int64, retErr error) {
 
 	transfer, err := client.CreateTransferWhenReady(ctx, ovirt.TransferRequest{
 		SnapshotID: imageID, Direction: "download", Format: format,
@@ -176,11 +239,33 @@ func (e *Engine) downloadVolume(ctx context.Context, client *ovirt.Client, image
 	if err != nil {
 		return 0, fmt.Errorf("открытие передачи тома: %w", err)
 	}
+	e.noteTransferOpened(ctx, transfer)
 	success := false
 	defer func() {
-		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+		// Следующий том открывается новой передачей того же диска, а движок
+		// 4.3 держит диск, пока прежняя передача не завершилась, — в том
+		// числе после успешного finalize. Поэтому завершения ждём всегда.
+		wait := legacyTransferCloseWait
+		if success {
+			wait = legacyTransferFinalizeWait
+		}
+		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), wait+time.Minute)
 		defer cancel()
-		_ = client.CloseTransfer(closeCtx, transfer.ID, success)
+		phase := ""
+		err := client.CloseTransfer(closeCtx, transfer.ID, success)
+		if err == nil {
+			phase, err = client.WaitTransferDone(closeCtx, transfer.ID, wait)
+		}
+		if err != nil {
+			e.log.Warn().Err(err).Str("transfer", transfer.ID).Str("фаза", phase).
+				Msg("движок не завершил передачу legacy-тома — диск остаётся заблокированным")
+			retErr = transferNotReleased(retErr, transfer.ID, phase, err)
+			return
+		}
+		if success && phase != "finished_success" {
+			e.log.Warn().Str("transfer", transfer.ID).Str("фаза", phase).
+				Msg("передача legacy-тома после finalize завершилась не в finished_success")
+		}
 	}()
 	ready, err := client.WaitTransferReady(ctx, transfer.ID, 10*time.Minute)
 	if err != nil {
@@ -191,7 +276,6 @@ func (e *Engine) downloadVolume(ctx context.Context, client *ovirt.Client, image
 	if !e.cfg.Transfer.PreferProxy && ready.ProxyURL != "" && ready.ProxyURL != url {
 		urls = append(urls, ready.ProxyURL)
 	}
-	var n int64
 	for _, candidate := range urls {
 		var file *os.File
 		file, err = os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o640)

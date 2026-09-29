@@ -356,6 +356,9 @@ func (e *Engine) ReconcileStaleRuns(ctx context.Context) error {
 					Msg("не удалось закрыть бэкап на движке — диски ВМ могут остаться заблокированными")
 			}
 		}
+		// Передачи прерванного запуска держат диск: снапшот не удалится, пока
+		// они открыты (на oVirt 4.3 — до перезапуска движка).
+		e.releaseStaleRunTransfers(ctx, run)
 		if run.SnapshotID != "" {
 			e.removeStaleSnapshot(ctx, run)
 		}
@@ -371,6 +374,45 @@ func (e *Engine) ReconcileStaleRuns(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// releaseStaleRunTransfers отменяет незавершённые передачи прерванного
+// запуска — те, что записаны в его хронологии.
+func (e *Engine) releaseStaleRunTransfers(ctx context.Context, run *model.BackupRun) {
+	owners, err := e.store.TransferOwners(ctx, run.ServerID, run.VMID)
+	if err != nil {
+		e.log.Warn().Err(err).Str("run", run.ID).Msg("записи о передачах прерванного запуска недоступны")
+		return
+	}
+	mine := map[string]bool{}
+	for transferID, runID := range owners {
+		if runID == run.ID {
+			mine[transferID] = true
+		}
+	}
+	if len(mine) == 0 {
+		return
+	}
+	client, err := e.pool.Get(ctx, run.ServerID)
+	if err != nil {
+		e.log.Warn().Err(err).Str("run", run.ID).Msg("не удалось подключиться к движку, чтобы отменить передачи")
+		return
+	}
+	transfers, err := client.ListImageTransfers(ctx)
+	if err != nil {
+		e.log.Warn().Err(err).Str("run", run.ID).Msg("список передач образов недоступен")
+		return
+	}
+	var open []ovirt.ImageTransfer
+	for _, t := range transfers {
+		if mine[t.ID] && !t.Terminal() {
+			open = append(open, t)
+		}
+	}
+	for id, err := range e.cancelTransfersAndWait(ctx, client, open) {
+		e.log.Error().Err(err).Str("run", run.ID).Str("transfer", id).Str("vm", run.VMName).
+			Msg("передача прерванного запуска не закрыта — диск ВМ остаётся заблокированным")
+	}
 }
 
 func (e *Engine) closeEngineBackup(ctx context.Context, run *model.BackupRun) error {

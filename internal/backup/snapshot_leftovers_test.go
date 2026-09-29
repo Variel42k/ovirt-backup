@@ -15,6 +15,32 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/ovirt"
 )
 
+func TestTransferRefsMatchOVirt43VolumeImageID(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ovirt-engine/sso/oauth/token", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"access_token":"token","exp":"9999999999999"}`))
+	})
+	mux.HandleFunc("GET /ovirt-engine/api/vms/vm-1/snapshots/snap-1/disks", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"disk":[{"id":"disk-1","image_id":"volume-image-1","format":"cow"}]}`))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	client, err := ovirt.New(ovirt.Config{EngineURL: srv.URL, Username: "admin@internal", Password: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	refs := transferRefsForSnapshot(context.Background(), client, "vm-1", ovirt.Snapshot{ID: "snap-1"})
+	if !transferMatchesRefs(ovirt.ImageTransfer{Snapshot: ovirt.Ref{ID: "volume-image-1"}}, refs) {
+		t.Fatal("oVirt 4.3 transfer.snapshot.id with volume image_id was not matched")
+	}
+	if !transferMatchesRefs(ovirt.ImageTransfer{Image: ovirt.Ref{ID: "volume-image-1"}}, refs) {
+		t.Fatal("oVirt transfer.image.id with volume image_id was not matched")
+	}
+	if transferMatchesRefs(ovirt.ImageTransfer{Snapshot: ovirt.Ref{ID: "foreign-image"}}, refs) {
+		t.Fatal("foreign transfer was matched to service snapshot")
+	}
+}
+
 func snapshotAt(id, description, status string, age time.Duration) ovirt.Snapshot {
 	var s ovirt.Snapshot
 	raw := fmt.Sprintf(`{"id":%q,"description":%q,"snapshot_status":%q,"snapshot_type":"regular","date":%d}`,

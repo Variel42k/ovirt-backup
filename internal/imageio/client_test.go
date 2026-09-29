@@ -3,8 +3,12 @@ package imageio
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -51,6 +55,71 @@ func TestDownloadReadsWholeTransfer(t *testing.T) {
 	n, err := New(srv.URL, srv.Client()).Download(context.Background(), &got)
 	if err != nil || n != int64(len(want)) || !bytes.Equal(got.Bytes(), want) {
 		t.Fatalf("Download: n=%d data=%q err=%v", n, got.Bytes(), err)
+	}
+}
+
+func TestDownloadUsesReadIdleTimeoutNotTotalDeadline(t *testing.T) {
+	t.Run("stalled body", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte("prefix"))
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+		}))
+		t.Cleanup(srv.Close)
+
+		var got bytes.Buffer
+		started := time.Now()
+		_, err := New(srv.URL, srv.Client()).
+			WithTimeouts(Timeouts{Block: 50 * time.Millisecond}).
+			Download(context.Background(), &got)
+		if !errors.Is(err, ErrReadIdleTimeout) {
+			t.Fatalf("stalled download error = %v", err)
+		}
+		if elapsed := time.Since(started); elapsed > time.Second {
+			t.Fatalf("idle timeout took %s", elapsed)
+		}
+		if !IsNetworkError(err) {
+			t.Fatalf("idle timeout must be retryable: %v", err)
+		}
+	})
+
+	t.Run("continuous slow body", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			flusher := w.(http.Flusher)
+			for _, part := range []string{"one", "two", "three", "four"} {
+				_, _ = w.Write([]byte(part))
+				flusher.Flush()
+				time.Sleep(30 * time.Millisecond)
+			}
+		}))
+		t.Cleanup(srv.Close)
+
+		var got bytes.Buffer
+		started := time.Now()
+		_, err := New(srv.URL, srv.Client()).
+			WithTimeouts(Timeouts{Block: 50 * time.Millisecond}).
+			Download(context.Background(), &got)
+		if err != nil {
+			t.Fatalf("continuous download: %v", err)
+		}
+		if time.Since(started) <= 50*time.Millisecond {
+			t.Fatal("test did not outlive one idle interval")
+		}
+		if got.String() != "onetwothreefour" {
+			t.Fatalf("downloaded %q", got.String())
+		}
+	})
+}
+
+func TestIsNetworkErrorDoesNotRetryLocalWriterFailure(t *testing.T) {
+	// Так io.Copy возвращает ошибку записи в *os.File при переполнении диска.
+	local := fmt.Errorf("imageio полное чтение тела: %w",
+		&fs.PathError{Op: "write", Path: "/var/tmp/vol.qcow2", Err: syscall.ENOSPC})
+	if IsNetworkError(local) {
+		t.Fatal("local writer error must not be treated as a retryable network failure")
+	}
+	if !IsNetworkError(errors.New("http2: server sent GOAWAY and closed the connection")) {
+		t.Fatal("closed connection must stay retryable")
 	}
 }
 

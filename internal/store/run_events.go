@@ -46,6 +46,30 @@ func (s *Store) LastRunEventAt(ctx context.Context, serverID, vmID string, kind 
 	return nullTime(at), nil
 }
 
+// TransferOwners — какие передачи образов открывали запуски ВМ за последние
+// 90 дней: идентификатор передачи → идентификатор запуска.
+func (s *Store) TransferOwners(ctx context.Context, serverID, vmID string) (map[string]string, error) {
+	rows, err := s.db.Query(ctx, `SELECT e.detail, e.run_id FROM backup_run_events e
+		JOIN backup_runs r ON r.id = e.run_id
+		WHERE r.server_id=? AND r.vm_id=? AND e.kind=? AND e.at >= ?`,
+		serverID, vmID, string(model.RunEventTransferOpened), time.Now().UTC().AddDate(0, 0, -90))
+	if err != nil {
+		return nil, fmt.Errorf("transfer owners: %w", err)
+	}
+	defer rows.Close()
+	owners := map[string]string{}
+	for rows.Next() {
+		var transferID, runID string
+		if err := rows.Scan(&transferID, &runID); err != nil {
+			return nil, fmt.Errorf("scan transfer owner: %w", err)
+		}
+		if transferID != "" {
+			owners[transferID] = runID
+		}
+	}
+	return owners, rows.Err()
+}
+
 func (s *Store) ListRunEvents(ctx context.Context, runID string) ([]*model.RunEvent, error) {
 	rows, err := s.db.Query(ctx, `SELECT `+runEventColumns+
 		` FROM backup_run_events WHERE run_id=? ORDER BY at, id`, runID)

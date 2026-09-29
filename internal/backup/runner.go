@@ -1493,6 +1493,9 @@ func (e *Engine) runSnapshot(ctx context.Context, client *ovirt.Client, backend 
 	srv *model.Server, vm *model.VM, run *model.BackupRun, req RunRequest,
 	disks []ovirt.Disk, p plan) ([]*DiskManifest, error) {
 
+	// Все передачи этого запуска записываются за ним: по записи уборка найдёт
+	// их, если запуск оборвётся (см. transfer_owner.go).
+	ctx = withTransferOwner(ctx, run)
 	diskIDs := make([]string, 0, len(disks))
 	for _, d := range disks {
 		diskIDs = append(diskIDs, d.ID)
@@ -1517,6 +1520,16 @@ func (e *Engine) runSnapshot(ctx context.Context, client *ovirt.Client, backend 
 				return nil, fmt.Errorf("диск %s требует локальной сборки qcow2: %w", d.AliasOrName(), err)
 			}
 			break
+		}
+	}
+
+	// После аварии или перезапуска oVirt 4.3 может оставить ImageTransfer в
+	// paused/transferring. Такая передача держит диск, но в API ссылается на
+	// image_id тома, а не на UUID снапшота. Убираем только доказанно свои
+	// билеты до создания нового снапшота и ждём фактической разблокировки.
+	if !srv.SupportsCBT {
+		if err := e.releaseLegacyTransferLeftovers(ctx, client, srv, vm, run, diskIDs); err != nil {
+			return nil, err
 		}
 	}
 
@@ -1646,6 +1659,13 @@ func (e *Engine) runSnapshot(ctx context.Context, client *ovirt.Client, backend 
 			}
 		}, extentContext)
 	})
+	if err != nil && ovirt.IsConflict(err) {
+		// На старом движке причина 409 часто не видна из самого POST. Сразу
+		// сохраняем в карточке запуска точные команды просмотра/отмены transfer
+		// и проверки snapshot/disk lock, чтобы оператору не пришлось собирать
+		// UUID из журналов вручную.
+		run.ManualSteps = e.engineLockSteps(ctx, client, srv, vm.ID, diskIDs)
+	}
 	if err == nil {
 		retainedSuccess = true
 	}
@@ -1661,6 +1681,7 @@ func (e *Engine) copyDisks(ctx context.Context, client *ovirt.Client, backend re
 	srv *model.Server, vm *model.VM, run *model.BackupRun, req RunRequest,
 	disks []ovirt.Disk, p plan, factory transferFactory, extentContext string) ([]*DiskManifest, error) {
 
+	ctx = withTransferOwner(ctx, run)
 	parallel := e.cfg.Transfer.MaxParallelDisks
 	if parallel < 1 {
 		parallel = 1
@@ -1802,6 +1823,7 @@ func (e *Engine) copyOneDisk(ctx context.Context, client *ovirt.Client, backend 
 	if err != nil {
 		return nil, 0, 0, fmt.Errorf("открытие передачи: %w", err)
 	}
+	e.noteTransferOpened(ctx, transfer)
 	// transferID меняется, если передачу приходится открыть заново.
 	transferID := transfer.ID
 
@@ -1867,6 +1889,7 @@ func (e *Engine) copyOneDisk(ctx context.Context, client *ovirt.Client, backend 
 		if err != nil {
 			return nil, err
 		}
+		e.noteTransferOpened(ctx, next)
 		transferID = next.ID
 		ready, err := client.WaitTransferReady(ctx, next.ID, 10*time.Minute)
 		if err != nil {

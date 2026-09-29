@@ -52,6 +52,9 @@ var (
 	// этого, а следующий том цепочки — новая передача того же диска.
 	legacyTransferFinalizeWait = 10 * time.Minute
 	legacyVolumeRetryDelay     = 2 * time.Second
+	// legacyTransferOpenWait — сколько повторять открытие передачи тома, пока
+	// движок отвечает 409 «disks are locked».
+	legacyTransferOpenWait = 10 * time.Minute
 )
 
 // errTransferNotReleased — движок не завершил передачу тома: диск остаётся
@@ -206,9 +209,13 @@ func (e *Engine) downloadVolume(ctx context.Context, client *ovirt.Client, image
 		if err == nil {
 			return n, nil
 		}
-		// Не освобождённая движком передача держит диск: новая попытка
-		// получила бы 409, повторять бессмысленно.
-		if ctx.Err() != nil || errors.Is(err, errTransferNotReleased) || !imageio.IsNetworkError(err) {
+		// Повторяется только оборванный поток данных. Отказ движка (в том
+		// числе 409 «disks are locked» после 10 минут ожидания) и не
+		// освобождённая передача — не обрыв: новая попытка получила бы тот
+		// же ответ.
+		var apiErr *ovirt.APIError
+		if ctx.Err() != nil || errors.Is(err, errTransferNotReleased) || errors.As(err, &apiErr) ||
+			!imageio.IsNetworkError(err) {
 			return n, err
 		}
 		if attempt == legacyVolumeDownloadAttempts {
@@ -232,10 +239,10 @@ func (e *Engine) downloadVolume(ctx context.Context, client *ovirt.Client, image
 func (e *Engine) downloadVolumeAttempt(ctx context.Context, client *ovirt.Client, imageID, format, path string,
 	onProgress func(int64)) (n int64, retErr error) {
 
-	transfer, err := client.CreateTransferWhenReady(ctx, ovirt.TransferRequest{
+	transfer, err := e.openVolumeTransfer(ctx, client, ovirt.TransferRequest{
 		SnapshotID: imageID, Direction: "download", Format: format,
 		InactivityTimeout: e.cfg.Transfer.InactivityTimeout,
-	}, 10*time.Minute)
+	})
 	if err != nil {
 		return 0, fmt.Errorf("открытие передачи тома: %w", err)
 	}
@@ -370,6 +377,9 @@ func (e *Engine) copyLegacyChainDisk(ctx context.Context, client *ovirt.Client, 
 	defer os.RemoveAll(workDir)
 
 	total := disk.ProvisionedSize.Int64()
+	// Тома скачиваются передачами этого диска: по нему служба спрашивает
+	// движок, что держит диск, если он отвечает 409.
+	ctx = withVolumeDisk(withTransferOwner(ctx, run), vm.ID, disk)
 	rawPath, downloaded, err := e.materializeLegacyChain(ctx, client, top, formats, workDir, func(done int64) {
 		pct := 0
 		if total > 0 {
@@ -378,6 +388,9 @@ func (e *Engine) copyLegacyChainDisk(ctx context.Context, client *ovirt.Client, 
 		_ = e.store.SetRunProgress(ctx, run.ID, minInt(pct, 99), run.ReadBytes+done, run.StoredBytes)
 	})
 	if err != nil {
+		if lockErr, ok := asDiskLocked(err); ok {
+			e.setManualSteps(run, legacyLockSteps(srv, vm.ID, lockErr))
+		}
 		return nil, downloaded, 0, fmt.Errorf("диск %s: сборка образа из томов снапшота: %w", disk.AliasOrName(), err)
 	}
 	manifest, stored, err := e.writeLegacyDelta(ctx, backend, srv, vm, run, req, disk, index, chunkSize, rawPath, parent)

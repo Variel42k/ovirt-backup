@@ -42,6 +42,8 @@ type Engine struct {
 	external map[model.VerifyMode]ExternalVerifier
 	// verifyGate — ограничитель проверок по площадкам (см. SetVerifyGate).
 	verifyGate VerifyGate
+	// manualMu защищает run.ManualSteps: диски копируются параллельно.
+	manualMu sync.Mutex
 
 	// heavy ограничивает число одновременных проверок и восстановлений.
 	//

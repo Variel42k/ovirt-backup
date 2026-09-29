@@ -335,6 +335,7 @@ const runMarkerKinds: Record<string, string> = {
   transfer_reopened: '#f57c00',
   transfer_via_proxy: '#f57c00',
   storage_queue: '#f57c00',
+  disk_lock_wait: '#f57c00',
   transfer_finished: '#21ba45',
   run_finished: '#21ba45',
   run_failed: '#c10015',
@@ -430,7 +431,8 @@ function eventColor(kind: string): string {
   if (kind === 'run_finished' || kind === 'manifest_written') return 'positive'
   if (kind === 'frozen' || kind === 'thawed' || kind === 'engine_takeover'
     || kind === 'extent_map_unavailable' || kind === 'transfer_reopened'
-    || kind === 'transfer_via_proxy' || kind === 'downgraded_full' || kind === 'storage_queue') return 'warning'
+    || kind === 'transfer_via_proxy' || kind === 'downgraded_full' || kind === 'storage_queue'
+    || kind === 'disk_lock_wait') return 'warning'
   return 'primary'
 }
 

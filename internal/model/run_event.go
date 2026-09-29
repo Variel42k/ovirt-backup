@@ -61,6 +61,9 @@ const (
 	// идентификатор передачи. По нему уборка узнаёт свои брошенные передачи
 	// на движке без Backup API, где пометить передачу нечем.
 	RunEventTransferOpened RunEventKind = "transfer_opened"
+	// RunEventDiskLockWait — движок держал диск (HTTP 409) перед передачей
+	// следующего тома; detail — что он показывал и когда отпустил.
+	RunEventDiskLockWait RunEventKind = "disk_lock_wait"
 )
 
 // Title возвращает название этапа для интерфейса.
@@ -114,6 +117,8 @@ func (k RunEventKind) Title() string {
 		return "Ожидание очереди на хранилище"
 	case RunEventTransferOpened:
 		return "Открыта передача образа"
+	case RunEventDiskLockWait:
+		return "Движок держит диск"
 	}
 	return string(k)
 }

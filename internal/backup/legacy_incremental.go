@@ -130,7 +130,11 @@ func (e *Engine) runLegacyQcow2(ctx context.Context, client *ovirt.Client, backe
 				parentReader.Close()
 				return nil, fmt.Errorf("сборка локальной основы %s: %w", disk.AliasOrName(), err)
 			}
-			downloaded, err := e.downloadQcowLayer(copyCtx, client, imageID, overlay)
+			layerCtx := withVolumeDisk(withTransferOwner(copyCtx, run), vm.ID, disk)
+			downloaded, err := e.downloadQcowLayer(layerCtx, client, imageID, overlay)
+			if lockErr, ok := asDiskLocked(err); ok {
+				e.setManualSteps(run, legacyLockSteps(srv, vm.ID, lockErr))
+			}
 			if err == nil {
 				var backing string
 				backing, err = Qcow2BackingFile(copyCtx, e.cfg.QemuImgPath, overlay)

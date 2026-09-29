@@ -364,3 +364,45 @@ func TestDownloadVolumeReportsTransferStuckAfterFinalize(t *testing.T) {
 		t.Fatalf("открыто передач: %d — повтор при заблокированном диске бессмыслен", created)
 	}
 }
+
+// 409 при открытии передачи — ответ движка, а не обрыв потока: скачивание не
+// повторяется, иначе запуск ждал бы ещё 10 минут того же отказа.
+func TestDownloadVolumeDoesNotRetryLockedDisk(t *testing.T) {
+	var (
+		mu    sync.Mutex
+		posts int
+	)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ovirt-engine/sso/oauth/token", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"access_token":"token","exp":"9999999999999"}`))
+	})
+	mux.HandleFunc("POST /ovirt-engine/api/imagetransfers", func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		posts++
+		mu.Unlock()
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"reason":"Operation Failed","detail":"[Cannot transfer Virtual Disk: The following disks are locked: ADV-GITLAB_Disk1. Please try again in a few minutes.]"}`))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	client, err := ovirt.New(ovirt.Config{EngineURL: srv.URL, Username: "admin@internal", Password: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldOpen, oldDelay := legacyTransferOpenWait, legacyVolumeRetryDelay
+	// Срок в прошлом: клиент движка не повторяет 409 сам, считается только
+	// повтор скачивания.
+	legacyTransferOpenWait, legacyVolumeRetryDelay = -time.Second, time.Millisecond
+	t.Cleanup(func() { legacyTransferOpenWait, legacyVolumeRetryDelay = oldOpen, oldDelay })
+
+	e := &Engine{log: zerolog.Nop()}
+	_, err = e.downloadVolume(context.Background(), client, "vol-2", "cow", filepath.Join(t.TempDir(), "v.qcow2"), nil)
+	if !ovirt.IsConflict(err) {
+		t.Fatalf("ожидался 409 движка: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if posts != 1 {
+		t.Fatalf("POST /imagetransfers: %d — отказ движка повторять как обрыв потока нельзя", posts)
+	}
+}

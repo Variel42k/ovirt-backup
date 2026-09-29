@@ -169,8 +169,10 @@ func (e *Engine) materializeLegacyChain(ctx context.Context, client *ovirt.Clien
 func (e *Engine) downloadVolume(ctx context.Context, client *ovirt.Client, imageID, format, path string,
 	onProgress func(int64)) (int64, error) {
 
-	transfer, err := client.CreateTransfer(ctx, ovirt.TransferRequest{SnapshotID: imageID, Direction: "download",
-		Format: format, InactivityTimeout: e.cfg.Transfer.InactivityTimeout})
+	transfer, err := client.CreateTransferWhenReady(ctx, ovirt.TransferRequest{
+		SnapshotID: imageID, Direction: "download", Format: format,
+		InactivityTimeout: e.cfg.Transfer.InactivityTimeout,
+	}, 10*time.Minute)
 	if err != nil {
 		return 0, fmt.Errorf("открытие передачи тома: %w", err)
 	}

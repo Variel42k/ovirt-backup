@@ -1792,7 +1792,7 @@ func (e *Engine) copyOneDisk(ctx context.Context, client *ovirt.Client, backend 
 	}
 	transferReq.InactivityTimeout = e.transferInactivity(longest)
 
-	transfer, err := client.CreateTransfer(ctx, transferReq)
+	transfer, err := client.CreateTransferWhenReady(ctx, transferReq, 10*time.Minute)
 	if err != nil {
 		return nil, 0, 0, fmt.Errorf("открытие передачи: %w", err)
 	}

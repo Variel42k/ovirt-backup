@@ -91,12 +91,42 @@ func (c *Client) CreateTransfer(ctx context.Context, req TransferRequest) (*Imag
 		delete(body, "timeout_policy")
 		transfer = ImageTransfer{}
 		if retryErr := c.post(ctx, "/imagetransfers", body, &transfer); retryErr != nil {
+			// A conflict means the 4.3-shaped document was understood and only
+			// the disk state rejected it. Remember the downgrade now; otherwise
+			// every lock retry would first send another known-invalid 4.4 request.
+			if IsConflict(retryErr) {
+				c.legacyImageTransfer.Store(true)
+			}
 			return nil, retryErr
 		}
 		c.legacyImageTransfer.Store(true)
 		return &transfer, nil
 	}
 	return nil, err
+}
+
+// CreateTransferWhenReady opens a transfer after transient disk locks clear.
+// Snapshot creation and transfer finalisation are asynchronous on older oVirt
+// engines: a snapshot may already report "ok" while POST /imagetransfers still
+// answers 409 for a few seconds. Only conflicts are retried; malformed
+// requests, authentication failures and connectivity errors return at once.
+func (c *Client) CreateTransferWhenReady(ctx context.Context, req TransferRequest,
+	timeout time.Duration) (*ImageTransfer, error) {
+	return c.createTransferWhenReady(ctx, req, timeout, 5*time.Second)
+}
+
+func (c *Client) createTransferWhenReady(ctx context.Context, req TransferRequest,
+	timeout, interval time.Duration) (*ImageTransfer, error) {
+	var transfer *ImageTransfer
+	err := retryConflict(ctx, timeout, interval, func() error {
+		var err error
+		transfer, err = c.CreateTransfer(ctx, req)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return transfer, nil
 }
 
 // GetTransfer reads the current state of a transfer.

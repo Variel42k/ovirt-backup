@@ -337,7 +337,12 @@ func (c *Client) DeleteSnapshot(ctx context.Context, vmID, snapshotID string) er
 // is still unlocking the VM after an image transfer. Other errors are not
 // hidden: authentication, connectivity and invalid IDs require intervention.
 func (c *Client) DeleteSnapshotWhenReady(ctx context.Context, vmID, snapshotID string, timeout time.Duration) error {
-	return retryConflict(ctx, timeout, 5*time.Second, func() error {
+	return c.deleteSnapshotWhenReady(ctx, vmID, snapshotID, timeout, 5*time.Second)
+}
+
+func (c *Client) deleteSnapshotWhenReady(ctx context.Context, vmID, snapshotID string,
+	timeout, interval time.Duration) error {
+	return retryConflict(ctx, timeout, interval, func() error {
 		return c.DeleteSnapshot(ctx, vmID, snapshotID)
 	})
 }

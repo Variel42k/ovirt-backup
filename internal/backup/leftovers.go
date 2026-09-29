@@ -322,7 +322,15 @@ func (e *Engine) CleanupLeftovers(ctx context.Context, serverID, vmID string) (*
 						Detail: map[bool]string{true: "передача отменена", false: "передачу отменить не удалось"}[ok]})
 				}
 			}
-			if err := client.DeleteSnapshot(ctx, vm.ID, s.ID); err != nil && !ovirt.IsNotFound(err) {
+			if err := client.DeleteSnapshotWhenReady(ctx, vm.ID, s.ID, 10*time.Minute); err != nil && !ovirt.IsNotFound(err) {
+				// HTTP 409 explicitly means that DELETE was rejected. A locked
+				// snapshot in this case is the pre-existing operation, not proof
+				// that our deletion started; report it honestly to the operator.
+				if ovirt.IsConflict(err) {
+					res.Actions = append(res.Actions, CleanupAction{Kind: LeftoverSnapshot, ID: s.ID,
+						Detail: fmt.Sprintf("удаление не запущено: %v", err)})
+					continue
+				}
 				// Ответ мог потеряться, а движок — принять удаление (или его уже
 				// начал повтор): судить по самому снапшоту, а не по ответу.
 				if gone, state := snapshotNow(ctx, client, vm.ID, s.ID); !gone && state != "locked" {

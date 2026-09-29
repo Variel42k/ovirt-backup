@@ -448,7 +448,11 @@ export const api = {
   vmLeftovers: (serverId: string, vmId: string) =>
     http.get<LeftoverReport>(`/servers/${serverId}/vms/${vmId}/leftovers`).then((r) => r.data),
   cleanupVMLeftovers: (serverId: string, vmId: string) =>
-    http.post<LeftoverCleanupResult>(`/servers/${serverId}/vms/${vmId}/leftovers/cleanup`, {}).then((r) => r.data),
+    http.post<LeftoverCleanupResult>(`/servers/${serverId}/vms/${vmId}/leftovers/cleanup`, {}, {
+      // oVirt 4.3 может до десяти минут снимать блокировку после закрытия
+      // передачи. Клиент должен жить немного дольше серверного ожидания.
+      timeout: 11 * 60_000,
+    }).then((r) => r.data),
 
   // Планирование бэкапа
   backupOptions: (serverId: string, vmId: string, storageTargetId?: string) =>

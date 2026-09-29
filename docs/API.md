@@ -834,6 +834,8 @@ S3 endpoint не передаёт данные через сервис и пот
   "verify_after": "boot",
   "verify_options": {
     "boot_host_id": "…",             // включённое подключение типа kvm
+    // или вместо него проверочная ВМ в движке oVirt (только для копий ВМ oVirt):
+    // "boot_engine_id": "…", "boot_cluster_id": "…", "boot_storage_domain_id": "…",
     "memory_mib": 0, "vcpus": 0,   // 0 — ресурсы исходной ВМ
     "timeout_sec": 300, "keep_on_failure": false
   },
@@ -894,6 +896,19 @@ S3 endpoint не передаёт данные через сервис и пот
 // диагностики, а не для обычной приёмочной проверки.
 { "mode": "boot", "boot_host_id": "…", "disk_id": "",
   "memory_mib": 0, "vcpus": 0, "timeout_sec": 300, "keep_on_failure": false }
+// Проверочная ВМ в движке oVirt вместо KVM-хоста: служба восстанавливает копию
+// новой ВМ без сетевых интерфейсов, запускает, ждёт ответа гостевого агента
+// через движок и удаляет ВМ с дисками. disk_id не применяется. timeout_sec 0 —
+// 15 минут: движок обновляет сведения от агента не сразу.
+{ "mode": "boot", "boot_engine_id": "…", "boot_cluster_id": "…",
+  "boot_storage_domain_id": "…", "memory_mib": 4096, "timeout_sec": 900 }
+
+// GET /boot-verify/engines/{id}/targets?run_id=…&copy_id=…  (проверка точки)
+// GET /boot-verify/engines/{id}/targets?server_id=…&vm_ids=a,b  (форма задания)
+// Кластеры движка и домены хранения с оценкой места для проверочной ВМ:
+// need_data — данные дисков (диски тонкие), need_full — полный размер,
+// у домена verdict: ok | tight (данные помещаются, полный размер — нет) |
+// short (не хватит с запасом, проверка откажет) | inactive | unknown.
 
 // POST /backups/{id}/restore
 // output_dir должен лежать внутри одного из backup.restore_dirs или внутри

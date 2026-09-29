@@ -33,6 +33,9 @@ func (d *Dispatcher) registerVerifiers() {
 }
 
 func (d *Dispatcher) verifyBoot(ctx context.Context, req backup.ExternalVerifyRequest) error {
+	if req.Options.OnEngine() {
+		return d.verifyBootOnEngine(ctx, req)
+	}
 	set, report, opts := req.Set, req.Report, req.Options
 
 	host, err := d.resolveBootHost(ctx, set.Leaf.ServerID, opts.BootHostID)
@@ -422,9 +425,8 @@ func (d *Dispatcher) resolveBootHost(ctx context.Context, ownServerID, requested
 		}
 		if !own.Kind.UsesLibvirt() {
 			return nil, fmt.Errorf(
-				"пробный запуск требует KVM-хоста: бэкап снят с подключения %q типа %s, "+
-					"а движок oVirt не умеет поднимать ВМ из чужого образа — "+
-					"запустите проверку вручную и укажите KVM-хост",
+				"для пробного запуска копии с подключения %q (%s) укажите в задании KVM-хост "+
+					"или движок oVirt с кластером и доменом хранения для проверочной ВМ",
 				own.Name, own.Kind.Title())
 		}
 		id = own.ID

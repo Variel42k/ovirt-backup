@@ -541,6 +541,9 @@ export const api = {
   getReplication: (id: string) => http.get<ReplicationDetail>(`/replications/${id}`).then((r) => r.data),
 
   // Проверка и восстановление
+  /** Кластеры и домены хранения движка для проверочной ВМ, с оценкой места. */
+  bootTargets: (engineId: string, params: { run_id?: string; copy_id?: string; server_id?: string; vm_ids?: string }) =>
+    http.get<import('./types').BootTargets>(`/boot-verify/engines/${engineId}/targets`, { params }).then((r) => r.data),
   verifyRun: (id: string, mode: string, options: Partial<BootVerifyOptions> & { copy_id?: string } = {}) =>
     http.post<VerifyRun>(`/backups/${id}/verify`, { mode, ...options }, { timeout: 300_000 }).then((r) => r.data),
   listVerifications: (runId?: string) =>

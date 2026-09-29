@@ -258,6 +258,8 @@ type VM struct {
 			FullVersion string `json:"full_version"`
 		} `json:"version"`
 	} `json:"guest_operating_system,omitempty"`
+	// Fqdn — имя гостя по данным агента; пусто, пока агент не ответил.
+	Fqdn            string `json:"fqdn,omitempty"`
 	ReportedDevices *struct {
 		ReportedDevice []struct {
 			Name string `json:"name"`

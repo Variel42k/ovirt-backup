@@ -6,7 +6,8 @@ import { api, errorMessage, notify, notifyError, notifyOk } from '@/api/client'
 import DirectoryPicker from '@/components/DirectoryPicker.vue'
 import ManualSteps from '@/components/ManualSteps.vue'
 import EngineLeftovers from '@/components/EngineLeftovers.vue'
-import { bytes, consistencyColor, consistencyLabel, dateTime, elapsed, runStatus, statusColor, usesOVirtAPI } from '@/api/format'
+import { bootTargetReady, bytes, consistencyColor, consistencyLabel, dateTime, elapsed, runStatus, statusColor, usesOVirtAPI } from '@/api/format'
+import BootTargetPicker from '@/components/BootTargetPicker.vue'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import { useOperationsStore } from '@/stores/operations'
@@ -479,11 +480,21 @@ const verifyForm = ref({
   copy_id: '',
   mode: 'manifest',
   boot_host_id: '',
+  boot_engine_id: '',
+  boot_cluster_id: '',
+  boot_storage_domain_id: '',
   disk_id: '',
   memory_mib: 0,
   vcpus: 0,
   timeout_sec: 300,
   keep_on_failure: false,
+})
+
+// Движок обновляет сведения от гостевого агента раз в минуту-другую: пять
+// минут ожидания, привычные для KVM-хоста, для движка коротки.
+watch(() => verifyForm.value.boot_engine_id, (engine) => {
+  if (engine && verifyForm.value.timeout_sec === 300) verifyForm.value.timeout_sec = 900
+  if (!engine && verifyForm.value.timeout_sec === 900) verifyForm.value.timeout_sec = 300
 })
 
 const verifyMode = computed(() =>
@@ -510,8 +521,12 @@ async function verify(run: BackupRun) {
 	verifyForm.value.copy_id = healthyCopies(selected)[0]?.id ?? ''
   verifyForm.value.disk_id = ''
   // Бэкап с KVM-хоста проверяется на нём же — это ожидаемый выбор по умолчанию.
+  // Копию oVirt без KVM-хостов удобнее проверить в том же движке.
   const own = app.servers.find((s) => s.id === run.server_id)
   verifyForm.value.boot_host_id = own?.kind === 'kvm' ? own.id : ''
+  verifyForm.value.boot_engine_id = usesOVirtAPI(own?.kind) && !bootHosts.value.length ? own?.id ?? '' : ''
+  verifyForm.value.boot_cluster_id = ''
+  verifyForm.value.boot_storage_domain_id = ''
 	verifyDisks.value = selected.disks ?? []
   verifyOpen.value = true
 
@@ -534,7 +549,10 @@ async function submitVerify() {
       ? {
 				copy_id: verifyForm.value.copy_id,
           boot_host_id: verifyForm.value.boot_host_id,
-          disk_id: verifyForm.value.disk_id,
+          boot_engine_id: verifyForm.value.boot_engine_id,
+          boot_cluster_id: verifyForm.value.boot_cluster_id,
+          boot_storage_domain_id: verifyForm.value.boot_storage_domain_id,
+          disk_id: verifyForm.value.boot_engine_id ? '' : verifyForm.value.disk_id,
           memory_mib: verifyForm.value.memory_mib,
           vcpus: verifyForm.value.vcpus,
           timeout_sec: verifyForm.value.timeout_sec,
@@ -1895,25 +1913,20 @@ const replicationColumns = [
 				hint="Проверяется выбранное хранилище и вся цепочка в нём"
 			/>
 
-          <template v-if="needsHypervisor">
-            <q-banner v-if="!bootHosts.length" dense class="bg-orange-1">
-              <template #avatar><q-icon name="warning" color="warning" /></template>
-              Нет ни одного подключения типа KVM. Пробный запуск поднимает ВМ на гипервизоре,
-              а движок oVirt не умеет стартовать ВМ из чужого образа — добавьте KVM-хост,
-              который будет использоваться для проверок.
-            </q-banner>
+          <template v-if="needsHypervisor && verifyTarget">
+            <BootTargetPicker
+              v-model:host-id="verifyForm.boot_host_id"
+              v-model:engine-id="verifyForm.boot_engine_id"
+              v-model:cluster-id="verifyForm.boot_cluster_id"
+              v-model:domain-id="verifyForm.boot_storage_domain_id"
+              :source-server-id="verifyTarget.server_id"
+              :run-id="verifyTarget.id"
+              :copy-id="verifyForm.copy_id"
+            />
 
-            <template v-else>
+            <template v-if="verifyForm.boot_host_id || verifyForm.boot_engine_id">
               <q-select
-                v-model="verifyForm.boot_host_id"
-                :options="bootHosts.map((s) => ({ label: s.name, value: s.id }))"
-                emit-value
-                map-options
-                label="Гипервизор для пробного запуска"
-                outlined
-                dense
-              />
-              <q-select
+                v-if="!verifyForm.boot_engine_id"
                 v-model="verifyForm.disk_id"
                 :options="[
                   { label: 'Все диски ВМ (рекомендуется)', value: '' },
@@ -1952,10 +1965,12 @@ const replicationColumns = [
 
               <q-toggle
                 v-model="verifyForm.keep_on_failure"
-                label="Оставить ВМ и образ на гипервизоре, если проверка не прошла"
+                :label="verifyForm.boot_engine_id
+                  ? 'Оставить проверочную ВМ в движке, если проверка не прошла'
+                  : 'Оставить ВМ и образ на гипервизоре, если проверка не прошла'"
               />
 
-              <q-banner dense class="bg-blue-1">
+              <q-banner v-if="!verifyForm.boot_engine_id" dense class="bg-blue-1">
                 <template #avatar><q-icon name="info" color="primary" /></template>
                 ВМ создаётся <b>без сетевых интерфейсов</b> и удаляется вместе с образом после
                 проверки: копия боевой системы не должна попасть в сеть, которую считает своей.
@@ -1975,7 +1990,7 @@ const replicationColumns = [
             unelevated
             label="Проверить"
             :loading="verifyBusy"
-            :disable="needsHypervisor && !verifyForm.boot_host_id"
+            :disable="needsHypervisor && !bootTargetReady(verifyForm)"
             @click="submitVerify"
           />
         </q-card-actions>

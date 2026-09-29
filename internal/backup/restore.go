@@ -348,13 +348,15 @@ func (e *Engine) restoreToEngine(ctx context.Context, set *ChainSet, reader *Cha
 		if suffix == "" {
 			suffix = "-restored-" + set.Leaf.CreatedAt.Format("20060102-1504")
 		}
+		format, sparse := NewDiskLayout(leaf.DiskFormat, e.domainStorageType(ctx, srv.ID, req.TargetDomainID),
+			srv.SupportsCBT)
 		created, err := client.CreateDisk(ctx, ovirt.CreateDiskRequest{
 			Alias:           leaf.Alias + suffix,
 			Description:     fmt.Sprintf("Восстановлен из бэкапа %s от %s", set.Leaf.ID, set.Leaf.CreatedAt.Format(time.RFC3339)),
 			StorageDomainID: req.TargetDomainID,
 			ProvisionedSize: leaf.VirtualSize,
-			Format:          leaf.DiskFormat,
-			Sparse:          true,
+			Format:          format,
+			Sparse:          sparse,
 		})
 		if err != nil {
 			return fmt.Errorf("создание диска: %w", err)

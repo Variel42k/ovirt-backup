@@ -453,12 +453,32 @@ type VerifyOptions struct {
 	TimeoutSec int `json:"timeout_sec,omitempty"`
 	// KeepOnFailure оставляет ВМ и образ на гипервизоре для разбора.
 	KeepOnFailure bool `json:"keep_on_failure,omitempty"`
+
+	// BootEngineID — подключение oVirt (РЕД Виртуализация), в котором служба
+	// восстанавливает проверочную ВМ без сети, запускает её, ждёт ответа
+	// гостевого агента через API движка и удаляет вместе с дисками.
+	// Задаётся вместо BootHostID.
+	BootEngineID string `json:"boot_engine_id,omitempty"`
+	// BootClusterID и BootStorageDomainID — где в движке создать проверочную
+	// ВМ: кластер и домен хранения для её дисков.
+	BootClusterID       string `json:"boot_cluster_id,omitempty"`
+	BootStorageDomainID string `json:"boot_storage_domain_id,omitempty"`
 }
+
+// OnEngine сообщает, что проверочная ВМ поднимается в движке oVirt, а не на
+// KVM-хосте.
+func (o VerifyOptions) OnEngine() bool { return o.BootEngineID != "" }
 
 // Validate rejects values which would make a boot verification meaningless or
 // could exhaust a hypervisor because of a typo. Zero keeps the verifier's
 // documented default.
 func (o VerifyOptions) Validate() error {
+	if o.BootEngineID != "" && o.BootHostID != "" {
+		return fmt.Errorf("укажите либо KVM-хост, либо движок для проверочной ВМ, но не оба")
+	}
+	if o.BootEngineID != "" && (o.BootClusterID == "" || o.BootStorageDomainID == "") {
+		return fmt.Errorf("для проверки через движок нужны кластер и домен хранения")
+	}
 	if o.MemoryMiB < 0 || o.MemoryMiB > 1<<20 {
 		return fmt.Errorf("память проверочной ВМ должна быть от 1 до 1048576 МиБ или 0 для значения по умолчанию")
 	}

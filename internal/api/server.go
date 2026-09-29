@@ -326,6 +326,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 
 	// Проверка и восстановление.
 	mux.HandleFunc("POST /backups/{id}/verify", s.perm(model.PermBackupsWrite, s.handleVerifyRun))
+	mux.HandleFunc("GET /boot-verify/engines/{id}/targets", s.perm(model.PermBackupsRead, s.handleBootTargets))
 	mux.HandleFunc("GET /verifications", s.perm(model.PermBackupsRead, s.handleListVerifications))
 	mux.HandleFunc("GET /verifications/{id}", s.perm(model.PermBackupsRead, s.handleGetVerification))
 	mux.HandleFunc("POST /backups/{id}/restore", s.perm(model.PermBackupsWrite, s.handleRestore))

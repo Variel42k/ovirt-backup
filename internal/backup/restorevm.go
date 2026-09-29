@@ -147,7 +147,7 @@ func restoreVMBlockers(in RestoreVMInput, plan *model.RestoreVMPlan) []string {
 	// Места должно хватить на полный виртуальный размер, а не на сжатый: диски
 	// создаются исходного объёма. Отказ здесь дешевле, чем отказ на середине
 	// заливки, после которого в домене остаются недоделанные диски.
-	if plan.FreeBytes >= 0 && plan.TotalBytes > plan.FreeBytes {
+	if plan.FreeBytes >= 0 && plan.TotalBytes > plan.FreeBytes && !in.Request.SkipCapacityCheck {
 		out = append(out, fmt.Sprintf("в домене хранения не хватает места: нужно %s, свободно %s",
 			humanBytes(plan.TotalBytes), humanBytes(plan.FreeBytes)))
 	}
@@ -177,7 +177,9 @@ func restoreVMWarnings(in RestoreVMInput, plan *model.RestoreVMPlan) []string {
 		out = append(out, "машина будет запущена сразу после сборки")
 	}
 
-	if plan.FreeBytes < 0 {
+	if in.Request.SkipCapacityCheck {
+		// Место уже сверено вызывающим по объёму данных.
+	} else if plan.FreeBytes < 0 {
 		out = append(out, "движок не сообщил свободное место — проверьте домен хранения сами")
 	} else if plan.TotalBytes > 0 && plan.FreeBytes-plan.TotalBytes < plan.TotalBytes/10 {
 		// Меньше десятой части запаса: место кончится на первом же снапшоте

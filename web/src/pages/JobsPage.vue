@@ -4,12 +4,14 @@ import { useQuasar } from 'quasar'
 import { useRoute, useRouter } from 'vue-router'
 import { api, errorMessage, notify, notifyError, notifyOk } from '@/api/client'
 import {
-  consistencyLabel, consistencyOptions, dateTime, freezeByHint, freezeByOptions, runStatus, statusColor, usesOVirtAPI,
+  bootTargetReady, consistencyLabel, consistencyOptions, dateTime, freezeByHint, freezeByOptions, runStatus, statusColor,
+  usesOVirtAPI,
 } from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import BackupOptionsPicker from '@/components/BackupOptionsPicker.vue'
 import FreezeMountpointsField from '@/components/FreezeMountpointsField.vue'
+import BootTargetPicker from '@/components/BootTargetPicker.vue'
 import HelpButton from '@/components/HelpButton.vue'
 import PageLoadError from '@/components/PageLoadError.vue'
 import { useUnsavedChanges } from '@/composables/unsavedChanges'
@@ -92,6 +94,9 @@ const emptyForm = () => ({
   verify_after: 'chain',
   verify_options: {
     boot_host_id: '',
+    boot_engine_id: '',
+    boot_cluster_id: '',
+    boot_storage_domain_id: '',
     disk_id: '',
     memory_mib: 0,
     vcpus: 0,
@@ -124,7 +129,6 @@ const schedulePresets = [
 
 const needsFullEvery = computed(() => ['incremental', 'differential'].includes(form.value.type))
 const usesCBT = computed(() => ['full', 'incremental', 'differential'].includes(form.value.type))
-const bootHosts = computed(() => app.servers.filter((s) => s.kind === 'kvm' && s.enabled))
 const backupServers = computed(() => app.servers.filter((s) => s.enabled && app.serverSupports(s, 'supports_backup')))
 const jobServer = computed(() => app.servers.find((server) => server.id === form.value.server_id))
 const isProxmoxJob = computed(() => jobServer.value?.kind === 'proxmox')
@@ -143,7 +147,11 @@ const requireConsistencyOptions = [
 // Подсказки стоят у тех полей, от которых зависят, и меняются вместе с ними:
 // что нужно в госте — у уровня, как работает заморозка — у выбора «кто
 // замораживает», когда уровень не будет достигнут — у выбора исхода.
-const freezeMode = computed(() => (isOVirtJob.value ? form.value.freeze_by : 'service'))
+// Выбор «кто замораживает» есть только у движка с Backup API. Движок без него
+// (oVirt 4.3) гостя сам не замораживает: копия снимается через временный
+// снапшот, и замораживает служба — на время запроса снапшота.
+const canChooseFreezeBy = computed(() => isOVirtJob.value && !isLegacyOVirtJob.value)
+const freezeMode = computed(() => (canChooseFreezeBy.value ? form.value.freeze_by : 'service'))
 
 const consistencyHint = computed(() => {
   switch (form.value.consistency) {
@@ -169,8 +177,11 @@ const longFreezeText = 'Запись в госте будет стоять, по
 function freezesLong(job: BackupJob): boolean {
   const level = job.consistency || (job.quiesce ? 'filesystem' : 'crash')
   if (level === 'crash') return false
-  const kind = app.servers.find((server) => server.id === job.server_id)?.kind
-  return usesOVirtAPI(kind) && (!job.freeze_by || job.freeze_by === 'service')
+  const server = app.servers.find((candidate) => candidate.id === job.server_id)
+  // На движке без Backup API служба держит заморозку только на время запроса
+  // снапшота, а не всю подготовку бэкапа.
+  return usesOVirtAPI(server?.kind) && server?.supports_cbt !== false &&
+    (!job.freeze_by || job.freeze_by === 'service')
 }
 
 const longFreezeJobs = computed(() => jobs.value.filter(freezesLong))
@@ -471,8 +482,8 @@ function validateJobStep(step: number): string {
     }
   }
   if (step === 4) {
-    if (form.value.verify_after === 'boot' && !form.value.verify_options.boot_host_id) {
-      return 'Выберите KVM-хост для пробного запуска.'
+    if (form.value.verify_after === 'boot' && !bootTargetReady(form.value.verify_options)) {
+      return 'Выберите KVM-хост или движок с кластером и доменом хранения для пробного запуска.'
     }
     if (isProxmoxJob.value && form.value.verify_after && !['quick', 'manifest', 'chain'].includes(form.value.verify_after)) {
       return 'Для Proxmox выберите quick, manifest или chain.'
@@ -513,7 +524,7 @@ async function save() {
   // смотрят только на него, поэтому держим их согласованными и здесь.
   form.value.quiesce = form.value.consistency !== 'crash'
   if (!form.value.quiesce || isProxmoxJob.value) form.value.require_consistency = false
-  if (!isOVirtJob.value) form.value.freeze_by = 'service'
+  if (!canChooseFreezeBy.value) form.value.freeze_by = 'service'
   if (!isKvmJob.value || !form.value.quiesce) form.value.freeze_mountpoints = []
   saving.value = true
   try {
@@ -659,10 +670,17 @@ async function preview(job: BackupJob) {
 
 watch(() => form.value.server_id, (serverID) => {
   void loadVMs()
-  if (!form.value.verify_options.boot_host_id) {
+  if (!form.value.verify_options.boot_host_id && !form.value.verify_options.boot_engine_id) {
     const source = app.servers.find((s) => s.id === serverID)
     form.value.verify_options.boot_host_id = source?.kind === 'kvm' ? source.id : ''
   }
+})
+// Движок обновляет сведения от гостевого агента раз в минуту-другую: пять
+// минут ожидания, привычные для KVM-хоста, для движка коротки.
+watch(() => form.value.verify_options.boot_engine_id, (engine) => {
+  const options = form.value.verify_options
+  if (engine && options.timeout_sec === 300) options.timeout_sec = 900
+  if (!engine && options.timeout_sec === 900) options.timeout_sec = 300
 })
 watch(() => [...form.value.vm_ids], () => void loadBackupOptions())
 watch(() => form.value.vm_name_regex, () => void loadBackupOptions())
@@ -1297,7 +1315,11 @@ const columns = [
               <template #append><HelpButton article="quiesce" label="Уровни согласованности" /></template>
             </q-select>
           </div>
-          <div v-if="isOVirtJob" class="col-12 col-sm-8">
+          <div v-if="isLegacyOVirtJob && form.consistency !== 'crash'" class="col-12 col-sm-8 text-caption text-grey-7" data-testid="job-freeze-legacy">
+            Движок без Backup API (oVirt 4.3) сам гостя не замораживает: копия снимается через временный снапшот,
+            и замораживает служба — только на время запроса снапшота, обычно секунды.
+          </div>
+          <div v-if="canChooseFreezeBy" class="col-12 col-sm-8">
             <q-select
               v-model="form.freeze_by"
               :options="freezeByOptions"
@@ -1326,11 +1348,11 @@ const columns = [
               type="number"
               min="0"
               max="600"
-              :disable="form.consistency === 'crash' || (isOVirtJob && form.freeze_by === 'engine')"
+              :disable="form.consistency === 'crash' || freezeMode === 'engine'"
               label="Предел заморозки, с"
-              :hint="isOVirtJob && form.freeze_by === 'engine'
+              :hint="freezeMode === 'engine'
                 ? 'Не нужен: движок держит заморозку доли секунды'
-                : isOVirtJob && form.freeze_by === 'mixed'
+                : freezeMode === 'mixed'
                   ? 'Сколько ждёт служба, прежде чем заморозку перехватит движок'
                   : '0 — по умолчанию службы; узлам Kubernetes — 10–15 с'"
               outlined
@@ -1338,7 +1360,7 @@ const columns = [
               data-testid="job-max-freeze"
             />
           </div>
-          <div v-if="isOVirtJob && form.consistency !== 'crash' && form.freeze_by === 'service'" class="col-12">
+          <div v-if="canChooseFreezeBy && form.consistency !== 'crash' && form.freeze_by === 'service'" class="col-12">
             <q-banner dense class="bg-orange-1" data-testid="job-long-freeze">
               <template #avatar><q-icon name="ac_unit" color="warning" /></template>
               <span class="jhv-wrap">{{ longFreezeText }}</span>
@@ -1390,26 +1412,24 @@ const columns = [
 					</div>
 
           <template v-if="form.verify_after === 'boot'">
-            <div v-if="!bootHosts.length" class="col-12">
-              <q-banner dense class="bg-orange-1">
-                <template #avatar><q-icon name="warning" color="warning" /></template>
-                Нет включённого подключения типа KVM. Добавьте KVM-хост, на котором можно
-                безопасно запускать восстановленные образы.
+            <div class="col-12">
+              <BootTargetPicker
+                v-model:host-id="form.verify_options.boot_host_id"
+                v-model:engine-id="form.verify_options.boot_engine_id"
+                v-model:cluster-id="form.verify_options.boot_cluster_id"
+                v-model:domain-id="form.verify_options.boot_storage_domain_id"
+                :source-server-id="form.server_id"
+                :vm-ids="form.vm_ids"
+              />
+            </div>
+            <div v-if="form.verify_options.boot_engine_id && form.concurrency > 1" class="col-12">
+              <q-banner dense class="bg-orange-1" data-testid="job-boot-concurrency">
+                <template #avatar><q-icon name="storage" color="warning" /></template>
+                Задание бэкапит до {{ form.concurrency }} ВМ параллельно, и проверочных ВМ в движке может
+                быть столько же одновременно: места на домене нужно соответственно больше, чем в оценке выше.
               </q-banner>
             </div>
-            <template v-else>
-              <div class="col-12">
-                <q-select
-                  v-model="form.verify_options.boot_host_id"
-                  :options="bootHosts.map((s) => ({ label: s.name, value: s.id }))"
-                  emit-value
-                  map-options
-                  label="KVM-хост для проверки образа"
-                  hint="Для oVirt требуется отдельный KVM-хост; для KVM по умолчанию выбран исходный"
-                  outlined
-                  dense
-                />
-              </div>
+            <template v-if="form.verify_options.boot_host_id || form.verify_options.boot_engine_id">
               <div class="col-12 col-sm-4">
                 <q-input v-model.number="form.verify_options.memory_mib" type="number" min="0" max="1048576" label="Память, МиБ" hint="0 — как у исходной ВМ" outlined dense />
               </div>
@@ -1422,10 +1442,12 @@ const columns = [
               <div class="col-12">
                 <q-toggle
                   v-model="form.verify_options.keep_on_failure"
-                  label="Оставлять неудачную ВМ и образ для диагностики"
+                  :label="form.verify_options.boot_engine_id
+                    ? 'Оставлять неудачную проверочную ВМ в движке для диагностики'
+                    : 'Оставлять неудачную ВМ и образ для диагностики'"
                 />
               </div>
-              <div class="col-12">
+              <div v-if="!form.verify_options.boot_engine_id" class="col-12">
                 <q-banner dense class="bg-blue-1">
                   <template #avatar><q-icon name="lan" color="primary" /></template>
                   Проверочная ВМ запускается со всеми дисками, но без сетевых интерфейсов. При включённом сохранении
@@ -1473,7 +1495,7 @@ const columns = [
             color="primary"
             unelevated
             label="Сохранить"
-            :disable="form.verify_after === 'boot' && !form.verify_options.boot_host_id"
+            :disable="form.verify_after === 'boot' && !bootTargetReady(form.verify_options)"
             :loading="saving"
             @click="save"
           />

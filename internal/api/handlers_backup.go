@@ -138,6 +138,9 @@ func (s *Server) validateJob(ctx context.Context, job *model.BackupJob) error {
 		return badRequest("заморозку силами движка поддерживает только oVirt и его производные: "+
 			"у %s выберите заморозку службой", srv.Kind.Title())
 	}
+	if job.FreezeBy.NeedsEngine() && !srv.SupportsCBT && job.Consistency.NeedsFreeze() {
+		return badRequest("%s", legacyEngineFreezeMessage(srv))
+	}
 	if len(job.FreezeMountpoints) > 0 && !srv.Kind.UsesLibvirt() {
 		return badRequest("заморозить только выбранные файловые системы можно на KVM: " +
 			"движок oVirt и vzdump замораживают все файловые системы гостя")
@@ -483,6 +486,10 @@ func (s *Server) handleAdHocBackup(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, badRequest("заморозку силами движка поддерживает только oVirt и его производные"))
 		return
 	}
+	if freezeBy.NeedsEngine() && !srv.SupportsCBT && (consistency.NeedsFreeze() || (consistency == "" && req.Quiesce)) {
+		s.writeError(w, r, badRequest("%s", legacyEngineFreezeMessage(srv)))
+		return
+	}
 	mountpoints := trimMountpoints(req.FreezeMountpoints)
 	if !consistency.NeedsFreeze() && !(consistency == "" && req.Quiesce) {
 		mountpoints = nil
@@ -775,6 +782,10 @@ type verifyRequest struct {
 	VCPUs         int    `json:"vcpus"`
 	TimeoutSec    int    `json:"timeout_sec"`
 	KeepOnFailure bool   `json:"keep_on_failure"`
+	// Проверочная ВМ в движке oVirt вместо KVM-хоста.
+	BootEngineID        string `json:"boot_engine_id"`
+	BootClusterID       string `json:"boot_cluster_id"`
+	BootStorageDomainID string `json:"boot_storage_domain_id"`
 }
 
 func (s *Server) handleVerifyRun(w http.ResponseWriter, r *http.Request) {
@@ -800,6 +811,10 @@ func (s *Server) handleVerifyRun(w http.ResponseWriter, r *http.Request) {
 		VCPUs:         req.VCPUs,
 		TimeoutSec:    req.TimeoutSec,
 		KeepOnFailure: req.KeepOnFailure,
+
+		BootEngineID:        req.BootEngineID,
+		BootClusterID:       req.BootClusterID,
+		BootStorageDomainID: req.BootStorageDomainID,
 	}
 
 	// The boot test starts a copy of a real system. Refusing an unusable
@@ -880,6 +895,9 @@ func (s *Server) validateBootOptions(ctx context.Context, sourceServerID string,
 	if err := opts.Validate(); err != nil {
 		return badRequest("параметры пробного запуска: %v", err)
 	}
+	if opts.OnEngine() {
+		return s.validateBootEngine(ctx, sourceServerID, opts)
+	}
 
 	if opts.BootHostID == "" {
 		own, err := s.store.GetServer(ctx, sourceServerID)
@@ -887,7 +905,8 @@ func (s *Server) validateBootOptions(ctx context.Context, sourceServerID string,
 			return err
 		}
 		if !own.Kind.UsesLibvirt() {
-			return badRequest("для пробного запуска нужно указать KVM-хост: %s", s.bootHostHint(ctx))
+			return badRequest("для пробного запуска укажите KVM-хост (%s) или движок oVirt с кластером и "+
+				"доменом хранения для проверочной ВМ", s.bootHostHint(ctx))
 		}
 		opts.BootHostID = own.ID
 	}
@@ -1280,4 +1299,57 @@ func trimMountpoints(list []string) []string {
 		out = append(out, mp)
 	}
 	return out
+}
+
+// legacyEngineFreezeMessage — почему на движке без Backup API нельзя выбрать
+// заморозку силами движка.
+func legacyEngineFreezeMessage(srv *model.Server) string {
+	return fmt.Sprintf("движок %s без Backup API (oVirt 4.3) сам гостя не замораживает: копия снимается через "+
+		"временный снапшот, и замораживает служба на время его запроса — выберите «Служба»", srv.Name)
+}
+
+// validateBootEngine проверяет движок, кластер и домен хранения для
+// проверочной ВМ. Место не проверяется: его сверяет сама проверка по свежим
+// цифрам движка, а форма показывает предварительный анализ.
+func (s *Server) validateBootEngine(ctx context.Context, sourceServerID string, opts *model.VerifyOptions) error {
+	engine, err := s.store.GetServer(ctx, opts.BootEngineID)
+	if err != nil {
+		return badRequest("движок для проверочной ВМ не найден")
+	}
+	if !engine.Kind.UsesOVirtAPI() {
+		return badRequest("проверочную ВМ через движок можно поднять только в oVirt и его производных, а %q — %s",
+			engine.Name, engine.Kind.Title())
+	}
+	if !engine.Enabled {
+		return badRequest("подключение %q отключено", engine.Name)
+	}
+	if source, err := s.store.GetServer(ctx, sourceServerID); err == nil && !source.Kind.UsesOVirtAPI() {
+		return badRequest("проверка через движок — только для копий ВМ oVirt; копии с %s проверяйте на KVM-хосте",
+			source.Kind.Title())
+	}
+	clusters, err := s.store.ListClusters(ctx, engine.ID)
+	if err != nil {
+		return err
+	}
+	found := false
+	for _, c := range clusters {
+		found = found || c.ID == opts.BootClusterID
+	}
+	if !found {
+		return badRequest("кластер для проверочной ВМ не найден у движка %q", engine.Name)
+	}
+	domains, err := s.store.ListStorageDomains(ctx, engine.ID)
+	if err != nil {
+		return err
+	}
+	for _, d := range domains {
+		if d.ID != opts.BootStorageDomainID {
+			continue
+		}
+		if d.Type != "" && d.Type != "data" {
+			return badRequest("домен хранения %q не для данных (%s): диски ВМ на нём не создать", d.Name, d.Type)
+		}
+		return nil
+	}
+	return badRequest("домен хранения для проверочной ВМ не найден у движка %q", engine.Name)
 }

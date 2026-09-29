@@ -274,6 +274,13 @@ export const consistencyOptions = [
  * Платформы с Backup API oVirt: только у них гостя может заморозить сам движок.
  * Тот же список, что ServerKind.UsesOVirtAPI на сервере.
  */
+/** Выбрано ли, где поднять проверочную ВМ пробного запуска. */
+export function bootTargetReady(o: { boot_host_id?: string; boot_engine_id?: string;
+  boot_cluster_id?: string; boot_storage_domain_id?: string }): boolean {
+  if (o.boot_engine_id) return Boolean(o.boot_cluster_id && o.boot_storage_domain_id)
+  return Boolean(o.boot_host_id)
+}
+
 export function usesOVirtAPI(kind?: string | null): boolean {
   return ['ovirt', 'redvirt', 'olvm', 'rhv'].includes(kind ?? '')
 }

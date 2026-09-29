@@ -210,8 +210,8 @@ func (e *Engine) RestoreVM(ctx context.Context, req *model.RestoreVMRequest) (*R
 		Name:        plan.NewName,
 		Description: fmt.Sprintf("Восстановлена из копии %s от %s", plan.RunID, plan.Created.Format(time.RFC3339)),
 		ClusterID:   req.ClusterID,
-		MemoryBytes: profileMemoryBytes(profile),
-		VCPUs:       profileVCPUs(profile),
+		MemoryBytes: overrideMemory(req.MemoryMiB, profileMemoryBytes(profile)),
+		VCPUs:       overrideVCPUs(req.VCPUs, profileVCPUs(profile)),
 		Firmware:    profileFirmware(profile),
 	})
 	if err != nil {
@@ -355,6 +355,22 @@ func profileVCPUs(p *VMProfile) int {
 		return 0
 	}
 	return p.VCPUs
+}
+
+// overrideMemory — память проверочной ВМ, если задана, иначе исходной.
+func overrideMemory(mib int, profile int64) int64 {
+	if mib > 0 {
+		return int64(mib) << 20
+	}
+	return profile
+}
+
+// overrideVCPUs — vCPU проверочной ВМ, если заданы, иначе исходной.
+func overrideVCPUs(n, profile int) int {
+	if n > 0 {
+		return n
+	}
+	return profile
 }
 
 func profileFirmware(p *VMProfile) string {

@@ -1075,6 +1075,39 @@ export interface BootVerifyOptions {
   vcpus: number
   timeout_sec: number
   keep_on_failure: boolean
+  /** Проверочная ВМ в движке oVirt вместо KVM-хоста: движок, кластер, домен хранения. */
+  boot_engine_id?: string
+  boot_cluster_id?: string
+  boot_storage_domain_id?: string
+}
+
+/** Оценка домена хранения для проверочной ВМ в движке. */
+export interface BootDomainCheck {
+  id: string
+  name: string
+  storage?: string
+  status?: string
+  /** Свободно и объём домена; -1 — неизвестно. */
+  available: number
+  total: number
+  /** Запас, который проверочная ВМ не трогает. */
+  reserve: number
+  /** Данные дисков и полный размер дисков; -1 — неизвестно. */
+  need_data: number
+  need_full: number
+  verdict: 'ok' | 'tight' | 'short' | 'inactive' | 'unknown'
+  message: string
+}
+
+/** Предварительный анализ для проверки загрузкой через движок. */
+export interface BootTargets {
+  engine_id: string
+  engine_name: string
+  clusters: Array<{ id: string; name: string }>
+  domains: BootDomainCheck[]
+  need_data: number
+  need_full: number
+  basis: string
 }
 
 /** Итог пробного запуска — лежит в details проверки под ключом boot. */

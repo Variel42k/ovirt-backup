@@ -67,6 +67,16 @@ func (c *Client) VMStatus(ctx context.Context, vmID string) (status, detail stri
 	return vm.Status, vm.StatusDetail, nil
 }
 
+// GetVMState читает ВМ без подгрузки дисков: состояние и то, что сообщил
+// гостевой агент. Для частого опроса, где GetVM с дисками избыточен.
+func (c *Client) GetVMState(ctx context.Context, vmID string) (*VM, error) {
+	var vm VM
+	if err := c.get(ctx, "/vms/"+vmID, &vm); err != nil {
+		return nil, err
+	}
+	return &vm, nil
+}
+
 // WaitVMStatus polls until the VM reaches one of the wanted statuses.
 func (c *Client) WaitVMStatus(ctx context.Context, vmID string, wanted []string, timeout time.Duration) (string, error) {
 	want := map[string]bool{}

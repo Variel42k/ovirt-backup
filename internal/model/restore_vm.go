@@ -65,6 +65,17 @@ type RestoreVMRequest struct {
 	Start bool `json:"start,omitempty"`
 	// Confirm требуется, когда восстановление затрагивает существующую машину.
 	Confirm bool `json:"confirm,omitempty"`
+
+	// Переопределения для проверочной ВМ проверки загрузкой через движок.
+	// Задаются только внутри службы, из API не принимаются.
+	//
+	// MemoryMiB и VCPUs заменяют ресурсы исходной машины, если больше нуля.
+	MemoryMiB int `json:"-"`
+	VCPUs     int `json:"-"`
+	// SkipCapacityCheck снимает проверку места по полному размеру дисков:
+	// проверка загрузкой сама сверяет место по объёму данных — диски
+	// тонкие, и полный размер для пробной ВМ избыточен.
+	SkipCapacityCheck bool `json:"-"`
 }
 
 // RestoreVMNetworkMapping maps one saved NIC to an oVirt vNIC profile or a

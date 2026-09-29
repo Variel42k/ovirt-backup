@@ -4,7 +4,7 @@ import { useQuasar } from 'quasar'
 import { useRoute } from 'vue-router'
 import { api, errorMessage, notifyError, notifyOk } from '@/api/client'
 import {
-  ago, bytes, consistencyOptions, dateTime, freezeByHint, freezeByOptions, runStatus, statusColor, usesOVirtAPI, vmStatus,
+  ago, bootTargetReady, bytes, consistencyOptions, dateTime, freezeByHint, freezeByOptions, runStatus, statusColor, usesOVirtAPI, vmStatus,
 } from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
@@ -15,6 +15,7 @@ import HelpButton from '@/components/HelpButton.vue'
 import PageLoadError from '@/components/PageLoadError.vue'
 import SpaceForecastCard from '@/components/SpaceForecastCard.vue'
 import FreezeMountpointsField from '@/components/FreezeMountpointsField.vue'
+import BootTargetPicker from '@/components/BootTargetPicker.vue'
 import type { BackupOption, BackupRun, Consistency, Disk, FreezeBy, Recommendation, SchedulePreset, VM } from '@/api/types'
 
 const props = defineProps<{ serverId: string; vmId: string }>()
@@ -51,6 +52,9 @@ const encrypt = ref(false)
 const verifyAfter = ref<string>('')
 const verifyOptions = ref({
   boot_host_id: '',
+  boot_engine_id: '',
+  boot_cluster_id: '',
+  boot_storage_domain_id: '',
   disk_id: '',
   memory_mib: 0,
   vcpus: 0,
@@ -66,7 +70,12 @@ const allDisksRaw = computed(
 )
 
 const assessment = computed(() => recommendation.value?.assessment)
-const bootHosts = computed(() => app.servers.filter((s) => s.kind === 'kvm' && s.enabled))
+// Движок обновляет сведения от гостевого агента раз в минуту-другую: пять
+// минут ожидания, привычные для KVM-хоста, для движка коротки.
+watch(() => verifyOptions.value.boot_engine_id, (engine) => {
+  if (engine && verifyOptions.value.timeout_sec === 300) verifyOptions.value.timeout_sec = 900
+  if (!engine && verifyOptions.value.timeout_sec === 900) verifyOptions.value.timeout_sec = 300
+})
 const sourceServer = computed(() => app.servers.find((s) => s.id === props.serverId))
 const backupSupported = computed(() => Boolean(sourceServer.value && app.serverSupports(sourceServer.value, 'supports_backup')))
 const backupPlanningAvailable = computed(() => backupSupported.value && auth.can('jobs.read'))
@@ -75,6 +84,16 @@ const isProxmox = computed(() => sourceServer.value?.kind === 'proxmox')
 // Выбор «кто замораживает» есть только у oVirt: у KVM и Proxmox замораживает служба или vzdump.
 const isOVirt = computed(() => usesOVirtAPI(sourceServer.value?.kind))
 const isLegacyOVirt = computed(() => isOVirt.value && sourceServer.value?.supports_cbt === false)
+// Выбор «кто замораживает» есть только у движка с Backup API. Движок без него
+// (oVirt 4.3) гостя сам не замораживает: бэкап идёт через временный снапшот, и
+// замораживает служба — на время запроса снапшота.
+const canChooseFreezeBy = computed(() => isOVirt.value && !isLegacyOVirt.value)
+const effectiveFreezeBy = computed<FreezeBy>(() => (canChooseFreezeBy.value ? freezeBy.value : 'service'))
+// Движок без Backup API отдаёт том qcow2 файлом; образ собирается через
+// qemu-img на сервере службы. Без него бэкап не запустится — лучше сказать
+// это до нажатия, а не ошибкой запуска.
+const legacyNeedsQemuImg = computed(() => isLegacyOVirt.value && assessment.value?.qemu_img_available === false &&
+  (assessment.value?.disks ?? []).some((disk) => disk.format === 'cow' && !disk.not_backed_up))
 const usesLegacyIncremental = computed(() => isLegacyOVirt.value && ['incremental', 'differential'].includes(selectedType.value))
 const isKvm = computed(() => sourceServer.value?.kind === 'kvm')
 const consistencyChoices = computed(() => consistencyOptions.map((option) => ({
@@ -147,7 +166,7 @@ async function loadRecommendation() {
     // Без агента заморозка невозможна вовсе, поэтому выбранный раньше уровень
     // сбрасывается; выбор оператора в остальном не трогаем.
     if (!result.assessment.guest_agent) consistency.value = 'crash'
-    if (!verifyOptions.value.boot_host_id) {
+    if (!verifyOptions.value.boot_host_id && !verifyOptions.value.boot_engine_id) {
       const source = app.servers.find((s) => s.id === props.serverId)
       verifyOptions.value.boot_host_id = source?.kind === 'kvm' ? source.id : ''
     }
@@ -185,8 +204,8 @@ async function startBackup() {
       quiesce: consistency.value !== 'crash',
       consistency: consistency.value,
       require_consistency: requireConsistency.value && consistency.value !== 'crash' && !isProxmox.value,
-      freeze_by: isOVirt.value ? freezeBy.value : 'service',
-      max_freeze_seconds: isOVirt.value && freezeBy.value === 'engine' ? 0 : maxFreezeSeconds.value,
+      freeze_by: effectiveFreezeBy.value,
+      max_freeze_seconds: effectiveFreezeBy.value === 'engine' ? 0 : maxFreezeSeconds.value,
       freeze_mountpoints: isKvm.value && consistency.value !== 'crash' ? freezeMountpoints.value : undefined,
       encrypt: encrypt.value,
       verify_after: verifyAfter.value || undefined,
@@ -418,7 +437,11 @@ onMounted(load)
                 Гостевой агент не отвечает — заморозка невозможна, копия будет как после сбоя питания
               </q-tooltip>
             </div>
-            <div v-if="isOVirt" class="col-12 col-sm-8">
+            <div v-if="isLegacyOVirt && consistency !== 'crash'" class="col-12 col-sm-8 text-caption text-grey-7" data-testid="adhoc-freeze-legacy">
+              Движок без Backup API (oVirt 4.3) сам гостя не замораживает: копия снимается через временный снапшот,
+              и замораживает служба — только на время запроса снапшота, обычно секунды.
+            </div>
+            <div v-if="canChooseFreezeBy" class="col-12 col-sm-8">
               <q-select
                 v-model="freezeBy"
                 :options="freezeByOptions"
@@ -447,9 +470,9 @@ onMounted(load)
                 type="number"
                 min="0"
                 max="600"
-                :disable="consistency === 'crash' || (isOVirt && freezeBy === 'engine')"
+                :disable="consistency === 'crash' || effectiveFreezeBy === 'engine'"
                 label="Предел заморозки, с"
-                :hint="isOVirt && freezeBy === 'engine'
+                :hint="effectiveFreezeBy === 'engine'
                   ? 'Не нужен: движок держит заморозку доли секунды'
                   : '0 — по умолчанию службы; узлам Kubernetes — 10–15 с'"
                 outlined
@@ -465,7 +488,7 @@ onMounted(load)
                 testid="adhoc-freeze-mountpoints"
               />
             </div>
-            <div v-if="isOVirt && consistency !== 'crash' && freezeBy === 'service'" class="col-12">
+            <div v-if="canChooseFreezeBy && consistency !== 'crash' && freezeBy === 'service'" class="col-12">
               <q-banner dense class="bg-orange-1" data-testid="adhoc-long-freeze">
                 <template #avatar><q-icon name="ac_unit" color="warning" /></template>
                 <span class="jhv-wrap">
@@ -488,20 +511,15 @@ onMounted(load)
           </q-card-section>
 
           <q-card-section v-if="verifyAfter === 'boot'" class="q-pt-none">
-            <q-banner v-if="!bootHosts.length" dense class="bg-orange-1">
-              <template #avatar><q-icon name="warning" color="warning" /></template>
-              Для запуска образа нужно добавить включённое подключение типа KVM.
-            </q-banner>
-            <div v-else class="q-gutter-sm">
-              <q-select
-                v-model="verifyOptions.boot_host_id"
-                :options="bootHosts.map((s) => ({ label: s.name, value: s.id }))"
-                emit-value
-                map-options
-                label="KVM-хост для проверки образа"
-                outlined
-                dense
-              />
+            <BootTargetPicker
+              v-model:host-id="verifyOptions.boot_host_id"
+              v-model:engine-id="verifyOptions.boot_engine_id"
+              v-model:cluster-id="verifyOptions.boot_cluster_id"
+              v-model:domain-id="verifyOptions.boot_storage_domain_id"
+              :source-server-id="serverId"
+              :vm-ids="[vmId]"
+            />
+            <div v-if="verifyOptions.boot_host_id || verifyOptions.boot_engine_id" class="q-gutter-sm q-mt-xs">
               <!-- Обёртка забирает отступ .q-gutter-sm себе; без неё строка
                    перебивает его своим отрицательным и уезжает к краю. -->
               <div>
@@ -519,9 +537,11 @@ onMounted(load)
               </div>
               <q-toggle
                 v-model="verifyOptions.keep_on_failure"
-                label="Оставить неудачную ВМ и образ для диагностики"
+                :label="verifyOptions.boot_engine_id
+                  ? 'Оставить неудачную проверочную ВМ в движке для диагностики'
+                  : 'Оставить неудачную ВМ и образ для диагностики'"
               />
-              <q-banner dense class="bg-blue-1">
+              <q-banner v-if="!verifyOptions.boot_engine_id" dense class="bg-blue-1">
                 <template #avatar><q-icon name="lan" color="primary" /></template>
                 Проверочная ВМ запускается со всеми дисками, без сетевых интерфейсов и удаляется после проверки.
               </q-banner>
@@ -533,6 +553,17 @@ onMounted(load)
             <BackupTypeHelpCard :type="selectedType" />
           </q-card-section>
 
+          <q-card-section v-if="legacyNeedsQemuImg" class="q-pt-none">
+            <q-banner dense class="bg-red-1" data-testid="adhoc-needs-qemu-img">
+              <template #avatar><q-icon name="error" color="negative" /></template>
+              <span class="jhv-wrap">
+                Бэкап не запустится: движок без Backup API отдаёт диски qcow2 файлами томов, и образ собирается
+                через qemu-img, а на сервере службы его нет. Установите пакет qemu-img (или укажите путь в
+                backup.qemu_img_path) и обновите страницу.
+              </span>
+            </q-banner>
+          </q-card-section>
+
           <q-card-actions align="right">
             <q-btn
               v-if="auth.can('backups.write')"
@@ -541,7 +572,7 @@ onMounted(load)
               icon="play_arrow"
               label="Запустить бэкап сейчас"
               :loading="starting"
-              :disable="recommendationLoading || !selectedType || !selectedStorage || (verifyAfter === 'boot' && !verifyOptions.boot_host_id)"
+              :disable="recommendationLoading || !selectedType || !selectedStorage || legacyNeedsQemuImg || (verifyAfter === 'boot' && !bootTargetReady(verifyOptions))"
               @click="startBackup"
             />
           </q-card-actions>

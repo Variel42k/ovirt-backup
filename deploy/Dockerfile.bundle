@@ -10,11 +10,13 @@
 
 FROM docker.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
-# Закреплённый Alpine уже содержит CA bundle и BusyBox wget. Установка из
-# фиксированного .run не должна обращаться к меняющемуся пакетному mirror:
-# qemu-img остаётся необязательным инструментом custom-образа, а база часовых
-# поясов встроена в Go-бинарь.
-RUN addgroup -g 10001 jhvirt && \
+# qemu-img стал частью основного пути данных: oVirt 4.3 отдаёт qcow2 как файл
+# тома, и служба собирает гостевой образ локально. Поэтому образ из .run не
+# должен отличаться по возможностям от образа, собранного из исходников.
+RUN apk upgrade --no-cache && \
+    apk add --no-cache ca-certificates tzdata qemu-img \
+        'libblkid>=2.42.3-r1' 'libmount>=2.42.3-r1' && \
+    addgroup -g 10001 jhvirt && \
     adduser -u 10001 -G jhvirt -h /app -D jhvirt
 
 WORKDIR /app

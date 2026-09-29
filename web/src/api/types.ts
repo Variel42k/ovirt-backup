@@ -1300,6 +1300,10 @@ export interface Meta {
   alert_audiences: { key: string; title: string; description: string }[]
   capabilities: {
     qemu_img: boolean
+    /** Путь виден из процесса службы; путь на узле контейнера сюда не попадает. */
+    qemu_img_path?: string
+    /** Точная причина недоступности, пригодная для диагностики установки. */
+    qemu_img_error?: string
     encryption: boolean
     compression: string
     chunk_size: number

@@ -134,6 +134,18 @@ func (s *Server) validateJob(ctx context.Context, job *model.BackupJob) error {
 			return badRequest("цепочка QCOW2: %v", err)
 		}
 	}
+	if srv.Kind.UsesOVirtAPI() && !srv.SupportsCBT && job.Type != model.BackupConfig && job.Type != model.BackupOVA {
+		if _, qemuErr := backup.FindQemuImg(s.cfg.Backup.QemuImgPath); qemuErr != nil {
+			names, scanErr := s.legacyQcowJobVMs(ctx, job)
+			if scanErr != nil {
+				return fmt.Errorf("проверка qcow2-дисков задания: %w", scanErr)
+			}
+			if len(names) > 0 {
+				return badRequest("движок без Backup API отдаёт qcow2 как файлы томов; для ВМ %s нужен qemu-img "+
+					"в среде службы: %v", strings.Join(names, ", "), qemuErr)
+			}
+		}
+	}
 	if job.FreezeBy.NeedsEngine() && !srv.Kind.UsesOVirtAPI() {
 		return badRequest("заморозку силами движка поддерживает только oVirt и его производные: "+
 			"у %s выберите заморозку службой", srv.Kind.Title())
@@ -196,6 +208,11 @@ func (s *Server) validateJob(ctx context.Context, job *model.BackupJob) error {
 	if job.VerifyAfter != "" {
 		if !knownVerifyMode(job.VerifyAfter) {
 			return badRequest("неизвестный режим проверки: %q", job.VerifyAfter)
+		}
+		if job.VerifyAfter == model.VerifyQemu {
+			if _, err := backup.FindQemuImg(s.cfg.Backup.QemuImgPath); err != nil {
+				return badRequest("проверка qemu-img check недоступна: %v", err)
+			}
 		}
 		if job.VerifyAfter.NeedsHypervisor() {
 			if err := s.validateBootOptions(ctx, job.ServerID, job.Type, &job.VerifyOptions); err != nil {
@@ -402,14 +419,18 @@ type adHocRequest struct {
 	StorageTargetID       string `json:"storage_target_id"`
 	Quiesce               bool   `json:"quiesce"`
 	// Consistency и RequireConsistency — как у задания; пусто — из quiesce.
-	Consistency        string              `json:"consistency"`
-	RequireConsistency bool                `json:"require_consistency"`
-	MaxFreezeSeconds   int                 `json:"max_freeze_seconds"`
-	FreezeBy           string              `json:"freeze_by"`
-	FreezeMountpoints  []string            `json:"freeze_mountpoints"`
-	Encrypt            bool                `json:"encrypt"`
-	VerifyAfter        string              `json:"verify_after"`
-	VerifyOptions      model.VerifyOptions `json:"verify_options"`
+	Consistency        string   `json:"consistency"`
+	RequireConsistency bool     `json:"require_consistency"`
+	MaxFreezeSeconds   int      `json:"max_freeze_seconds"`
+	FreezeBy           string   `json:"freeze_by"`
+	FreezeMountpoints  []string `json:"freeze_mountpoints"`
+	Encrypt            bool     `json:"encrypt"`
+	// ExportQcow2 создаёт управляемый проверенный QCOW2-артефакт так же, как
+	// одноимённый параметр задания. Разовый запуск не должен иметь урезанный
+	// путь данных по сравнению с запуском по расписанию.
+	ExportQcow2   bool                `json:"export_qcow2"`
+	VerifyAfter   string              `json:"verify_after"`
+	VerifyOptions model.VerifyOptions `json:"verify_options"`
 	// RetainDays ставит срок годности разовой копии; 0 — хранить бессрочно.
 	RetainDays   int      `json:"retain_days"`
 	ExcludeDisks []string `json:"exclude_disk_ids"`
@@ -458,13 +479,45 @@ func (s *Server) handleAdHocBackup(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if srv.Kind.UsesOVirtAPI() && !srv.SupportsCBT && model.BackupType(req.Type) != model.BackupConfig &&
+		model.BackupType(req.Type) != model.BackupOVA {
+		if _, qemuErr := backup.FindQemuImg(s.cfg.Backup.QemuImgPath); qemuErr != nil {
+			disks, scanErr := s.store.ListDisksForVM(r.Context(), req.ServerID, req.VMID)
+			if scanErr != nil {
+				s.writeError(w, r, scanErr)
+				return
+			}
+			excluded := make(map[string]bool, len(req.ExcludeDisks))
+			for _, id := range req.ExcludeDisks {
+				excluded[id] = true
+			}
+			for _, disk := range disks {
+				if !excluded[disk.ID] && !disk.Shareable && (disk.ContentType == "" || disk.ContentType == "data") &&
+					(disk.Format == "cow" || disk.Format == "qcow2") {
+					s.writeError(w, r, badRequest("диск %s в формате qcow2 требует qemu-img в среде службы: %v",
+						disk.Alias, qemuErr))
+					return
+				}
+			}
+		}
+	}
 	if srv.Kind.UsesProxmoxAPI() {
 		if !srv.HasProxmoxDataPlane() {
 			s.writeError(w, r, badRequest("для Proxmox сначала настройте SSH-канал данных и закрепите ключи всех узлов"))
 			return
 		}
-		if model.BackupType(req.Type) != model.BackupFull || len(req.ExcludeDisks) > 0 {
-			s.writeError(w, r, badRequest("Proxmox поддерживает полный нативный vzdump без исключения отдельных дисков"))
+		if model.BackupType(req.Type) != model.BackupFull || len(req.ExcludeDisks) > 0 || req.ExportQcow2 {
+			s.writeError(w, r, badRequest("Proxmox поддерживает полный нативный vzdump без исключения дисков и QCOW2-артефактов"))
+			return
+		}
+	}
+	if req.ExportQcow2 {
+		if model.BackupType(req.Type) == model.BackupConfig || model.BackupType(req.Type) == model.BackupOVA {
+			s.writeError(w, r, badRequest("export_qcow2 доступен только для бэкапа с дисками"))
+			return
+		}
+		if _, err := backup.FindQemuImg(s.cfg.Backup.QemuImgPath); err != nil {
+			s.writeError(w, r, badRequest("export_qcow2: %v", err))
 			return
 		}
 	}
@@ -518,6 +571,12 @@ func (s *Server) handleAdHocBackup(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, r, badRequest("для нативного архива Proxmox доступны проверки quick, manifest и chain"))
 			return
 		}
+		if verifyMode == model.VerifyQemu {
+			if _, err := backup.FindQemuImg(s.cfg.Backup.QemuImgPath); err != nil {
+				s.writeError(w, r, badRequest("проверка qemu-img check недоступна: %v", err))
+				return
+			}
+		}
 		if verifyMode.NeedsHypervisor() {
 			if err := s.validateBootOptions(r.Context(), req.ServerID, model.BackupType(req.Type), &req.VerifyOptions); err != nil {
 				s.writeError(w, r, err)
@@ -546,6 +605,7 @@ func (s *Server) handleAdHocBackup(w http.ResponseWriter, r *http.Request) {
 		FreezeBy:              freezeBy,
 		FreezeMountpoints:     mountpoints,
 		Encrypt:               req.Encrypt,
+		ExportQcow2:           req.ExportQcow2,
 		VerifyAfter:           verifyMode,
 		VerifyOptions:         req.VerifyOptions,
 		OVAHostID:             req.OVAHostID,
@@ -805,6 +865,12 @@ func (s *Server) handleVerifyRun(w http.ResponseWriter, r *http.Request) {
 	if !knownVerifyMode(mode) {
 		s.writeError(w, r, badRequest("неизвестный режим проверки: %q", mode))
 		return
+	}
+	if mode == model.VerifyQemu {
+		if _, err := backup.FindQemuImg(s.cfg.Backup.QemuImgPath); err != nil {
+			s.writeError(w, r, badRequest("проверка qemu-img check недоступна: %v", err))
+			return
+		}
 	}
 	opts := model.VerifyOptions{
 		BootHostID:    req.BootHostID,
@@ -1314,6 +1380,46 @@ func trimMountpoints(list []string) []string {
 func legacyEngineFreezeMessage(srv *model.Server) string {
 	return fmt.Sprintf("движок %s без Backup API (oVirt 4.3) сам гостя не замораживает: копия снимается через "+
 		"временный снапшот, и замораживает служба на время его запроса — выберите «Служба»", srv.Name)
+}
+
+// legacyQcowJobVMs возвращает текущие ВМ отбора задания, у которых есть
+// сохраняемый qcow2-диск. На oVirt 4.3 такой том нельзя разобрать без
+// локального qemu-img. Проверка выполняется при сохранении задания, чтобы
+// расписание не ждало первого ночного запуска ради предсказуемой ошибки.
+func (s *Server) legacyQcowJobVMs(ctx context.Context, job *model.BackupJob) ([]string, error) {
+	selector, err := model.NewVMSelector(job)
+	if err != nil {
+		return nil, err
+	}
+	vms, err := s.store.ListVMs(ctx, job.ServerID)
+	if err != nil {
+		return nil, err
+	}
+	excluded := make(map[string]bool, len(job.ExcludeDiskIDs))
+	for _, id := range job.ExcludeDiskIDs {
+		excluded[id] = true
+	}
+	var names []string
+	for _, vm := range vms {
+		matched, _ := selector.Match(vm)
+		if !matched {
+			continue
+		}
+		disks, diskErr := s.store.ListDisksForVM(ctx, job.ServerID, vm.ID)
+		if diskErr != nil {
+			return nil, diskErr
+		}
+		for _, disk := range disks {
+			if excluded[disk.ID] || disk.Shareable || (disk.ContentType != "" && disk.ContentType != "data") {
+				continue
+			}
+			if disk.Format == "cow" || disk.Format == "qcow2" {
+				names = append(names, vm.Name)
+				break
+			}
+		}
+	}
+	return names, nil
 }
 
 // validateBootEngine проверяет движок, кластер и домен хранения для

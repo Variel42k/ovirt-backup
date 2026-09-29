@@ -101,6 +101,24 @@ func TestWeeklyPresetUsesBackupAPIForRawDisks(t *testing.T) {
 	}
 }
 
+func TestLegacyQcowOptionsRequireQemuImg(t *testing.T) {
+	a := Assessment{
+		EngineSupportsCBT: false,
+		DiskCount:         1,
+		Disks:             []DiskFacts{{ID: "disk", Alias: "system", Format: "cow"}},
+		QemuImgAvailable:  false,
+	}
+	for _, typ := range []model.BackupType{model.BackupSnapshot, model.BackupIncremental, model.BackupDifferential} {
+		option := optionOf(t, buildOptions(a), typ)
+		if option.Available || !strings.Contains(option.Blocker, "qemu-img") {
+			t.Fatalf("%s должен быть заблокирован без qemu-img: %+v", typ, option)
+		}
+	}
+	if option := optionOf(t, buildOptions(a), model.BackupConfig); !option.Available {
+		t.Fatalf("копия конфигурации не должна зависеть от qemu-img: %+v", option)
+	}
+}
+
 // Полный бэкап ВМ с raw-дисками идёт через Backup API: временный снапшот и
 // его слияние не нужны. Базы решение не требует: основа полному не нужна.
 func TestFullBackupOfRawDisksUsesBackupAPI(t *testing.T) {

@@ -41,6 +41,9 @@ const hostsOfServer = ref<Host[]>([])
 const backupOptions = ref<BackupOption[]>([])
 const backupOptionsLoading = ref(false)
 const backupOptionsError = ref('')
+// Текущий отбор задания может включать qcow2-ВМ oVirt 4.3. Они требуют
+// qemu-img даже в режиме полного снапшота, а не только для qcow2_chain.
+const legacyQcowVMs = ref<string[]>([])
 // Прогноз места под горячий бэкап по выбранным ВМ — только совет, запуск
 // по-прежнему решают сторожа места.
 const spaceWarnings = ref<string[]>([])
@@ -138,6 +141,9 @@ const isKvmJob = computed(() => jobServer.value?.kind === 'kvm')
 // Заморозку силами движка умеет только Backup API oVirt и его производных.
 const isOVirtJob = computed(() => usesOVirtAPI(jobServer.value?.kind))
 const isLegacyOVirtJob = computed(() => isOVirtJob.value && jobServer.value?.supports_cbt === false)
+const legacyQcowBlocked = computed(() => isLegacyOVirtJob.value &&
+  !app.meta?.capabilities.qemu_img && legacyQcowVMs.value.length > 0)
+const legacyNeedsQemuImg = computed(() => legacyQcowBlocked.value && !['config', 'ova'].includes(form.value.type))
 // Что будет, если заявленный уровень не достигнут. Формулировка — об итоге для
 // копии: «прервать запуск» читалось так, будто служба оборвёт идущий бэкап.
 const requireConsistencyOptions = [
@@ -209,9 +215,17 @@ const consistencyFailureHint = computed(() => {
   return `Это случится, если ${reasons.join(', ')}.`
 })
 
-const verifyModes = computed(() => (app.meta?.verify_modes ?? []).filter((mode) =>
-  !isProxmoxJob.value || ['quick', 'manifest', 'chain'].includes(mode.value),
-))
+const qemuImgError = computed(() => app.meta?.capabilities.qemu_img_error ||
+  'qemu-img не найден внутри среды службы (для контейнера установка на узле недостаточна)')
+const verifyModes = computed(() => (app.meta?.verify_modes ?? [])
+  .filter((mode) => !isProxmoxJob.value || ['quick', 'manifest', 'chain'].includes(mode.value))
+  .map((mode) => ({
+    ...mode,
+    disable: mode.value === 'qemu' && !app.meta?.capabilities.qemu_img,
+    caption: mode.value === 'qemu' && !app.meta?.capabilities.qemu_img
+      ? qemuImgError.value
+      : mode.description,
+  })))
 const selectedVMs = computed(() => {
   const excluded = new Set(form.value.exclude_vm_ids)
   const selected = new Set(form.value.vm_ids)
@@ -302,6 +316,7 @@ async function loadVMs() {
   ++optionLoadSequence
   backupOptions.value = []
   backupOptionsError.value = ''
+  legacyQcowVMs.value = []
   spaceWarnings.value = []
   if (!form.value.server_id) {
     vmsOfServer.value = []
@@ -337,6 +352,7 @@ async function loadBackupOptions() {
 
   backupOptions.value = []
   backupOptionsError.value = ''
+  legacyQcowVMs.value = []
   spaceWarnings.value = []
   if (!serverID || !vms.length) {
     backupOptionsLoading.value = false
@@ -358,14 +374,24 @@ async function loadBackupOptions() {
     if (sequence !== optionLoadSequence || serverID !== form.value.server_id) return
 
     backupOptions.value = aggregateOptions(entries)
+    legacyQcowVMs.value = entries
+      .filter(({ recommendation }) => recommendation.assessment.disks
+        .some((disk) => !form.value.exclude_disk_ids.includes(disk.id) &&
+          (disk.format === 'cow' || disk.format === 'qcow2') && !disk.not_backed_up))
+      .map(({ vm }) => vm.name)
     spaceWarnings.value = entries.flatMap(({ vm, recommendation }) =>
       (recommendation.assessment.space_forecast?.warnings ?? [])
         .map((warning) => (entries.length > 1 ? `${vm.name}: ${warning}` : warning)))
     const current = backupOptions.value.find((option) => option.type === form.value.type)
     if (!form.value.type || (!current?.available && !preserveUnavailableType)) {
       const wasPristine = dialog.value && jobFormSignature.value === jobFormBaseline.value
-      const replacement = backupOptions.value.find((option) => option.recommended) ??
-        backupOptions.value.find((option) => option.available)
+      // Если данные qcow2 на oVirt 4.3 сейчас не скопировать, нельзя молча
+      // заменить бэкап данных на «только конфигурацию». Оставляем выбор
+      // пустым и показываем точный blocker.
+      const replacement = legacyQcowBlocked.value
+        ? undefined
+        : backupOptions.value.find((option) => option.recommended) ??
+          backupOptions.value.find((option) => option.available)
       form.value.type = replacement?.type ?? ''
       if (replacement?.suggested_verify) form.value.verify_after = replacement.suggested_verify
       // Автоподбор при первом открытии — часть исходного состояния формы.
@@ -376,6 +402,7 @@ async function loadBackupOptions() {
   } catch {
     if (sequence !== optionLoadSequence) return
     backupOptions.value = []
+    legacyQcowVMs.value = []
     spaceWarnings.value = []
     backupOptionsError.value = 'Не удалось проверить доступность типов бэкапа. Повторите проверку.'
     preserveUnavailableType = false
@@ -473,6 +500,9 @@ function validateJobStep(step: number): string {
     if (backupOptionsLoading.value) return 'Дождитесь проверки доступных типов бэкапа.'
     if (backupOptionsError.value) return 'Повторите проверку доступных типов бэкапа.'
     if (!form.value.type || selectedBackupOption.value?.available === false) return 'Выберите доступный способ резервного копирования.'
+    if (legacyNeedsQemuImg.value) {
+      return `Для qcow2-дисков oVirt 4.3 нужен qemu-img в среде службы: ${qemuImgError.value}`
+    }
     if (form.value.type === 'ova') {
       if (!form.value.ova_host_id) return 'Выберите хост, на котором будет создан OVA.'
       if (!form.value.ova_directory.startsWith('/')) return 'Для OVA укажите абсолютный каталог на хосте.'
@@ -485,6 +515,9 @@ function validateJobStep(step: number): string {
     }
   }
   if (step === 4) {
+    if (form.value.verify_after === 'qemu' && !app.meta?.capabilities.qemu_img) {
+      return `Проверка qemu-img check недоступна: ${qemuImgError.value}`
+    }
     if (form.value.verify_after === 'boot' && !bootTargetReady(form.value.verify_options)) {
       return 'Выберите KVM-хост или движок с кластером и доменом хранения для пробного запуска.'
     }
@@ -691,11 +724,13 @@ watch(() => form.value.vm_name_regex, () => void loadBackupOptions())
 watch(() => [...form.value.cluster_ids], () => void loadBackupOptions())
 watch(() => [...form.value.tags], () => void loadBackupOptions())
 watch(() => [...form.value.exclude_vm_ids], () => void loadBackupOptions())
+watch(() => [...form.value.exclude_disk_ids], () => void loadBackupOptions())
 watch(() => form.value.storage_target_ids[0] ?? '', () => void loadBackupOptions())
 watch(() => form.value.type, (type) => {
   if (type === 'differential' && form.value.legacy_incremental_mode === 'qcow2_chain') {
     form.value.legacy_incremental_mode = 'compare'
   }
+  if (isProxmoxJob.value || type === 'config' || type === 'ova') form.value.export_qcow2 = false
 })
 
 async function applyRouteIntent() {
@@ -1065,6 +1100,17 @@ const columns = [
             </q-banner>
           </div>
 
+          <div v-if="legacyNeedsQemuImg" class="col-12">
+            <q-banner dense class="bg-red-1 text-negative" data-testid="job-needs-qemu-img">
+              <template #avatar><q-icon name="error" color="negative" /></template>
+              <span class="jhv-wrap">
+                Задание не запустится для ВМ {{ legacyQcowVMs.join(', ') }}: oVirt 4.3 отдаёт qcow2 как файл
+                тома, который собирается локально через qemu-img. {{ qemuImgError }}.
+                Для Docker/Kubernetes пакет должен находиться внутри образа службы.
+              </span>
+            </q-banner>
+          </div>
+
           <div class="col-12">
             <BackupOptionsPicker
               v-model="form.type"
@@ -1286,13 +1332,22 @@ const columns = [
           <div class="col-12 col-sm-4">
             <q-select
               v-model="form.verify_after"
-              :options="[{ label: 'Не проверять', value: '' }, ...verifyModes.map((m) => ({ label: m.title, value: m.value }))]"
+              :options="[{ label: 'Не проверять', value: '', caption: 'Копия будет создана без автоматической проверки' }, ...verifyModes.map((m) => ({ label: m.title, value: m.value, caption: m.caption, disable: m.disable }))]"
               emit-value
               map-options
+              option-disable="disable"
               label="Проверка после бэкапа"
               outlined
               dense
             >
+              <template #option="scope">
+                <q-item v-bind="scope.itemProps">
+                  <q-item-section>
+                    <q-item-label>{{ scope.opt.label }}</q-item-label>
+                    <q-item-label v-if="scope.opt.caption" caption>{{ scope.opt.caption }}</q-item-label>
+                  </q-item-section>
+                </q-item>
+              </template>
               <template #append><HelpButton article="verify" label="Режимы проверки" /></template>
             </q-select>
           </div>
@@ -1399,7 +1454,7 @@ const columns = [
 								label="Артефакты QCOW2"
 								:disable="!app.meta?.capabilities.qemu_img"
 							>
-								<q-tooltip v-if="!app.meta?.capabilities.qemu_img">qemu-img не найден на сервере</q-tooltip>
+								<q-tooltip v-if="!app.meta?.capabilities.qemu_img">{{ qemuImgError }}</q-tooltip>
 							</q-toggle>
             </div>
           </div>

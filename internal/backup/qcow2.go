@@ -9,25 +9,43 @@ import (
 	"time"
 )
 
-// qemu-img is optional. It is only needed for two conveniences: exporting a
-// restored image as a qcow2 that any hypervisor can open, and running
-// `qemu-img check` as an extra, independent opinion on a restored image.
-// Everything else in this service works without it.
+// qemu-img is part of the oVirt 4.3 qcow2 data path: old imageio returns the
+// volume file instead of a guest-visible raw stream, so the service has to
+// materialise its backing chain locally. It is also used for managed qcow2
+// artifacts, qcow2 restores and `qemu-img check`. Raw-only legacy VMs and
+// other verification modes can still work without it.
 
 // FindQemuImg resolves the qemu-img binary. An explicit path from the config
 // wins; otherwise PATH is searched.
 func FindQemuImg(configured string) (string, error) {
+	configured = strings.TrimSpace(configured)
 	if configured != "" {
-		if _, err := exec.LookPath(configured); err != nil {
+		path, err := exec.LookPath(configured)
+		if err != nil {
 			return "", fmt.Errorf("qemu-img по указанному пути %q недоступен: %w", configured, err)
 		}
-		return configured, nil
+		return path, nil
 	}
 	path, err := exec.LookPath("qemu-img")
-	if err != nil {
-		return "", fmt.Errorf("qemu-img не найден в PATH: %w", err)
+	if err == nil {
+		return path, nil
 	}
-	return path, nil
+
+	// У systemd и минимальных контейнеров PATH нередко уже интерактивного.
+	// Пакет при этом установлен в стандартный каталог и полностью пригоден к
+	// работе. Абсолютные кандидаты не заменяют настройку нестандартного пути,
+	// но избавляют от ложного «не найден» для обычной пакетной установки.
+	for _, candidate := range []string{
+		"/usr/bin/qemu-img",
+		"/usr/local/bin/qemu-img",
+		"/bin/qemu-img",
+		"/usr/libexec/qemu-img",
+	} {
+		if resolved, candidateErr := exec.LookPath(candidate); candidateErr == nil {
+			return resolved, nil
+		}
+	}
+	return "", fmt.Errorf("qemu-img не найден в среде службы (PATH и стандартные каталоги): %w", err)
 }
 
 // QemuImgAvailable reports whether the tool can be used, for feature flags in

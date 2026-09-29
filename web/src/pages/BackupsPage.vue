@@ -501,11 +501,19 @@ watch(() => verifyForm.value.boot_engine_id, (engine) => {
 const verifyMode = computed(() =>
   (app.meta?.verify_modes ?? []).find((m) => m.value === verifyForm.value.mode),
 )
+const qemuImgError = computed(() => app.meta?.capabilities.qemu_img_error ||
+  'qemu-img не найден внутри среды службы (для контейнера установка на узле недостаточна)')
 const verifyModeOptions = computed(() => {
   const server = app.servers.find((item) => item.id === verifyTarget.value?.server_id)
-  return (app.meta?.verify_modes ?? []).filter((mode) =>
-    server?.kind !== 'proxmox' || ['quick', 'manifest', 'chain'].includes(mode.value),
-  )
+  return (app.meta?.verify_modes ?? [])
+    .filter((mode) => server?.kind !== 'proxmox' || ['quick', 'manifest', 'chain'].includes(mode.value))
+    .map((mode) => ({
+      ...mode,
+      disable: mode.value === 'qemu' && !app.meta?.capabilities.qemu_img,
+      caption: mode.value === 'qemu' && !app.meta?.capabilities.qemu_img
+        ? qemuImgError.value
+        : mode.description,
+    }))
 })
 /** Пробный запуск — единственный режим, которому нужен гипервизор. */
 const needsHypervisor = computed(() => verifyMode.value?.needs_hypervisor === true)
@@ -1895,13 +1903,22 @@ const replicationColumns = [
         <q-card-section class="q-gutter-md">
           <q-select
             v-model="verifyForm.mode"
-            :options="verifyModeOptions.map((m) => ({ label: m.title, value: m.value }))"
+            :options="verifyModeOptions.map((m) => ({ label: m.title, value: m.value, caption: m.caption, disable: m.disable }))"
             emit-value
             map-options
+            option-disable="disable"
             label="Глубина проверки"
             outlined
             dense
           >
+            <template #option="scope">
+              <q-item v-bind="scope.itemProps">
+                <q-item-section>
+                  <q-item-label>{{ scope.opt.label }}</q-item-label>
+                  <q-item-label v-if="scope.opt.caption" caption>{{ scope.opt.caption }}</q-item-label>
+                </q-item-section>
+              </q-item>
+            </template>
             <template #append><HelpButton article="verify" label="Что доказывает каждый режим" /></template>
           </q-select>
           <div v-if="verifyMode?.description" class="jhv-reason">{{ verifyMode.description }}</div>
@@ -1994,7 +2011,7 @@ const replicationColumns = [
             unelevated
             label="Проверить"
             :loading="verifyBusy"
-            :disable="needsHypervisor && !bootTargetReady(verifyForm)"
+            :disable="(verifyForm.mode === 'qemu' && !app.meta?.capabilities.qemu_img) || (needsHypervisor && !bootTargetReady(verifyForm))"
             @click="submitVerify"
           />
         </q-card-actions>

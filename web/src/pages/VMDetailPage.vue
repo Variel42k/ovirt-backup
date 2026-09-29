@@ -49,6 +49,7 @@ const maxFreezeSeconds = ref(0)
 // Выборочная заморозка — только KVM; пусто — все файловые системы гостя.
 const freezeMountpoints = ref<string[]>([])
 const encrypt = ref(false)
+const exportQcow2 = ref(false)
 const verifyAfter = ref<string>('')
 const verifyOptions = ref({
   boot_host_id: '',
@@ -71,6 +72,18 @@ const allDisksRaw = computed(
 )
 
 const assessment = computed(() => recommendation.value?.assessment)
+const qemuImgError = computed(() => app.meta?.capabilities.qemu_img_error ||
+  'qemu-img не найден внутри среды службы (для контейнера установка на узле недостаточна)')
+const verifyModes = computed(() => (app.meta?.verify_modes ?? [])
+  .filter((mode) => !isProxmox.value || ['quick', 'manifest', 'chain'].includes(mode.value))
+  .map((mode) => ({
+    label: mode.title,
+    value: mode.value,
+    caption: mode.value === 'qemu' && !app.meta?.capabilities.qemu_img
+      ? qemuImgError.value
+      : mode.description,
+    disable: mode.value === 'qemu' && !app.meta?.capabilities.qemu_img,
+  })))
 // Движок обновляет сведения от гостевого агента раз в минуту-другую: пять
 // минут ожидания, привычные для KVM-хоста, для движка коротки.
 watch(() => verifyOptions.value.boot_engine_id, (engine) => {
@@ -94,9 +107,10 @@ const effectiveFreezeBy = computed<FreezeBy>(() => (canChooseFreezeBy.value ? fr
 // qemu-img на сервере службы. Без него бэкап не запустится — лучше сказать
 // это до нажатия, а не ошибкой запуска.
 const legacyNeedsQemuImg = computed(() => isLegacyOVirt.value && assessment.value?.qemu_img_available === false &&
-  (assessment.value?.disks ?? []).some((disk) => disk.format === 'cow' && !disk.not_backed_up))
+  (assessment.value?.disks ?? []).some((disk) => ['cow', 'qcow2'].includes(disk.format) && !disk.not_backed_up))
 const usesLegacyIncremental = computed(() => isLegacyOVirt.value && ['incremental', 'differential'].includes(selectedType.value))
 const isKvm = computed(() => sourceServer.value?.kind === 'kvm')
+const canExportQcow2 = computed(() => !isProxmox.value && !['ova', 'config'].includes(selectedType.value))
 const consistencyChoices = computed(() => consistencyOptions.map((option) => ({
   ...option,
   disable: option.value !== 'crash' && !assessment.value?.guest_agent,
@@ -193,6 +207,11 @@ async function startBackup() {
     notifyError('Выберите хранилище и тип бэкапа')
     return
   }
+  if (((canExportQcow2.value && exportQcow2.value) || verifyAfter.value === 'qemu') &&
+    !app.meta?.capabilities.qemu_img) {
+    notifyError(qemuImgError.value, 'qemu-img недоступен')
+    return
+  }
   starting.value = true
   try {
     await api.startBackup({
@@ -209,6 +228,7 @@ async function startBackup() {
       max_freeze_seconds: effectiveFreezeBy.value === 'engine' ? 0 : maxFreezeSeconds.value,
       freeze_mountpoints: isKvm.value && consistency.value !== 'crash' ? freezeMountpoints.value : undefined,
       encrypt: encrypt.value,
+      export_qcow2: canExportQcow2.value && exportQcow2.value,
       verify_after: verifyAfter.value || undefined,
       verify_options: verifyAfter.value === 'boot' ? verifyOptions.value : undefined,
     })
@@ -253,7 +273,7 @@ function applyPreset(preset: SchedulePreset) {
         server_id: props.serverId,
         vm_ids: [props.vmId],
         type: preset.type,
-        legacy_incremental_mode: isLegacyOVirt.value && preset.type === 'incremental'
+        legacy_incremental_mode: isLegacyOVirt.value && ['incremental', 'differential'].includes(preset.type)
           ? legacyIncrementalMode.value
           : undefined,
         full_every: preset.full_every,
@@ -381,13 +401,22 @@ onMounted(load)
             <div class="col-12 col-sm-4">
               <q-select
                 v-model="verifyAfter"
-                :options="[{ label: 'Не проверять', value: '' }, ...(app.meta?.verify_modes ?? []).map((m) => ({ label: m.title, value: m.value }))]"
+                :options="[{ label: 'Не проверять', value: '', caption: 'Копия будет создана без автоматической проверки' }, ...verifyModes]"
                 emit-value
                 map-options
+                option-disable="disable"
                 label="Проверка после бэкапа"
                 outlined
                 dense
               >
+                <template #option="scope">
+                  <q-item v-bind="scope.itemProps">
+                    <q-item-section>
+                      <q-item-label>{{ scope.opt.label }}</q-item-label>
+                      <q-item-label v-if="scope.opt.caption" caption>{{ scope.opt.caption }}</q-item-label>
+                    </q-item-section>
+                  </q-item>
+                </template>
                 <template #append><HelpButton article="verify" label="Режимы проверки" /></template>
               </q-select>
             </div>
@@ -508,6 +537,23 @@ onMounted(load)
                 dense
               />
               <q-toggle v-model="encrypt" label="Шифровать" dense />
+              <q-toggle
+                v-if="canExportQcow2"
+                v-model="exportQcow2"
+                label="Создать проверенный QCOW2-артефакт"
+                :disable="!app.meta?.capabilities.qemu_img"
+                dense
+                data-testid="adhoc-export-qcow2"
+              >
+                <q-tooltip v-if="!app.meta?.capabilities.qemu_img">{{ qemuImgError }}</q-tooltip>
+              </q-toggle>
+            </div>
+            <div v-if="canExportQcow2 && exportQcow2" class="col-12">
+              <q-banner dense class="bg-blue-1">
+                Для каждого диска будет создан отдельный QCOW2-артефакт и проверен через qemu-img check.
+                Артефакт участвует в репликации, проверке и правилах хранения; основная копия остаётся в
+                штатном чанковом формате.
+              </q-banner>
             </div>
           </q-card-section>
 
@@ -560,8 +606,8 @@ onMounted(load)
               <template #avatar><q-icon name="error" color="negative" /></template>
               <span class="jhv-wrap">
                 Бэкап не запустится: движок без Backup API отдаёт диски qcow2 файлами томов, и образ собирается
-                через qemu-img, а на сервере службы его нет. Установите пакет qemu-img (или укажите путь в
-                backup.qemu_img_path) и обновите страницу.
+                через qemu-img, а процесс службы его не видит. {{ qemuImgError }}.
+                Если служба работает в контейнере, пакет должен быть внутри образа, а не только на узле.
               </span>
             </q-banner>
           </q-card-section>
@@ -574,7 +620,7 @@ onMounted(load)
               icon="play_arrow"
               label="Запустить бэкап сейчас"
               :loading="starting"
-              :disable="recommendationLoading || !selectedType || !selectedStorage || legacyNeedsQemuImg || (verifyAfter === 'boot' && !bootTargetReady(verifyOptions))"
+              :disable="recommendationLoading || !selectedType || !selectedStorage || legacyNeedsQemuImg || (((canExportQcow2 && exportQcow2) || verifyAfter === 'qemu') && !app.meta?.capabilities.qemu_img) || (verifyAfter === 'boot' && !bootTargetReady(verifyOptions))"
               @click="startBackup"
             />
           </q-card-actions>

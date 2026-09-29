@@ -58,6 +58,8 @@ type metaResponse struct {
 
 	Capabilities struct {
 		QemuImg      bool   `json:"qemu_img"`
+		QemuImgPath  string `json:"qemu_img_path,omitempty"`
+		QemuImgError string `json:"qemu_img_error,omitempty"`
 		Encryption   bool   `json:"encryption"`
 		Compression  string `json:"compression"`
 		ChunkSize    int    `json:"chunk_size"`
@@ -193,7 +195,12 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 	resp.Roles = s.roleOptions(r.Context())
 	resp.AlertAudiences = model.AlertAudiences()
 
-	resp.Capabilities.QemuImg = backup.QemuImgAvailable(s.cfg.Backup.QemuImgPath)
+	if path, err := backup.FindQemuImg(s.cfg.Backup.QemuImgPath); err != nil {
+		resp.Capabilities.QemuImgError = err.Error()
+	} else {
+		resp.Capabilities.QemuImg = true
+		resp.Capabilities.QemuImgPath = path
+	}
 	resp.Capabilities.Encryption = true
 	resp.Capabilities.Compression = s.engine.Compression()
 	resp.Capabilities.ChunkSize = s.cfg.Backup.ChunkSize

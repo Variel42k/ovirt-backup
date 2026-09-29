@@ -318,10 +318,11 @@ func (e *Engine) Recommend(ctx context.Context, serverID, vmID, storageTargetID 
 	// собирается через qemu-img. Без него бэкап такой ВМ не выполнится.
 	if !a.Libvirt && !srv.SupportsCBT && !a.QemuImgAvailable {
 		for _, d := range a.Disks {
-			if d.Format == "cow" && d.NotBackedUp == "" {
+			if (d.Format == "cow" || d.Format == "qcow2") && d.NotBackedUp == "" {
 				a.Warnings = append(a.Warnings, fmt.Sprintf(
 					"диск %s в формате qcow2, а движок без Backup API отдаёт такой том файлом: образ собирается "+
-						"через qemu-img, которого на сервере службы нет. Установите qemu-img (backup.qemu_img_path), "+
+						"через qemu-img, которого нет в среде процесса службы. Для контейнера пакет нужен внутри образа; "+
+						"для systemd установите его на сервер службы или задайте backup.qemu_img_path, "+
 						"иначе бэкап этой ВМ не выполнится", d.Alias))
 				break
 			}
@@ -416,6 +417,15 @@ func buildOptions(a Assessment) []Option {
 	// incremental chain from ordinary snapshots. The operator chooses between
 	// reading and comparing the full image and retaining a QCOW2 snapshot base.
 	legacyIncremental := !a.Libvirt && !a.EngineSupportsCBT && a.DiskCount > 0
+	legacyQcowNeedsQemu := false
+	if legacyIncremental && !a.QemuImgAvailable {
+		for _, disk := range a.Disks {
+			if disk.NotBackedUp == "" && (disk.Format == "cow" || disk.Format == "qcow2") {
+				legacyQcowNeedsQemu = true
+				break
+			}
+		}
+	}
 	mixed := incrementalReady && !a.Libvirt && a.CBTEnabled < a.DiskCount
 	hasHistory := a.BackupCount > 0
 	rawNames, rawUsed := a.rawDiskNames()
@@ -569,6 +579,16 @@ func buildOptions(a Assessment) []Option {
 		case model.BackupOVA:
 			o.Rationale = "переносимый самодостаточный артефакт для передачи ВМ в другую инсталляцию"
 			o.Prerequisites = append(o.Prerequisites, "указать хост и каталог на нём, где движок создаст файл")
+		}
+
+		// imageio в oVirt 4.3 отдаёт qcow2 как файл тома, а не как сырые
+		// гостевые данные. Это касается и полной основы через snapshot, и обоих
+		// совместимых инкрементов; без локального qemu-img ни один из этих
+		// вариантов нельзя честно предложить как доступный.
+		if legacyQcowNeedsQemu && (o.Type == model.BackupSnapshot || o.Type.NeedsParent()) {
+			o.Blocker = "qcow2-том oVirt 4.3 нужно собрать через qemu-img, но инструмент недоступен в среде службы"
+			o.Prerequisites = append(o.Prerequisites,
+				"установить qemu-img внутри контейнера службы или задать backup.qemu_img_path при systemd-установке")
 		}
 
 		if o.Blocker != "" {

@@ -1271,9 +1271,19 @@ watch(() => [route.query, route.meta.settingsTab], applyDeepLink)
                   <q-item-section side>{{ bytes(app.meta?.capabilities.chunk_size) }}</q-item-section>
                 </q-item>
                 <q-item>
-                  <q-item-section>qemu-img</q-item-section>
+                  <q-item-section>
+                    <q-item-label>qemu-img</q-item-label>
+                    <q-item-label caption>
+                      Проверяется внутри процесса службы; пакет на узле Docker/Kubernetes контейнеру не виден.
+                    </q-item-label>
+                    <q-item-label v-if="app.meta?.capabilities.qemu_img_error" caption class="text-negative jhv-wrap">
+                      {{ app.meta.capabilities.qemu_img_error }}
+                    </q-item-label>
+                  </q-item-section>
                   <q-item-section side>
-                    {{ app.meta?.capabilities.qemu_img ? 'доступен' : 'не установлен' }}
+                    {{ app.meta?.capabilities.qemu_img
+                      ? `доступен: ${app.meta.capabilities.qemu_img_path || 'PATH'}`
+                      : 'недоступен' }}
                   </q-item-section>
                 </q-item>
                 <q-item class="items-start">

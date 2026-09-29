@@ -881,6 +881,7 @@ S3 endpoint не передаёт данные через сервис и пот
 { "server_id": "…", "vm_id": "…", "type": "incremental",
   "legacy_incremental_mode": "compare",
   "storage_target_id": "…", "consistency": "filesystem", "verify_after": "boot",
+  "export_qcow2": true,
   "verify_options": { "boot_host_id": "…", "memory_mib": 0,
     "vcpus": 0, "timeout_sec": 300 },
   "retain_days": 30 }

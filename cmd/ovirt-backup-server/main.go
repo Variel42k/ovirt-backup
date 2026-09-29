@@ -346,9 +346,9 @@ func run() error {
 	dbDumpEngine.RecoverInterrupted(ctx)
 
 	if backup.QemuImgAvailable(cfg.Backup.QemuImgPath) {
-		log.Info().Msg("qemu-img найден: доступны экспорт в qcow2 и проверка qemu-img check")
+		log.Info().Msg("qemu-img найден: доступны бэкап qcow2 с oVirt 4.3, экспорт в qcow2 и проверка qemu-img check")
 	} else {
-		log.Info().Msg("qemu-img не найден: бэкапы и восстановление работают, недоступны только экспорт в qcow2 и qemu-img check")
+		log.Warn().Msg("qemu-img не найден в среде службы: недоступны бэкап qcow2 с oVirt 4.3, экспорт в qcow2 и qemu-img check")
 	}
 
 	// Runs that were executing when the previous process died still hold locks

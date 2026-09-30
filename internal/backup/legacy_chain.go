@@ -396,10 +396,19 @@ func (e *Engine) copyLegacyChainDisk(ctx context.Context, client *ovirt.Client, 
 		defer parent.Close()
 	}
 
-	workDir, err := makeTempWorkspace(e.cfg.TempDir, "jhvirt-legacy-chain-")
+	// Образ собирается там, где хватит места: в backup.temp_dir или в
+	// служебной области локального хранилища бэкапа (см. legacyWorkspaceBase).
+	base, err := e.legacyWorkspaceBase(ctx, run, legacyAssemblyNeed(disk, top.Format))
+	if err != nil {
+		return nil, 0, 0, fmt.Errorf("диск %s: %w", disk.AliasOrName(), err)
+	}
+	workDir, err := makeTempWorkspace(base, "jhvirt-legacy-chain-")
 	if err != nil {
 		return nil, 0, 0, err
 	}
+	e.event(ctx, run, model.RunEventLegacyAssembly, 0, fmt.Sprintf(
+		"диск %s: тома скачиваются целиком в %s и собираются в образ — пока идёт скачивание, растёт только "+
+			"«прочитано»; в хранилище данные пишутся после сборки", disk.AliasOrName(), base))
 	defer os.RemoveAll(workDir)
 
 	total := disk.ProvisionedSize.Int64()

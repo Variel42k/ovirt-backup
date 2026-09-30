@@ -1555,6 +1555,22 @@ func (e *Engine) runSnapshot(ctx context.Context, client *ovirt.Client, backend 
 				Msg("том в цепочке диска заблокирован — бэкап пойдёт через временный клон снапшота")
 		}
 	}
+	// Тома qcow2 собираются локально: место проверяется до заморозки гостя и
+	// снапшота, а не когда диск сервера уже заполнен. Диск клона в формате raw
+	// читается потоком и места не требует.
+	if !srv.SupportsCBT && !viaClone {
+		var need int64
+		for _, d := range disks {
+			if needsLegacyChain(srv, d.Format) {
+				need += legacyAssemblyNeed(d, "cow")
+			}
+		}
+		if need > 0 {
+			if _, err := e.legacyWorkspaceBase(ctx, run, need); err != nil {
+				return nil, fmt.Errorf("бэкап не начат: %w", err)
+			}
+		}
+	}
 
 	// Записи гостя за время бэкапа копятся в слое снапшота на том же домене.
 	domains, err := e.checkDomainSpace(ctx, client, vm, disks)
@@ -1659,6 +1675,8 @@ func (e *Engine) runSnapshot(ctx context.Context, client *ovirt.Client, backend 
 		e.log.Info().Str("vm", vm.Name).Strs("диски", names).
 			Msg("движок без Backup API: тома qcow2 скачиваются целиком и собираются через qemu-img")
 	}
+	// cloneStream — исходный диск → диск клона, который читается потоком.
+	cloneStream := map[string]string{}
 	if viaClone {
 		clones, removeClone, err := e.cloneForBackup(ctx, client, vm, run, snap.ID, disks)
 		// Клон удаляется раньше снапшота: defer выполняются в обратном порядке.
@@ -1666,11 +1684,16 @@ func (e *Engine) runSnapshot(ctx context.Context, client *ovirt.Client, backend 
 		if err != nil {
 			return nil, err
 		}
-		// У диска клона один том: он скачивается целиком, как диск, и
-		// сохраняется как исходный диск ВМ.
+		// У диска клона один том. Том raw — это и есть образ диска: он
+		// читается диапазонами прямо в хранилище, без временного файла. Том
+		// qcow2 скачивается целиком и переводится в сырой образ локально.
 		p.LegacyChain = map[string]legacyVolume{}
 		p.LegacyFormats = map[string]string{}
 		for sourceID, c := range clones {
+			if c.Format != "cow" {
+				cloneStream[sourceID] = c.ID
+				continue
+			}
 			p.LegacyChain[sourceID] = legacyVolume{ImageID: c.ImageID, Format: c.Format, DiskID: c.ID}
 			p.LegacyFormats[c.ImageID] = c.Format
 		}
@@ -1689,6 +1712,11 @@ func (e *Engine) runSnapshot(ctx context.Context, client *ovirt.Client, backend 
 			extentContext = "compare"
 		}
 		return e.copyDisks(ctx, client, backend, srv, vm, run, req, disks, copyPlan, func(d ovirt.Disk) ovirt.TransferRequest {
+			if cloneDiskID, ok := cloneStream[d.ID]; ok {
+				// Диск временного клона: читается как диск целиком.
+				return ovirt.TransferRequest{DiskID: cloneDiskID, Direction: "download", Format: "raw",
+					InactivityTimeout: e.cfg.Transfer.InactivityTimeout}
+			}
 			return ovirt.TransferRequest{
 				SnapshotID:        imageByDisk[d.ID],
 				Direction:         "download",

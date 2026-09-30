@@ -67,6 +67,9 @@ const (
 	// RunEventLegacyClone — том в цепочке диска застрял в locked, и бэкап
 	// идёт через временный клон ВМ из снапшота; detail — что сделано.
 	RunEventLegacyClone RunEventKind = "legacy_clone"
+	// RunEventLegacyAssembly — тома диска скачиваются целиком во временный
+	// каталог и собираются в образ; detail — где.
+	RunEventLegacyAssembly RunEventKind = "legacy_assembly"
 )
 
 // Title возвращает название этапа для интерфейса.
@@ -124,6 +127,8 @@ func (k RunEventKind) Title() string {
 		return "Движок держит диск"
 	case RunEventLegacyClone:
 		return "Бэкап через клон снапшота"
+	case RunEventLegacyAssembly:
+		return "Сборка образа из томов"
 	}
 	return string(k)
 }

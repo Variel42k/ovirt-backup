@@ -104,7 +104,16 @@ func (e *Engine) runLegacyQcow2(ctx context.Context, client *ovirt.Client, backe
 		imageByDisk[disk.ID] = disk.ImageID
 	}
 
-	workDir, err := makeTempWorkspace(e.cfg.TempDir, "jhvirt-legacy-qcow2-")
+	// Основа и новый образ собираются локально: места нужно под оба.
+	var need int64
+	for _, d := range disks {
+		need += legacyAssemblyNeed(d, "cow")
+	}
+	base, err := e.legacyWorkspaceBase(ctx, run, need)
+	if err != nil {
+		return nil, err
+	}
+	workDir, err := makeTempWorkspace(base, "jhvirt-legacy-qcow2-")
 	if err != nil {
 		return nil, err
 	}

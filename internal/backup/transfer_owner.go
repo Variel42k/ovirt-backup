@@ -99,7 +99,19 @@ func abandonedTransfers(transfers []ovirt.ImageTransfer, owners map[string]strin
 	return out
 }
 
-// cancelTransfersAndWait отменяет передачи и ждёт, пока движок их закроет.
+// closeDownloadFirst — передача скачивания закрывается через finalize, а
+// cancel — только если движок finalize не принял.
+//
+// На oVirt 4.3 cancel передачи тома снапшота оставляет этот том в статусе
+// locked в базе движка: он не отпускается ни сам, ни после перезапуска
+// движка, и каждая следующая передача тома и удаление снапшота получают 409
+// «disks are locked». Снять такую блокировку можно только unlock_entity.sh на
+// хосте движка. Finalize скачивания образ не меняет — движок лишь закрывает
+// сеанс, — и том отпускается штатно.
+const closeDownloadFirst = true
+
+// cancelTransfersAndWait закрывает передачи и ждёт, пока движок их закроет:
+// скачивания — через finalize (см. closeDownloadFirst), остальные — cancel.
 // Возвращает ошибки по передачам, которые закрыть не удалось.
 func (e *Engine) cancelTransfersAndWait(ctx context.Context, client *ovirt.Client,
 	transfers []ovirt.ImageTransfer) map[string]error {
@@ -107,7 +119,12 @@ func (e *Engine) cancelTransfersAndWait(ctx context.Context, client *ovirt.Clien
 	failed := map[string]error{}
 	for _, t := range transfers {
 		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), transferCancelWait)
-		err := client.CancelTransfer(closeCtx, t.ID)
+		var err error
+		if t.Direction == "download" {
+			err = client.CloseTransfer(closeCtx, t.ID, closeDownloadFirst)
+		} else {
+			err = client.CancelTransfer(closeCtx, t.ID)
+		}
 		if err == nil || ovirt.IsNotFound(err) {
 			var phase string
 			phase, err = client.WaitTransferDone(closeCtx, t.ID, transferCancelWait)

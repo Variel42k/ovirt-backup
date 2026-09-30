@@ -402,6 +402,8 @@ export interface LeftoverReport {
   items: Leftover[]
   removable: number
   blocked?: string
+  /** Том застрял в locked в базе движка: уборка не пройдёт без администратора oVirt. */
+  stuck_lock?: string
   manual_steps?: ManualStep[]
   /** Что движок без Backup API показывает о занятости дисков ВМ. */
   disks?: DiskLockReport[]

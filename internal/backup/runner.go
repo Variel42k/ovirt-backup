@@ -1834,7 +1834,9 @@ func (e *Engine) copyOneDisk(ctx context.Context, client *ovirt.Client, backend 
 	defer func() {
 		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
 		defer cancel()
-		if err := client.CloseTransfer(closeCtx, transferID, success); err != nil {
+		// На движке без Backup API передача скачивания закрывается через
+		// finalize и после сбоя: cancel там запирает том снапшота.
+		if err := client.CloseTransfer(closeCtx, transferID, success || !srv.SupportsCBT); err != nil {
 			e.log.Warn().Err(err).Str("transfer", transferID).Msg("не удалось корректно закрыть передачу")
 		}
 	}()
@@ -1872,7 +1874,7 @@ func (e *Engine) copyOneDisk(ctx context.Context, client *ovirt.Client, backend 
 	reopen := func(ctx context.Context, cause error) (*imageio.Client, error) {
 		old := transferID
 		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
-		_ = client.CancelTransfer(closeCtx, old)
+		_ = client.CloseTransfer(closeCtx, old, !srv.SupportsCBT)
 		_, _ = client.WaitTransferDone(closeCtx, old, 2*time.Minute)
 		cancel()
 

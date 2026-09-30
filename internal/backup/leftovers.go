@@ -59,6 +59,10 @@ type LeftoverReport struct {
 	Removable int `json:"removable"`
 	// Blocked — почему кнопка сейчас ничего не сделает (идёт бэкап ВМ).
 	Blocked string `json:"blocked,omitempty"`
+	// StuckLock — том диска застрял в статусе locked в базе движка без
+	// активной операции: удаление снапшотов не пройдёт, пока администратор
+	// oVirt не снимет блокировку на хосте движка.
+	StuckLock string `json:"stuck_lock,omitempty"`
 	// ManualSteps — команды для того, что служба не трогает.
 	ManualSteps []model.ManualStep `json:"manual_steps,omitempty"`
 	// Disks — что движок показывает о занятости дисков ВМ. Только для движков
@@ -295,6 +299,10 @@ func (e *Engine) report(sc *leftoverScan) *LeftoverReport {
 			rep.Removable++
 		}
 	}
+	var stuckDisks []string
+	if rep.StuckLock, stuckDisks = stuckLockNotice(sc.diskLocks); rep.StuckLock != "" {
+		rep.ManualSteps = append(rep.ManualSteps, stuckLockSteps(sc.srv, stuckDisks)...)
+	}
 	if len(blocking) > 0 || (len(rep.Items) > rep.Removable && !sc.busyVM) {
 		rep.ManualSteps = EngineUnlockSteps(sc.srv, sc.vm.ID, blocking,
 			relatedTransfers(sc.transfers, blocking, sc.diskIDs), sc.diskIDs)
@@ -404,7 +412,7 @@ func (e *Engine) CleanupLeftovers(ctx context.Context, serverID, vmID string) (*
 				// that our deletion started; report it honestly to the operator.
 				if ovirt.IsConflict(err) {
 					res.Actions = append(res.Actions, CleanupAction{Kind: LeftoverSnapshot, ID: s.ID,
-						Detail: fmt.Sprintf("удаление не запущено: %v%s", err, lockHolderHint(ctx, client, sc.diskIDs, refs))})
+						Detail: fmt.Sprintf("удаление не запущено: %v%s", err, e.cleanupLockHint(ctx, client, sc, refs))})
 					continue
 				}
 				// Ответ мог потеряться, а движок — принять удаление (или его уже
@@ -453,4 +461,24 @@ func lockHolderHint(ctx context.Context, client *ovirt.Client, diskIDs []string,
 	return ". Диск держит незавершённая передача образа " + strings.Join(parts, ", ") +
 		": служба не открывала её или не может опознать как свою, поэтому не отменяет сама. " +
 		"Если передача брошена, отмените её командой из отчёта об остатках и повторите уборку"
+}
+
+// cleanupLockHint объясняет 409 при удалении снапшота: передачи, которые
+// держат диск, а на движке без Backup API — и тома, застрявшие в locked.
+func (e *Engine) cleanupLockHint(ctx context.Context, client *ovirt.Client, sc *leftoverScan,
+	refs map[string]struct{}) string {
+
+	hint := lockHolderHint(ctx, client, sc.diskIDs, refs)
+	if sc.srv.SupportsCBT {
+		return hint
+	}
+	var fresh []DiskLockReport
+	for _, d := range sc.diskLocks {
+		st := probeDiskLock(ctx, client, volumeDisk{vmID: sc.vm.ID, vmName: sc.vm.Name, diskID: d.DiskID, alias: d.Alias})
+		fresh = append(fresh, diskLockReport(ovirt.Disk{ID: d.DiskID, Alias: d.Alias}, st))
+	}
+	if notice, _ := stuckLockNotice(fresh); notice != "" {
+		hint += ". " + notice
+	}
+	return hint
 }

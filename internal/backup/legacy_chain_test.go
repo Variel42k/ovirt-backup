@@ -276,7 +276,9 @@ func TestDownloadVolumeReopensStalledLegacyTransfer(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if created != 2 || !cancelled["tr-1"] || !finalized["tr-2"] {
+	// Замолчавшая передача закрывается через finalize, а не cancel: на 4.3
+	// cancel оставляет том снапшота в статусе locked в базе движка.
+	if created != 2 || !finalized["tr-1"] || cancelled["tr-1"] || !finalized["tr-2"] {
 		t.Fatalf("created=%d cancelled=%v finalized=%v", created, cancelled, finalized)
 	}
 }

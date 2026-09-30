@@ -224,7 +224,7 @@ func (e *diskLockedError) diagnosis() string {
 			"Повторите бэкап, когда снапшот выйдет из статуса locked"
 	case len(st.LockedVolumes) > 0 || st.DiskStatus == "locked":
 		return "Тома диска остались в статусе locked в базе движка, хотя передач и операций со снапшотами нет: " +
-			"движок 4.3 не снял блокировку после завершения передачи. Через API её не снять: нужен " +
+			"так oVirt 4.3 оставляет том после отменённой передачи. Через API её не снять: нужен " +
 			"unlock_entity.sh на хосте движка — передайте команду из блока «Что сделать вручную» администратору oVirt"
 	default:
 		return "Движок не показывает причину ни в передачах, ни в статусах диска и снапшотов: блокировку держит " +
@@ -401,4 +401,47 @@ func diskLockReport(d ovirt.Disk, st diskLockState) DiskLockReport {
 		r.Transfers = append(r.Transfers, fmt.Sprintf("%s (фаза %s)", t.ID, t.Phase))
 	}
 	return r
+}
+
+// stuckLockNotice объясняет тома, застрявшие в статусе locked без активной
+// передачи и без операции со снапшотом, и возвращает их диски.
+func stuckLockNotice(disks []DiskLockReport) (string, []string) {
+	var parts, ids []string
+	for _, d := range disks {
+		if len(d.LockedVolumes) == 0 || len(d.Transfers) > 0 || len(d.BusySnapshots) > 0 {
+			continue
+		}
+		ids = append(ids, d.DiskID)
+		parts = append(parts, fmt.Sprintf("диск %s: том(а) %s", d.Alias, strings.Join(d.LockedVolumes, ", ")))
+	}
+	if len(parts) == 0 {
+		return "", nil
+	}
+	return "В базе движка остались заблокированными тома без активной передачи и без операции со снапшотом — " +
+		strings.Join(parts, "; ") + ". Так oVirt 4.3 оставляет том после отменённой передачи. Пока блокировка " +
+		"не снята, движок не удалит снапшоты с этим томом и не откроет его передачу (HTTP 409 «disks are locked»). " +
+		"Через API её не снять: администратор oVirt снимает её на хосте движка командами из блока «Что сделать " +
+		"вручную», после чего повторите уборку.", ids
+}
+
+// stuckLockSteps — команды администратору oVirt для застрявшей блокировки томов.
+func stuckLockSteps(srv *model.Server, diskIDs []string) []model.ManualStep {
+	const unlock = "/usr/share/ovirt-engine/setup/dbutils/unlock_entity.sh"
+	return []model.ManualStep{
+		{
+			Title:   "Администратору oVirt: посмотреть заблокированные диски в базе движка",
+			Where:   "хост движка, root",
+			Detail:  "Только просмотр, ничего не меняет. Диск из отчёта должен быть в списке.",
+			Command: unlock + " -t disk -q",
+		},
+		{
+			Title: "Администратору oVirt: снять застрявшую блокировку томов диска",
+			Where: "хост движка, root",
+			Risky: true,
+			Detail: "Снимает статус locked со всех томов диска в базе движка. Выполнять, только если отчёт службы " +
+				"показывает: незавершённых передач диска нет, снапшоты не в операции. Снятие блокировки с диска, " +
+				"с которым идёт операция, может повредить образ.",
+			Command: unlock + " -t disk " + strings.Join(quoteAll(diskIDs), " "),
+		},
+	}
 }

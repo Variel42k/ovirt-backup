@@ -259,7 +259,10 @@ func (e *Engine) downloadVolumeAttempt(ctx context.Context, client *ovirt.Client
 		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), wait+time.Minute)
 		defer cancel()
 		phase := ""
-		err := client.CloseTransfer(closeCtx, transfer.ID, success)
+		// Даже после сбоя передача скачивания закрывается через finalize:
+		// cancel на oVirt 4.3 оставляет том снапшота в статусе locked в базе
+		// движка (см. closeDownloadFirst).
+		err := client.CloseTransfer(closeCtx, transfer.ID, closeDownloadFirst)
 		if err == nil {
 			phase, err = client.WaitTransferDone(closeCtx, transfer.ID, wait)
 		}

@@ -117,6 +117,10 @@ async function cleanup() {
     <template v-if="report">
       <div class="text-caption text-grey-7 q-mt-sm">Проверено {{ dateTime(report.checked_at) }}</div>
       <q-banner v-if="report.blocked" dense class="bg-blue-1 q-mt-xs">{{ report.blocked }}</q-banner>
+      <q-banner v-if="report.stuck_lock" dense class="bg-orange-1 q-mt-xs" data-testid="leftovers-stuck-lock">
+        <template #avatar><q-icon name="lock" color="warning" /></template>
+        <span class="jhv-wrap">{{ report.stuck_lock }}</span>
+      </q-banner>
       <div v-if="!report.items.length" class="jhv-reason q-mt-xs">
         Остатков нет: диски ВМ не держит ни один бэкап, передача или снапшот службы.
       </div>

@@ -1797,6 +1797,10 @@ const replicationColumns = [
                     ВМ запустилась, но гостевой агент не ответил — либо он не установлен,
                     либо система не загрузилась
                   </template>
+                  <template v-else-if="bootReport(check)!.stage === 'assembly'">
+                    <q-icon name="cancel" color="negative" size="14px" />
+                    проверочную ВМ не удалось собрать: диски не записаны на площадку, до запуска дело не дошло
+                  </template>
                   <template v-else>
                     <q-icon name="cancel" color="negative" size="14px" />
                     ВМ не удалось запустить

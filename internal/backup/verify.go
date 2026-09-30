@@ -52,7 +52,13 @@ type BootReport struct {
 	Hostname     string   `json:"hostname,omitempty"`
 	ImageBytes   int64    `json:"image_bytes,omitempty"`
 	Notes        []string `json:"notes,omitempty"`
+	// Stage — на каком этапе проверка остановилась, если ВМ не запускалась:
+	// assembly — проверочную ВМ не удалось собрать (диски не записаны).
+	Stage string `json:"stage,omitempty"`
 }
+
+// BootStageAssembly — проверочная ВМ не собрана: до запуска дело не дошло.
+const BootStageAssembly = "assembly"
 
 // DiskReport is the per-disk part of a verification.
 type DiskReport struct {

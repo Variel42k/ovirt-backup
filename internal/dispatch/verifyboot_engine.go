@@ -129,7 +129,8 @@ func (d *Dispatcher) verifyBootOnEngine(ctx context.Context, req backup.External
 			notes = append(notes, result.CleanupFailed...)
 		}
 		report.Summary = "проверочную ВМ не удалось собрать в движке"
-		report.Boot = &backup.BootReport{Host: engineSrv.Name, DomainName: name, Notes: notes}
+		report.Boot = &backup.BootReport{Host: engineSrv.Name, DomainName: name, Notes: notes,
+			Stage: backup.BootStageAssembly}
 		markDisks(report, set, false, err.Error())
 		return nil
 	}

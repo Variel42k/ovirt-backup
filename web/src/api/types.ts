@@ -1243,6 +1243,8 @@ export interface BootReport {
   hostnames?: string[]
   image_bytes?: number
   notes?: string[]
+  /** assembly — проверочную ВМ не удалось собрать: до запуска дело не дошло. */
+  stage?: string
 }
 
 /** Один отрисовываемый кусок статьи справки. */

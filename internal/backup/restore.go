@@ -348,8 +348,15 @@ func (e *Engine) restoreToEngine(ctx context.Context, set *ChainSet, reader *Cha
 		if suffix == "" {
 			suffix = "-restored-" + set.Leaf.CreatedAt.Format("20060102-1504")
 		}
-		format, sparse := NewDiskLayout(leaf.DiskFormat, e.domainStorageType(ctx, srv.ID, req.TargetDomainID),
-			srv.SupportsCBT)
+		storageType := e.domainStorageType(ctx, srv.ID, req.TargetDomainID)
+		format, sparse := NewDiskLayout(leaf.DiskFormat, storageType, srv.SupportsCBT)
+		// Тонкий qcow2 на блочном домене создаётся маленьким томом, и во
+		// время загрузки его никто не расширяет: сразу выделяем место под
+		// данные копии и метаданные qcow2.
+		var initialSize int64
+		if format == "cow" && sparse && IsBlockStorage(storageType) {
+			initialSize = Qcow2InitialSize(int64(reader.PresentChunks())*reader.ChunkSize(), leaf.VirtualSize)
+		}
 		created, err := client.CreateDisk(ctx, ovirt.CreateDiskRequest{
 			Alias:           leaf.Alias + suffix,
 			Description:     fmt.Sprintf("Восстановлен из бэкапа %s от %s", set.Leaf.ID, set.Leaf.CreatedAt.Format(time.RFC3339)),
@@ -357,6 +364,7 @@ func (e *Engine) restoreToEngine(ctx context.Context, set *ChainSet, reader *Cha
 			ProvisionedSize: leaf.VirtualSize,
 			Format:          format,
 			Sparse:          sparse,
+			InitialSize:     initialSize,
 		})
 		if err != nil {
 			return fmt.Errorf("создание диска: %w", err)

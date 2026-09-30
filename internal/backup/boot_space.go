@@ -108,6 +108,33 @@ func (e *Engine) RestoreSizeEstimate(ctx context.Context, runID, copyID string) 
 	return min(data, full), full, nil
 }
 
+// Qcow2InitialSize — начальный размер тома тонкого qcow2 под data байт данных
+// диска размером virtual: данные и метаданные qcow2 (таблицы L2 и refcount для
+// кластеров по 64 КиБ) с запасом, как считает qemu-img measure. Больше полного
+// размера qcow2 для этого диска не бывает — движок такой начальный размер не
+// примет.
+func Qcow2InitialSize(data, virtual int64) int64 {
+	const (
+		cluster = 64 << 10
+		mib     = 1 << 20
+		slack   = 256 << 20
+	)
+	if data < 0 {
+		data = 0
+	}
+	if virtual > 0 && data > virtual {
+		data = virtual
+	}
+	l2 := (virtual/cluster + 1) * 8
+	refcount := ((virtual+l2)/cluster + 1) * 2
+	meta := l2 + refcount + 16*cluster
+	size := data + meta + slack
+	if full := virtual + meta; virtual > 0 && size > full {
+		size = full
+	}
+	return (size + mib - 1) / mib * mib
+}
+
 // OVirtClient — клиент движка oVirt из пула службы; нужен диспетчеру для
 // проверки загрузкой через движок.
 func (e *Engine) OVirtClient(srv *model.Server) (*ovirt.Client, error) {

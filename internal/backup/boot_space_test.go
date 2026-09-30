@@ -41,6 +41,25 @@ func TestCheckBootDomain(t *testing.T) {
 	}
 }
 
+func TestQcow2InitialSize(t *testing.T) {
+	// ADV-GITLAB: диск 300 ГиБ, в копии около 181 ГиБ данных.
+	got := Qcow2InitialSize(181*gib, 300*gib)
+	if got < 181*gib || got > 182*gib || got%(1<<20) != 0 {
+		t.Fatalf("начальный размер %d: данные, метаданные qcow2 и запас, кратно МиБ", got)
+	}
+	// Данных почти на весь диск: не больше полного размера qcow2.
+	full := Qcow2InitialSize(300*gib, 300*gib)
+	if full < 300*gib || full > 301*gib {
+		t.Fatalf("полный размер qcow2 для 300 ГиБ: %d", full)
+	}
+	if Qcow2InitialSize(400*gib, 300*gib) != full {
+		t.Fatal("данных больше размера диска не бывает")
+	}
+	if small := Qcow2InitialSize(0, 10*gib); small <= 0 || small > gib {
+		t.Fatalf("пустой диск: %d", small)
+	}
+}
+
 func TestNewDiskLayout(t *testing.T) {
 	cases := []struct {
 		source, storage string

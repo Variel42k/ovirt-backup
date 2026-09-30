@@ -240,6 +240,9 @@ func (c *Client) CreateDisk(ctx context.Context, req CreateDiskRequest) (*Disk, 
 	if req.Incremental {
 		body["backup"] = "incremental"
 	}
+	if req.InitialSize > 0 {
+		body["initial_size"] = fmt.Sprint(req.InitialSize)
+	}
 
 	var disk Disk
 	if err := c.post(ctx, "/disks", body, &disk); err != nil {
@@ -257,6 +260,11 @@ type CreateDiskRequest struct {
 	Format          string // cow | raw
 	Sparse          bool
 	Incremental     bool
+	// InitialSize — начальный размер тома тонкого qcow2 на блочном домене.
+	// Во время загрузки через imageio том никто не расширяет (ВМ не
+	// запущена), и без него запись упирается в конец маленького начального
+	// тома: imageio отвечает HTTP 500. Ноль — умолчание движка.
+	InitialSize int64
 }
 
 // WaitDiskStatus polls until a disk leaves the locked state.

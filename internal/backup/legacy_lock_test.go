@@ -117,7 +117,8 @@ func TestOpenVolumeTransferDiagnosesLock(t *testing.T) {
 			fake: func() *fakeLockedEngine {
 				return &fakeLockedEngine{conflicts: -1, diskState: "ok", volumeState: "locked"}
 			},
-			contains: []string{"тома в статусе locked: vol-1", "unlock_entity.sh"},
+			contains: []string{"тома снапшотов в статусе locked: vol-1 (снапшот «jhvirt-backup»)", "unlock_entity.sh",
+				"статус диска (активного слоя, как в портале) ok"},
 		},
 		{
 			name: "причины не видно",

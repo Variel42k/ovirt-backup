@@ -1533,9 +1533,19 @@ func (e *Engine) runSnapshot(ctx context.Context, client *ovirt.Client, backend 
 		if err := e.releaseLegacyTransferLeftovers(ctx, client, srv, vm, run, diskIDs); err != nil {
 			return nil, err
 		}
+		// Брошенные снапшоты удлиняют цепочку диска: убираем их до нового.
+		e.presweepLegacySnapshots(ctx, client, srv, vm, run)
 	}
 
 	e.waitSnapshotOperations(ctx, client, vm, run)
+
+	// Том, застрявший в locked, движок не отдаст: такой бэкап не пройдёт, а
+	// новый снапшот только удлинит цепочку.
+	if !srv.SupportsCBT {
+		if err := e.stuckChainError(ctx, client, srv, vm, run, disks); err != nil {
+			return nil, err
+		}
+	}
 
 	// Записи гостя за время бэкапа копятся в слое снапшота на том же домене.
 	domains, err := e.checkDomainSpace(ctx, client, vm, disks)

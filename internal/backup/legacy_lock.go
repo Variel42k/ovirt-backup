@@ -59,7 +59,12 @@ var legacyLockProbeInterval = time.Minute
 type diskLockState struct {
 	DiskStatus string
 	// LockedVolumes — тома диска (image_id) в статусе locked в снапшотах.
+	// Это не статус диска: в портале, во вкладке «Диски» ВМ, показан статус
+	// активного слоя, а статус томов снапшотов — в домене хранения, вкладка
+	// «Снимки дисков».
 	LockedVolumes []string
+	// volumeSnapshot — в каком снапшоте лежит том: image_id → описание.
+	volumeSnapshot map[string]string
 	// BusySnapshots — снапшоты ВМ в операции (создание, удаление со слиянием).
 	BusySnapshots []string
 	// Transfers — незавершённые передачи этого диска.
@@ -79,7 +84,7 @@ func (s diskLockState) visibleCause() bool {
 func (s diskLockState) String() string {
 	var parts []string
 	if s.DiskStatus != "" {
-		parts = append(parts, "статус диска "+s.DiskStatus)
+		parts = append(parts, "статус диска (активного слоя, как в портале) "+s.DiskStatus)
 	}
 	if len(s.Transfers) > 0 {
 		var ts []string
@@ -91,7 +96,7 @@ func (s diskLockState) String() string {
 		parts = append(parts, "незавершённых передач диска нет")
 	}
 	if len(s.LockedVolumes) > 0 {
-		parts = append(parts, "тома в статусе locked: "+strings.Join(s.LockedVolumes, ", "))
+		parts = append(parts, "тома снапшотов в статусе locked: "+strings.Join(s.lockedLabels(), ", "))
 	}
 	if len(s.BusySnapshots) > 0 {
 		parts = append(parts, "снапшоты в операции: "+strings.Join(s.BusySnapshots, ", "))
@@ -100,6 +105,19 @@ func (s diskLockState) String() string {
 		parts = append(parts, "часть сведений недоступна: "+s.ProbeError)
 	}
 	return strings.Join(parts, "; ")
+}
+
+// lockedLabels — заблокированные тома с именами снапшотов, в которых они лежат.
+func (s diskLockState) lockedLabels() []string {
+	out := make([]string, 0, len(s.LockedVolumes))
+	for _, id := range s.LockedVolumes {
+		if desc := s.volumeSnapshot[id]; desc != "" {
+			out = append(out, fmt.Sprintf("%s (снапшот «%s»)", id, desc))
+		} else {
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 // probeDiskLock спрашивает движок, что сейчас держит диск.
@@ -128,6 +146,10 @@ func probeDiskLock(ctx context.Context, client *ovirt.Client, d volumeDisk) disk
 				refs[sd.ImageID] = struct{}{}
 				if sd.Status == "locked" && !containsString(st.LockedVolumes, sd.ImageID) {
 					st.LockedVolumes = append(st.LockedVolumes, sd.ImageID)
+					if st.volumeSnapshot == nil {
+						st.volumeSnapshot = map[string]string{}
+					}
+					st.volumeSnapshot[sd.ImageID] = s.Description
 				}
 			}
 		}
@@ -396,7 +418,8 @@ func (e *Engine) setManualSteps(run *model.BackupRun, steps []model.ManualStep) 
 // diskLockReport переводит состояние диска в строку отчёта об остатках.
 func diskLockReport(d ovirt.Disk, st diskLockState) DiskLockReport {
 	r := DiskLockReport{DiskID: d.ID, Alias: d.AliasOrName(), Status: st.DiskStatus,
-		LockedVolumes: st.LockedVolumes, BusySnapshots: st.BusySnapshots, Summary: st.String()}
+		LockedVolumes: st.LockedVolumes, LockedIn: st.lockedLabels(), BusySnapshots: st.BusySnapshots,
+		Summary: st.String()}
 	for _, t := range st.Transfers {
 		r.Transfers = append(r.Transfers, fmt.Sprintf("%s (фаза %s)", t.ID, t.Phase))
 	}
@@ -412,16 +435,22 @@ func stuckLockNotice(disks []DiskLockReport) (string, []string) {
 			continue
 		}
 		ids = append(ids, d.DiskID)
-		parts = append(parts, fmt.Sprintf("диск %s: том(а) %s", d.Alias, strings.Join(d.LockedVolumes, ", ")))
+		volumes := d.LockedIn
+		if len(volumes) == 0 {
+			volumes = d.LockedVolumes
+		}
+		parts = append(parts, fmt.Sprintf("диск %s: том(а) %s", d.Alias, strings.Join(volumes, ", ")))
 	}
 	if len(parts) == 0 {
 		return "", nil
 	}
-	return "В базе движка остались заблокированными тома без активной передачи и без операции со снапшотом — " +
-		strings.Join(parts, "; ") + ". Так oVirt 4.3 оставляет том после отменённой передачи. Пока блокировка " +
-		"не снята, движок не удалит снапшоты с этим томом и не откроет его передачу (HTTP 409 «disks are locked»). " +
-		"Через API её не снять: администратор oVirt снимает её на хосте движка командами из блока «Что сделать " +
-		"вручную», после чего повторите уборку.", ids
+	return "В базе движка остались заблокированными тома снапшотов без активной передачи и без операции со " +
+		"снапшотом — " + strings.Join(parts, "; ") + ". Сам диск при этом в статусе OK — так его показывает и " +
+		"портал oVirt во вкладке «Диски» ВМ: там статус активного слоя. Статус тома снапшота в портале виден в " +
+		"домене хранения, вкладка «Снимки дисков». Так oVirt 4.3 оставляет том после отменённой передачи. Пока " +
+		"блокировка не снята, движок не удалит снапшоты с этим томом и не откроет его передачу (HTTP 409 «disks " +
+		"are locked»); остальные снапшоты удаляются. Через API её не снять: администратор oVirt снимает её на " +
+		"хосте движка командами из блока «Что сделать вручную», после чего повторите уборку.", ids
 }
 
 // stuckLockSteps — команды администратору oVirt для застрявшей блокировки томов.

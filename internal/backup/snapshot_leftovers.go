@@ -342,6 +342,21 @@ func (e *Engine) startSnapshotSweep(client *ovirt.Client, srv *model.Server, vm 
 // попадают команды для администратора.
 func (e *Engine) sweepLeftoverSnapshots(ctx context.Context, client *ovirt.Client, srv *model.Server,
 	vm *model.VM, runID string) int {
+	return e.sweepSnapshots(ctx, client, srv, vm, runID, sweepOptions{attachSteps: true})
+}
+
+// sweepOptions — чем уборка перед бэкапом отличается от фоновой.
+type sweepOptions struct {
+	// currentRun — запуск, который сам вызвал уборку перед своим снапшотом:
+	// он не считается «идущим бэкапом ВМ», из-за которого уборку откладывают.
+	currentRun string
+	// attachSteps — дописывать команды к завершённому запуску runID. Перед
+	// бэкапом запуск ещё идёт и сохранит свои команды сам.
+	attachSteps bool
+}
+
+func (e *Engine) sweepSnapshots(ctx context.Context, client *ovirt.Client, srv *model.Server,
+	vm *model.VM, runID string, opts sweepOptions) int {
 
 	snaps, err := client.ListSnapshots(ctx, vm.ID)
 	if err != nil {
@@ -382,7 +397,8 @@ func (e *Engine) sweepLeftoverSnapshots(ctx context.Context, client *ovirt.Clien
 		// Между удалениями мог начаться бэкап этой ВМ: удаление упёрлось бы в
 		// него. Уборку тогда продолжит следующий запуск.
 		if active, err := e.store.ListBackupRuns(ctx, store.RunFilter{ServerID: srv.ID, VMID: vm.ID,
-			Statuses: []model.RunStatus{model.RunPending, model.RunRunning}, Limit: 1}); err != nil || len(active) > 0 {
+			Statuses: []model.RunStatus{model.RunPending, model.RunRunning}, Limit: 2}); err != nil ||
+			otherActiveRun(active, opts.currentRun) {
 			e.log.Info().Str("vm", vm.Name).Msg("уборка снапшотов отложена: идёт бэкап ВМ")
 			return 0
 		}
@@ -401,10 +417,35 @@ func (e *Engine) sweepLeftoverSnapshots(ctx context.Context, client *ovirt.Clien
 		if len(abandoned) > 0 {
 			transfers, _ = client.ListImageTransfers(ctx)
 		}
+		// Том снапшота застрял в locked в базе движка: DELETE получил бы 409,
+		// пока администратор oVirt не снимет блокировку. Не ждём и не
+		// останавливаемся — остальные снапшоты удаляются.
+		if stuck := stuckSnapshotVolumes(ctx, client, vm.ID, s, transfers); len(stuck) > 0 {
+			pending++
+			e.log.Warn().Str("vm", vm.Name).Str("snapshot", s.ID).Strs("тома", stuck).
+				Msg("снапшот пропущен: его том заблокирован в базе движка без активной передачи")
+			if _, reported := e.snapshotFailures.LoadOrStore("stuck:"+s.ID, struct{}{}); !reported {
+				e.event(ctx, run, model.RunEventSnapshotRemoveFailed, 0, fmt.Sprintf(
+					"снапшот %s (%s) не удалить: том(а) %s заблокирован(ы) в базе движка без активной передачи — "+
+						"снять блокировку может только администратор oVirt на хосте движка", s.ID, s.Description,
+					strings.Join(stuck, ", ")))
+				if opts.attachSteps {
+					e.attachSteps(ctx, runID, stuckLockSteps(srv, snapshotDiskIDs(ctx, client, vm.ID, s)))
+				}
+			}
+			continue
+		}
 		started := time.Now()
 		err := client.DeleteSnapshotWhenReady(ctx, vm.ID, s.ID, 10*time.Minute)
 		if err == nil || ovirt.IsNotFound(err) {
 			err = client.WaitSnapshotGone(ctx, vm.ID, s.ID, 5*time.Hour)
+			// Время уборки перед бэкапом вышло, а движок ещё сливает слои:
+			// удаление идёт, бэкап дождётся его. Это не неудача.
+			if err != nil && ctx.Err() != nil {
+				e.log.Info().Str("vm", vm.Name).Str("snapshot", s.ID).
+					Msg("удаление снапшота запущено, движок ещё сливает слои — продолжится без уборки")
+				return pending + len(snaps) - i
+			}
 		}
 		if err != nil {
 			e.log.Error().Err(err).Str("vm", vm.Name).Str("snapshot", s.ID).
@@ -415,7 +456,9 @@ func (e *Engine) sweepLeftoverSnapshots(ctx context.Context, client *ovirt.Clien
 			if _, reported := e.snapshotFailures.LoadOrStore(s.ID, struct{}{}); !reported {
 				e.event(ctx, run, model.RunEventSnapshotRemoveFailed, time.Since(started),
 					fmt.Sprintf("снапшот %s (%s): %v", s.ID, s.Description, err))
-				e.attachSteps(ctx, runID, SnapshotCleanupSteps(srv, vm.ID, s))
+				if opts.attachSteps {
+					e.attachSteps(ctx, runID, SnapshotCleanupSteps(srv, vm.ID, s))
+				}
 			}
 			// Движок не справился с одним — остальные подождут следующего
 			// раза, чтобы не громоздить операции на проблемное хранилище.

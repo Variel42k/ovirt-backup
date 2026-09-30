@@ -418,6 +418,8 @@ export interface DiskLockReport {
   status?: string
   transfers?: string[]
   locked_volumes?: string[]
+  /** Те же тома с именами снапшотов, в которых они лежат. */
+  locked_in?: string[]
   busy_snapshots?: string[]
   summary: string
 }

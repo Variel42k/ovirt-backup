@@ -80,6 +80,8 @@ type DiskLockReport struct {
 	Status        string   `json:"status,omitempty"`
 	Transfers     []string `json:"transfers,omitempty"`
 	LockedVolumes []string `json:"locked_volumes,omitempty"`
+	// LockedIn — те же тома с именами снапшотов, в которых они лежат.
+	LockedIn      []string `json:"locked_in,omitempty"`
 	BusySnapshots []string `json:"busy_snapshots,omitempty"`
 	// Summary — одной строкой для интерфейса.
 	Summary string `json:"summary"`
@@ -124,6 +126,10 @@ type leftoverScan struct {
 	// diskLocks и events — только для движков без Backup API.
 	diskLocks []DiskLockReport
 	events    []string
+	// stuckSnaps — свои снапшоты, тома которых застряли в locked без
+	// активной передачи: снапшот → тома. Удалить их может только
+	// администратор oVirt, сняв блокировку на хосте движка.
+	stuckSnaps map[string][]string
 }
 
 func (e *Engine) scanLeftovers(ctx context.Context, serverID, vmID string) (*leftoverScan, error) {
@@ -198,6 +204,15 @@ func (e *Engine) scanLeftovers(ctx context.Context, serverID, vmID string) (*lef
 	}
 	if !srv.SupportsCBT {
 		sc.events = recentEngineEvents(ctx, client, 10, vm.Name)
+		sc.stuckSnaps = map[string][]string{}
+		for _, s := range sc.snaps {
+			if owner, _, _ := leftoverSnapshot(s, sc.runs, time.Now()); owner == "" {
+				continue
+			}
+			if stuck := stuckSnapshotVolumes(ctx, client, vm.ID, s, sc.transfers); len(stuck) > 0 {
+				sc.stuckSnaps[s.ID] = stuck
+			}
+		}
 	}
 	return sc, nil
 }
@@ -260,7 +275,12 @@ func (e *Engine) report(sc *leftoverScan) *LeftoverReport {
 		if t := s.Date.Time(); !t.IsZero() {
 			item.Created = t.UTC().Format(time.RFC3339)
 		}
-		if verdict == snapshotRemove {
+		switch stuck := sc.stuckSnaps[s.ID]; {
+		case verdict == snapshotRemove && len(stuck) > 0:
+			item.Reason = why + ": через API не удалить — том(а) " + strings.Join(stuck, ", ") +
+				" заблокирован(ы) в базе движка без активной передачи. Удалится автоматически перед следующим " +
+				"бэкапом, когда администратор oVirt снимет блокировку"
+		case verdict == snapshotRemove:
 			item.Removable = !sc.busyVM
 			item.Reason = why + ": будет удалён; движок сольёт слои, это может занять время"
 		}
@@ -401,10 +421,22 @@ func (e *Engine) CleanupLeftovers(ctx context.Context, serverID, vmID string) (*
 			}
 			res.Actions = append(res.Actions, action)
 		}
+		current, _ := client.ListImageTransfers(ctx)
 		for _, s := range sc.snaps {
 			owner, verdict, _ := leftoverSnapshot(s, sc.runs, time.Now())
 			if verdict != snapshotRemove {
 				continue
+			}
+			// Том застрял в locked: DELETE получил бы 409 через 10 минут
+			// ожидания. Сразу говорим, что нужно, и убираем остальные.
+			if !sc.srv.SupportsCBT {
+				if stuck := stuckSnapshotVolumes(ctx, client, vm.ID, s, current); len(stuck) > 0 {
+					res.Actions = append(res.Actions, CleanupAction{Kind: LeftoverSnapshot, ID: s.ID,
+						Detail: "не удалён: том(а) " + strings.Join(stuck, ", ") + " заблокирован(ы) в базе движка без " +
+							"активной передачи, через API это не снять. Когда администратор oVirt снимет блокировку, " +
+							"снапшот удалится автоматически перед следующим бэкапом"})
+					continue
+				}
 			}
 			if err := client.DeleteSnapshotWhenReady(ctx, vm.ID, s.ID, 10*time.Minute); err != nil && !ovirt.IsNotFound(err) {
 				// HTTP 409 explicitly means that DELETE was rejected. A locked

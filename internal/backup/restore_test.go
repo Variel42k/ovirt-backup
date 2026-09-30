@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -63,5 +64,47 @@ func TestResolveOutputDirNoRoots(t *testing.T) {
 	}
 	if _, err := ResolveOutputDir("", nil); err != nil {
 		t.Fatalf("пустой каталог должен оставаться разрешённым: %v", err)
+	}
+}
+
+func TestChainReaderPresentBytesCountsShortTail(t *testing.T) {
+	reader := &ChainReader{
+		chunkSize:   4,
+		virtualSize: 10,
+		owner:       map[int64]int{0: 0, 2: 0},
+	}
+	if got, want := reader.PresentBytes(), int64(6); got != want {
+		t.Fatalf("PresentBytes() = %d, нужно %d", got, want)
+	}
+}
+
+func TestStreamObserverShowsRepositoryReadAndTargetWrite(t *testing.T) {
+	reader := &ChainReader{chunkSize: 4, virtualSize: 8, owner: map[int64]int{}}
+	var stages []StreamStage
+	err := reader.StreamObserved(context.Background(), func(_ context.Context, offset int64, data []byte, zeroLength int64) error {
+		if offset != 0 || data != nil || zeroLength != 8 {
+			t.Fatalf("неожиданный нулевой диапазон: offset=%d data=%v length=%d", offset, data, zeroLength)
+		}
+		return nil
+	}, nil, func(stage StreamStage, _, _ int64) {
+		stages = append(stages, stage)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []StreamStage{StreamReadingBackup, StreamReadingBackup, StreamWritingTarget}
+	if len(stages) != len(want) {
+		t.Fatalf("этапы = %v, нужно %v", stages, want)
+	}
+	for i := range want {
+		if stages[i] != want[i] {
+			t.Fatalf("этапы = %v, нужно %v", stages, want)
+		}
+	}
+}
+
+func TestRestoreStageHintExplainsFlush(t *testing.T) {
+	if hint := restoreStageHint("imageio_flush"); hint == "" {
+		t.Fatal("для долгого flush нет диагностической подсказки")
 	}
 }

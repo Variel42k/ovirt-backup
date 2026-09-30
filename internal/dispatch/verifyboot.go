@@ -349,16 +349,30 @@ func (d *Dispatcher) uploadImage(ctx context.Context, driver *kvm.Driver, reader
 	pr, pw := io.Pipe()
 	var written int64
 	lastReport := time.Now()
+	started := time.Now()
+	lastLogStep := -1
 
 	progress := func(done int64) {
 		if progressTotal <= 0 || time.Since(lastReport) < 3*time.Second {
 			return
 		}
 		lastReport = time.Now()
+		current := progressBase + done
+		var speed int64
+		if elapsed := time.Since(started); elapsed > 0 {
+			speed = int64(float64(done) / elapsed.Seconds())
+		}
 		// Upload occupies the first 80% of the bar; the boot itself is the
 		// rest and has no measurable progress of its own.
-		d.Engine.UpdateProgress(ctx, req.Record,
-			int((progressBase+done)*80/max64(progressTotal, 1)))
+		pct := int(current * 100 / max64(progressTotal, 1))
+		d.Engine.UpdateVerifyTransfer(ctx, req.Record, "writing_data", pct*80/100,
+			current, progressTotal, speed)
+		if step := pct / 10; step > lastLogStep {
+			d.log.Info().Str("verify", req.Record.ID).Int("процент", pct).
+				Int64("передано", current).Int64("всего", progressTotal).
+				Int64("байт-в-секунду", speed).Msg("образ передаётся на KVM-площадку проверки")
+			lastLogStep = step
+		}
 	}
 
 	go func() {
@@ -387,7 +401,13 @@ func (d *Dispatcher) uploadImage(ctx context.Context, driver *kvm.Driver, reader
 		_ = pr.CloseWithError(err)
 		return 0, err
 	}
-	d.Engine.UpdateProgress(ctx, req.Record, 80)
+	d.Engine.UpdateVerifyTransfer(ctx, req.Record, "writing_data", 80,
+		progressBase+written, progressTotal, func() int64 {
+			if elapsed := time.Since(started); elapsed > 0 {
+				return int64(float64(written) / elapsed.Seconds())
+			}
+			return 0
+		}())
 	return written, nil
 }
 

@@ -43,6 +43,34 @@ export function bytes(value?: number | null): string {
   return `${negative ? '-' : ''}${text} ${UNITS[unit]}`
 }
 
+/** Доля фактически переданных данных для индикатора, всегда от 0 до 1. */
+export function transferRatio(transferred?: number | null, total?: number | null): number {
+  if (!total || total <= 0) return 0
+  return Math.max(0, Math.min(1, (transferred ?? 0) / total))
+}
+
+/** Объём, средняя скорость и оценка оставшегося времени одной строкой. */
+export function transferSummary(transferred?: number | null, total?: number | null, speed?: number | null): string {
+  if (!total || total <= 0) return ''
+  const done = Math.max(0, transferred ?? 0)
+  const parts = [`${bytes(done)} из ${bytes(total)}`]
+  if (speed && speed > 0) {
+    parts.push(`${bytes(speed)}/с`)
+    const seconds = Math.ceil(Math.max(0, total - done) / speed)
+    if (seconds > 0) parts.push(`осталось ~${shortDuration(seconds)}`)
+  }
+  return parts.join(' · ')
+}
+
+function shortDuration(seconds: number): string {
+  if (seconds < 60) return '< 1 мин'
+  const minutes = Math.ceil(seconds / 60)
+  if (minutes < 60) return `${minutes} мин`
+  const hours = Math.floor(minutes / 60)
+  const rest = minutes % 60
+  return rest ? `${hours} ч ${rest} мин` : `${hours} ч`
+}
+
 export function dateTime(value?: string | null): string {
   if (!value) return '—'
   const d = new Date(value)
@@ -103,6 +131,31 @@ export function noteServerDate(header?: string | null): void {
 export function serverNow(): number {
   void relativeTick.value
   return Date.now() + serverClockOffset.value
+}
+
+/** Истинно, если метка не обновлялась дольше заданного числа секунд. */
+export function staleFor(value?: string | null, seconds = 120): boolean {
+  if (!value) return false
+  const at = Date.parse(value)
+  return !Number.isNaN(at) && serverNow() - at > seconds * 1000
+}
+
+/** Пояснение паузы по последнему сохранённому этапу передачи. */
+export function transferPauseHint(phase?: string): string {
+  switch (phase) {
+    case 'flushing':
+      return 'данные уже отправлены; ImageIO фиксирует их и метаданные диска, поэтому Sent в движке не растёт'
+    case 'writing_data':
+    case 'restoring_disks':
+      return 'нет новых подтверждённых диапазонов; журнал различит чтение копии и ожидание ImageIO'
+    case 'opening_transfer':
+      return 'движок или ImageIO ещё не подготовил ticket передачи'
+    case 'waiting_disk':
+    case 'creating_disk':
+      return 'движок ещё подготавливает диск на домене хранения'
+    default:
+      return 'операция продолжается без нового подтверждённого объёма'
+  }
 }
 
 /** Относительное время: «3 мин назад». Абсолютное время рядом всё равно нужно. */

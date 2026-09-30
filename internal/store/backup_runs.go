@@ -608,7 +608,8 @@ func (s *Store) ListBackupDisks(ctx context.Context, runID string) ([]model.Back
 	return out, rows.Err()
 }
 
-const verifyColumns = `id, run_id, mode, status, progress, details, error, started_at, ended_at, created_at, copy_id,
+const verifyColumns = `id, run_id, mode, status, progress, phase, transferred_bytes, total_bytes, bytes_per_second, last_progress_at,
+	details, error, started_at, ended_at, created_at, copy_id,
 	target_id, triggered_by`
 
 // CreateVerifyRun records a verification request.
@@ -619,8 +620,9 @@ func (s *Store) CreateVerifyRun(ctx context.Context, v *model.VerifyRun) error {
 	if v.CreatedAt.IsZero() {
 		v.CreatedAt = time.Now().UTC()
 	}
-	_, err := s.db.Exec(ctx, `INSERT INTO verify_runs (`+verifyColumns+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		v.ID, v.RunID, string(v.Mode), string(v.Status), v.Progress, jsonOrNull(v.Details), v.Error,
+	_, err := s.db.Exec(ctx, `INSERT INTO verify_runs (`+verifyColumns+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		v.ID, v.RunID, string(v.Mode), string(v.Status), v.Progress, v.Phase,
+		v.TransferredBytes, v.TotalBytes, v.BytesPerSecond, v.LastProgressAt, jsonOrNull(v.Details), v.Error,
 		v.StartedAt, v.EndedAt, v.CreatedAt, nullString(v.CopyID), nullString(v.TargetID), v.TriggeredBy)
 	if err != nil {
 		return fmt.Errorf("insert verify run: %w", err)
@@ -630,9 +632,11 @@ func (s *Store) CreateVerifyRun(ctx context.Context, v *model.VerifyRun) error {
 
 // UpdateVerifyRun persists progress and outcome of a verification.
 func (s *Store) UpdateVerifyRun(ctx context.Context, v *model.VerifyRun) error {
-	_, err := s.db.Exec(ctx, `UPDATE verify_runs SET status=?, progress=?, details=?, error=?,
+	_, err := s.db.Exec(ctx, `UPDATE verify_runs SET status=?, progress=?, phase=?,
+		transferred_bytes=?, total_bytes=?, bytes_per_second=?, last_progress_at=?, details=?, error=?,
 		started_at=?, ended_at=? WHERE id=?`,
-		string(v.Status), v.Progress, jsonOrNull(v.Details), v.Error, v.StartedAt,
+		string(v.Status), v.Progress, v.Phase, v.TransferredBytes, v.TotalBytes, v.BytesPerSecond,
+		v.LastProgressAt, jsonOrNull(v.Details), v.Error, v.StartedAt,
 		v.EndedAt, v.ID)
 	return err
 }
@@ -675,6 +679,26 @@ func (s *Store) ListVerifyRuns(ctx context.Context, runID string, limit int) ([]
 	return out, rows.Err()
 }
 
+// ListInterruptedVerifyRuns returns checks that cannot still be executing
+// after a service restart.
+func (s *Store) ListInterruptedVerifyRuns(ctx context.Context) ([]*model.VerifyRun, error) {
+	rows, err := s.db.Query(ctx, `SELECT `+verifyColumns+`
+		FROM verify_runs WHERE status IN ('pending','running') ORDER BY created_at`)
+	if err != nil {
+		return nil, fmt.Errorf("list interrupted verify runs: %w", err)
+	}
+	defer rows.Close()
+	var out []*model.VerifyRun
+	for rows.Next() {
+		item, err := scanVerify(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
 func scanVerify(row rowScanner) (*model.VerifyRun, error) {
 	var (
 		v                  model.VerifyRun
@@ -683,7 +707,8 @@ func scanVerify(row rowScanner) (*model.VerifyRun, error) {
 		createdAt          time.Time
 	)
 	var copyID, targetID sql.NullString
-	err := row.Scan(&v.ID, &v.RunID, &mode, &status, &v.Progress, &v.Details, &v.Error,
+	err := row.Scan(&v.ID, &v.RunID, &mode, &status, &v.Progress, &v.Phase,
+		&v.TransferredBytes, &v.TotalBytes, &v.BytesPerSecond, &v.LastProgressAt, &v.Details, &v.Error,
 		&startedAt, &endedAt, &createdAt, &copyID, &targetID, &v.TriggeredBy)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -702,7 +727,9 @@ func scanVerify(row rowScanner) (*model.VerifyRun, error) {
 }
 
 const restoreColumns = `id, run_id, target, status, disk_ids, output_path, output_format,
-	target_server_id, target_disk_id, target_domain_id, target_vm_id, progress, error,
+	target_server_id, target_server_name, target_cluster_id, target_cluster_name,
+	target_disk_id, target_disk_name, target_domain_id, target_domain_name, target_vm_id, transfer_id, progress,
+	transferred_bytes, total_bytes, bytes_per_second, last_progress_at, error,
 	started_at, ended_at, created_at, copy_id, target_vm_name, phase, cleanup_errors`
 
 // CreateRestoreRun records a restore request.
@@ -714,10 +741,12 @@ func (s *Store) CreateRestoreRun(ctx context.Context, r *model.RestoreRun) error
 		r.CreatedAt = time.Now().UTC()
 	}
 	_, err := s.db.Exec(ctx, `INSERT INTO restore_runs (`+restoreColumns+`)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		r.ID, r.RunID, string(r.Target), string(r.Status), encodeJSON(r.DiskIDs), r.OutputPath,
-		r.OutputFormat, r.TargetServerID, r.TargetDiskID, r.TargetDomainID, r.TargetVMID,
-		r.Progress, r.Error, r.StartedAt, r.EndedAt, r.CreatedAt, nullString(r.CopyID),
+		r.OutputFormat, r.TargetServerID, r.TargetServerName, r.TargetClusterID, r.TargetClusterName,
+		r.TargetDiskID, r.TargetDiskName, r.TargetDomainID, r.TargetDomainName, r.TargetVMID,
+		r.TransferID, r.Progress, r.TransferredBytes, r.TotalBytes, r.BytesPerSecond, r.LastProgressAt, r.Error,
+		r.StartedAt, r.EndedAt, r.CreatedAt, nullString(r.CopyID),
 		r.TargetVMName, r.Phase, encodeJSON(r.CleanupErrors))
 	if err != nil {
 		return fmt.Errorf("insert restore run: %w", err)
@@ -727,11 +756,15 @@ func (s *Store) CreateRestoreRun(ctx context.Context, r *model.RestoreRun) error
 
 // UpdateRestoreRun persists progress and outcome of a restore.
 func (s *Store) UpdateRestoreRun(ctx context.Context, r *model.RestoreRun) error {
-	_, err := s.db.Exec(ctx, `UPDATE restore_runs SET status=?, output_path=?, target_disk_id=?,
-		target_vm_id=?, target_vm_name=?, phase=?, cleanup_errors=?, progress=?, error=?,
+	_, err := s.db.Exec(ctx, `UPDATE restore_runs SET status=?, output_path=?,
+		target_server_name=?, target_cluster_id=?, target_cluster_name=?, target_disk_id=?, target_disk_name=?,
+		target_domain_name=?, target_vm_id=?, target_vm_name=?, transfer_id=?, phase=?, cleanup_errors=?, progress=?,
+		transferred_bytes=?, total_bytes=?, bytes_per_second=?, last_progress_at=?, error=?,
 		started_at=?, ended_at=? WHERE id=?`,
-		string(r.Status), r.OutputPath, r.TargetDiskID, r.TargetVMID, r.TargetVMName,
-		r.Phase, encodeJSON(r.CleanupErrors), r.Progress, r.Error, r.StartedAt, r.EndedAt, r.ID)
+		string(r.Status), r.OutputPath, r.TargetServerName, r.TargetClusterID, r.TargetClusterName,
+		r.TargetDiskID, r.TargetDiskName, r.TargetDomainName, r.TargetVMID, r.TargetVMName, r.TransferID,
+		r.Phase, encodeJSON(r.CleanupErrors), r.Progress, r.TransferredBytes, r.TotalBytes,
+		r.BytesPerSecond, r.LastProgressAt, r.Error, r.StartedAt, r.EndedAt, r.ID)
 	return err
 }
 
@@ -772,6 +805,26 @@ func (s *Store) ListRestoreRuns(ctx context.Context, runID string, limit int) ([
 	return out, rows.Err()
 }
 
+// ListInterruptedRestoreRuns returns restores left pending or running by the
+// previous service process.
+func (s *Store) ListInterruptedRestoreRuns(ctx context.Context) ([]*model.RestoreRun, error) {
+	rows, err := s.db.Query(ctx, `SELECT `+restoreColumns+`
+		FROM restore_runs WHERE status IN ('pending','running') ORDER BY created_at`)
+	if err != nil {
+		return nil, fmt.Errorf("list interrupted restore runs: %w", err)
+	}
+	defer rows.Close()
+	var out []*model.RestoreRun
+	for rows.Next() {
+		item, err := scanRestore(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
 func scanRestore(row rowScanner) (*model.RestoreRun, error) {
 	var (
 		r                  model.RestoreRun
@@ -783,7 +836,9 @@ func scanRestore(row rowScanner) (*model.RestoreRun, error) {
 	var copyID sql.NullString
 	var cleanupErrors string
 	err := row.Scan(&r.ID, &r.RunID, &target, &status, &diskIDs, &r.OutputPath, &r.OutputFormat,
-		&r.TargetServerID, &r.TargetDiskID, &r.TargetDomainID, &r.TargetVMID, &r.Progress,
+		&r.TargetServerID, &r.TargetServerName, &r.TargetClusterID, &r.TargetClusterName,
+		&r.TargetDiskID, &r.TargetDiskName, &r.TargetDomainID, &r.TargetDomainName, &r.TargetVMID, &r.TransferID, &r.Progress,
+		&r.TransferredBytes, &r.TotalBytes, &r.BytesPerSecond, &r.LastProgressAt,
 		&r.Error, &startedAt, &endedAt, &createdAt, &copyID, &r.TargetVMName, &r.Phase, &cleanupErrors)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound

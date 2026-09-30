@@ -42,6 +42,11 @@ type BootReport struct {
 	// Host — подключение, на котором поднималась ВМ.
 	Host       string `json:"host"`
 	DomainName string `json:"domain_name"`
+	// Явное место проверки. DomainName оставлено для совместимости: исторически
+	// в нём хранится имя проверочной ВМ, а не домен хранения.
+	ClusterName       string `json:"cluster_name,omitempty"`
+	StorageDomainName string `json:"storage_domain_name,omitempty"`
+	VMName            string `json:"vm_name,omitempty"`
 	// Started — ВМ создана и запущена гипервизором.
 	Started bool `json:"started"`
 	// AgentReplied — гостевой агент внутри восстановленной системы ответил.
@@ -104,6 +109,32 @@ func (e *Engine) UpdateProgress(ctx context.Context, record *model.VerifyRun, pe
 	_ = e.store.UpdateVerifyRun(ctx, record)
 }
 
+// UpdateVerifyPhase publishes a human-readable stage together with progress.
+func (e *Engine) UpdateVerifyPhase(ctx context.Context, record *model.VerifyRun, phase string, percent int) {
+	if record == nil {
+		return
+	}
+	record.Phase = phase
+	record.Progress = minInt(percent, 99)
+	_ = e.store.UpdateVerifyRun(ctx, record)
+}
+
+// UpdateVerifyTransfer mirrors byte-level progress of the image transfer into
+// the verification record rendered by the web status bar.
+func (e *Engine) UpdateVerifyTransfer(ctx context.Context, record *model.VerifyRun, phase string,
+	percent int, transferred, total, bytesPerSecond int64) {
+	if record == nil {
+		return
+	}
+	if transferred > record.TransferredBytes {
+		progressAt := time.Now().UTC()
+		record.LastProgressAt = &progressAt
+	}
+	record.Phase, record.Progress = phase, minInt(percent, 99)
+	record.TransferredBytes, record.TotalBytes, record.BytesPerSecond = transferred, total, bytesPerSecond
+	_ = e.store.UpdateVerifyRun(ctx, record)
+}
+
 // RegisterVerifier installs a handler for a mode the engine does not implement.
 func (e *Engine) RegisterVerifier(mode model.VerifyMode, fn ExternalVerifier) {
 	if e.external == nil {
@@ -154,6 +185,7 @@ func (e *Engine) VerifyCopy(ctx context.Context, runID, copyID string, mode mode
 		TriggeredBy: opts.TriggeredBy,
 		Mode:        mode,
 		Status:      model.RunPending,
+		Phase:       "queued",
 		CreatedAt:   time.Now().UTC(),
 	}
 	if err := e.store.CreateVerifyRun(ctx, record); err != nil {
@@ -168,6 +200,7 @@ func (e *Engine) VerifyCopy(ctx context.Context, runID, copyID string, mode mode
 		release, err := e.verifyGate(ctx, mode, opts)
 		if err != nil {
 			record.Status = model.RunFailed
+			record.Phase = "failed"
 			record.Error = err.Error()
 			_ = e.store.UpdateVerifyRun(context.WithoutCancel(ctx), record)
 			return record, err
@@ -177,6 +210,7 @@ func (e *Engine) VerifyCopy(ctx context.Context, runID, copyID string, mode mode
 
 	if err := e.acquireHeavy(ctx); err != nil {
 		record.Status = model.RunFailed
+		record.Phase = "failed"
 		record.Error = "отменено в очереди: " + err.Error()
 		_ = e.store.UpdateVerifyRun(context.WithoutCancel(ctx), record)
 		return record, err
@@ -186,6 +220,7 @@ func (e *Engine) VerifyCopy(ctx context.Context, runID, copyID string, mode mode
 	started := time.Now().UTC()
 	record.StartedAt = &started
 	record.Status = model.RunRunning
+	record.Phase = "preparing"
 	_ = e.store.UpdateVerifyRun(ctx, record)
 	log.Info().Msg("проверка бэкапа запущена")
 
@@ -201,6 +236,7 @@ func (e *Engine) VerifyCopy(ctx context.Context, runID, copyID string, mode mode
 
 	if err != nil {
 		record.Status = model.RunFailed
+		record.Phase = "failed"
 		record.Error = err.Error()
 		_ = e.store.UpdateVerifyRun(context.WithoutCancel(ctx), record)
 		e.markRunVerified(ctx, runID, copyID, model.RunFailed)
@@ -210,6 +246,7 @@ func (e *Engine) VerifyCopy(ctx context.Context, runID, copyID string, mode mode
 
 	record.Status = model.RunSucceeded
 	record.Progress = 100
+	record.Phase = "completed"
 	if err := e.store.UpdateVerifyRun(ctx, record); err != nil {
 		log.Warn().Err(err).Msg("не удалось сохранить результат проверки")
 	}

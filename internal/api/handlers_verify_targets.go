@@ -456,17 +456,19 @@ func (s *Server) scheduleLocation() *time.Location {
 
 type bootCheckView struct {
 	*model.BootCheck
-	Summary      string   `json:"summary,omitempty"`
-	Problems     []string `json:"problems,omitempty"`
-	Duration     string   `json:"duration,omitempty"`
-	Host         string   `json:"host,omitempty"`
-	CheckVMName  string   `json:"check_vm_name,omitempty"`
-	Started      bool     `json:"started"`
-	AgentReplied bool     `json:"agent_replied"`
-	GuestOS      string   `json:"guest_os,omitempty"`
-	Hostname     string   `json:"hostname,omitempty"`
-	Elapsed      string   `json:"elapsed,omitempty"`
-	Notes        []string `json:"notes,omitempty"`
+	Summary           string   `json:"summary,omitempty"`
+	Problems          []string `json:"problems,omitempty"`
+	Duration          string   `json:"duration,omitempty"`
+	Host              string   `json:"host,omitempty"`
+	CheckVMName       string   `json:"check_vm_name,omitempty"`
+	ClusterName       string   `json:"cluster_name,omitempty"`
+	StorageDomainName string   `json:"storage_domain_name,omitempty"`
+	Started           bool     `json:"started"`
+	AgentReplied      bool     `json:"agent_replied"`
+	GuestOS           string   `json:"guest_os,omitempty"`
+	Hostname          string   `json:"hostname,omitempty"`
+	Elapsed           string   `json:"elapsed,omitempty"`
+	Notes             []string `json:"notes,omitempty"`
 }
 
 // handleListBootChecks: GET /verify/checks — журнал проверок загрузкой.
@@ -501,12 +503,22 @@ func bootCheckViewOf(c *model.BootCheck) bootCheckView {
 	if c.Details != "" && json.Unmarshal([]byte(c.Details), &report) == nil {
 		view.Summary, view.Problems, view.Duration = report.Summary, report.Problems, report.Duration
 		if b := report.Boot; b != nil {
-			view.Host, view.CheckVMName, view.Started, view.AgentReplied = b.Host, b.DomainName, b.Started, b.AgentReplied
+			view.Host, view.CheckVMName, view.Started, view.AgentReplied = b.Host, firstNonEmpty(b.VMName, b.DomainName), b.Started, b.AgentReplied
+			view.ClusterName, view.StorageDomainName = b.ClusterName, b.StorageDomainName
 			view.GuestOS, view.Hostname, view.Elapsed, view.Notes = b.GuestOS, b.Hostname, b.Elapsed, b.Notes
 		}
 	}
 	c.Details = ""
 	return view
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 // ---- Остатки ----

@@ -82,10 +82,20 @@ func (d *Dispatcher) verifyBootOnEngine(ctx context.Context, req backup.External
 	case backup.BootSpaceShort, backup.BootSpaceInactive:
 		return fmt.Errorf("домен хранения «%s»: %s", domain.Name, space.Message)
 	}
+	clusterName := opts.BootClusterID
+	if clusters, listErr := d.store.ListClusters(ctx, engineSrv.ID); listErr == nil {
+		for _, cluster := range clusters {
+			if cluster.ID == opts.BootClusterID {
+				clusterName = cluster.Name
+				break
+			}
+		}
+	}
 
 	name := verifyVMName(set.Leaf.VMName, req.Record.ID)
 	log := d.log.With().Str("verify", req.Record.ID).Str("backup", set.Leaf.ID).
-		Str("движок", engineSrv.Name).Str("вм", name).Logger()
+		Str("исходная-вм", set.Leaf.VMName).Str("движок", engineSrv.Name).
+		Str("кластер", clusterName).Str("домен", domain.Name).Str("проверочная-вм", name).Logger()
 
 	restoreReq := &model.RestoreVMRequest{
 		RunID: set.Leaf.ID, CopyID: req.Record.CopyID, ServerID: engineSrv.ID, Name: name,
@@ -97,6 +107,7 @@ func (d *Dispatcher) verifyBootOnEngine(ctx context.Context, req backup.External
 		// По метке служба узнаёт свою проверочную ВМ среди остатков.
 		Description: fmt.Sprintf("%s%s проверочная ВМ пробного запуска из копии %s; служба удаляет её сама",
 			model.VerifyVMMarker, req.Record.ID, set.Leaf.ID),
+		DiskSuffix: fmt.Sprintf("-verify-%s-%s", set.Leaf.CreatedAt.Format("20060102-1504"), shortID(req.Record.ID)),
 	}
 	// Ни одного сетевого интерфейса: копия боевой системы не должна
 	// встретиться в сети с оригиналом даже отключённой картой.
@@ -108,7 +119,9 @@ func (d *Dispatcher) verifyBootOnEngine(ctx context.Context, req backup.External
 	}
 	restore := &model.RestoreRun{
 		RunID: set.Leaf.ID, CopyID: req.Record.CopyID, Target: model.RestoreToNewVM, Status: model.RunPending,
-		TargetServerID: engineSrv.ID, TargetDomainID: opts.BootStorageDomainID, TargetVMName: name,
+		TargetServerID: engineSrv.ID, TargetServerName: engineSrv.Name,
+		TargetClusterID: opts.BootClusterID, TargetClusterName: clusterName,
+		TargetDomainID: opts.BootStorageDomainID, TargetDomainName: domain.Name, TargetVMName: name,
 		Phase: "queued", CreatedAt: time.Now().UTC(),
 	}
 	if err := d.store.CreateRestoreRun(ctx, restore); err != nil {
@@ -118,8 +131,10 @@ func (d *Dispatcher) verifyBootOnEngine(ctx context.Context, req backup.External
 
 	// Прогресс сборки ВМ — первые 80 % проверки; ожидание агента — остальное.
 	stopProgress := d.followRestoreProgress(ctx, req, restore.ID)
-	log.Info().Str("кластер", opts.BootClusterID).Str("домен", domain.Name).
-		Msg("проверка загрузкой через движок: собираю проверочную ВМ")
+	log.Info().Str("домен-id", domain.ID).Str("тип-хранилища", domain.Storage).
+		Int64("свободно", domain.AvailableSize).Int64("нужно", need).
+		Str("суффикс-дисков", restoreReq.DiskSuffix).
+		Msg("проверка загрузкой через движок: создаю изолированную ВМ и восстанавливаю диски")
 	result, err := d.Engine.RestoreVM(ctx, restoreReq)
 	stopProgress()
 	if err != nil {
@@ -129,12 +144,13 @@ func (d *Dispatcher) verifyBootOnEngine(ctx context.Context, req backup.External
 			notes = append(notes, result.CleanupFailed...)
 		}
 		report.Summary = "проверочную ВМ не удалось собрать в движке"
-		report.Boot = &backup.BootReport{Host: engineSrv.Name, DomainName: name, Notes: notes,
+		report.Boot = &backup.BootReport{Host: engineSrv.Name, DomainName: name,
+			ClusterName: clusterName, StorageDomainName: domain.Name, VMName: name, Notes: notes,
 			Stage: backup.BootStageAssembly}
 		markDisks(report, set, false, err.Error())
 		return nil
 	}
-	d.Engine.UpdateProgress(ctx, req.Record, 80)
+	d.Engine.UpdateVerifyPhase(ctx, req.Record, "waiting_guest", 80)
 
 	client, err := d.Engine.OVirtClient(engineSrv)
 	if err != nil {
@@ -144,6 +160,8 @@ func (d *Dispatcher) verifyBootOnEngine(ctx context.Context, req backup.External
 	if timeout <= 0 {
 		timeout = engineBootDefaultTimeout
 	}
+	log.Info().Str("вм-id", result.VMID).Dur("таймаут", timeout).
+		Msg("проверочная ВМ создана и запущена, ожидаю ответ гостевого агента")
 	boot := waitGuestOnEngine(ctx, client, result.VMID, timeout, engineBootPoll)
 
 	var notes []string
@@ -158,9 +176,11 @@ func (d *Dispatcher) verifyBootOnEngine(ctx context.Context, req backup.External
 		notes = append(notes, fmt.Sprintf("проверочная ВМ %s оставлена в движке для разбора — удалите её вместе "+
 			"с дисками вручную", name))
 	} else {
+		d.Engine.UpdateVerifyPhase(ctx, req.Record, "cleanup", 95)
 		notes = append(notes, d.removeEngineVerifyVM(ctx, client, result.VMID, name)...)
 	}
-	notes = append(notes, fmt.Sprintf("кластер %s, домен хранения «%s», сеть не подключалась", opts.BootClusterID, domain.Name))
+	notes = append(notes, fmt.Sprintf("движок «%s», кластер «%s», домен хранения «%s», сеть не подключалась",
+		engineSrv.Name, clusterName, domain.Name))
 
 	passed := boot.Failure == ""
 	summary := "ОС загрузилась: гостевой агент ответил"
@@ -172,6 +192,7 @@ func (d *Dispatcher) verifyBootOnEngine(ctx context.Context, req backup.External
 	report.Summary = fmt.Sprintf("%s (движок %s, ВМ %s)", summary, engineSrv.Name, name)
 	report.Boot = &backup.BootReport{
 		Host: engineSrv.Name, DomainName: name, Started: boot.Started, AgentReplied: boot.AgentReplied,
+		ClusterName: clusterName, StorageDomainName: domain.Name, VMName: name,
 		Elapsed: boot.Elapsed.Round(time.Second).String(), GuestOS: boot.GuestOS, Hostname: boot.Hostname,
 		ImageBytes: data, Notes: notes,
 	}
@@ -241,6 +262,7 @@ func waitGuestOnEngine(ctx context.Context, client *ovirt.Client, vmID string, t
 func (d *Dispatcher) removeEngineVerifyVM(ctx context.Context, client *ovirt.Client, vmID, name string) []string {
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Minute)
 	defer cancel()
+	d.log.Info().Str("вм", name).Str("вм-id", vmID).Msg("удаляю проверочную ВМ вместе с дисками")
 	if status, _, err := client.VMStatus(cleanupCtx, vmID); err == nil && status != "down" {
 		_ = client.StopVM(cleanupCtx, vmID)
 		if _, err := client.WaitVMStatus(cleanupCtx, vmID, []string{"down"}, 5*time.Minute); err != nil {
@@ -250,6 +272,7 @@ func (d *Dispatcher) removeEngineVerifyVM(ctx context.Context, client *ovirt.Cli
 	var err error
 	for attempt := 0; attempt < 6; attempt++ {
 		if err = client.DeleteVM(cleanupCtx, vmID, false); err == nil || ovirt.IsNotFound(err) {
+			d.log.Info().Str("вм", name).Str("вм-id", vmID).Msg("проверочная ВМ и её диски удалены")
 			return nil
 		}
 		if !ovirt.IsConflict(err) {
@@ -274,6 +297,26 @@ func (d *Dispatcher) removeEngineVerifyVM(ctx context.Context, client *ovirt.Cli
 func (d *Dispatcher) followRestoreProgress(ctx context.Context, req backup.ExternalVerifyRequest, restoreID string) func() {
 	done := make(chan struct{})
 	stopped := make(chan struct{})
+	lastLogStep := -1
+	publish := func() {
+		if restore, err := d.store.GetRestoreRun(ctx, restoreID); err == nil {
+			d.Engine.UpdateVerifyTransfer(ctx, req.Record, restore.Phase, restore.Progress*80/100,
+				restore.TransferredBytes, restore.TotalBytes, restore.BytesPerSecond)
+			if restore.TotalBytes > 0 {
+				pct := int(restore.TransferredBytes * 100 / restore.TotalBytes)
+				if step := pct / 10; step > lastLogStep {
+					d.log.Info().Str("verify", req.Record.ID).Str("restore", restore.ID).
+						Str("этап", restore.Phase).Int("процент", pct).
+						Int64("передано", restore.TransferredBytes).Int64("всего", restore.TotalBytes).
+						Int64("байт-в-секунду", restore.BytesPerSecond).
+						Str("движок", restore.TargetServerName).Str("кластер", restore.TargetClusterName).
+						Str("домен", restore.TargetDomainName).
+						Msg("образ передаётся на площадку проверки через ImageIO")
+					lastLogStep = step
+				}
+			}
+		}
+	}
 	go func() {
 		defer close(stopped)
 		for {
@@ -284,12 +327,14 @@ func (d *Dispatcher) followRestoreProgress(ctx context.Context, req backup.Exter
 				return
 			case <-time.After(5 * time.Second):
 			}
-			if restore, err := d.store.GetRestoreRun(ctx, restoreID); err == nil {
-				d.Engine.UpdateProgress(ctx, req.Record, restore.Progress*80/100)
-			}
+			publish()
 		}
 	}()
-	return func() { close(done); <-stopped }
+	return func() {
+		close(done)
+		<-stopped
+		publish()
+	}
 }
 
 // markDisks отмечает в отчёте все диски копии одним итогом: в движке ВМ

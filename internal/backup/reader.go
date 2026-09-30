@@ -74,6 +74,19 @@ type loadedBatch struct {
 	data []byte
 }
 
+// StreamStage distinguishes a slow repository read from a slow destination
+// write. Without it both look like a frozen percentage to an operator.
+type StreamStage string
+
+const (
+	StreamReadingBackup StreamStage = "reading_backup"
+	StreamWritingTarget StreamStage = "writing_target"
+)
+
+// StreamObserver is called immediately before a potentially slow operation.
+// It must return quickly and must not retain data owned by the reader.
+type StreamObserver func(stage StreamStage, offset, length int64)
+
 // NewChainReader prepares a reader over an ordered chain. manifests must run
 // from the chain root (a full or snapshot backup) to the newest link.
 func NewChainReader(backend repo.Backend, cipher *secret.Cipher, manifests []*DiskManifest) (*ChainReader, error) {
@@ -160,6 +173,16 @@ func (r *ChainReader) GridChunks() int64 {
 // PresentChunks returns how many chunks the merged image actually stores; the
 // rest are zero.
 func (r *ChainReader) PresentChunks() int { return len(r.owner) }
+
+// PresentBytes returns the amount of non-zero image data that a fresh sparse
+// destination actually receives. Unlike virtual size it excludes holes.
+func (r *ChainReader) PresentBytes() int64 {
+	var total int64
+	for index := range r.owner {
+		total += r.ChunkLength(index)
+	}
+	return total
+}
 
 // buildBatches groups chunks that are both needed from the same manifest and
 // adjacent in its data object.
@@ -278,6 +301,17 @@ type ImageSink func(ctx context.Context, offset int64, data []byte, zeroLength i
 // Consecutive zero chunks are coalesced into one call so a sparse image costs
 // a handful of calls rather than one per chunk.
 func (r *ChainReader) Stream(ctx context.Context, sink ImageSink, progress func(done int64)) error {
+	return r.stream(ctx, sink, progress, nil)
+}
+
+// StreamObserved is Stream with diagnostics for long-running restores.
+func (r *ChainReader) StreamObserved(ctx context.Context, sink ImageSink, progress func(done int64),
+	observe StreamObserver) error {
+	return r.stream(ctx, sink, progress, observe)
+}
+
+func (r *ChainReader) stream(ctx context.Context, sink ImageSink, progress func(done int64),
+	observe StreamObserver) error {
 	total := r.GridChunks()
 	var zeroStart int64 = -1
 	var zeroLen int64
@@ -285,6 +319,9 @@ func (r *ChainReader) Stream(ctx context.Context, sink ImageSink, progress func(
 	flushZeros := func() error {
 		if zeroStart < 0 {
 			return nil
+		}
+		if observe != nil {
+			observe(StreamWritingTarget, zeroStart, zeroLen)
 		}
 		if err := sink(ctx, zeroStart, nil, zeroLen); err != nil {
 			return err
@@ -300,6 +337,9 @@ func (r *ChainReader) Stream(ctx context.Context, sink ImageSink, progress func(
 		offset := i * r.chunkSize
 		length := r.ChunkLength(i)
 
+		if observe != nil {
+			observe(StreamReadingBackup, offset, length)
+		}
 		data, err := r.ReadChunk(ctx, i)
 		if err != nil {
 			return err
@@ -313,6 +353,9 @@ func (r *ChainReader) Stream(ctx context.Context, sink ImageSink, progress func(
 		}
 		if err := flushZeros(); err != nil {
 			return err
+		}
+		if observe != nil {
+			observe(StreamWritingTarget, offset, int64(len(data)))
 		}
 		if err := sink(ctx, offset, data, 0); err != nil {
 			return err

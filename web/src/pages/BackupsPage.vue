@@ -6,7 +6,7 @@ import { api, errorMessage, notify, notifyError, notifyOk } from '@/api/client'
 import DirectoryPicker from '@/components/DirectoryPicker.vue'
 import ManualSteps from '@/components/ManualSteps.vue'
 import EngineLeftovers from '@/components/EngineLeftovers.vue'
-import { bootTargetReady, bytes, consistencyColor, consistencyLabel, dateTime, elapsed, runStatus, statusColor, usesOVirtAPI } from '@/api/format'
+import { ago, bootTargetReady, bytes, consistencyColor, consistencyLabel, dateTime, elapsed, runStatus, staleFor, statusColor, transferPauseHint, transferRatio, transferSummary, usesOVirtAPI } from '@/api/format'
 import BootTargetPicker from '@/components/BootTargetPicker.vue'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
@@ -470,9 +470,34 @@ function restoreTargetTitle(target: string): string {
       return 'Поверх существующего диска'
     case 'new_disk':
       return 'В новый диск'
+    case 'new_vm':
+      return 'Сборка новой ВМ'
     default:
       return target
   }
+}
+
+function restorePhaseTitle(phase?: string): string {
+  return ({
+    queued: 'ожидает запуска',
+    preparing: 'подготовка цепочки бэкапа',
+    creating_vm: 'создание ВМ',
+    creating_disk: 'создание диска',
+    waiting_disk: 'ожидание готовности диска',
+    opening_transfer: 'открытие ImageIO',
+    writing_data: 'запись данных',
+    flushing: 'фиксация данных на диске',
+    attaching_disk: 'подключение диска к ВМ',
+    restoring_disks: 'восстановление дисков',
+    creating_networks: 'создание сетевых интерфейсов',
+    defining_vm: 'регистрация ВМ',
+    starting_vm: 'запуск ВМ',
+    waiting_guest: 'ожидание ответа гостевого агента',
+    cleanup: 'удаление проверочной ВМ и дисков',
+    rollback: 'удаление созданных объектов после ошибки',
+    completed: 'завершено',
+    failed: 'ошибка',
+  } as Record<string, string>)[phase || ''] || phase || '—'
 }
 
 const verifyOpen = ref(false)
@@ -1171,6 +1196,12 @@ const replicationColumns = [
         <template #body-cell-target="props">
           <q-td :props="props">
             {{ restoreTargetTitle(props.row.target) }}
+            <div v-if="props.row.target_vm_name" class="text-caption jhv-mono">ВМ: {{ props.row.target_vm_name }}</div>
+            <div v-if="props.row.target_server_name || props.row.target_server_id" class="text-caption text-grey-7">
+              {{ props.row.target_server_name || app.serverName(props.row.target_server_id) }}
+              <template v-if="props.row.target_cluster_name"> · кластер {{ props.row.target_cluster_name }}</template>
+              <template v-if="props.row.target_domain_name"> · домен {{ props.row.target_domain_name }}</template>
+            </div>
             <div v-if="props.row.disk_ids?.length" class="text-caption text-grey-7">
               дисков: {{ props.row.disk_ids.length }}
             </div>
@@ -1181,6 +1212,8 @@ const replicationColumns = [
             <q-chip dense :color="statusColor(props.row.status)" text-color="white">
               {{ runStatus(props.row.status) }}
             </q-chip>
+            <div class="text-caption">{{ restorePhaseTitle(props.row.phase) }}</div>
+            <div v-if="props.row.status === 'running'" class="text-caption text-grey-7">{{ props.row.progress }}%</div>
             <q-linear-progress
               v-if="props.row.status === 'running'"
               :value="props.row.progress / 100"
@@ -1193,7 +1226,14 @@ const replicationColumns = [
         <template #body-cell-result="props">
           <q-td :props="props" class="jhv-wrap">
             <span v-if="props.row.output_path" class="jhv-mono">{{ props.row.output_path }}</span>
-            <span v-else-if="props.row.target_disk_id" class="jhv-mono">диск {{ props.row.target_disk_id }}</span>
+            <template v-else-if="props.row.target_disk_name || props.row.target_disk_id">
+              <span class="jhv-mono">диск {{ props.row.target_disk_name || props.row.target_disk_id }}</span>
+              <div v-if="props.row.target_disk_name && props.row.target_disk_id" class="text-caption text-grey-7 jhv-mono">{{ props.row.target_disk_id }}</div>
+            </template>
+            <template v-else-if="props.row.target_vm_name">
+              <span class="jhv-mono">ВМ {{ props.row.target_vm_name }}</span>
+              <div v-if="props.row.target_vm_id" class="text-caption text-grey-7 jhv-mono">{{ props.row.target_vm_id }}</div>
+            </template>
             <span v-else class="text-grey-6">—</span>
             <div v-if="props.row.error" class="text-negative">{{ props.row.error }}</div>
           </q-td>
@@ -1783,6 +1823,27 @@ const replicationColumns = [
                   {{ dateTime(check.created_at) }} ·
                   {{ parseDetails(check.details)?.summary ?? runStatus(check.status) }}
                 </q-item-label>
+                <q-item-label v-if="check.status === 'running'" caption>
+                  этап: {{ restorePhaseTitle(check.phase) }} · {{ check.progress }}%
+                </q-item-label>
+                <template v-if="check.total_bytes > 0">
+                  <q-linear-progress
+                    v-if="check.status === 'running'"
+                    :value="transferRatio(check.transferred_bytes, check.total_bytes)"
+                    color="primary"
+                    size="6px"
+                    rounded
+                    class="q-mt-xs"
+                  />
+                  <q-item-label caption>
+                    Передача на площадку проверки: {{ transferSummary(check.transferred_bytes, check.total_bytes, check.bytes_per_second) }}
+                  </q-item-label>
+                  <q-item-label v-if="check.status === 'running' && check.last_progress_at" caption :class="staleFor(check.last_progress_at) ? 'text-warning' : 'text-grey-7'">
+                    <q-icon :name="staleFor(check.last_progress_at) ? 'warning' : 'schedule'" />
+                    последнее продвижение {{ ago(check.last_progress_at) }}
+                    <template v-if="staleFor(check.last_progress_at)"> · {{ transferPauseHint(check.phase) }}</template>
+                  </q-item-label>
+                </template>
 
                 <!-- Пробный запуск: чем именно закончилась загрузка гостя. -->
                 <q-item-label v-if="bootReport(check)" caption class="jhv-wrap">
@@ -1806,10 +1867,15 @@ const replicationColumns = [
                     ВМ не удалось запустить
                   </template>
                   <div class="text-grey-7">
-                    хост {{ bootReport(check)!.host }}
+                    движок/хост {{ bootReport(check)!.host }}
+                    <template v-if="bootReport(check)!.cluster_name"> · кластер {{ bootReport(check)!.cluster_name }}</template>
+                    <template v-if="bootReport(check)!.storage_domain_name"> · домен {{ bootReport(check)!.storage_domain_name }}</template>
                     <template v-if="bootReport(check)!.image_bytes">
                       · образ {{ bytes(bootReport(check)!.image_bytes) }}
                     </template>
+                  </div>
+                  <div v-if="bootReport(check)!.vm_name || bootReport(check)!.domain_name" class="text-grey-7 jhv-mono">
+                    проверочная ВМ: {{ bootReport(check)!.vm_name || bootReport(check)!.domain_name }}
                   </div>
                   <div v-for="(note, i) in bootReport(check)!.notes ?? []" :key="i" class="text-grey-7">
                     {{ note }}
@@ -1837,6 +1903,41 @@ const replicationColumns = [
                 <q-item-label caption>
                   {{ dateTime(item.created_at) }} · {{ runStatus(item.status) }}
                   <template v-if="item.ended_at"> · {{ elapsed(item.created_at, item.ended_at) }}</template>
+                </q-item-label>
+                <q-item-label caption>
+                  этап: {{ restorePhaseTitle(item.phase) }}<template v-if="item.status === 'running'"> · {{ item.progress }}%</template>
+                </q-item-label>
+                <template v-if="item.total_bytes > 0">
+                  <q-linear-progress
+                    v-if="item.status === 'running'"
+                    :value="transferRatio(item.transferred_bytes, item.total_bytes)"
+                    color="primary"
+                    size="6px"
+                    rounded
+                    class="q-mt-xs"
+                  />
+                  <q-item-label caption>
+                    Передано: {{ transferSummary(item.transferred_bytes, item.total_bytes, item.bytes_per_second) }}
+                  </q-item-label>
+                  <q-item-label v-if="item.status === 'running' && item.last_progress_at" caption :class="staleFor(item.last_progress_at) ? 'text-warning' : 'text-grey-7'">
+                    <q-icon :name="staleFor(item.last_progress_at) ? 'warning' : 'schedule'" />
+                    последнее продвижение {{ ago(item.last_progress_at) }}
+                    <template v-if="staleFor(item.last_progress_at)"> · {{ transferPauseHint(item.phase) }}</template>
+                  </q-item-label>
+                </template>
+                <q-item-label v-if="item.target_vm_name" caption class="jhv-mono jhv-wrap">
+                  ВМ: {{ item.target_vm_name }}<template v-if="item.target_vm_id"> · {{ item.target_vm_id }}</template>
+                </q-item-label>
+                <q-item-label v-if="item.target_disk_name || item.target_disk_id" caption class="jhv-mono jhv-wrap">
+                  диск: {{ item.target_disk_name || item.target_disk_id }}<template v-if="item.target_disk_name && item.target_disk_id"> · {{ item.target_disk_id }}</template>
+                </q-item-label>
+                <q-item-label v-if="item.transfer_id" caption class="jhv-mono jhv-wrap">
+                  ImageTransfer: {{ item.transfer_id }}
+                </q-item-label>
+                <q-item-label v-if="item.target_server_name || item.target_server_id" caption class="jhv-wrap">
+                  {{ item.target_server_name || app.serverName(item.target_server_id) }}
+                  <template v-if="item.target_cluster_name"> · кластер {{ item.target_cluster_name }}</template>
+                  <template v-if="item.target_domain_name"> · домен {{ item.target_domain_name }}</template>
                 </q-item-label>
                 <q-item-label v-if="item.output_path" caption class="jhv-mono jhv-wrap">
                   {{ item.output_path }}

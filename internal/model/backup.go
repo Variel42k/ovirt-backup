@@ -1056,11 +1056,16 @@ type VerifyRun struct {
 	RunID  string `json:"run_id"`
 	CopyID string `json:"copy_id,omitempty"`
 	// TargetID — площадка проверки загрузкой; TriggeredBy — кто запустил.
-	TargetID    string     `json:"target_id,omitempty"`
-	TriggeredBy string     `json:"triggered_by,omitempty"`
-	Mode        VerifyMode `json:"mode"`
-	Status      RunStatus  `json:"status"`
-	Progress    int        `json:"progress"`
+	TargetID         string     `json:"target_id,omitempty"`
+	TriggeredBy      string     `json:"triggered_by,omitempty"`
+	Mode             VerifyMode `json:"mode"`
+	Status           RunStatus  `json:"status"`
+	Progress         int        `json:"progress"`
+	Phase            string     `json:"phase,omitempty"`
+	TransferredBytes int64      `json:"transferred_bytes"`
+	TotalBytes       int64      `json:"total_bytes"`
+	BytesPerSecond   int64      `json:"bytes_per_second"`
+	LastProgressAt   *time.Time `json:"last_progress_at,omitempty"`
 	// Details содержит машинно-читаемый отчёт: сколько чанков проверено,
 	// какие расхождения найдены.
 	Details   string     `json:"details,omitempty"`
@@ -1105,19 +1110,29 @@ type RestoreRun struct {
 	// Какие диски восстанавливать; пусто — все из бэкапа.
 	DiskIDs []string `json:"disk_ids,omitempty"`
 
-	OutputPath     string   `json:"output_path,omitempty"`   // для RestoreToFile
-	OutputFormat   string   `json:"output_format,omitempty"` // raw | qcow2
-	TargetServerID string   `json:"target_server_id,omitempty"`
-	TargetDiskID   string   `json:"target_disk_id,omitempty"`
-	TargetDomainID string   `json:"target_domain_id,omitempty"`
-	TargetVMID     string   `json:"target_vm_id,omitempty"`
-	TargetVMName   string   `json:"target_vm_name,omitempty"`
-	Phase          string   `json:"phase,omitempty"`
-	CleanupErrors  []string `json:"cleanup_errors,omitempty"`
+	OutputPath        string   `json:"output_path,omitempty"`   // для RestoreToFile
+	OutputFormat      string   `json:"output_format,omitempty"` // raw | qcow2
+	TargetServerID    string   `json:"target_server_id,omitempty"`
+	TargetServerName  string   `json:"target_server_name,omitempty"`
+	TargetClusterID   string   `json:"target_cluster_id,omitempty"`
+	TargetClusterName string   `json:"target_cluster_name,omitempty"`
+	TargetDiskID      string   `json:"target_disk_id,omitempty"`
+	TargetDiskName    string   `json:"target_disk_name,omitempty"`
+	TargetDomainID    string   `json:"target_domain_id,omitempty"`
+	TargetDomainName  string   `json:"target_domain_name,omitempty"`
+	TargetVMID        string   `json:"target_vm_id,omitempty"`
+	TargetVMName      string   `json:"target_vm_name,omitempty"`
+	TransferID        string   `json:"transfer_id,omitempty"`
+	Phase             string   `json:"phase,omitempty"`
+	CleanupErrors     []string `json:"cleanup_errors,omitempty"`
 
-	Progress  int        `json:"progress"`
-	Error     string     `json:"error,omitempty"`
-	StartedAt *time.Time `json:"started_at,omitempty"`
-	EndedAt   *time.Time `json:"ended_at,omitempty"`
-	CreatedAt time.Time  `json:"created_at"`
+	Progress         int        `json:"progress"`
+	TransferredBytes int64      `json:"transferred_bytes"`
+	TotalBytes       int64      `json:"total_bytes"`
+	BytesPerSecond   int64      `json:"bytes_per_second"`
+	LastProgressAt   *time.Time `json:"last_progress_at,omitempty"`
+	Error            string     `json:"error,omitempty"`
+	StartedAt        *time.Time `json:"started_at,omitempty"`
+	EndedAt          *time.Time `json:"ended_at,omitempty"`
+	CreatedAt        time.Time  `json:"created_at"`
 }

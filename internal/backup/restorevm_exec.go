@@ -170,9 +170,12 @@ func (e *Engine) RestoreVM(ctx context.Context, req *model.RestoreVMRequest) (*R
 		return &RestoreVMResult{Plan: plan}, fmt.Errorf("восстановление невозможно: %s",
 			strings.Join(plan.Blockers, "; "))
 	}
+	serverName, clusterName, domainName := e.restoreLocationNames(ctx, plan.ServerID, req.ClusterID, req.StorageDomainID)
 	record := &model.RestoreRun{
 		ID: req.RestoreID, RunID: req.RunID, CopyID: req.CopyID, Target: model.RestoreToNewVM,
-		Status: model.RunPending, TargetServerID: plan.ServerID, TargetDomainID: req.StorageDomainID,
+		Status: model.RunPending, TargetServerID: plan.ServerID, TargetServerName: serverName,
+		TargetClusterID: req.ClusterID, TargetClusterName: clusterName,
+		TargetDomainID: req.StorageDomainID, TargetDomainName: domainName,
 		TargetVMName: plan.NewName, Phase: "queued", CreatedAt: time.Now().UTC(),
 	}
 	if record.ID == "" {
@@ -222,8 +225,10 @@ func (e *Engine) RestoreVM(ctx context.Context, req *model.RestoreVMRequest) (*R
 	result.VMID = vm.ID
 	record.TargetVMID, record.TargetVMName, record.Phase, record.Progress = vm.ID, plan.NewName, "restoring_disks", 10
 	_ = e.store.UpdateRestoreRun(ctx, record)
-	log := e.log.With().Str("восстановление-вм", vm.ID).Str("копия", plan.RunID).Logger()
-	log.Info().Str("имя", plan.NewName).Int("дисков", len(plan.Disks)).Msg("машина создана, наполняю дисками")
+	log := e.log.With().Str("восстановление-вм", vm.ID).Str("копия", plan.RunID).
+		Str("движок", serverName).Str("кластер", clusterName).Str("домен", domainName).
+		Str("имя-вм", plan.NewName).Logger()
+	log.Info().Int("дисков", len(plan.Disks)).Msg("машина создана, наполняю дисками")
 
 	buses := make(map[string]string, len(plan.Disks))
 	for _, d := range plan.Disks {
@@ -233,14 +238,28 @@ func (e *Engine) RestoreVM(ctx context.Context, req *model.RestoreVMRequest) (*R
 	var restore *model.RestoreRun
 	if len(plan.Disks) > 0 {
 		restore, err = e.Restore(ctx, RestoreRequest{
-			RunID:          req.RunID,
-			CopyID:         req.CopyID,
-			Target:         model.RestoreToNewDisk,
-			TargetServerID: plan.ServerID,
-			TargetDomainID: req.StorageDomainID,
-			AttachToVMID:   vm.ID,
-			DiskBuses:      buses,
-			TriggeredBy:    "restore-vm",
+			RunID:           req.RunID,
+			CopyID:          req.CopyID,
+			Target:          model.RestoreToNewDisk,
+			TargetServerID:  plan.ServerID,
+			TargetClusterID: req.ClusterID,
+			TargetDomainID:  req.StorageDomainID,
+			AttachToVMID:    vm.ID,
+			AttachToVMName:  plan.NewName,
+			NewDiskSuffix:   req.DiskSuffix,
+			DiskBuses:       buses,
+			TriggeredBy:     "restore-vm",
+			Progress: func(done, total, bytesPerSecond int64) {
+				record.Phase = "writing_data"
+				record.TransferredBytes, record.TotalBytes = done, total
+				record.BytesPerSecond = bytesPerSecond
+				progressAt := time.Now().UTC()
+				record.LastProgressAt = &progressAt
+				if total > 0 {
+					record.Progress = minInt(10+int(done*80/total), 90)
+				}
+				_ = e.store.UpdateRestoreRun(ctx, record)
+			},
 		})
 	}
 	if err != nil {
@@ -305,6 +324,33 @@ func (e *Engine) RestoreVM(ctx context.Context, req *model.RestoreVMRequest) (*R
 		log.Info().Msg("машина собрана; запуск оставлен оператору")
 	}
 	return result, nil
+}
+
+// restoreLocationNames переводит внутренние UUID назначения в названия,
+// которые сохраняются с операцией и остаются понятными после изменения
+// инвентаря или удаления временной проверочной ВМ.
+func (e *Engine) restoreLocationNames(ctx context.Context, serverID, clusterID, domainID string) (string, string, string) {
+	serverName, clusterName, domainName := serverID, clusterID, domainID
+	if srv, err := e.store.GetServer(ctx, serverID); err == nil && strings.TrimSpace(srv.Name) != "" {
+		serverName = srv.Name
+	}
+	if clusters, err := e.store.ListClusters(ctx, serverID); err == nil {
+		for _, cluster := range clusters {
+			if cluster.ID == clusterID && strings.TrimSpace(cluster.Name) != "" {
+				clusterName = cluster.Name
+				break
+			}
+		}
+	}
+	if domains, err := e.store.ListStorageDomains(ctx, serverID); err == nil {
+		for _, domain := range domains {
+			if domain.ID == domainID && strings.TrimSpace(domain.Name) != "" {
+				domainName = domain.Name
+				break
+			}
+		}
+	}
+	return serverName, clusterName, domainName
 }
 
 // storageDomainFree возвращает свободное место целевого домена, -1 при неудаче.

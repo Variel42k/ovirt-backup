@@ -701,6 +701,11 @@ export interface VerifyRun {
   mode: string
   status: RunStatus
   progress: number
+  phase?: string
+  transferred_bytes: number
+  total_bytes: number
+  bytes_per_second: number
+  last_progress_at?: string
   details?: string
   error?: string
   started_at?: string
@@ -717,13 +722,26 @@ export interface RestoreRun {
   disk_ids?: string[]
   output_path?: string
   output_format?: string
+  target_server_id?: string
+  target_server_name?: string
+  target_cluster_id?: string
+  target_cluster_name?: string
   target_disk_id?: string
+  target_disk_name?: string
+  target_domain_id?: string
+  target_domain_name?: string
   target_vm_id?: string
   target_vm_name?: string
+  transfer_id?: string
   phase?: string
   cleanup_errors?: string[]
   progress: number
+  transferred_bytes: number
+  total_bytes: number
+  bytes_per_second: number
+  last_progress_at?: string
   error?: string
+  started_at?: string
   created_at: string
   ended_at?: string
 }
@@ -1171,6 +1189,8 @@ export interface BootCheck extends VerifyRun {
   duration?: string
   host?: string
   check_vm_name?: string
+  cluster_name?: string
+  storage_domain_name?: string
   started: boolean
   agent_replied: boolean
   guest_os?: string
@@ -1235,6 +1255,9 @@ export interface BootTargets {
 export interface BootReport {
   host: string
   domain_name: string
+  cluster_name?: string
+  storage_domain_name?: string
+  vm_name?: string
   started: boolean
   agent_replied: boolean
   elapsed?: string

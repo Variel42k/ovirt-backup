@@ -83,11 +83,13 @@ type RestoreRequest struct {
 	OutputFormat string // raw | qcow2
 
 	// Для RestoreToDisk и RestoreToNewDisk.
-	TargetServerID string
-	TargetDiskID   string
-	TargetDomainID string
+	TargetServerID  string
+	TargetClusterID string
+	TargetDiskID    string
+	TargetDomainID  string
 	// AttachToVMID подключает восстановленный диск к ВМ после заливки.
-	AttachToVMID string
+	AttachToVMID   string
+	AttachToVMName string
 	// NewDiskSuffix отличает восстановленный диск от исходного по имени.
 	NewDiskSuffix string
 	// DiskBuses задаёт шину подключения для каждого диска: идентификатор диска
@@ -100,6 +102,10 @@ type RestoreRequest struct {
 	DiskBuses map[string]string
 
 	TriggeredBy string
+	// Progress mirrors byte-level transfer into a parent operation, such as a
+	// whole-VM restore or boot verification. It is internal and never comes
+	// from the API request.
+	Progress func(transferred, total, bytesPerSecond int64)
 }
 
 // Restore reconstructs disks from a backup point.
@@ -126,23 +132,35 @@ func (e *Engine) Restore(ctx context.Context, req RestoreRequest) (*model.Restor
 	if req.Target == model.RestoreToDisk && len(diskIDs) != 1 {
 		return nil, errors.New("восстановление в существующий диск возможно только для одного диска за раз")
 	}
+	transferTotal, err := e.restoreTransferTotal(set, diskIDs, req.Target)
+	if err != nil {
+		return nil, err
+	}
 
 	// Запись создаётся до ожидания очереди со статусом «ожидает»: восстановление
 	// может простоять в ней долго, и всё это время оператор должен видеть, что
 	// его запрос принят.
+	serverName, clusterName, domainName := e.restoreLocationNames(ctx, req.TargetServerID, req.TargetClusterID, req.TargetDomainID)
 	record := &model.RestoreRun{
-		ID:             uuid.NewString(),
-		RunID:          req.RunID,
-		CopyID:         set.Copy.ID,
-		Target:         req.Target,
-		Status:         model.RunPending,
-		DiskIDs:        diskIDs,
-		OutputFormat:   req.OutputFormat,
-		TargetServerID: req.TargetServerID,
-		TargetDiskID:   req.TargetDiskID,
-		TargetDomainID: req.TargetDomainID,
-		TargetVMID:     req.AttachToVMID,
-		CreatedAt:      time.Now().UTC(),
+		ID:                uuid.NewString(),
+		RunID:             req.RunID,
+		CopyID:            set.Copy.ID,
+		Target:            req.Target,
+		Status:            model.RunPending,
+		DiskIDs:           diskIDs,
+		OutputFormat:      req.OutputFormat,
+		TargetServerID:    req.TargetServerID,
+		TargetServerName:  serverName,
+		TargetClusterID:   req.TargetClusterID,
+		TargetClusterName: clusterName,
+		TargetDiskID:      req.TargetDiskID,
+		TargetDomainID:    req.TargetDomainID,
+		TargetDomainName:  domainName,
+		TargetVMID:        req.AttachToVMID,
+		TargetVMName:      req.AttachToVMName,
+		Phase:             "queued",
+		TotalBytes:        transferTotal,
+		CreatedAt:         time.Now().UTC(),
 	}
 	if err := e.store.CreateRestoreRun(ctx, record); err != nil {
 		return nil, err
@@ -161,22 +179,50 @@ func (e *Engine) Restore(ctx context.Context, req RestoreRequest) (*model.Restor
 	started := time.Now().UTC()
 	record.StartedAt = &started
 	record.Status = model.RunRunning
+	record.Phase = "preparing"
 	_ = e.store.UpdateRestoreRun(ctx, record)
-	log.Info().Strs("диски", diskIDs).Str("цель", string(req.Target)).Msg("восстановление запущено")
+	log.Info().Strs("диски", diskIDs).Str("цель", string(req.Target)).
+		Str("движок", serverName).Str("кластер", clusterName).Str("домен", domainName).
+		Str("целевая-вм", req.AttachToVMName).Str("инициатор", req.TriggeredBy).
+		Msg("восстановление запущено")
 
+	lastProgressWrite, transferStarted, lastProgressLog := time.Time{}, time.Time{}, -1
 	err = e.runRestore(ctx, set, req, record, diskIDs, func(done, total int64) {
 		pct := 0
 		if total > 0 {
 			pct = int(done * 100 / total)
 		}
 		record.Progress = minInt(pct, 99)
-		_ = e.store.UpdateRestoreRun(ctx, record)
+		record.TransferredBytes, record.TotalBytes = done, total
+		progressAt := time.Now().UTC()
+		record.LastProgressAt = &progressAt
+		if transferStarted.IsZero() {
+			transferStarted = time.Now()
+		}
+		if elapsed := time.Since(transferStarted); elapsed > 0 {
+			record.BytesPerSecond = int64(float64(done) / elapsed.Seconds())
+		}
+		now := time.Now()
+		if now.Sub(lastProgressWrite) >= time.Second || done >= total {
+			_ = e.store.UpdateRestoreRun(ctx, record)
+			if req.Progress != nil {
+				req.Progress(done, total, record.BytesPerSecond)
+			}
+			lastProgressWrite = now
+		}
+		step := pct / 10
+		if step > lastProgressLog || done >= total {
+			log.Info().Int("процент", pct).Int64("передано", done).Int64("всего", total).
+				Int64("байт-в-секунду", record.BytesPerSecond).Msg("ход передачи данных восстановления")
+			lastProgressLog = step
+		}
 	})
 
 	ended := time.Now().UTC()
 	record.EndedAt = &ended
 	if err != nil {
 		record.Status = model.RunFailed
+		record.Phase = "failed"
 		record.Error = err.Error()
 		_ = e.store.UpdateRestoreRun(context.WithoutCancel(ctx), record)
 		log.Error().Err(err).Msg("восстановление не выполнено")
@@ -184,7 +230,9 @@ func (e *Engine) Restore(ctx context.Context, req RestoreRequest) (*model.Restor
 	}
 
 	record.Status = model.RunSucceeded
+	record.Phase = "completed"
 	record.Progress = 100
+	record.TransferredBytes = record.TotalBytes
 	if err := e.store.UpdateRestoreRun(ctx, record); err != nil {
 		log.Warn().Err(err).Msg("не удалось обновить запись о восстановлении")
 	}
@@ -194,13 +242,7 @@ func (e *Engine) Restore(ctx context.Context, req RestoreRequest) (*model.Restor
 
 func (e *Engine) runRestore(ctx context.Context, set *ChainSet, req RestoreRequest,
 	record *model.RestoreRun, diskIDs []string, progress func(done, total int64)) error {
-
-	var total int64
-	for _, id := range diskIDs {
-		chain := set.Manifests[id]
-		total += chain[len(chain)-1].VirtualSize
-	}
-
+	total := record.TotalBytes
 	var done int64
 	for _, diskID := range diskIDs {
 		reader, err := e.ReaderFor(set, diskID)
@@ -219,14 +261,35 @@ func (e *Engine) runRestore(ctx context.Context, set *ChainSet, req RestoreReque
 		default:
 			err = fmt.Errorf("неизвестная цель восстановления: %q", req.Target)
 		}
-		done += reader.VirtualSize()
+		done += restoreDiskTransferBytes(reader, req.Target)
 		reader.Close()
 
 		if err != nil {
-			return fmt.Errorf("диск %s: %w", diskID, err)
+			alias := set.Manifests[diskID][len(set.Manifests[diskID])-1].Alias
+			return fmt.Errorf("диск %s (%s): %w", alias, diskID, err)
 		}
 	}
 	return nil
+}
+
+func (e *Engine) restoreTransferTotal(set *ChainSet, diskIDs []string, target model.RestoreTarget) (int64, error) {
+	var total int64
+	for _, diskID := range diskIDs {
+		reader, err := e.ReaderFor(set, diskID)
+		if err != nil {
+			return 0, err
+		}
+		total += restoreDiskTransferBytes(reader, target)
+		reader.Close()
+	}
+	return total, nil
+}
+
+func restoreDiskTransferBytes(reader *ChainReader, target model.RestoreTarget) int64 {
+	if target == model.RestoreToDisk {
+		return reader.VirtualSize()
+	}
+	return reader.PresentBytes()
 }
 
 // restoreToFile writes a sparse raw image, optionally converting it to qcow2.
@@ -282,6 +345,7 @@ func (e *Engine) restoreToFile(ctx context.Context, set *ChainSet, reader *Chain
 		return fmt.Errorf("резервирование размера образа: %w", err)
 	}
 
+	var transferred int64
 	err = reader.Stream(ctx, func(ctx context.Context, offset int64, data []byte, zeroLength int64) error {
 		if data == nil {
 			// The file is already zero there; skipping keeps it sparse.
@@ -290,8 +354,10 @@ func (e *Engine) restoreToFile(ctx context.Context, set *ChainSet, reader *Chain
 		if _, err := f.WriteAt(data, offset); err != nil {
 			return fmt.Errorf("запись образа по смещению %d: %w", offset, err)
 		}
+		transferred += int64(len(data))
+		progress(transferred)
 		return nil
-	}, progress)
+	}, nil)
 	if err != nil {
 		return err
 	}
@@ -348,17 +414,27 @@ func (e *Engine) restoreToEngine(ctx context.Context, set *ChainSet, reader *Cha
 		if suffix == "" {
 			suffix = "-restored-" + set.Leaf.CreatedAt.Format("20060102-1504")
 		}
+		targetAlias := leaf.Alias + suffix
 		storageType := e.domainStorageType(ctx, srv.ID, req.TargetDomainID)
 		format, sparse := NewDiskLayout(leaf.DiskFormat, storageType, srv.SupportsCBT)
+		presentBytes := reader.PresentBytes()
 		// Тонкий qcow2 на блочном домене создаётся маленьким томом, и во
 		// время загрузки его никто не расширяет: сразу выделяем место под
 		// данные копии и метаданные qcow2.
 		var initialSize int64
 		if format == "cow" && sparse && IsBlockStorage(storageType) {
-			initialSize = Qcow2InitialSize(int64(reader.PresentChunks())*reader.ChunkSize(), leaf.VirtualSize)
+			initialSize = Qcow2InitialSize(presentBytes, leaf.VirtualSize)
 		}
+		record.TargetDiskName, record.Phase = targetAlias, "creating_disk"
+		_ = e.store.UpdateRestoreRun(ctx, record)
+		log := e.log.With().Str("restore", record.ID).Str("исходный-диск", leaf.Alias).
+			Str("новый-диск", targetAlias).Str("движок", srv.Name).
+			Str("домен", record.TargetDomainName).Str("домен-id", req.TargetDomainID).Logger()
+		log.Info().Int64("виртуальный-размер", leaf.VirtualSize).Int64("данных-к-передаче", presentBytes).
+			Int64("начальный-размер", initialSize).
+			Str("формат", format).Bool("тонкий", sparse).Msg("создаю диск для восстановления")
 		created, err := client.CreateDisk(ctx, ovirt.CreateDiskRequest{
-			Alias:           leaf.Alias + suffix,
+			Alias:           targetAlias,
 			Description:     fmt.Sprintf("Восстановлен из бэкапа %s от %s", set.Leaf.ID, set.Leaf.CreatedAt.Format(time.RFC3339)),
 			StorageDomainID: req.TargetDomainID,
 			ProvisionedSize: leaf.VirtualSize,
@@ -371,16 +447,21 @@ func (e *Engine) restoreToEngine(ctx context.Context, set *ChainSet, reader *Cha
 		}
 		targetDiskID = created.ID
 		freshDisk = true
-		record.TargetDiskID = targetDiskID
+		record.TargetDiskID, record.Phase = targetDiskID, "waiting_disk"
+		_ = e.store.UpdateRestoreRun(ctx, record)
+		log.Info().Str("диск-id", targetDiskID).Msg("диск создан, ожидаю готовность")
 
 		if err := client.WaitDiskStatus(ctx, targetDiskID, "ok", 10*time.Minute); err != nil {
 			return err
 		}
+		log.Info().Str("диск-id", targetDiskID).Msg("диск готов к записи")
 	}
 	if targetDiskID == "" {
 		return errors.New("не указан целевой диск")
 	}
 
+	record.Phase = "opening_transfer"
+	_ = e.store.UpdateRestoreRun(ctx, record)
 	transfer, err := client.CreateTransfer(ctx, ovirt.TransferRequest{
 		DiskID:    targetDiskID,
 		Direction: "upload",
@@ -392,12 +473,18 @@ func (e *Engine) restoreToEngine(ctx context.Context, set *ChainSet, reader *Cha
 	if err != nil {
 		return fmt.Errorf("открытие передачи на запись: %w", err)
 	}
+	record.TransferID = transfer.ID
+	_ = e.store.UpdateRestoreRun(ctx, record)
 	success := false
 	defer func() {
 		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
 		defer cancel()
 		if err := client.CloseTransfer(closeCtx, transfer.ID, success); err != nil {
-			e.log.Warn().Err(err).Msg("не удалось корректно закрыть передачу восстановления")
+			e.log.Warn().Err(err).Str("restore", record.ID).Str("transfer", transfer.ID).
+				Bool("успешная-передача", success).Msg("не удалось корректно закрыть передачу восстановления")
+		} else {
+			e.log.Info().Str("restore", record.ID).Str("transfer", transfer.ID).
+				Bool("успешная-передача", success).Msg("передача imageio закрыта")
 		}
 	}()
 
@@ -405,9 +492,23 @@ func (e *Engine) restoreToEngine(ctx context.Context, set *ChainSet, reader *Cha
 	if err != nil {
 		return err
 	}
-	dst := imageio.New(ovirt.DataURL(ready, e.cfg.Transfer.PreferProxy), client.DataHTTPClient()).
+	dataURL := ovirt.DataURL(ready, e.cfg.Transfer.PreferProxy)
+	dst := imageio.New(dataURL, client.DataHTTPClient()).
 		WithTimeouts(e.imageioTimeouts(leaf.VirtualSize))
+	repository := ""
+	if set.Target != nil {
+		repository = set.Target.Name
+	}
+	watch := newRestoreTransferWatch(e.log.With().Str("restore", record.ID).Logger(), transfer.ID,
+		targetDiskID, record.TargetDiskName, repository, dataURL)
+	defer watch.Stop()
+	e.log.Info().Str("restore", record.ID).Str("диск", record.TargetDiskName).
+		Str("диск-id", targetDiskID).Str("transfer", transfer.ID).Str("узел-imageio", imageioNode(dataURL)).
+		Msg("imageio готов, начинаю запись данных")
+	record.Phase = "writing_data"
+	_ = e.store.UpdateRestoreRun(ctx, record)
 
+	watch.Observe("imageio_options", 0, 0)
 	features, err := dst.Options(ctx)
 	if err != nil {
 		return fmt.Errorf("определение возможностей imageio: %w", err)
@@ -415,7 +516,8 @@ func (e *Engine) restoreToEngine(ctx context.Context, set *ChainSet, reader *Cha
 	canZero := features.Has("zero")
 
 	lastKeepalive := time.Now()
-	err = reader.Stream(ctx, func(ctx context.Context, offset int64, data []byte, zeroLength int64) error {
+	var transferred int64
+	err = reader.StreamObserved(ctx, func(ctx context.Context, offset int64, data []byte, zeroLength int64) error {
 		if time.Since(lastKeepalive) > 20*time.Second {
 			_ = client.ExtendTransfer(ctx, transfer.ID)
 			lastKeepalive = time.Now()
@@ -428,26 +530,55 @@ func (e *Engine) restoreToEngine(ctx context.Context, set *ChainSet, reader *Cha
 				return nil
 			}
 			if canZero {
-				return dst.Zero(ctx, offset, zeroLength, false)
+				if err := dst.Zero(ctx, offset, zeroLength, false); err != nil {
+					return err
+				}
+			} else if err := writeZeros(ctx, dst, offset, zeroLength); err != nil {
+				return err
 			}
-			return writeZeros(ctx, dst, offset, zeroLength)
+			transferred += zeroLength
+			progress(transferred)
+			return nil
 		}
-		return dst.WriteRange(ctx, offset, bytesReader(data), int64(len(data)), false)
-	}, progress)
+		if err := dst.WriteRange(ctx, offset, bytesReader(data), int64(len(data)), false); err != nil {
+			return err
+		}
+		transferred += int64(len(data))
+		progress(transferred)
+		return nil
+	}, nil, func(stage StreamStage, offset, length int64) {
+		name := string(stage)
+		if stage == StreamWritingTarget {
+			name = "writing_imageio"
+		}
+		watch.Observe(name, offset, length)
+	})
 	if err != nil {
 		return err
 	}
 
+	record.Phase = "flushing"
+	_ = e.store.UpdateRestoreRun(ctx, record)
+	watch.Observe("imageio_flush", 0, leaf.VirtualSize)
+	e.log.Info().Str("restore", record.ID).Str("диск", record.TargetDiskName).
+		Str("диск-id", targetDiskID).Msg("данные переданы, выполняю flush imageio")
 	if err := dst.Flush(ctx); err != nil {
 		return fmt.Errorf("сброс данных на диск: %w", err)
 	}
 	success = true
+	e.log.Info().Str("restore", record.ID).Str("диск", record.TargetDiskName).
+		Str("диск-id", targetDiskID).Msg("запись и flush диска завершены")
 
 	if req.AttachToVMID != "" {
+		record.Phase = "attaching_disk"
+		_ = e.store.UpdateRestoreRun(ctx, record)
 		iface := ovirt.DiskInterfaceForBus(req.DiskBuses[diskID])
 		if err := client.AttachDisk(ctx, req.AttachToVMID, targetDiskID, iface, leaf.Bootable); err != nil {
 			return fmt.Errorf("подключение диска к ВМ: %w", err)
 		}
+		e.log.Info().Str("restore", record.ID).Str("диск", record.TargetDiskName).
+			Str("диск-id", targetDiskID).Str("вм", req.AttachToVMName).
+			Str("вм-id", req.AttachToVMID).Str("интерфейс", iface).Msg("диск подключён к ВМ")
 	}
 	return nil
 }

@@ -3,7 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useQuasar } from 'quasar'
 import { api, errorMessage, notifyError, notifyOk } from '@/api/client'
-import { bytes, dateTime, runStatus, statusColor, usesOVirtAPI } from '@/api/format'
+import { ago, bytes, dateTime, runStatus, staleFor, statusColor, transferPauseHint, transferRatio, transferSummary, usesOVirtAPI } from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import { useUnsavedChanges } from '@/composables/unsavedChanges'
@@ -425,6 +425,18 @@ function triggerText(value?: string): string {
   return ({ job: 'после бэкапа', manual: 'вручную', replication: 'реплика', schedule: 'расписание' } as Record<string, string>)[value] ?? value
 }
 
+function checkPhaseTitle(phase?: string): string {
+  return ({
+    queued: 'ожидает запуска', preparing: 'подготовка цепочки бэкапа', creating_vm: 'создание ВМ',
+    creating_disk: 'создание диска', waiting_disk: 'ожидание готовности диска',
+    opening_transfer: 'открытие ImageIO', writing_data: 'запись данных', flushing: 'фиксация данных на диске',
+    attaching_disk: 'подключение диска к ВМ', restoring_disks: 'восстановление дисков',
+    creating_networks: 'создание сетевых интерфейсов', starting_vm: 'запуск ВМ',
+    waiting_guest: 'ожидание ответа гостевого агента', cleanup: 'удаление временной ВМ и дисков',
+    rollback: 'уборка после ошибки', completed: 'завершено', failed: 'ошибка',
+  } as Record<string, string>)[phase || ''] || phase || '—'
+}
+
 // ---- Остатки ----
 
 const leftovers = ref<VerifyLeftoverScan | null>(null)
@@ -666,11 +678,36 @@ onMounted(async () => {
               <q-td key="place" :props="p">
                 {{ p.row.target_name || p.row.host || '—' }}
                 <div v-if="p.row.target_name && p.row.host" class="text-caption text-grey-7">{{ p.row.host }}</div>
+                <div v-if="p.row.cluster_name || p.row.storage_domain_name" class="text-caption text-grey-7">
+                  <template v-if="p.row.cluster_name">кластер {{ p.row.cluster_name }}</template>
+                  <template v-if="p.row.cluster_name && p.row.storage_domain_name"> · </template>
+                  <template v-if="p.row.storage_domain_name">домен {{ p.row.storage_domain_name }}</template>
+                </div>
               </q-td>
               <q-td key="trigger" :props="p">{{ triggerText(p.row.triggered_by) }}</q-td>
               <q-td key="status" :props="p">
                 <q-chip dense :color="statusColor(p.row.status)" text-color="white">{{ runStatus(p.row.status) }}</q-chip>
-                <span v-if="p.row.status === 'running'" class="text-caption">{{ p.row.progress }}%</span>
+                <div v-if="p.row.status === 'running'" class="text-caption">{{ checkPhaseTitle(p.row.phase) }} · {{ p.row.progress }}%</div>
+                <template v-if="p.row.total_bytes > 0">
+                  <q-linear-progress
+                    v-if="p.row.status === 'running'"
+                    :value="transferRatio(p.row.transferred_bytes, p.row.total_bytes)"
+                    color="primary"
+                    size="6px"
+                    rounded
+                    class="q-mt-xs"
+                    style="min-width: 180px"
+                  />
+                  <div class="text-caption text-grey-7 jhv-wrap">
+                    {{ transferSummary(p.row.transferred_bytes, p.row.total_bytes, p.row.bytes_per_second) }}
+                  </div>
+                  <div v-if="p.row.status === 'running' && p.row.last_progress_at" class="text-caption jhv-wrap"
+                    :class="staleFor(p.row.last_progress_at) ? 'text-warning' : 'text-grey-7'">
+                    <q-icon :name="staleFor(p.row.last_progress_at) ? 'warning' : 'schedule'" />
+                    последнее продвижение {{ ago(p.row.last_progress_at) }}
+                    <template v-if="staleFor(p.row.last_progress_at)"> · {{ transferPauseHint(p.row.phase) }}</template>
+                  </div>
+                </template>
               </q-td>
               <q-td key="guest" :props="p" style="max-width: 360px">
                 <template v-if="p.row.agent_replied">
@@ -684,6 +721,12 @@ onMounted(async () => {
               <q-td colspan="100%" class="bg-grey-1">
                 <div v-if="p.row.summary" class="text-body2">{{ p.row.summary }}</div>
                 <div v-if="p.row.check_vm_name" class="text-caption">Проверочная ВМ: <span class="jhv-mono">{{ p.row.check_vm_name }}</span></div>
+                <div v-if="p.row.host" class="text-caption">
+                  Место: {{ p.row.host }}<template v-if="p.row.cluster_name"> · кластер {{ p.row.cluster_name }}</template><template v-if="p.row.storage_domain_name"> · домен {{ p.row.storage_domain_name }}</template>
+                </div>
+                <div v-if="p.row.total_bytes > 0" class="text-caption">
+                  Передача на площадку проверки: {{ transferSummary(p.row.transferred_bytes, p.row.total_bytes, p.row.bytes_per_second) }}
+                </div>
                 <div v-for="(problem, index) in p.row.problems ?? []" :key="'p' + index" class="text-caption text-negative jhv-wrap">{{ problem }}</div>
                 <div v-for="(note, index) in p.row.notes ?? []" :key="'n' + index" class="text-caption text-grey-8 jhv-wrap">• {{ note }}</div>
                 <q-btn flat dense no-caps color="primary" icon="backup" label="Открыть точку" class="q-mt-xs"

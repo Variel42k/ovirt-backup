@@ -64,6 +64,9 @@ const (
 	// RunEventDiskLockWait — движок держал диск (HTTP 409) перед передачей
 	// следующего тома; detail — что он показывал и когда отпустил.
 	RunEventDiskLockWait RunEventKind = "disk_lock_wait"
+	// RunEventLegacyClone — том в цепочке диска застрял в locked, и бэкап
+	// идёт через временный клон ВМ из снапшота; detail — что сделано.
+	RunEventLegacyClone RunEventKind = "legacy_clone"
 )
 
 // Title возвращает название этапа для интерфейса.
@@ -119,6 +122,8 @@ func (k RunEventKind) Title() string {
 		return "Открыта передача образа"
 	case RunEventDiskLockWait:
 		return "Движок держит диск"
+	case RunEventLegacyClone:
+		return "Бэкап через клон снапшота"
 	}
 	return string(k)
 }

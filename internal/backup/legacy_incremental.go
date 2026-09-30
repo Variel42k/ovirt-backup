@@ -38,12 +38,10 @@ func (e *Engine) runLegacyQcow2(ctx context.Context, client *ovirt.Client, backe
 	}
 
 	// Брошенные снапшоты удлиняют цепочку; опорный снапшот цепочки уборка
-	// не трогает — он записан за успешным запуском.
+	// не трогает — он записан за успешным запуском. Застрявший том предка
+	// здесь не мешает: скачивается только новый слой, основа — из хранилища.
 	e.presweepLegacySnapshots(ctx, client, srv, vm, run)
 	e.waitSnapshotOperations(ctx, client, vm, run)
-	if err := e.stuckChainError(ctx, client, srv, vm, run, disks); err != nil {
-		return nil, err
-	}
 	if _, err := client.GetSnapshot(ctx, vm.ID, parent.SnapshotID); err != nil {
 		return nil, fmt.Errorf("опорный snapshot QCOW2 %s больше недоступен: %w", parent.SnapshotID, err)
 	}

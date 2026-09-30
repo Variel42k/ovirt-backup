@@ -34,6 +34,21 @@ import (
 type legacyVolume struct {
 	ImageID string
 	Format  string // cow | raw
+	// DiskID — скачивать диск целиком, а не том снапшота: так читается диск
+	// временного клона (у него один том), см. legacy_clone.go.
+	DiskID string
+}
+
+// transferRequest — передача тома: по диску, если задан DiskID, иначе по
+// тому снапшота.
+func (v legacyVolume) transferRequest(inactivity time.Duration) ovirt.TransferRequest {
+	req := ovirt.TransferRequest{Direction: "download", Format: v.Format, InactivityTimeout: inactivity}
+	if v.DiskID != "" {
+		req.DiskID = v.DiskID
+	} else {
+		req.SnapshotID = v.ImageID
+	}
+	return req
 }
 
 // legacyChainDepth — сколько слоёв допускается в цепочке. Больше — почти
@@ -145,7 +160,11 @@ func (e *Engine) materializeLegacyChain(ctx context.Context, client *ovirt.Clien
 			return "", downloaded, fmt.Errorf("цепочка томов длиннее %d слоёв — похоже на ошибку разбора", legacyChainDepth)
 		}
 		path := filepath.Join(workDir, fmt.Sprintf("%03d-%s.%s", depth, id, qemuFormat(format)))
-		n, err := e.downloadVolume(ctx, client, id, format, path, func(done int64) {
+		vol := legacyVolume{ImageID: id, Format: format}
+		if depth == 0 {
+			vol.DiskID = top.DiskID
+		}
+		n, err := e.downloadVolumeFrom(ctx, client, vol, path, func(done int64) {
 			if onDownload != nil {
 				onDownload(downloaded + done)
 			}
@@ -202,9 +221,16 @@ func (e *Engine) materializeLegacyChain(ctx context.Context, client *ovirt.Clien
 // в нём данных, а не весь размер диска.
 func (e *Engine) downloadVolume(ctx context.Context, client *ovirt.Client, imageID, format, path string,
 	onProgress func(int64)) (int64, error) {
+	return e.downloadVolumeFrom(ctx, client, legacyVolume{ImageID: imageID, Format: format}, path, onProgress)
+}
+
+// downloadVolumeFrom скачивает том или, если задан DiskID, диск целиком.
+func (e *Engine) downloadVolumeFrom(ctx context.Context, client *ovirt.Client, vol legacyVolume, path string,
+	onProgress func(int64)) (int64, error) {
+	imageID := vol.ImageID
 	var lastN int64
 	for attempt := 1; attempt <= legacyVolumeDownloadAttempts; attempt++ {
-		n, err := e.downloadVolumeAttempt(ctx, client, imageID, format, path, onProgress)
+		n, err := e.downloadVolumeAttempt(ctx, client, vol, path, onProgress)
 		lastN = n
 		if err == nil {
 			return n, nil
@@ -236,13 +262,10 @@ func (e *Engine) downloadVolume(ctx context.Context, client *ovirt.Client, image
 	return lastN, fmt.Errorf("исчерпаны попытки скачивания тома")
 }
 
-func (e *Engine) downloadVolumeAttempt(ctx context.Context, client *ovirt.Client, imageID, format, path string,
+func (e *Engine) downloadVolumeAttempt(ctx context.Context, client *ovirt.Client, vol legacyVolume, path string,
 	onProgress func(int64)) (n int64, retErr error) {
 
-	transfer, err := e.openVolumeTransfer(ctx, client, ovirt.TransferRequest{
-		SnapshotID: imageID, Direction: "download", Format: format,
-		InactivityTimeout: e.cfg.Transfer.InactivityTimeout,
-	})
+	transfer, err := e.openVolumeTransfer(ctx, client, vol.transferRequest(e.cfg.Transfer.InactivityTimeout))
 	if err != nil {
 		return 0, fmt.Errorf("открытие передачи тома: %w", err)
 	}

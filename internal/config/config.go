@@ -735,6 +735,12 @@ type TransferConfig struct {
 	// LockWait — сколько ждать, пока движок без Backup API отпустит диск
 	// перед передачей следующего тома цепочки (HTTP 409 «disks are locked»).
 	LockWait time.Duration `mapstructure:"lock_wait"`
+	// CloneFallback — движок без Backup API: если том в цепочке диска застрял
+	// в статусе locked, бэкап идёт через временный клон ВМ из снапшота (движок
+	// сам собирает цепочку на хосте). Выключено — бэкап останавливается.
+	CloneFallback bool `mapstructure:"clone_fallback"`
+	// CloneTimeout — сколько ждать, пока движок скопирует диски клона.
+	CloneTimeout time.Duration `mapstructure:"clone_timeout"`
 	// MaxReadMBps — предел чтения с хранилища ВМ по умолчанию, МиБ/с; 0 — без
 	// ограничения. Задание может задать свой.
 	MaxReadMBps int `mapstructure:"max_read_mbps"`
@@ -1285,6 +1291,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("backup.transfer.inactivity_timeout", "60s")
 	v.SetDefault("backup.transfer.request_timeout", "2m")
 	v.SetDefault("backup.transfer.lock_wait", "10m")
+	v.SetDefault("backup.transfer.clone_fallback", true)
+	v.SetDefault("backup.transfer.clone_timeout", "6h")
 	v.SetDefault("backup.transfer.max_parallel_disks", 2)
 	v.SetDefault("backup.transfer.range_retries", 3)
 	v.SetDefault("backup.transfer.max_read_mbps", 0)

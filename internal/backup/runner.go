@@ -1474,7 +1474,7 @@ func (e *Engine) settleFreeze(ctx context.Context, run *model.BackupRun, req Run
 func (e *Engine) event(ctx context.Context, run *model.BackupRun, kind model.RunEventKind,
 	took time.Duration, detail string) {
 
-	if run == nil || run.ID == "" {
+	if run == nil || run.ID == "" || e.store == nil {
 		return
 	}
 	saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
@@ -1539,11 +1539,20 @@ func (e *Engine) runSnapshot(ctx context.Context, client *ovirt.Client, backend 
 
 	e.waitSnapshotOperations(ctx, client, vm, run)
 
-	// Том, застрявший в locked, движок не отдаст: такой бэкап не пройдёт, а
-	// новый снапшот только удлинит цепочку.
+	// Том, застрявший в locked, движок не отдаст. Если разрешено, цепочку
+	// прочитает сам движок — через временный клон из снапшота
+	// (legacy_clone.go); иначе бэкап останавливается до снапшота, чтобы не
+	// удлинять цепочку.
+	viaClone := false
 	if !srv.SupportsCBT {
 		if err := e.stuckChainError(ctx, client, srv, vm, run, disks); err != nil {
-			return nil, err
+			if !e.cfg.Transfer.CloneFallback {
+				return nil, fmt.Errorf("%w. Обход через временный клон снапшота выключен настройкой "+
+					"backup.transfer.clone_fallback", err)
+			}
+			viaClone = true
+			e.log.Warn().Str("vm", vm.Name).Err(err).
+				Msg("том в цепочке диска заблокирован — бэкап пойдёт через временный клон снапшота")
 		}
 	}
 
@@ -1649,6 +1658,22 @@ func (e *Engine) runSnapshot(ctx context.Context, client *ovirt.Client, backend 
 		}
 		e.log.Info().Str("vm", vm.Name).Strs("диски", names).
 			Msg("движок без Backup API: тома qcow2 скачиваются целиком и собираются через qemu-img")
+	}
+	if viaClone {
+		clones, removeClone, err := e.cloneForBackup(ctx, client, vm, run, snap.ID, disks)
+		// Клон удаляется раньше снапшота: defer выполняются в обратном порядке.
+		defer removeClone()
+		if err != nil {
+			return nil, err
+		}
+		// У диска клона один том: он скачивается целиком, как диск, и
+		// сохраняется как исходный диск ВМ.
+		p.LegacyChain = map[string]legacyVolume{}
+		p.LegacyFormats = map[string]string{}
+		for sourceID, c := range clones {
+			p.LegacyChain[sourceID] = legacyVolume{ImageID: c.ImageID, Format: c.Format, DiskID: c.ID}
+			p.LegacyFormats[c.ImageID] = c.Format
+		}
 	}
 
 	manifests, err := e.copyDisksGuarded(ctx, client, run, domains, func(ctx context.Context) ([]*DiskManifest, error) {

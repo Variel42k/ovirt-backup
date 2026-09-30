@@ -130,6 +130,31 @@ func (c *Client) CreateVM(ctx context.Context, req CreateVMRequest) (*VM, error)
 	return &vm, nil
 }
 
+// CloneVMFromSnapshot создаёт выключенную ВМ из снапшота. Движок копирует
+// диски снапшота в новые образы: цепочку томов он собирает сам на хосте, поэтому
+// у дисков клона по одному тому. Запрос возвращается сразу; пока идёт
+// копирование, ВМ в статусе image_locked.
+func (c *Client) CloneVMFromSnapshot(ctx context.Context, name, description, clusterID, snapshotID string) (*VM, error) {
+	if strings.TrimSpace(name) == "" || clusterID == "" || snapshotID == "" {
+		return nil, errors.New("для клона из снапшота нужны имя, кластер и снапшот")
+	}
+	body := map[string]any{
+		"name":        name,
+		"description": description,
+		"cluster":     map[string]string{"id": clusterID},
+		"template":    map[string]string{"id": blankTemplateID},
+		"snapshots":   map[string]any{"snapshot": []map[string]string{{"id": snapshotID}}},
+	}
+	var vm VM
+	if err := c.post(ctx, "/vms", body, &vm); err != nil {
+		return nil, fmt.Errorf("клон ВМ %s из снапшота: %w", name, err)
+	}
+	if vm.ID == "" {
+		return nil, fmt.Errorf("движок принял клон ВМ %s, но не вернул её идентификатор", name)
+	}
+	return &vm, nil
+}
+
 // DiskInterfaceForBus приводит имя шины из профиля к тому, что понимает движок.
 //
 // Профиль хранит libvirt-имена (scsi, virtio, ide), а движок ждёт свои

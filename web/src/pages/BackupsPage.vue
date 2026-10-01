@@ -487,6 +487,7 @@ function restorePhaseTitle(phase?: string): string {
     opening_transfer: 'открытие ImageIO',
     writing_data: 'запись данных',
     flushing: 'фиксация данных на диске',
+    finalizing_transfer: 'завершение ImageTransfer и разблокировка диска',
     attaching_disk: 'подключение диска к ВМ',
     restoring_disks: 'восстановление дисков',
     creating_networks: 'создание сетевых интерфейсов',

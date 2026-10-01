@@ -430,6 +430,7 @@ function checkPhaseTitle(phase?: string): string {
     queued: 'ожидает запуска', preparing: 'подготовка цепочки бэкапа', creating_vm: 'создание ВМ',
     creating_disk: 'создание диска', waiting_disk: 'ожидание готовности диска',
     opening_transfer: 'открытие ImageIO', writing_data: 'запись данных', flushing: 'фиксация данных на диске',
+    finalizing_transfer: 'завершение ImageTransfer и разблокировка диска',
     attaching_disk: 'подключение диска к ВМ', restoring_disks: 'восстановление дисков',
     creating_networks: 'создание сетевых интерфейсов', starting_vm: 'запуск ВМ',
     waiting_guest: 'ожидание ответа гостевого агента', cleanup: 'удаление временной ВМ и дисков',

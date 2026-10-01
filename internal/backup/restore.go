@@ -476,7 +476,11 @@ func (e *Engine) restoreToEngine(ctx context.Context, set *ChainSet, reader *Cha
 	record.TransferID = transfer.ID
 	_ = e.store.UpdateRestoreRun(ctx, record)
 	success := false
+	transferClosed := false
 	defer func() {
+		if transferClosed {
+			return
+		}
 		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
 		defer cancel()
 		if err := client.CloseTransfer(closeCtx, transfer.ID, success); err != nil {
@@ -568,6 +572,28 @@ func (e *Engine) restoreToEngine(ctx context.Context, set *ChainSet, reader *Cha
 	success = true
 	e.log.Info().Str("restore", record.ID).Str("диск", record.TargetDiskName).
 		Str("диск-id", targetDiskID).Msg("запись и flush диска завершены")
+
+	// Finalize is asynchronous: the POST only asks the engine to finish. The
+	// disk remains locked until ImageTransfer reaches finished_success, so an
+	// immediate AttachDisk deterministically races and receives HTTP 409.
+	record.Phase = "finalizing_transfer"
+	_ = e.store.UpdateRestoreRun(ctx, record)
+	watch.Observe("imageio_finalize", 0, leaf.VirtualSize)
+	e.log.Info().Str("restore", record.ID).Str("transfer", transfer.ID).
+		Str("диск", record.TargetDiskName).Msg("завершаю ImageTransfer и ожидаю освобождение диска")
+	finalizeCtx, finalizeCancel := context.WithTimeout(ctx, 10*time.Minute)
+	err = client.FinalizeTransferAndWait(finalizeCtx, transfer.ID, 10*time.Minute)
+	finalizeCancel()
+	if err != nil {
+		return fmt.Errorf("завершение ImageTransfer %s: %w", transfer.ID, err)
+	}
+	transferClosed = true
+	if err := client.WaitDiskStatus(ctx, targetDiskID, "ok", 10*time.Minute); err != nil {
+		return fmt.Errorf("ожидание разблокировки диска после ImageTransfer: %w", err)
+	}
+	e.log.Info().Str("restore", record.ID).Str("transfer", transfer.ID).
+		Str("диск", record.TargetDiskName).Str("диск-id", targetDiskID).
+		Msg("ImageTransfer завершён, диск разблокирован")
 
 	if req.AttachToVMID != "" {
 		record.Phase = "attaching_disk"

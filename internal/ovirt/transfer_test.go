@@ -192,3 +192,37 @@ func TestCreateTransferWhenReadyCachesOVirt43ShapeWhileDiskLocked(t *testing.T) 
 		t.Fatalf("unexpected request shapes (true is 4.4): %v", modern)
 	}
 }
+
+func TestFinalizeTransferAndWaitReleasesDiskBeforeCallerContinues(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ovirt-engine/sso/oauth/token", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"token","exp":"9999999999999"}`))
+	})
+
+	var calls []string
+	mux.HandleFunc("/ovirt-engine/api/imagetransfers/transfer-1/finalize", func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, r.Method+" finalize")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	})
+	mux.HandleFunc("/ovirt-engine/api/imagetransfers/transfer-1", func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, r.Method+" status")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"transfer-1","phase":"finished_success"}`))
+	})
+
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	client, err := New(Config{EngineURL: server.URL, Username: "admin@internal", Password: "x"})
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	if err := client.FinalizeTransferAndWait(context.Background(), "transfer-1", time.Second); err != nil {
+		t.Fatalf("finalize and wait: %v", err)
+	}
+	want := []string{"POST finalize", "GET status"}
+	if len(calls) != len(want) || calls[0] != want[0] || calls[1] != want[1] {
+		t.Fatalf("порядок вызовов = %v, нужно %v", calls, want)
+	}
+}

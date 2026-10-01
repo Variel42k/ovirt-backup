@@ -145,6 +145,8 @@ export function transferPauseHint(phase?: string): string {
   switch (phase) {
     case 'flushing':
       return 'данные уже отправлены; ImageIO фиксирует их и метаданные диска, поэтому Sent в движке не растёт'
+    case 'finalizing_transfer':
+      return 'движок завершает ImageTransfer; подключение диска начнётся только после снятия блокировки'
     case 'writing_data':
     case 'restoring_disks':
       return 'нет новых подтверждённых диапазонов; журнал различит чтение копии и ожидание ImageIO'

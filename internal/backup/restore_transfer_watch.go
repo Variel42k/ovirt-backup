@@ -94,6 +94,8 @@ func restoreStageHint(stage string) string {
 		return "ovirt-imageio на указанном узле, сеть до него и задержки домена хранения"
 	case "imageio_flush":
 		return "журнал ovirt-imageio и операции/свободное место домена хранения; Sent в движке во время flush не растёт"
+	case "imageio_finalize":
+		return "состояние ImageTransfer в движке; диск остаётся locked до finished_success"
 	case "imageio_options":
 		return "доступность ticket URL ovirt-imageio"
 	default:

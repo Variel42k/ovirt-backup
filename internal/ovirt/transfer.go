@@ -227,6 +227,23 @@ func (c *Client) WaitTransferDone(ctx context.Context, id string, timeout time.D
 	}
 }
 
+// FinalizeTransferAndWait completes an upload and waits until the engine has
+// actually released the disk. A successful POST /finalize is only an accepted
+// request; attaching the disk before the terminal phase races its engine lock.
+func (c *Client) FinalizeTransferAndWait(ctx context.Context, id string, timeout time.Duration) error {
+	if err := c.FinalizeTransfer(ctx, id); err != nil {
+		return err
+	}
+	phase, err := c.WaitTransferDone(ctx, id, timeout)
+	if err != nil {
+		return err
+	}
+	if phase != "finished_success" {
+		return fmt.Errorf("передача %s завершилась в состоянии %s", id, phase)
+	}
+	return nil
+}
+
 // CloseTransfer finalises a transfer, falling back to cancel when finalising is
 // rejected. Used in deferred cleanup where the caller cannot handle an error
 // but must not leave a disk locked.

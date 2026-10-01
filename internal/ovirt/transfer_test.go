@@ -125,7 +125,7 @@ func TestCreateTransferFallsBackToOVirt43Request(t *testing.T) {
 		t.Fatalf("client: %v", err)
 	}
 
-	request := TransferRequest{SnapshotID: "image-1", Direction: "download", Format: "raw"}
+	request := TransferRequest{SnapshotID: "image-1", HostID: "selected-host", Direction: "download", Format: "raw"}
 	transfer, err := client.CreateTransfer(context.Background(), request)
 	if err != nil {
 		t.Fatalf("create transfer: %v", err)
@@ -157,6 +157,41 @@ func TestCreateTransferFallsBackToOVirt43Request(t *testing.T) {
 	}
 	if _, exists := requests[2]["timeout_policy"]; exists {
 		t.Fatalf("cached 4.3 request contains timeout_policy: %#v", requests[2])
+	}
+	for _, body := range requests {
+		host, ok := body["host"].(map[string]any)
+		if !ok || host["id"] != "selected-host" {
+			t.Fatalf("modern/4.3 request lost selected host: %#v", body)
+		}
+	}
+}
+
+func TestCreateUploadForNewDiskRejectsRecoveredTransferOnOtherHost(t *testing.T) {
+	var posts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/ovirt-engine/sso/oauth/token" {
+			_, _ = w.Write([]byte(`{"access_token":"token","exp":"9999999999999"}`))
+			return
+		}
+		if r.Method == http.MethodPost {
+			posts.Add(1)
+			time.Sleep(100 * time.Millisecond)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"image_transfer": []ImageTransfer{
+			{ID: "wrong-host", Direction: "upload", Phase: "transferring", Image: Ref{ID: "disk-1"}, Host: Ref{ID: "other-host"}},
+		}})
+	}))
+	defer server.Close()
+	client, err := New(Config{EngineURL: server.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	transfer, err := client.CreateUploadForNewDisk(context.Background(), TransferRequest{
+		DiskID: "disk-1", HostID: "selected-host", Direction: "upload", RequestTimeout: 30 * time.Millisecond,
+	})
+	if err == nil || transfer != nil || posts.Load() != 1 {
+		t.Fatalf("continued transfer on another host or repeated POST: %+v, %v, posts=%d", transfer, err, posts.Load())
 	}
 }
 

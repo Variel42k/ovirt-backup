@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { useQuasar } from 'quasar'
+import { copyToClipboard, useQuasar } from 'quasar'
 import { useRoute, useRouter } from 'vue-router'
 import { api, errorMessage, notify, notifyError, notifyOk } from '@/api/client'
 import DirectoryPicker from '@/components/DirectoryPicker.vue'
@@ -61,6 +61,19 @@ function setRunBusy(id: string, busy: boolean) {
 
 const detail = ref<BackupRun | null>(null)
 const detailOpen = ref(false)
+/**
+ * Лист карточки запуска.
+ *
+ * Карточка была одной длинной лентой: показатели, хронология, графики,
+ * диски, цепочка, а под ними каждая проверка и каждое восстановление с полным
+ * текстом ошибки. После нескольких неудачных проверок до сути было не
+ * долистать. Теперь это листы, а попытка открывается отдельным листом.
+ */
+const detailTab = ref<'overview' | 'progress' | 'checks' | 'restores'>('overview')
+const attemptOpen = ref(false)
+const attemptVerify = ref<VerifyRun | null>(null)
+const attemptRestore = ref<RestoreRun | null>(null)
+const attemptParent = ref<VerifyRun | null>(null)
 const chain = ref<BackupRun[]>([])
 const verifications = ref<VerifyRun[]>([])
 const artifacts = ref<RepositoryArtifact[]>([])
@@ -112,6 +125,7 @@ const restoreNetworks = ref<RestoreNetworkTarget[]>([])
 const targetInventoryLoading = ref(false)
 const targetInventoryError = ref('')
 let targetInventorySequence = 0
+const diskHostTargets = ref<import('@/api/types').HostStorageTargets | null>(null)
 
 // План сборки машины целиком. Запрашивается отдельно и до запуска: он ничего
 // не создаёт, а показывает объём и последствия — сколько дисков, сколько
@@ -138,7 +152,7 @@ const restoreTargetOptions = computed(() => nativeProxmoxRestore.value
   : [
       { label: 'Собрать машину целиком: создать ВМ, диски и подключить их', value: 'new_vm' },
       { label: 'Собрать образ в файл на сервере бэкапов', value: 'file' },
-      { label: 'Создать новый диск в oVirt и залить в него', value: 'new_disk' },
+      { label: 'Создать новый диск в oVirt и загрузить данные', value: 'new_disk' },
       { label: 'Записать поверх существующего диска', value: 'disk' },
     ])
 const compatibleRestoreServers = computed(() => {
@@ -151,6 +165,11 @@ const compatibleRestoreServers = computed(() => {
     return server.kind !== 'kvm' && server.kind !== 'proxmox'
   })
 })
+const diskRestoreServers = computed(() => app.servers.filter((server) =>
+  server.enabled && usesOVirtAPI(server.kind) && app.serverSupports(server, 'supports_restore'),
+))
+const selectedDiskHost = computed(() => restoreHosts.value.find((host) => host.id === vmForm.value.host_id))
+const selectedDiskDomain = computed(() => domains.value.find((domain) => domain.id === restoreForm.value.target_domain_id))
 
 async function loadVMTargetInventory(serverId: string) {
   const sequence = ++targetInventorySequence
@@ -160,12 +179,23 @@ async function loadVMTargetInventory(serverId: string) {
   clusters.value = []
   restoreHosts.value = []
   restoreNetworks.value = []
+  diskHostTargets.value = null
+  if (restoreForm.value.target === 'new_disk') {
+    vmForm.value.host_id = ''
+    restoreForm.value.target_domain_id = ''
+    invalidateRestoreDestination()
+  }
   if (!serverId) {
     targetInventoryLoading.value = false
     return
   }
   const server = app.servers.find((item) => item.id === serverId)
   try {
+    if (restoreForm.value.target === 'new_disk') {
+      const hosts = await api.listHosts(serverId, true)
+      if (sequence === targetInventorySequence) restoreHosts.value = hosts
+      return
+    }
     const [targetDomains, targetNetworks, targetClusters, targetHosts] = await Promise.all([
       api.listStorageDomains(serverId),
       server?.kind === 'proxmox' ? Promise.resolve([] as RestoreNetworkTarget[]) : api.listRestoreNetworks(serverId),
@@ -192,6 +222,8 @@ async function changeVMTargetServer(serverId: string) {
   vmForm.value.host_id = ''
   vmForm.value.network_mappings = []
   restoreForm.value.target_domain_id = ''
+  restoreForm.value.attach_to_vm_id = ''
+  invalidateRestoreDestination()
   invalidateVMPlan()
   await loadVMTargetInventory(serverId)
 }
@@ -200,12 +232,45 @@ async function changeRestoreTarget(target: string) {
   restoreForm.value.overwrite_confirm = false
   invalidateVMPlan()
   maxRestoreStep.value = 1
-  if (target === 'new_vm') {
-    await loadVMTargetInventory(vmForm.value.server_id)
+  if (target === 'new_vm' || target === 'new_disk') {
+    const allowed = target === 'new_disk' ? diskRestoreServers.value : compatibleRestoreServers.value
+    const serverId = allowed.some((server) => server.id === vmForm.value.server_id)
+      ? vmForm.value.server_id : allowed.find((server) => server.id === detail.value?.server_id)?.id ?? allowed[0]?.id ?? ''
+    await changeVMTargetServer(serverId)
   } else if (detail.value) {
     await loadVMTargetInventory(detail.value.server_id)
   }
 }
+
+async function changeDiskTargetHost(hostId: string | null) {
+  const sequence = ++targetInventorySequence
+  const serverId = vmForm.value.server_id
+  vmForm.value.host_id = hostId ?? ''
+  restoreForm.value.target_domain_id = ''
+  domains.value = []
+  diskHostTargets.value = null
+  targetInventoryError.value = ''
+  targetInventoryLoading.value = Boolean(hostId)
+  invalidateRestoreDestination()
+  if (!hostId) return
+  try {
+    const targets = await api.listHostStorageDomains(serverId, hostId)
+    if (sequence !== targetInventorySequence) return
+    diskHostTargets.value = targets
+    domains.value = targets.domains
+  } catch (err) {
+    if (sequence === targetInventorySequence) targetInventoryError.value = errorMessage(err)
+  } finally {
+    if (sequence === targetInventorySequence) targetInventoryLoading.value = false
+  }
+}
+
+watch(restoreOpen, (open) => {
+  if (!open) {
+    ++targetInventorySequence
+    targetInventoryLoading.value = false
+  }
+})
 
 async function load(silent = false) {
   if (silent && loading.value) return
@@ -235,11 +300,18 @@ async function openDetail(run: BackupRun) {
   const changingRun = detail.value?.id !== run.id
   detailOpen.value = true
   detail.value = run
-  chain.value = []
-  verifications.value = []
-	artifacts.value = []
-  runRestores.value = []
-  if (changingRun) telemetry.value = { events: [], databases: [], disks: [] }
+  // Списки очищаются только при смене запуска. Карточка обновляется сама по
+  // живым событиям, и очистка на каждое обновление заставляла открытый лист
+  // мигать, а лист попытки — терять свою запись.
+  if (changingRun) {
+    chain.value = []
+    verifications.value = []
+    artifacts.value = []
+    runRestores.value = []
+    telemetry.value = { events: [], databases: [], disks: [] }
+    detailTab.value = 'overview'
+    attemptOpen.value = false
+  }
   telemetryLoading.value = true
   telemetryError.value = ''
   try {
@@ -610,7 +682,10 @@ async function submitVerify() {
     } else {
       notifyOk('Проверка запущена в фоне')
     }
-    if (detailOpen.value && detail.value?.id === run.id) await openDetail(run)
+    if (detailOpen.value && detail.value?.id === run.id) {
+      detailTab.value = 'checks'
+      await openDetail(run)
+    }
   } catch (err) {
     notifyError(err, 'Проверка не выполнена')
   } finally {
@@ -683,6 +758,77 @@ function bootReport(check: VerifyRun): BootReport | null {
   return (parseDetails(check.details)?.boot as BootReport) ?? null
 }
 
+/** Итог попытки проверки одной строкой — для списка попыток. */
+function verifyOutcome(check: VerifyRun): string {
+  if (check.status === 'running') return `этап: ${restorePhaseTitle(check.phase)} · ${check.progress}%`
+  const boot = bootReport(check)
+  if (boot) {
+    if (boot.agent_replied) return `гость ответил за ${boot.elapsed ?? '—'}`
+    if (boot.started) return 'ВМ запустилась, гостевой агент не ответил'
+    if (boot.stage === 'assembly') return 'проверочную ВМ не удалось собрать'
+    return 'ВМ не удалось запустить'
+  }
+  return String(parseDetails(check.details)?.summary ?? runStatus(check.status))
+}
+
+function openVerifyAttempt(check: VerifyRun) {
+  attemptParent.value = null
+  attemptRestore.value = null
+  attemptVerify.value = check
+  attemptOpen.value = true
+}
+
+/** Восстановление, открытое из листа проверки, помнит её — чтобы вернуться. */
+function openRestoreAttempt(item: RestoreRun) {
+  attemptParent.value = attemptOpen.value ? attemptVerify.value : null
+  attemptVerify.value = null
+  attemptRestore.value = item
+  attemptOpen.value = true
+}
+
+/**
+ * Восстановления, созданные за время попытки проверки.
+ *
+ * Пробный запуск сам создаёт записи восстановления — сборку проверочной ВМ и
+ * запись каждого диска. Связи между ними в API нет, поэтому они подбираются по
+ * времени; восстановление, запущенное вручную в те же минуты, попадёт сюда же.
+ */
+const attemptRelatedRestores = computed<RestoreRun[]>(() => {
+  const check = attemptVerify.value
+  if (!check) return []
+  const from = new Date(check.started_at ?? check.created_at).getTime() - 5_000
+  const to = check.ended_at ? new Date(check.ended_at).getTime() + 5_000 : Number.POSITIVE_INFINITY
+  return runRestores.value.filter((item) => {
+    const at = new Date(item.created_at).getTime()
+    return at >= from && at <= to
+  })
+})
+
+const attemptTitle = computed(() => {
+  if (attemptVerify.value) return `Проверка: ${app.verifyModeTitle(attemptVerify.value.mode)}`
+  if (attemptRestore.value) return `Восстановление: ${restoreTargetTitle(attemptRestore.value.target)}`
+  return ''
+})
+const attemptStatus = computed(() => attemptVerify.value?.status ?? attemptRestore.value?.status ?? '')
+const attemptError = computed(() => attemptVerify.value?.error ?? attemptRestore.value?.error ?? '')
+
+async function copyAttemptError() {
+  try {
+    await copyToClipboard(attemptError.value)
+    notifyOk('Текст ошибки скопирован')
+  } catch {
+    notify({ type: 'negative', message: 'Не удалось скопировать: выделите текст вручную' })
+  }
+}
+
+// Открытый лист попытки показывает свежую запись после каждого обновления карточки.
+watch([verifications, runRestores], () => {
+  const check = attemptVerify.value
+  if (check) attemptVerify.value = verifications.value.find((item) => item.id === check.id) ?? check
+  const restore = attemptRestore.value
+  if (restore) attemptRestore.value = runRestores.value.find((item) => item.id === restore.id) ?? restore
+})
+
 async function openRestore(run: BackupRun) {
 	try {
 		detail.value = run.copies?.length ? run : await api.getRun(run.id)
@@ -748,8 +894,12 @@ function validateRestoreStep(step: number): string {
     if (vmPlanDirty.value) return 'Параметры изменились — обновите план.'
     if (vmPlan.value.blockers?.length) return 'В плане остались блокирующие проблемы.'
   }
-  if (restoreForm.value.target === 'new_disk' && !restoreForm.value.target_domain_id) {
-    return 'Выберите домен хранения для нового диска.'
+  if (restoreForm.value.target === 'new_disk') {
+    if (!diskRestoreServers.value.some((server) => server.id === vmForm.value.server_id)) return 'Выберите подключённую виртуализацию oVirt, RHV или РЕД Виртуализация.'
+    if (targetInventoryLoading.value) return 'Дождитесь загрузки хостов и хранилищ.'
+    if (targetInventoryError.value) return 'Повторите загрузку хостов или хранилищ.'
+    if (!selectedDiskHost.value || selectedDiskHost.value.status !== 'up') return 'Выберите работающий хост для загрузки диска.'
+    if (diskHostTargets.value?.host_id !== vmForm.value.host_id || !selectedDiskDomain.value) return 'Выберите доступное хранилище выбранного хоста для нового диска.'
   }
   if (restoreForm.value.target === 'disk') {
     if (!restoreForm.value.target_disk_id.trim()) return 'Укажите ID существующего диска.'
@@ -969,6 +1119,10 @@ async function submitRestore() {
   }
   const payload: Record<string, unknown> = { ...restoreForm.value }
   delete payload.overwrite_confirm
+  if (restoreForm.value.target === 'new_disk') {
+    payload.target_server_id = vmForm.value.server_id
+    payload.target_host_id = vmForm.value.host_id
+  }
   if (restoreForm.value.target === 'file') {
     delete payload.target_domain_id
     delete payload.target_disk_id
@@ -1107,10 +1261,14 @@ onMounted(async () => {
 
 watch(() => route.query, () => void applyRoute())
 watch(detailOpen, (open) => {
-  if (!open) detailLoadSequence += 1
+  if (!open) {
+    detailLoadSequence += 1
+    attemptOpen.value = false
+  }
 })
 
 onBeforeUnmount(() => {
+  ++targetInventorySequence
 	liveSource?.close()
 	if (liveRefreshTimer) window.clearTimeout(liveRefreshTimer)
 	if (fallbackPollTimer) window.clearInterval(fallbackPollTimer)
@@ -1513,14 +1671,41 @@ const replicationColumns = [
 
     <!-- Подробности запуска -->
     <q-dialog v-model="detailOpen">
-      <q-card style="width: 1100px; max-width: 96vw">
-        <q-card-section class="text-h6">
-          {{ detail?.vm_name }} — {{ app.backupTypeTitle(detail?.type) }}
-          <div class="text-caption text-grey-7">{{ dateTime(detail?.created_at) }}</div>
+      <q-card style="width: 1100px; max-width: 96vw" data-testid="run-detail">
+        <q-card-section class="row items-start no-wrap q-pb-sm">
+          <div>
+            <div class="text-h6">{{ detail?.vm_name }} — {{ app.backupTypeTitle(detail?.type) }}</div>
+            <div class="text-caption text-grey-7">{{ dateTime(detail?.created_at) }}</div>
+          </div>
+          <q-space />
+          <q-chip v-if="detail" dense :color="statusColor(detail.status)" text-color="white">
+            {{ runStatus(detail.status) }}
+          </q-chip>
         </q-card-section>
+        <q-tabs v-model="detailTab" dense align="left" active-color="primary" indicator-color="primary"
+                outside-arrows mobile-arrows>
+          <q-tab name="overview" label="Обзор" />
+          <q-tab name="progress" label="Ход выполнения" />
+          <q-tab name="checks" :label="`Проверки (${verifications.length})`"
+                 :alert="verifications.some((check) => check.status === 'running') ? 'primary' : false" />
+          <q-tab name="restores" :label="`Восстановления (${runRestores.length})`"
+                 :alert="runRestores.some((item) => item.status === 'running') ? 'primary' : false" />
+        </q-tabs>
         <q-separator />
 
-        <q-card-section style="max-height: 70vh" class="scroll">
+        <q-card-section class="scroll jhv-run-detail__body">
+          <!-- Заморозка гостя видна на любом листе: это единственное в
+               карточке, что требует действий немедленно. -->
+          <q-banner v-if="guestMayBeFrozen" dense class="bg-red-1 text-negative q-mb-md">
+            <template #avatar><q-icon name="error" /></template>
+            Разморозка гостя не подтверждена. Немедленно проверьте файловые системы ВМ вручную.
+          </q-banner>
+          <q-banner v-else-if="guestCurrentlyFrozen" dense class="bg-orange-1 text-warning q-mb-md">
+            <template #avatar><q-spinner color="warning" size="24px" /></template>
+            Гость сейчас заморожен: служба фиксирует точку бэкапа. Карточка обновляется автоматически.
+          </q-banner>
+
+          <div v-show="detailTab === 'overview'" data-testid="run-detail-overview">
           <div class="row q-col-gutter-md q-mb-md">
             <div class="col-6 col-sm-3">
               <div class="jhv-metric__label">Прочитано</div>
@@ -1555,119 +1740,6 @@ const replicationColumns = [
               <EngineLeftovers :server-id="detail.server_id" :vm-id="detail.vm_id" />
             </div>
           </q-expansion-item>
-
-          <div class="row items-center q-mb-xs">
-            <div class="text-subtitle2">Ход выполнения и влияние на ВМ</div>
-            <q-space />
-            <q-spinner v-if="telemetryLoading" color="primary" size="20px" />
-            <q-badge v-if="frozenDuration > 0" color="warning" outline>
-              запись в госте стояла {{ durationLabel(frozenDuration) }}
-            </q-badge>
-          </div>
-          <PageLoadError
-            v-if="telemetryError"
-            :message="telemetryError"
-            title="Телеметрия запуска недоступна"
-            class="q-mb-md"
-            @retry="detail && openDetail(detail)"
-          />
-          <q-banner v-if="guestMayBeFrozen" dense class="bg-red-1 text-negative q-mb-md">
-            <template #avatar><q-icon name="error" /></template>
-            Разморозка гостя не подтверждена. Немедленно проверьте файловые системы ВМ вручную.
-          </q-banner>
-          <q-banner v-else-if="guestCurrentlyFrozen" dense class="bg-orange-1 text-warning q-mb-md">
-            <template #avatar><q-spinner color="warning" size="24px" /></template>
-            Гость сейчас заморожен: служба фиксирует точку бэкапа. Карточка обновляется автоматически.
-          </q-banner>
-          <div class="row q-col-gutter-md q-mb-md">
-            <div class="col-12 col-md-5">
-              <q-timeline v-if="telemetry.events.length" layout="dense" color="primary" class="q-my-none">
-                <q-timeline-entry
-                  v-for="event in telemetry.events"
-                  :key="event.id"
-                  :title="event.title"
-                  :subtitle="`${dateTime(event.at)}${event.duration_ms ? ` · ${durationLabel(event.duration_ms)}` : ''}`"
-                  :color="eventColor(event.kind)"
-                  :icon="['run_failed', 'freeze_failed', 'thaw_failed'].includes(event.kind) ? 'error' : undefined"
-                >
-                  <div v-if="event.detail" class="text-caption jhv-wrap">{{ event.detail }}</div>
-                </q-timeline-entry>
-              </q-timeline>
-              <div v-else-if="!telemetryLoading" class="jhv-reason">
-                У старых запусков хронология отсутствует. Для текущего запуска этапы появляются по мере выполнения.
-              </div>
-            </div>
-            <div class="col-12 col-md-7">
-              <div class="text-caption text-weight-medium">Ввод-вывод гостя</div>
-              <div class="text-caption text-grey-7 q-mb-xs">
-                Что сама ВМ читала и писала на свои диски, по статистике движка. Чтение службы идёт через
-                ovirt-imageio на хосте, мимо гостя, и на графике не видно<template v-if="serviceReadRate !== null">:
-                служба прочитала {{ bytes(detail?.read_bytes) }}, в среднем {{ bytes(serviceReadRate) }}/с</template>.
-                Оранжевая полоса — заморозка, пунктир — этапы запуска.
-              </div>
-              <IOChart :points="vmIOPoints" :bands="freezeBands" :markers="runMarkers" :height="190" />
-              <div v-if="!vmIOPoints.length && !telemetryLoading" class="jhv-reason q-mt-xs">
-                За время запуска замеров I/O не получено. Проверьте, что сбор метрик включён, а учётная запись виртуализации может читать статистику дисков.
-              </div>
-              <div v-if="telemetry.impact" class="q-mt-sm" data-testid="run-io-impact">
-                <div class="row items-center q-gutter-xs">
-                  <div class="text-caption text-weight-medium">Влияние на ВМ</div>
-                  <q-chip dense :color="impactMeta[telemetry.impact.level].color" text-color="white">
-                    {{ impactMeta[telemetry.impact.level].label }}
-                  </q-chip>
-                </div>
-                <div class="text-caption jhv-wrap">{{ telemetry.impact.note }}</div>
-                <div v-if="telemetry.impact.write_during.samples || telemetry.impact.read_during.samples" class="text-caption text-grey-7">
-                  Задержка гостя, 95 % операций: запись {{ latency(telemetry.impact.write_during) }}
-                  (обычно {{ latency(telemetry.impact.write_baseline) }}), чтение {{ latency(telemetry.impact.read_during) }}
-                  (обычно {{ latency(telemetry.impact.read_baseline) }}).
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <template v-if="databaseSeries.length">
-            <div class="text-subtitle2 q-mb-xs">Транзакции СУБД</div>
-            <div class="jhv-reason q-mb-sm">
-              Накопительные счётчики читаются через защищённый SSH-хелпер без записи в пользовательские базы.
-              Оранжевая полоса — измеренный интервал заморозки гостя.
-            </div>
-            <q-card v-for="series in databaseSeries" :key="series.key" flat bordered class="q-mb-md">
-              <q-card-section class="q-pb-none">
-                <div class="row items-center">
-                  <div class="text-weight-medium">{{ series.label }}</div>
-                  <q-space />
-                  <div v-if="series.latest" class="text-caption text-grey-7">
-                    активных соединений: {{ series.latest.active }}
-                  </div>
-                </div>
-                <q-banner v-if="series.errors" dense class="bg-orange-1 q-mt-sm">
-                  {{ series.errors }} {{ series.errors === 1 ? 'замер не выполнен' : 'замеров не выполнено' }}. Проверьте хелпер и права чтения статистики.
-                </q-banner>
-              </q-card-section>
-              <q-card-section>
-                <div class="text-caption text-grey-7">Транзакции в секунду</div>
-                <IOChart
-                  :points="series.transactionPoints"
-                  :bands="freezeBands"
-                  unit="count"
-                  read-label="коммиты"
-                  write-label="откаты"
-                  :show-latency="false"
-                  :height="145"
-                />
-                <div class="text-caption text-grey-7 q-mt-md">Запись журнала транзакций</div>
-                <IOChart
-                  :points="series.logPoints"
-                  :bands="freezeBands"
-                  read-label="WAL / redo"
-                  write-label=""
-                  :show-latency="false"
-                  :height="120"
-                />
-              </q-card-section>
-            </q-card>
-          </template>
 
 			<div class="text-subtitle2 q-mb-xs">Физические копии</div>
 			<q-list dense bordered separator class="q-mb-md">
@@ -1810,158 +1882,198 @@ const replicationColumns = [
             </q-item>
           </q-list>
 
-          <div class="text-subtitle2 q-mb-xs">Проверки</div>
-          <q-list dense bordered separator>
-            <q-item v-for="check in verifications" :key="check.id">
-              <q-item-section avatar>
-                <q-icon
-                  :name="check.status === 'succeeded' ? 'verified' : 'gpp_bad'"
-                  :color="statusColor(check.status)"
-                />
-              </q-item-section>
-              <q-item-section>
-                <q-item-label>{{ app.verifyModeTitle(check.mode) }}</q-item-label>
-                <q-item-label caption>
-                  {{ dateTime(check.created_at) }} ·
-                  {{ parseDetails(check.details)?.summary ?? runStatus(check.status) }}
-                </q-item-label>
-                <q-item-label v-if="check.status === 'running'" caption>
-                  этап: {{ restorePhaseTitle(check.phase) }} · {{ check.progress }}%
-                </q-item-label>
-                <template v-if="check.total_bytes > 0">
-                  <q-linear-progress
-                    v-if="check.status === 'running'"
-                    :value="transferRatio(check.transferred_bytes, check.total_bytes)"
-                    color="primary"
-                    size="6px"
-                    rounded
-                    class="q-mt-xs"
-                  />
-                  <q-item-label caption>
-                    Передача на площадку проверки: {{ transferSummary(check.transferred_bytes, check.total_bytes, check.bytes_per_second) }}
-                  </q-item-label>
-                  <q-item-label v-if="check.status === 'running' && check.last_progress_at" caption :class="staleFor(check.last_progress_at) ? 'text-warning' : 'text-grey-7'">
-                    <q-icon :name="staleFor(check.last_progress_at) ? 'warning' : 'schedule'" />
-                    последнее продвижение {{ ago(check.last_progress_at) }}
-                    <template v-if="staleFor(check.last_progress_at)"> · {{ transferPauseHint(check.phase) }}</template>
-                  </q-item-label>
-                </template>
-
-                <!-- Пробный запуск: чем именно закончилась загрузка гостя. -->
-                <q-item-label v-if="bootReport(check)" caption class="jhv-wrap">
-                  <template v-if="bootReport(check)!.agent_replied">
-                    <q-icon name="check_circle" color="positive" size="14px" />
-                    гость ответил за {{ bootReport(check)!.elapsed }}
-                    <template v-if="bootReport(check)!.guest_os"> · {{ bootReport(check)!.guest_os }}</template>
-                    <template v-if="bootReport(check)!.hostname"> · {{ bootReport(check)!.hostname }}</template>
-                  </template>
-                  <template v-else-if="bootReport(check)!.started">
-                    <q-icon name="help" color="warning" size="14px" />
-                    ВМ запустилась, но гостевой агент не ответил — либо он не установлен,
-                    либо система не загрузилась
-                  </template>
-                  <template v-else-if="bootReport(check)!.stage === 'assembly'">
-                    <q-icon name="cancel" color="negative" size="14px" />
-                    проверочную ВМ не удалось собрать: диски не записаны на площадку, до запуска дело не дошло
-                  </template>
-                  <template v-else>
-                    <q-icon name="cancel" color="negative" size="14px" />
-                    ВМ не удалось запустить
-                  </template>
-                  <div class="text-grey-7">
-                    движок/хост {{ bootReport(check)!.host }}
-                    <template v-if="bootReport(check)!.cluster_name"> · кластер {{ bootReport(check)!.cluster_name }}</template>
-                    <template v-if="bootReport(check)!.storage_domain_name"> · домен {{ bootReport(check)!.storage_domain_name }}</template>
-                    <template v-if="bootReport(check)!.image_bytes">
-                      · образ {{ bytes(bootReport(check)!.image_bytes) }}
-                    </template>
-                  </div>
-                  <div v-if="bootReport(check)!.vm_name || bootReport(check)!.domain_name" class="text-grey-7 jhv-mono">
-                    проверочная ВМ: {{ bootReport(check)!.vm_name || bootReport(check)!.domain_name }}
-                  </div>
-                  <div v-for="(note, i) in bootReport(check)!.notes ?? []" :key="i" class="text-grey-7">
-                    {{ note }}
-                  </div>
-                </q-item-label>
-
-                <q-item-label v-if="check.error" caption class="text-negative jhv-wrap">
-                  {{ check.error }}
-                </q-item-label>
-              </q-item-section>
-            </q-item>
-            <q-item v-if="!verifications.length">
-              <q-item-section class="text-grey-7">Проверок не было.</q-item-section>
-            </q-item>
-          </q-list>
-
-          <div class="row items-center q-mt-md q-mb-xs">
-            <div class="text-subtitle2">Восстановления с этой точки</div>
-            <q-space />
-            <q-btn flat dense no-caps color="primary" icon="cleaning_services" label="Передачи и остатки проверки"
-              :to="{ name: 'verify', query: { tab: 'leftovers' } }" />
-          </div>
-          <q-list dense bordered separator>
-            <q-item v-for="item in runRestores" :key="item.id">
-              <q-item-section avatar>
-                <q-icon name="restore" :color="statusColor(item.status)" />
-              </q-item-section>
-              <q-item-section>
-                <q-item-label>{{ restoreTargetTitle(item.target) }}</q-item-label>
-                <q-item-label caption>
-                  {{ dateTime(item.created_at) }} · {{ runStatus(item.status) }}
-                  <template v-if="item.ended_at"> · {{ elapsed(item.created_at, item.ended_at) }}</template>
-                </q-item-label>
-                <q-item-label caption>
-                  этап: {{ restorePhaseTitle(item.phase) }}<template v-if="item.status === 'running'"> · {{ item.progress }}%</template>
-                </q-item-label>
-                <template v-if="item.total_bytes > 0">
-                  <q-linear-progress
-                    v-if="item.status === 'running'"
-                    :value="transferRatio(item.transferred_bytes, item.total_bytes)"
-                    color="primary"
-                    size="6px"
-                    rounded
-                    class="q-mt-xs"
-                  />
-                  <q-item-label caption>
-                    Передано: {{ transferSummary(item.transferred_bytes, item.total_bytes, item.bytes_per_second) }}
-                  </q-item-label>
-                  <q-item-label v-if="item.status === 'running' && item.last_progress_at" caption :class="staleFor(item.last_progress_at) ? 'text-warning' : 'text-grey-7'">
-                    <q-icon :name="staleFor(item.last_progress_at) ? 'warning' : 'schedule'" />
-                    последнее продвижение {{ ago(item.last_progress_at) }}
-                    <template v-if="staleFor(item.last_progress_at)"> · {{ transferPauseHint(item.phase) }}</template>
-                  </q-item-label>
-                </template>
-                <q-item-label v-if="item.target_vm_name" caption class="jhv-mono jhv-wrap">
-                  ВМ: {{ item.target_vm_name }}<template v-if="item.target_vm_id"> · {{ item.target_vm_id }}</template>
-                </q-item-label>
-                <q-item-label v-if="item.target_disk_name || item.target_disk_id" caption class="jhv-mono jhv-wrap">
-                  диск: {{ item.target_disk_name || item.target_disk_id }}<template v-if="item.target_disk_name && item.target_disk_id"> · {{ item.target_disk_id }}</template>
-                </q-item-label>
-                <q-item-label v-if="item.transfer_id" caption class="jhv-mono jhv-wrap">
-                  ImageTransfer: {{ item.transfer_id }}
-                </q-item-label>
-                <q-item-label v-if="item.target_server_name || item.target_server_id" caption class="jhv-wrap">
-                  {{ item.target_server_name || app.serverName(item.target_server_id) }}
-                  <template v-if="item.target_cluster_name"> · кластер {{ item.target_cluster_name }}</template>
-                  <template v-if="item.target_domain_name"> · домен {{ item.target_domain_name }}</template>
-                </q-item-label>
-                <q-item-label v-if="item.output_path" caption class="jhv-mono jhv-wrap">
-                  {{ item.output_path }}
-                </q-item-label>
-                <q-item-label v-if="item.error" caption class="text-negative jhv-wrap">
-                  {{ item.error }}
-                </q-item-label>
-              </q-item-section>
-            </q-item>
-            <q-item v-if="!runRestores.length">
-              <q-item-section class="text-grey-7">С этой точки ничего не восстанавливали.</q-item-section>
-            </q-item>
-          </q-list>
-
           <div class="text-caption text-grey-7 q-mt-md jhv-mono jhv-wrap">
             путь в хранилище: {{ detail?.repo_path }}<br />
             checkpoint: {{ detail?.from_checkpoint_id || '—' }} → {{ detail?.to_checkpoint_id || '—' }}
+          </div>
+          </div>
+
+          <div v-if="detailTab === 'progress'" data-testid="run-detail-progress">
+          <div class="row items-center q-mb-xs">
+            <div class="text-subtitle2">Ход выполнения и влияние на ВМ</div>
+            <q-space />
+            <q-spinner v-if="telemetryLoading" color="primary" size="20px" />
+            <q-badge v-if="frozenDuration > 0" color="warning" outline>
+              запись в госте стояла {{ durationLabel(frozenDuration) }}
+            </q-badge>
+          </div>
+          <PageLoadError
+            v-if="telemetryError"
+            :message="telemetryError"
+            title="Телеметрия запуска недоступна"
+            class="q-mb-md"
+            @retry="detail && openDetail(detail)"
+          />
+          <div class="row q-col-gutter-md q-mb-md">
+            <div class="col-12 col-md-5">
+              <q-timeline v-if="telemetry.events.length" layout="dense" color="primary" class="q-my-none">
+                <q-timeline-entry
+                  v-for="event in telemetry.events"
+                  :key="event.id"
+                  :title="event.title"
+                  :subtitle="`${dateTime(event.at)}${event.duration_ms ? ` · ${durationLabel(event.duration_ms)}` : ''}`"
+                  :color="eventColor(event.kind)"
+                  :icon="['run_failed', 'freeze_failed', 'thaw_failed'].includes(event.kind) ? 'error' : undefined"
+                >
+                  <div v-if="event.detail" class="text-caption jhv-wrap">{{ event.detail }}</div>
+                </q-timeline-entry>
+              </q-timeline>
+              <div v-else-if="!telemetryLoading" class="jhv-reason">
+                У старых запусков хронология отсутствует. Для текущего запуска этапы появляются по мере выполнения.
+              </div>
+            </div>
+            <div class="col-12 col-md-7">
+              <div class="text-caption text-weight-medium">Ввод-вывод гостя</div>
+              <div class="text-caption text-grey-7 q-mb-xs">
+                Что сама ВМ читала и писала на свои диски, по статистике движка. Чтение службы идёт через
+                ovirt-imageio на хосте, мимо гостя, и на графике не видно<template v-if="serviceReadRate !== null">:
+                служба прочитала {{ bytes(detail?.read_bytes) }}, в среднем {{ bytes(serviceReadRate) }}/с</template>.
+                Оранжевая полоса — заморозка, пунктир — этапы запуска.
+              </div>
+              <IOChart :points="vmIOPoints" :bands="freezeBands" :markers="runMarkers" :height="190" />
+              <div v-if="!vmIOPoints.length && !telemetryLoading" class="jhv-reason q-mt-xs">
+                За время запуска замеров I/O не получено. Проверьте, что сбор метрик включён, а учётная запись виртуализации может читать статистику дисков.
+              </div>
+              <div v-if="telemetry.impact" class="q-mt-sm" data-testid="run-io-impact">
+                <div class="row items-center q-gutter-xs">
+                  <div class="text-caption text-weight-medium">Влияние на ВМ</div>
+                  <q-chip dense :color="impactMeta[telemetry.impact.level].color" text-color="white">
+                    {{ impactMeta[telemetry.impact.level].label }}
+                  </q-chip>
+                </div>
+                <div class="text-caption jhv-wrap">{{ telemetry.impact.note }}</div>
+                <div v-if="telemetry.impact.write_during.samples || telemetry.impact.read_during.samples" class="text-caption text-grey-7">
+                  Задержка гостя, 95 % операций: запись {{ latency(telemetry.impact.write_during) }}
+                  (обычно {{ latency(telemetry.impact.write_baseline) }}), чтение {{ latency(telemetry.impact.read_during) }}
+                  (обычно {{ latency(telemetry.impact.read_baseline) }}).
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <template v-if="databaseSeries.length">
+            <div class="text-subtitle2 q-mb-xs">Транзакции СУБД</div>
+            <div class="jhv-reason q-mb-sm">
+              Накопительные счётчики читаются через защищённый SSH-хелпер без записи в пользовательские базы.
+              Оранжевая полоса — измеренный интервал заморозки гостя.
+            </div>
+            <q-card v-for="series in databaseSeries" :key="series.key" flat bordered class="q-mb-md">
+              <q-card-section class="q-pb-none">
+                <div class="row items-center">
+                  <div class="text-weight-medium">{{ series.label }}</div>
+                  <q-space />
+                  <div v-if="series.latest" class="text-caption text-grey-7">
+                    активных соединений: {{ series.latest.active }}
+                  </div>
+                </div>
+                <q-banner v-if="series.errors" dense class="bg-orange-1 q-mt-sm">
+                  {{ series.errors }} {{ series.errors === 1 ? 'замер не выполнен' : 'замеров не выполнено' }}. Проверьте хелпер и права чтения статистики.
+                </q-banner>
+              </q-card-section>
+              <q-card-section>
+                <div class="text-caption text-grey-7">Транзакции в секунду</div>
+                <IOChart
+                  :points="series.transactionPoints"
+                  :bands="freezeBands"
+                  unit="count"
+                  read-label="коммиты"
+                  write-label="откаты"
+                  :show-latency="false"
+                  :height="145"
+                />
+                <div class="text-caption text-grey-7 q-mt-md">Запись журнала транзакций</div>
+                <IOChart
+                  :points="series.logPoints"
+                  :bands="freezeBands"
+                  read-label="WAL / redo"
+                  write-label=""
+                  :show-latency="false"
+                  :height="120"
+                />
+              </q-card-section>
+            </q-card>
+          </template>
+
+          </div>
+
+          <div v-if="detailTab === 'checks'" data-testid="run-detail-checks">
+            <div class="jhv-reason q-mb-sm">
+              Каждая строка — одна попытка проверки. Подробности попытки и текст ошибки целиком
+              открываются отдельным листом.
+            </div>
+            <q-list dense bordered separator>
+              <q-item v-for="check in verifications" :key="check.id" clickable data-testid="verify-attempt"
+                      @click="openVerifyAttempt(check)">
+                <q-item-section avatar>
+                  <q-spinner v-if="check.status === 'running'" color="primary" size="22px" />
+                  <q-icon v-else :name="check.status === 'succeeded' ? 'verified' : 'gpp_bad'" :color="statusColor(check.status)" />
+                </q-item-section>
+                <q-item-section>
+                  <q-item-label>{{ app.verifyModeTitle(check.mode) }}</q-item-label>
+                  <q-item-label caption>
+                    {{ dateTime(check.created_at) }} · {{ runStatus(check.status) }}
+                    <template v-if="check.ended_at"> · {{ elapsed(check.started_at ?? check.created_at, check.ended_at) }}</template>
+                    · {{ verifyOutcome(check) }}
+                  </q-item-label>
+                  <q-linear-progress
+                    v-if="check.status === 'running' && check.total_bytes > 0"
+                    :value="transferRatio(check.transferred_bytes, check.total_bytes)"
+                    color="primary" size="4px" rounded class="q-mt-xs"
+                  />
+                  <q-item-label v-if="check.error" caption lines="1" class="text-negative">{{ check.error }}</q-item-label>
+                </q-item-section>
+                <q-item-section side><q-icon name="chevron_right" /></q-item-section>
+              </q-item>
+              <q-item v-if="!verifications.length">
+                <q-item-section class="text-grey-7">Проверок не было.</q-item-section>
+              </q-item>
+            </q-list>
+          </div>
+
+          <div v-if="detailTab === 'restores'" data-testid="run-detail-restores">
+            <div class="row items-center q-mb-sm">
+              <div class="jhv-reason col">
+                Каждая строка — одна попытка восстановления с этой точки. Пробный запуск тоже создаёт
+                такие записи: сборку проверочной ВМ и запись каждого её диска.
+              </div>
+              <q-btn flat dense no-caps color="primary" icon="cleaning_services" label="Передачи и остатки проверки"
+                :to="{ name: 'verify', query: { tab: 'leftovers' } }" />
+            </div>
+            <q-list dense bordered separator>
+              <q-item v-for="item in runRestores" :key="item.id" clickable data-testid="restore-attempt"
+                      @click="openRestoreAttempt(item)">
+                <q-item-section avatar>
+                  <q-spinner v-if="item.status === 'running'" color="primary" size="22px" />
+                  <q-icon v-else name="restore" :color="statusColor(item.status)" />
+                </q-item-section>
+                <q-item-section>
+                  <q-item-label>
+                    {{ restoreTargetTitle(item.target) }}
+                    <span v-if="item.target_vm_name || item.target_disk_name" class="text-grey-7">
+                      · {{ item.target_vm_name || item.target_disk_name }}
+                    </span>
+                  </q-item-label>
+                  <q-item-label caption>
+                    {{ dateTime(item.created_at) }} · {{ runStatus(item.status) }}
+                    <template v-if="item.ended_at"> · {{ elapsed(item.created_at, item.ended_at) }}</template>
+                    <template v-if="item.status === 'running'"> · этап: {{ restorePhaseTitle(item.phase) }} · {{ item.progress }}%</template>
+                    <template v-if="item.target_server_name || item.target_server_id">
+                      · {{ item.target_server_name || app.serverName(item.target_server_id) }}
+                    </template>
+                  </q-item-label>
+                  <q-linear-progress
+                    v-if="item.status === 'running' && item.total_bytes > 0"
+                    :value="transferRatio(item.transferred_bytes, item.total_bytes)"
+                    color="primary" size="4px" rounded class="q-mt-xs"
+                  />
+                  <q-item-label v-if="item.error" caption lines="1" class="text-negative">{{ item.error }}</q-item-label>
+                </q-item-section>
+                <q-item-section side><q-icon name="chevron_right" /></q-item-section>
+              </q-item>
+              <q-item v-if="!runRestores.length">
+                <q-item-section class="text-grey-7">С этой точки ничего не восстанавливали.</q-item-section>
+              </q-item>
+            </q-list>
           </div>
         </q-card-section>
 
@@ -1976,6 +2088,220 @@ const replicationColumns = [
             icon="restore"
             @click="openRestore(detail)"
           />
+          <q-btn flat label="Закрыть" v-close-popup />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
+
+    <!-- Лист одной попытки проверки или восстановления -->
+    <q-dialog v-model="attemptOpen">
+      <q-card style="width: 780px; max-width: 96vw" data-testid="attempt-sheet">
+        <q-card-section class="row items-start no-wrap q-pb-sm">
+          <div>
+            <div class="text-h6">{{ attemptTitle }}</div>
+            <div class="text-caption text-grey-7">
+              {{ detail?.vm_name }} · точка {{ dateTime(detail?.created_at) }}
+            </div>
+          </div>
+          <q-space />
+          <q-chip dense :color="statusColor(attemptStatus)" text-color="white">{{ runStatus(attemptStatus) }}</q-chip>
+        </q-card-section>
+        <q-separator />
+
+        <q-card-section style="max-height: 70vh" class="scroll">
+          <q-banner v-if="attemptError" dense class="bg-red-1 q-mb-md" data-testid="attempt-error">
+            <template #avatar><q-icon name="error" color="negative" /></template>
+            <div class="jhv-attempt-error">{{ attemptError }}</div>
+          </q-banner>
+
+          <template v-if="attemptVerify">
+            <q-markup-table flat dense bordered class="q-mb-md jhv-attempt-facts">
+              <tbody>
+                <tr><td>Начата</td><td>{{ dateTime(attemptVerify.started_at ?? attemptVerify.created_at) }}</td></tr>
+                <tr v-if="attemptVerify.ended_at">
+                  <td>Завершена</td>
+                  <td>
+                    {{ dateTime(attemptVerify.ended_at) }} ·
+                    {{ elapsed(attemptVerify.started_at ?? attemptVerify.created_at, attemptVerify.ended_at) }}
+                  </td>
+                </tr>
+                <tr><td>Итог</td><td class="jhv-wrap">{{ parseDetails(attemptVerify.details)?.summary ?? verifyOutcome(attemptVerify) }}</td></tr>
+                <tr v-if="attemptVerify.status === 'running'">
+                  <td>Этап</td>
+                  <td>{{ restorePhaseTitle(attemptVerify.phase) }} · {{ attemptVerify.progress }}%</td>
+                </tr>
+                <tr v-if="attemptVerify.total_bytes > 0">
+                  <td>Передача на площадку</td>
+                  <td>
+                    {{ transferSummary(attemptVerify.transferred_bytes, attemptVerify.total_bytes, attemptVerify.bytes_per_second) }}
+                    <q-linear-progress
+                      v-if="attemptVerify.status === 'running'"
+                      :value="transferRatio(attemptVerify.transferred_bytes, attemptVerify.total_bytes)"
+                      color="primary" size="6px" rounded class="q-mt-xs"
+                    />
+                    <div v-if="attemptVerify.status === 'running' && attemptVerify.last_progress_at"
+                         :class="staleFor(attemptVerify.last_progress_at) ? 'text-warning' : 'text-grey-7'">
+                      <q-icon :name="staleFor(attemptVerify.last_progress_at) ? 'warning' : 'schedule'" />
+                      последнее продвижение {{ ago(attemptVerify.last_progress_at) }}
+                      <template v-if="staleFor(attemptVerify.last_progress_at)"> · {{ transferPauseHint(attemptVerify.phase) }}</template>
+                    </div>
+                  </td>
+                </tr>
+              </tbody>
+            </q-markup-table>
+
+            <!-- Пробный запуск: чем именно закончилась загрузка гостя. -->
+            <template v-if="bootReport(attemptVerify)">
+              <div class="text-subtitle2 q-mb-xs">Пробный запуск</div>
+              <q-markup-table flat dense bordered class="q-mb-md jhv-attempt-facts">
+                <tbody>
+                  <tr>
+                    <td>Загрузка гостя</td>
+                    <td class="jhv-wrap">
+                      <template v-if="bootReport(attemptVerify)!.agent_replied">
+                        <q-icon name="check_circle" color="positive" size="16px" />
+                        гость ответил за {{ bootReport(attemptVerify)!.elapsed }}
+                        <template v-if="bootReport(attemptVerify)!.guest_os"> · {{ bootReport(attemptVerify)!.guest_os }}</template>
+                        <template v-if="bootReport(attemptVerify)!.hostname"> · {{ bootReport(attemptVerify)!.hostname }}</template>
+                      </template>
+                      <template v-else-if="bootReport(attemptVerify)!.started">
+                        <q-icon name="help" color="warning" size="16px" />
+                        ВМ запустилась, но гостевой агент не ответил — либо он не установлен,
+                        либо система не загрузилась
+                      </template>
+                      <template v-else-if="bootReport(attemptVerify)!.stage === 'assembly'">
+                        <q-icon name="cancel" color="negative" size="16px" />
+                        проверочную ВМ не удалось собрать: диски не записаны на площадку, до запуска дело не дошло
+                      </template>
+                      <template v-else>
+                        <q-icon name="cancel" color="negative" size="16px" />
+                        ВМ не удалось запустить
+                      </template>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>Площадка</td>
+                    <td class="jhv-wrap">
+                      движок/хост {{ bootReport(attemptVerify)!.host }}
+                      <template v-if="bootReport(attemptVerify)!.cluster_name"> · кластер {{ bootReport(attemptVerify)!.cluster_name }}</template>
+                      <template v-if="bootReport(attemptVerify)!.storage_domain_name"> · домен {{ bootReport(attemptVerify)!.storage_domain_name }}</template>
+                    </td>
+                  </tr>
+                  <tr v-if="bootReport(attemptVerify)!.image_bytes">
+                    <td>Образ</td><td>{{ bytes(bootReport(attemptVerify)!.image_bytes) }}</td>
+                  </tr>
+                  <tr v-if="bootReport(attemptVerify)!.vm_name || bootReport(attemptVerify)!.domain_name">
+                    <td>Проверочная ВМ</td>
+                    <td class="jhv-mono jhv-wrap">{{ bootReport(attemptVerify)!.vm_name || bootReport(attemptVerify)!.domain_name }}</td>
+                  </tr>
+                  <tr v-if="bootReport(attemptVerify)!.notes?.length">
+                    <td>Заметки</td>
+                    <td class="jhv-wrap">
+                      <div v-for="(note, i) in bootReport(attemptVerify)!.notes ?? []" :key="i">{{ note }}</div>
+                    </td>
+                  </tr>
+                </tbody>
+              </q-markup-table>
+            </template>
+
+            <template v-if="attemptRelatedRestores.length">
+              <div class="text-subtitle2 q-mb-xs">Восстановления за время этой проверки</div>
+              <q-list dense bordered separator>
+                <q-item v-for="item in attemptRelatedRestores" :key="item.id" clickable @click="openRestoreAttempt(item)">
+                  <q-item-section avatar><q-icon name="restore" :color="statusColor(item.status)" /></q-item-section>
+                  <q-item-section>
+                    <q-item-label>
+                      {{ restoreTargetTitle(item.target) }}
+                      <span v-if="item.target_vm_name || item.target_disk_name" class="text-grey-7">
+                        · {{ item.target_vm_name || item.target_disk_name }}
+                      </span>
+                    </q-item-label>
+                    <q-item-label caption>
+                      {{ dateTime(item.created_at) }} · {{ runStatus(item.status) }} · этап: {{ restorePhaseTitle(item.phase) }}
+                    </q-item-label>
+                  </q-item-section>
+                  <q-item-section side><q-icon name="chevron_right" /></q-item-section>
+                </q-item>
+              </q-list>
+            </template>
+          </template>
+
+          <template v-else-if="attemptRestore">
+            <q-markup-table flat dense bordered class="jhv-attempt-facts">
+              <tbody>
+                <tr><td>Начато</td><td>{{ dateTime(attemptRestore.started_at ?? attemptRestore.created_at) }}</td></tr>
+                <tr v-if="attemptRestore.ended_at">
+                  <td>Завершено</td>
+                  <td>{{ dateTime(attemptRestore.ended_at) }} · {{ elapsed(attemptRestore.created_at, attemptRestore.ended_at) }}</td>
+                </tr>
+                <tr>
+                  <td>Этап</td>
+                  <td>
+                    {{ restorePhaseTitle(attemptRestore.phase) }}<template v-if="attemptRestore.status === 'running'"> · {{ attemptRestore.progress }}%</template>
+                  </td>
+                </tr>
+                <tr v-if="attemptRestore.total_bytes > 0">
+                  <td>Передано</td>
+                  <td>
+                    {{ transferSummary(attemptRestore.transferred_bytes, attemptRestore.total_bytes, attemptRestore.bytes_per_second) }}
+                    <q-linear-progress
+                      v-if="attemptRestore.status === 'running'"
+                      :value="transferRatio(attemptRestore.transferred_bytes, attemptRestore.total_bytes)"
+                      color="primary" size="6px" rounded class="q-mt-xs"
+                    />
+                    <div v-if="attemptRestore.status === 'running' && attemptRestore.last_progress_at"
+                         :class="staleFor(attemptRestore.last_progress_at) ? 'text-warning' : 'text-grey-7'">
+                      <q-icon :name="staleFor(attemptRestore.last_progress_at) ? 'warning' : 'schedule'" />
+                      последнее продвижение {{ ago(attemptRestore.last_progress_at) }}
+                      <template v-if="staleFor(attemptRestore.last_progress_at)"> · {{ transferPauseHint(attemptRestore.phase) }}</template>
+                    </div>
+                  </td>
+                </tr>
+                <tr v-if="attemptRestore.target_server_name || attemptRestore.target_server_id">
+                  <td>Площадка</td>
+                  <td class="jhv-wrap">
+                    {{ attemptRestore.target_server_name || app.serverName(attemptRestore.target_server_id) }}
+                    <template v-if="attemptRestore.target_cluster_name"> · кластер {{ attemptRestore.target_cluster_name }}</template>
+                    <template v-if="attemptRestore.target_domain_name"> · домен {{ attemptRestore.target_domain_name }}</template>
+                  </td>
+                </tr>
+                <tr v-if="attemptRestore.target_vm_name || attemptRestore.target_vm_id">
+                  <td>ВМ</td>
+                  <td class="jhv-mono jhv-wrap">
+                    {{ attemptRestore.target_vm_name }}<template v-if="attemptRestore.target_vm_name && attemptRestore.target_vm_id"> · </template>{{ attemptRestore.target_vm_id }}
+                  </td>
+                </tr>
+                <tr v-if="attemptRestore.target_disk_name || attemptRestore.target_disk_id">
+                  <td>Диск</td>
+                  <td class="jhv-mono jhv-wrap">
+                    {{ attemptRestore.target_disk_name }}<template v-if="attemptRestore.target_disk_name && attemptRestore.target_disk_id"> · </template>{{ attemptRestore.target_disk_id }}
+                  </td>
+                </tr>
+                <tr v-if="attemptRestore.transfer_id">
+                  <td>ImageTransfer</td><td class="jhv-mono jhv-wrap">{{ attemptRestore.transfer_id }}</td>
+                </tr>
+                <tr v-if="attemptRestore.output_path">
+                  <td>Файл</td>
+                  <td class="jhv-mono jhv-wrap">
+                    {{ attemptRestore.output_path }}<template v-if="attemptRestore.output_format"> · {{ attemptRestore.output_format }}</template>
+                  </td>
+                </tr>
+                <tr v-if="attemptRestore.cleanup_errors?.length">
+                  <td>Не убрано после ошибки</td>
+                  <td class="jhv-wrap text-warning">
+                    <div v-for="(line, i) in attemptRestore.cleanup_errors" :key="i">{{ line }}</div>
+                  </td>
+                </tr>
+              </tbody>
+            </q-markup-table>
+          </template>
+        </q-card-section>
+
+        <q-separator />
+        <q-card-actions align="right">
+          <q-btn v-if="attemptError" flat icon="content_copy" label="Скопировать ошибку" @click="copyAttemptError" />
+          <q-btn v-if="attemptRestore && attemptParent" flat icon="arrow_back" label="К проверке"
+                 @click="openVerifyAttempt(attemptParent)" />
           <q-btn flat label="Закрыть" v-close-popup />
         </q-card-actions>
       </q-card>
@@ -2455,19 +2781,63 @@ const replicationColumns = [
 
           <template v-if="restoreForm.target === 'new_disk'">
             <q-select
+              :model-value="vmForm.server_id"
+              :options="diskRestoreServers.map((server) => ({ label: `${server.name} · ${server.engine_url}`, value: server.id }))"
+              emit-value map-options outlined dense
+              label="Подключённая виртуализация"
+              @update:model-value="changeVMTargetServer"
+            />
+            <div v-if="!diskRestoreServers.length" class="text-negative">
+              Нет включённых подключений oVirt, RHV или РЕД Виртуализация с поддержкой восстановления.
+            </div>
+            <q-select
+              :model-value="vmForm.host_id"
+              :options="restoreHosts.map((host) => ({ label: `${host.name} · ${host.address} · ${host.status}`, value: host.id, disable: host.status !== 'up' }))"
+              emit-value map-options clearable outlined dense
+              label="Хост для загрузки диска"
+              hint="Данные будут передаваться через выбранный работающий хост"
+              :loading="targetInventoryLoading"
+              :disable="!vmForm.server_id || targetInventoryLoading"
+              @update:model-value="changeDiskTargetHost"
+            >
+              <template #no-option><q-item><q-item-section>Хосты не найдены</q-item-section></q-item></template>
+            </q-select>
+            <div v-if="vmForm.server_id && !targetInventoryLoading && !targetInventoryError && !restoreHosts.some((host) => host.status === 'up')" class="text-warning">
+              На выбранной виртуализации нет работающих хостов для загрузки диска.
+            </div>
+            <q-banner v-if="targetInventoryError" dense class="bg-red-1 text-negative">
+              <template #avatar><q-icon name="error" /></template>
+              {{ targetInventoryError }}
+              <template #action>
+                <q-btn flat label="Повторить" :loading="targetInventoryLoading"
+                  @click="vmForm.host_id ? changeDiskTargetHost(vmForm.host_id) : loadVMTargetInventory(vmForm.server_id)" />
+              </template>
+            </q-banner>
+            <div v-if="diskHostTargets" class="jhv-reason">
+              Кластер: {{ diskHostTargets.cluster_name }} · дата-центр: {{ diskHostTargets.data_center_name }}.
+              Ниже — активные хранилища данных этого дата-центра. Общие хранилища могут быть доступны нескольким хостам.
+            </div>
+            <q-banner v-if="diskHostTargets && !domains.length" dense class="bg-orange-1">
+              В дата-центре выбранного хоста нет активных хранилищ данных. Выберите другой хост или проверьте хранилища в движке.
+            </q-banner>
+            <q-select
               v-model="restoreForm.target_domain_id"
-              :options="domains.filter((d) => d.type === 'data').map((d) => ({ label: d.name, value: d.id }))"
+              :options="domains.map((d) => ({ label: `${d.name} · ${d.storage || 'тип не указан'} · свободно ${bytes(d.available_size)}`, value: d.id }))"
               emit-value
               map-options
-              label="Домен хранения для нового диска"
+              label="Хранилище для нового диска"
               outlined
               dense
+              :loading="targetInventoryLoading"
+              :disable="!diskHostTargets || targetInventoryLoading || !!targetInventoryError"
               @update:model-value="invalidateRestoreDestination"
-            />
+            >
+              <template #no-option><q-item><q-item-section>Доступные хранилища не найдены</q-item-section></q-item></template>
+            </q-select>
             <q-input
               v-model="restoreForm.attach_to_vm_id"
               label="ID ВМ для подключения диска"
-              hint="Необязательно: диск можно подключить позже вручную"
+              hint="Необязательно: ID ВМ в выбранной виртуализации. Диск можно подключить позже вручную"
               outlined
               dense
               @update:model-value="invalidateRestoreDestination"
@@ -2499,7 +2869,16 @@ const replicationColumns = [
               <q-item><q-item-section><q-item-label caption>Действие</q-item-label><q-item-label>{{ ({ new_vm: 'Собрать виртуальную машину', file: 'Собрать образ в файл', new_disk: 'Создать новый диск', disk: 'Перезаписать существующий диск' } as Record<string, string>)[restoreForm.target] }}</q-item-label></q-item-section><q-item-section side><q-btn flat label="Изменить" @click="restoreStep = 2" /></q-item-section></q-item>
               <q-item v-if="restoreForm.target === 'new_vm'"><q-item-section><q-item-label caption>Целевая платформа</q-item-label><q-item-label>{{ app.serverName(vmForm.server_id) }} · сеть {{ vmForm.network === 'attached' ? 'будет подключена' : 'останется отключённой' }} · {{ vmPlan?.disks.length ?? 0 }} дисков</q-item-label></q-item-section></q-item>
               <q-item v-if="restoreForm.target === 'file'"><q-item-section><q-item-label caption>Файл</q-item-label><q-item-label>{{ restoreForm.output_dir || 'временный каталог сервиса' }} · {{ restoreForm.output_format }}</q-item-label></q-item-section></q-item>
-              <q-item v-if="restoreForm.target === 'new_disk'"><q-item-section><q-item-label caption>Новый диск</q-item-label><q-item-label>{{ restoreForm.target_domain_id }}{{ restoreForm.attach_to_vm_id ? ` · подключить к ${restoreForm.attach_to_vm_id}` : '' }}</q-item-label></q-item-section></q-item>
+              <q-item v-if="restoreForm.target === 'new_disk'">
+                <q-item-section>
+                  <q-item-label caption>Место создания нового диска</q-item-label>
+                  <q-item-label>{{ app.serverName(vmForm.server_id) }} · {{ vmTargetServer?.engine_url }}</q-item-label>
+                  <q-item-label>Хост: {{ selectedDiskHost?.name }} · {{ selectedDiskHost?.address }}</q-item-label>
+                  <q-item-label>Хранилище: {{ selectedDiskDomain?.name }} · свободно {{ bytes(selectedDiskDomain?.available_size ?? 0) }}</q-item-label>
+                  <q-item-label caption>Кластер: {{ diskHostTargets?.cluster_name }} · дата-центр: {{ diskHostTargets?.data_center_name }}</q-item-label>
+                  <q-item-label v-if="restoreForm.attach_to_vm_id">Подключить к ВМ: {{ restoreForm.attach_to_vm_id }}</q-item-label>
+                </q-item-section>
+              </q-item>
               <q-item v-if="restoreForm.target === 'disk'" class="bg-red-1"><q-item-section><q-item-label caption>Перезаписываемый диск</q-item-label><q-item-label class="text-negative text-weight-medium">{{ restoreForm.target_disk_id }}</q-item-label></q-item-section></q-item>
             </q-list>
           </template>
@@ -2545,3 +2924,26 @@ const replicationColumns = [
     />
   </q-page>
 </template>
+
+<style scoped>
+/* Высота листа постоянная: иначе окно прыгает при переключении листов. */
+.jhv-run-detail__body {
+  height: 70vh;
+}
+.jhv-attempt-error {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+.jhv-attempt-facts td {
+  white-space: normal;
+}
+.jhv-attempt-facts td:first-child {
+  width: 190px;
+  color: var(--jhv-text-subtle);
+  vertical-align: top;
+}
+@media (max-width: 600px) {
+  .jhv-attempt-facts td:first-child { width: 110px; }
+}
+</style>

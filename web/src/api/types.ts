@@ -239,6 +239,16 @@ export interface RestoreNetworkTarget {
   status?: string
 }
 
+export interface HostStorageTargets {
+  host_id: string
+  host_name: string
+  cluster_id: string
+  cluster_name: string
+  data_center_id: string
+  data_center_name: string
+  domains: StorageDomain[]
+}
+
 export type StorageKind = 'local' | 's3' | 'smb' | 'webdav' | 'sftp'
 
 export interface StorageTarget {
@@ -1015,12 +1025,25 @@ export interface Alert {
   count: number
   first_seen: string
   last_seen: string
+  resolved_at?: string
   acked_by?: string
+  acked_at?: string
+  /** Пояснения администратора. Приходят только в списке принятых (`?accepted=true`). */
+  comments?: AlertComment[]
   notifications_muted: boolean
   notifications_muted_until?: string
   notification_count: number
   last_notified_at?: string
   next_notification_at?: string
+}
+
+/** Пояснение к принятому оповещению: почему так случилось и что сделано. */
+export interface AlertComment {
+  id: string
+  alert_id: string
+  author: string
+  message: string
+  created_at: string
 }
 
 export interface RemediationRecord {

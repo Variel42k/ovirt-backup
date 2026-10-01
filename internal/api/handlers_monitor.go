@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Variel42k/ovirt-backup/internal/events"
 	"github.com/Variel42k/ovirt-backup/internal/model"
@@ -23,12 +25,14 @@ func (s *Server) handleListAlerts(w http.ResponseWriter, r *http.Request) {
 		// как было до разделения.
 		Audience: model.AlertAudience(r.URL.Query().Get("audience")),
 		Limit:    queryInt(r, "limit", 200),
+		Accepted: queryBool(r, "accepted"),
 	}
 	// By default the list shows what still needs attention; resolved alerts
-	// are history and only clutter the working view.
+	// are history and only clutter the working view. Раздел принятых — журнал:
+	// закрытые оповещения с пояснениями остаются в нём.
 	if state := r.URL.Query().Get("state"); state != "" {
 		filter.States = []model.AlertState{model.AlertState(state)}
-	} else if !queryBool(r, "include_resolved") {
+	} else if !filter.Accepted && !queryBool(r, "include_resolved") {
 		filter.States = []model.AlertState{model.AlertFiring, model.AlertAcked}
 	}
 
@@ -41,13 +45,25 @@ func (s *Server) handleListAlerts(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAckAlert(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	actor := "api"
-	if p := principalFrom(r.Context()); p != nil {
-		actor = p.Username
+	// Тело необязательно: прежние клиенты принимают оповещение пустым запросом.
+	var req struct {
+		Comment string `json:"comment"`
 	}
+	if r.ContentLength != 0 {
+		if err := decodeJSON(r, &req); err != nil {
+			s.writeError(w, r, err)
+			return
+		}
+	}
+	req.Comment = strings.TrimSpace(req.Comment)
+	if utf8.RuneCountInString(req.Comment) > model.AlertCommentMaxLength {
+		s.writeError(w, r, badRequest("пояснение не должно превышать %d символов", model.AlertCommentMaxLength))
+		return
+	}
+	id := r.PathValue("id")
+	actor := runtimeActor(r)
 
-	if err := s.store.AckAlert(r.Context(), id, actor); err != nil {
+	if err := s.store.AckAlert(r.Context(), id, actor, req.Comment); err != nil {
 		s.writeError(w, r, err)
 		return
 	}
@@ -56,6 +72,40 @@ func (s *Server) handleAckAlert(w http.ResponseWriter, r *http.Request) {
 		s.bus.Publish(events.Event{Kind: events.KindAlert, ObjectID: id, Message: "alert acknowledged"})
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "acked"})
+}
+
+func (s *Server) handleListAlertComments(w http.ResponseWriter, r *http.Request) {
+	items, err := s.store.ListAlertComments(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeList(w, items)
+}
+
+func (s *Server) handleAddAlertComment(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Message string `json:"message"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	req.Message = strings.TrimSpace(req.Message)
+	if req.Message == "" || utf8.RuneCountInString(req.Message) > model.AlertCommentMaxLength {
+		s.writeError(w, r, badRequest("пояснение должно содержать от 1 до %d символов", model.AlertCommentMaxLength))
+		return
+	}
+	item, err := s.store.AddAlertComment(r.Context(), r.PathValue("id"), runtimeActor(r), req.Message)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	s.audit(r, "alert.comment", model.ScopeServer, item.AlertID, true, "добавлено пояснение")
+	if s.bus != nil {
+		s.bus.Publish(events.Event{Kind: events.KindAlert, ObjectID: item.AlertID, Message: "alert comment added"})
+	}
+	writeJSON(w, http.StatusCreated, item)
 }
 
 func (s *Server) handleListRemediations(w http.ResponseWriter, r *http.Request) {

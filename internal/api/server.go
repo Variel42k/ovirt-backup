@@ -249,6 +249,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /servers/{id}/vms/{vmID}/filesystems", s.perm(model.PermServersRead, s.handleGuestFilesystems))
 	mux.HandleFunc("GET /servers/{id}/disks", s.perm(model.PermServersRead, s.handleListDisks))
 	mux.HandleFunc("GET /servers/{id}/storage-domains", s.perm(model.PermServersRead, s.handleListStorageDomains))
+	mux.HandleFunc("GET /servers/{id}/hosts/{hostID}/storage-domains", s.perm(model.PermServersRead, s.handleHostStorageDomains))
 	mux.HandleFunc("GET /servers/{id}/restore-networks", s.perm(model.PermServersRead, s.handleListRestoreNetworks))
 
 	// Управление ВМ и хостами.
@@ -364,6 +365,8 @@ func (s *Server) routes(mux *http.ServeMux) {
 	// Оповещения.
 	mux.HandleFunc("GET /alerts", s.perm(model.PermAlertsRead, s.handleListAlerts))
 	mux.HandleFunc("POST /alerts/{id}/ack", s.perm(model.PermAlertsWrite, s.handleAckAlert))
+	mux.HandleFunc("GET /alerts/{id}/comments", s.perm(model.PermAlertsRead, s.handleListAlertComments))
+	mux.HandleFunc("POST /alerts/{id}/comments", s.perm(model.PermAlertsWrite, s.handleAddAlertComment))
 	mux.HandleFunc("POST /alerts/{id}/notifications", s.perm(model.PermAlertsWrite, s.handleAlertNotifications))
 	mux.HandleFunc("GET /settings/notifications", s.perm(model.PermAlertsAdmin, s.handleGetNotificationSettings))
 	mux.HandleFunc("PUT /settings/notifications", s.perm(model.PermAlertsAdmin, s.handleSetNotificationSettings))

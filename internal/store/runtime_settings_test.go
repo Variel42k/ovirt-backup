@@ -23,7 +23,7 @@ func TestRuntimeSettingsRoundTripAndReset(t *testing.T) {
 		PerformanceDegradationPct: 50, PerformanceConsecutiveRuns: 3,
 		StorageWarningFreePct: 15, StorageCriticalFreePct: 5,
 		StorageWarningForecastDays: 30, StorageCriticalForecastDays: 7,
-		HistoryRetentionDays: 90,
+		HistoryRetentionDays: 90, DomainWarningFreePct: 12, DomainCriticalFreePct: 4,
 	}
 
 	if err := s.SetBackupCompression(ctx, "s2", "admin"); err != nil {
@@ -52,7 +52,7 @@ func TestRuntimeSettingsRoundTripAndReset(t *testing.T) {
 		*stored.LogMaxBackups != 12 || *stored.LogMaxAgeDays != 90 {
 		t.Fatalf("rotation not persisted: %+v", stored)
 	}
-	if !stored.HasBackupQuality() || stored.BackupQuality() != quality {
+	if !stored.HasBackupQuality() || stored.BackupQuality(model.BackupQualitySettings{}) != quality {
 		t.Fatalf("backup quality not persisted: %+v", stored)
 	}
 

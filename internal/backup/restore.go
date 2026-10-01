@@ -84,10 +84,11 @@ type RestoreRequest struct {
 
 	// Для RestoreToDisk и RestoreToNewDisk.
 	TargetServerID  string
+	TargetHostID    string
 	TargetClusterID string
 	TargetDiskID    string
 	TargetDomainID  string
-	// AttachToVMID подключает восстановленный диск к ВМ после заливки.
+	// AttachToVMID подключает восстановленный диск к ВМ после загрузки.
 	AttachToVMID   string
 	AttachToVMName string
 	// NewDiskSuffix отличает восстановленный диск от исходного по имени.
@@ -469,9 +470,11 @@ func (e *Engine) restoreToEngine(ctx context.Context, set *ChainSet, reader *Cha
 		targetDiskID, record.TargetDiskName, "", client.BaseURL())
 	openingWatch.Observe("opening_transfer", 0, 0)
 	e.log.Info().Str("restore", record.ID).Str("диск-id", targetDiskID).
+		Str("хост-загрузки-id", req.TargetHostID).
 		Dur("таймаут-запроса", e.imageioTimeouts(0).Block).Msg("ожидаю открытие передачи на запись в движке")
 	transferRequest := ovirt.TransferRequest{
 		DiskID:         targetDiskID,
+		HostID:         req.TargetHostID,
 		Direction:      "upload",
 		Format:         "raw",
 		RequestTimeout: e.imageioTimeouts(0).Block,

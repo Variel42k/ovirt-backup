@@ -356,7 +356,9 @@ export const api = {
       .then((r) => r.data),
 
   // Инвентарь
-  listHosts: (serverId: string) => http.get<ListResponse<Host>>(`/servers/${serverId}/hosts`).then((r) => unwrap(r.data)),
+  listHosts: (serverId: string, live = false) => http.get<ListResponse<Host>>(`/servers/${serverId}/hosts`, { params: live ? { live: true } : undefined }).then((r) => unwrap(r.data)),
+  listHostStorageDomains: (serverId: string, hostId: string) =>
+    http.get<import('./types').HostStorageTargets>(`/servers/${serverId}/hosts/${hostId}/storage-domains`, { timeout: 50_000 }).then((r) => r.data),
   listClusters: (serverId: string) => http.get<ListResponse<Cluster>>(`/servers/${serverId}/clusters`).then((r) => unwrap(r.data)),
   listVMs: (serverId: string, params?: Record<string, string>) =>
     http.get<ListResponse<VM>>(`/servers/${serverId}/vms`, { params }).then((r) => unwrap(r.data)),
@@ -602,7 +604,9 @@ export const api = {
   // Мониторинг
   listAlerts: (params: Record<string, string | number | boolean> = {}) =>
     http.get<ListResponse<Alert>>('/alerts', { params }).then((r) => unwrap(r.data)),
-  ackAlert: (id: string) => http.post(`/alerts/${id}/ack`, {}).then((r) => r.data),
+  ackAlert: (id: string, comment = '') => http.post(`/alerts/${id}/ack`, { comment }).then((r) => r.data),
+  addAlertComment: (id: string, message: string) =>
+    http.post<import('./types').AlertComment>(`/alerts/${id}/comments`, { message }).then((r) => r.data),
   setAlertNotifications: (id: string, payload: { action: 'mute' | 'snooze' | 'unmute'; until?: string; reason?: string }) =>
     http.post(`/alerts/${id}/notifications`, payload).then((r) => r.data),
   listRemediations: (serverId?: string) =>

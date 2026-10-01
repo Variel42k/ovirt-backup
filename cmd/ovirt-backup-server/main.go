@@ -270,7 +270,7 @@ func run() error {
 		log.Warn().Msg("неполная настройка ротации в базе проигнорирована; используются значения конфигурации")
 	}
 	if runtimeSettings.HasBackupQuality() {
-		cfg.Monitor.BackupQuality = runtimeSettings.BackupQuality()
+		cfg.Monitor.BackupQuality = runtimeSettings.BackupQuality(cfg.Monitor.BackupQuality)
 		if err := cfg.Monitor.BackupQuality.Validate(); err != nil {
 			return fmt.Errorf("настройки качества бэкапов из базы данных: %w", err)
 		}
@@ -394,6 +394,9 @@ func run() error {
 	mon := monitor.New(st, pool, libvirtPool, proxmoxPool, remediator, cfg.Monitor, bus, log)
 	dispatcher.SetTelemetryMonitor(mon)
 	qualityService := quality.New(st, cfg.Monitor.BackupQuality, cfg.Location())
+	// Пороги заполнения доменов меняются из web без перезапуска: монитор
+	// читает их у службы качества, а не из конфигурации запуска.
+	mon.UseQualitySettings(qualityService.Settings)
 	replicator := replication.New(st, cfg.Backup.ReplicationWorkers, bus, log)
 	replicator.SetVerifier(func(ctx context.Context, runID, copyID string, mode model.VerifyMode, opts model.VerifyOptions) error {
 		opts.TriggeredBy = model.VerifyTriggerReplication

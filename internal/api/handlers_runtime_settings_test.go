@@ -34,7 +34,7 @@ func TestRuntimeSettingsHandlersApplyAndReset(t *testing.T) {
 		PerformanceDegradationPct: 50, PerformanceConsecutiveRuns: 3,
 		StorageWarningFreePct: 15, StorageCriticalFreePct: 5,
 		StorageWarningForecastDays: 30, StorageCriticalForecastDays: 7,
-		HistoryRetentionDays: 90,
+		HistoryRetentionDays: 90, DomainWarningFreePct: 12, DomainCriticalFreePct: 4,
 	}
 
 	_, logs, err := logging.Setup(base.Logging)
@@ -94,6 +94,19 @@ func TestRuntimeSettingsHandlersApplyAndReset(t *testing.T) {
 	if quality.BackupQuality.Source != "database" || quality.BackupQuality.Value.StaleIntervals != 3 {
 		t.Fatalf("quality was not applied: %+v", quality.BackupQuality)
 	}
+	// Клиент, который не знает о порогах доменов, их не обнуляет.
+	if got := quality.BackupQuality.Value; got.DomainWarningFreePct != 12 || got.DomainCriticalFreePct != 4 {
+		t.Fatalf("domain thresholds lost by a request without them: %+v", got)
+	}
+	domains := call(s.handleSetRuntimeBackupQuality, "PUT",
+		`{"domain_warning_free_percent":5,"domain_critical_free_percent":2}`)
+	if got := domains.BackupQuality.Value; got.DomainWarningFreePct != 5 || got.DomainCriticalFreePct != 2 ||
+		got.StaleIntervals != 3 {
+		t.Fatalf("domain thresholds were not applied: %+v", got)
+	}
+	if got := s.quality.Settings(); got.DomainWarningFreePct != 5 || got.DomainCriticalFreePct != 2 {
+		t.Fatalf("live settings keep old domain thresholds: %+v", got)
+	}
 
 	resetCompression := call(s.handleResetRuntimeCompression, "DELETE", "")
 	if resetCompression.Compression.Value != "zstd" || resetCompression.Compression.Source != "config" {
@@ -108,7 +121,8 @@ func TestRuntimeSettingsHandlersApplyAndReset(t *testing.T) {
 		t.Fatalf("rotation reset failed: %+v", resetRotation.LogRotation)
 	}
 	resetQuality := call(s.handleResetRuntimeBackupQuality, "DELETE", "")
-	if resetQuality.BackupQuality.Source != "config" || resetQuality.BackupQuality.Value.StaleIntervals != 2 {
+	if resetQuality.BackupQuality.Source != "config" || resetQuality.BackupQuality.Value.StaleIntervals != 2 ||
+		resetQuality.BackupQuality.Value.DomainWarningFreePct != 12 {
 		t.Fatalf("quality reset failed: %+v", resetQuality.BackupQuality)
 	}
 

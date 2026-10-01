@@ -699,11 +699,24 @@ func capacityFor(target *model.StorageTarget, samples []*model.StorageUsageSampl
 	if item.ForecastDays != nil {
 		forecast = *item.ForecastDays
 	}
+	// В причине названы и число, и порог, который оно перешло: по словам
+	// «место заканчивается» не видно, заполнено хранилище на 6 % или на 96 %.
+	filled := fmt.Sprintf("заполнено на %.1f%%", 100-freePct)
 	switch {
-	case freePct <= float64(settings.StorageCriticalFreePct) || forecast <= float64(settings.StorageCriticalForecastDays):
-		item.State, item.Reason = "critical", "место заканчивается"
-	case freePct <= float64(settings.StorageWarningFreePct) || forecast <= float64(settings.StorageWarningForecastDays):
-		item.State, item.Reason = "warning", "хранилище приближается к порогу заполнения"
+	case freePct <= float64(settings.StorageCriticalFreePct):
+		item.State = "critical"
+		item.Reason = fmt.Sprintf("%s — выше критичного порога %d%%", filled, 100-settings.StorageCriticalFreePct)
+	case forecast <= float64(settings.StorageCriticalForecastDays):
+		item.State = "critical"
+		item.Reason = fmt.Sprintf("при текущем росте места хватит на %.0f дн. (критичный порог %d дн.), %s",
+			forecast, settings.StorageCriticalForecastDays, filled)
+	case freePct <= float64(settings.StorageWarningFreePct):
+		item.State = "warning"
+		item.Reason = fmt.Sprintf("%s — выше порога предупреждения %d%%", filled, 100-settings.StorageWarningFreePct)
+	case forecast <= float64(settings.StorageWarningForecastDays):
+		item.State = "warning"
+		item.Reason = fmt.Sprintf("при текущем росте места хватит на %.0f дн. (порог предупреждения %d дн.), %s",
+			forecast, settings.StorageWarningForecastDays, filled)
 	default:
 		item.State, item.Reason = "ok", "ёмкость в норме"
 	}

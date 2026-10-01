@@ -67,7 +67,7 @@ func (s *Server) runtimeSettings(r *http.Request) (runtimeSettingsResponse, erro
 	qualityValue := s.baseCfg.Monitor.BackupQuality
 	if stored.HasBackupQuality() {
 		qualitySource = "database"
-		qualityValue = stored.BackupQuality()
+		qualityValue = stored.BackupQuality(s.baseCfg.Monitor.BackupQuality)
 	} else if s.quality != nil {
 		qualityValue = s.quality.Settings()
 	}
@@ -348,7 +348,9 @@ func (s *Server) handleResetRuntimeLogRotation(w http.ResponseWriter, r *http.Re
 }
 
 func (s *Server) handleSetRuntimeBackupQuality(w http.ResponseWriter, r *http.Request) {
-	var value model.BackupQualitySettings
+	// Разбор идёт поверх действующих значений: клиент, который не знает о
+	// новых порогах, не обнуляет их своим запросом.
+	value := s.quality.Settings()
 	if err := decodeJSON(r, &value); err != nil {
 		s.writeError(w, r, err)
 		return

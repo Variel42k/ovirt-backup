@@ -169,6 +169,60 @@ func (c *Client) ListStorageDomains(ctx context.Context, serverID string) ([]*mo
 	return out, nil
 }
 
+// HostStorageTargets describes domains attached to the host's data center.
+// Shared domains belong to a data center, not to an individual physical disk.
+type HostStorageTargets struct {
+	HostID         string                 `json:"host_id"`
+	HostName       string                 `json:"host_name"`
+	ClusterID      string                 `json:"cluster_id"`
+	ClusterName    string                 `json:"cluster_name"`
+	DataCenterID   string                 `json:"data_center_id"`
+	DataCenterName string                 `json:"data_center_name"`
+	Domains        []*model.StorageDomain `json:"domains"`
+}
+
+func (c *Client) HostStorageDomains(ctx context.Context, serverID, hostID string) (*HostStorageTargets, error) {
+	if hostID == "" || hostID == "." || hostID == ".." || strings.ContainsAny(hostID, "/\\?#") {
+		return nil, fmt.Errorf("неверный идентификатор хоста")
+	}
+	var host Host
+	if err := c.get(ctx, "/hosts/"+hostID, &host); err != nil {
+		return nil, fmt.Errorf("хост загрузки: %w", err)
+	}
+	if host.ID != hostID || host.Cluster.ID == "" {
+		return nil, fmt.Errorf("у выбранного хоста нет кластера")
+	}
+	if host.Status != "up" {
+		return nil, fmt.Errorf("хост %s недоступен для загрузки (статус %s)", host.Name, host.Status)
+	}
+	var cluster Cluster
+	q := url.Values{"follow": {"data_center"}}
+	if err := c.get(ctx, "/clusters/"+host.Cluster.ID, &cluster, withQuery(q)); err != nil {
+		return nil, fmt.Errorf("кластер выбранного хоста: %w", err)
+	}
+	if cluster.DataCenter.ID == "" {
+		return nil, fmt.Errorf("у кластера %s нет дата-центра", cluster.Name)
+	}
+	var list storageDomainList
+	if err := c.get(ctx, "/datacenters/"+cluster.DataCenter.ID+"/storagedomains", &list); err != nil {
+		return nil, fmt.Errorf("хранилища дата-центра выбранного хоста: %w", err)
+	}
+	result := &HostStorageTargets{HostID: host.ID, HostName: host.Name,
+		ClusterID: host.Cluster.ID, ClusterName: cluster.Name,
+		DataCenterID: cluster.DataCenter.ID, DataCenterName: cluster.DataCenter.Name,
+		Domains: []*model.StorageDomain{}}
+	for _, d := range list.StorageDomain {
+		if d.Type != "data" || d.EffectiveStatus() != "active" {
+			continue
+		}
+		result.Domains = append(result.Domains, &model.StorageDomain{ID: d.ID, ServerID: serverID,
+			Name: d.Name, Type: d.Type, Storage: d.Storage.Type, Status: d.EffectiveStatus(),
+			Master: d.Master.Bool(), AvailableSize: d.Available.Int64(), UsedSize: d.Used.Int64(),
+			CommittedSize: d.Committed.Int64()})
+	}
+	return result, nil
+}
+
 // GetStorageDomain reads one storage domain as the engine reports it, with
 // its free and used space.
 func (c *Client) GetStorageDomain(ctx context.Context, id string) (*StorageDomain, error) {

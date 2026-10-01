@@ -19,12 +19,6 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/store"
 )
 
-// Thresholds for storage domain capacity alerts.
-const (
-	domainWarnFreeRatio     = 0.10
-	domainCriticalFreeRatio = 0.05
-)
-
 // Monitor polls every enabled engine on a fixed interval.
 type Monitor struct {
 	store      *store.Store
@@ -41,6 +35,10 @@ type Monitor struct {
 
 	// io хранит предыдущие показания счётчиков, чтобы считать из них скорости.
 	io *counterCache
+
+	// quality отдаёт действующие пороги: их меняют из web без перезапуска.
+	// Пусто — берутся значения конфигурации запуска.
+	quality func() model.BackupQualitySettings
 }
 
 // New builds the monitor.
@@ -52,6 +50,28 @@ func New(st *store.Store, pool *ovirt.Pool, libvirtPool *libvirtx.Pool, proxmoxP
 		cfg: cfg, bus: bus, log: log,
 		inFlight: map[string]bool{},
 	}
+}
+
+// UseQualitySettings подключает источник действующих порогов. Вызывается до
+// Run: поле читается опросом без блокировки.
+func (m *Monitor) UseQualitySettings(get func() model.BackupQualitySettings) {
+	m.quality = get
+}
+
+// domainFreeThresholds — при каком проценте свободного места домена поднимать
+// предупреждение и критичное оповещение.
+func (m *Monitor) domainFreeThresholds() (warning, critical int) {
+	settings := m.cfg.BackupQuality
+	if m.quality != nil {
+		settings = m.quality()
+	}
+	warning, critical = settings.DomainWarningFreePct, settings.DomainCriticalFreePct
+	// Монитор, собранный без конфигурации (тесты, встраивание), не должен
+	// молчать о полном домене из-за нулевых порогов.
+	if warning <= 0 || critical <= 0 || critical >= warning {
+		return model.DefaultDomainWarningFreePct, model.DefaultDomainCriticalFreePct
+	}
+	return warning, critical
 }
 
 // Run polls until the context is cancelled. It returns when the loop stops.
@@ -441,6 +461,7 @@ func classifyVM(vm *model.VM, desired model.VMDesiredState) (problem string, sev
 // evaluateDomains raises alerts about storage domains.
 func (m *Monitor) evaluateDomains(ctx context.Context, srv *model.Server, domains []*model.StorageDomain, now time.Time) []model.HealthSample {
 	samples := make([]model.HealthSample, 0, len(domains))
+	warnFree, criticalFree := m.domainFreeThresholds()
 
 	for _, d := range domains {
 		// ISO and export domains have no capacity worth alerting on and are
@@ -464,28 +485,49 @@ func (m *Monitor) evaluateDomains(ctx context.Context, srv *model.Server, domain
 			_ = m.store.ResolveAlert(ctx, srv.ID, model.ScopeStorageDomain, d.ID, model.AlertStorageDomainDown)
 		}
 
-		ratio := d.FreeRatio()
-		switch {
-		case ratio < 0:
-			// Capacity unknown; nothing to say.
-		case ratio < domainCriticalFreeRatio:
-			m.raise(ctx, &model.Alert{
-				ServerID: srv.ID, Scope: model.ScopeStorageDomain, ObjectID: d.ID, ObjectName: d.Name,
-				Kind: model.AlertStorageDomainFull, Severity: model.SeverityCritical,
-				Message: fmt.Sprintf("на домене %s осталось %.1f%% свободного места — ВМ встанут на паузу при заполнении",
-					d.Name, ratio*100),
-			})
-		case ratio < domainWarnFreeRatio:
-			m.raise(ctx, &model.Alert{
-				ServerID: srv.ID, Scope: model.ScopeStorageDomain, ObjectID: d.ID, ObjectName: d.Name,
-				Kind: model.AlertStorageDomainFull, Severity: model.SeverityWarning,
-				Message: fmt.Sprintf("на домене %s осталось %.1f%% свободного места", d.Name, ratio*100),
-			})
-		default:
-			_ = m.store.ResolveAlert(ctx, srv.ID, model.ScopeStorageDomain, d.ID, model.AlertStorageDomainFull)
+		severity, message := domainFillAlert(d, warnFree, criticalFree)
+		if message == "" {
+			// Заполнение ниже порога или объём неизвестен: говорить не о чем.
+			if d.FreeRatio() >= 0 {
+				_ = m.store.ResolveAlert(ctx, srv.ID, model.ScopeStorageDomain, d.ID, model.AlertStorageDomainFull)
+			}
+			continue
 		}
+		m.raise(ctx, &model.Alert{
+			ServerID: srv.ID, Scope: model.ScopeStorageDomain, ObjectID: d.ID, ObjectName: d.Name,
+			Kind: model.AlertStorageDomainFull, Severity: severity, Message: message,
+		})
 	}
 	return samples
+}
+
+// domainFillAlert решает, нужно ли оповещение о заполнении домена, и
+// составляет его текст. Пустой текст — оповещения нет.
+//
+// Пороги заданы остатком свободного места, а в тексте стоит заполнение и
+// сам порог: «осталось 6.2 % свободного» читали как «заполнено на 6 %», и
+// было не видно, от какого числа считать «мало».
+func domainFillAlert(d *model.StorageDomain, warnFree, criticalFree int) (model.Severity, string) {
+	ratio := d.FreeRatio()
+	if ratio < 0 {
+		return "", ""
+	}
+	free := ratio * 100
+	base := fmt.Sprintf("домен хранения %s заполнен на %.1f%%", d.Name, 100-free)
+	left := fmt.Sprintf("свободно %s", gibibytes(d.AvailableSize))
+	switch {
+	case free < float64(criticalFree):
+		return model.SeverityCritical, fmt.Sprintf("%s (критичный порог %d%%), %s — ВМ встанут на паузу при заполнении",
+			base, 100-criticalFree, left)
+	case free < float64(warnFree):
+		return model.SeverityWarning, fmt.Sprintf("%s (порог предупреждения %d%%), %s",
+			base, 100-warnFree, left)
+	}
+	return "", ""
+}
+
+func gibibytes(n int64) string {
+	return fmt.Sprintf("%.1f ГиБ", float64(n)/(1<<30))
 }
 
 // raise stores an alert and notifies subscribers.

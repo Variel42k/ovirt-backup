@@ -123,7 +123,23 @@ type Alert struct {
 	NotificationCount       int        `json:"notification_count"`
 	LastNotifiedAt          *time.Time `json:"last_notified_at,omitempty"`
 	NextNotificationAt      *time.Time `json:"next_notification_at,omitempty"`
+	// Comments — пояснения администратора. Заполняются только в списке
+	// принятых оповещений.
+	Comments []AlertComment `json:"comments,omitempty"`
 }
+
+// AlertComment is an append-only explanation attached to an alert: почему так
+// случилось и что с этим сделано.
+type AlertComment struct {
+	ID        string    `json:"id"`
+	AlertID   string    `json:"alert_id"`
+	Author    string    `json:"author"`
+	Message   string    `json:"message"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// AlertCommentMaxLength — предел длины одного пояснения, в символах.
+const AlertCommentMaxLength = 4000
 
 // RemediationAction names a corrective operation the service can perform.
 type RemediationAction string

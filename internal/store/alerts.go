@@ -73,6 +73,8 @@ func (s *Store) RaiseAlert(ctx context.Context, a *model.Alert) error {
 			last_seen=excluded.last_seen,
 			state=CASE WHEN alerts.state='acked' THEN 'acked' ELSE 'firing' END,
 			resolved_at=NULL,
+			acked_by=CASE WHEN alerts.state='resolved' THEN '' ELSE alerts.acked_by END,
+			acked_at=CASE WHEN alerts.state='resolved' THEN NULL ELSE alerts.acked_at END,
 			notification_count=CASE WHEN alerts.state='resolved' THEN 0 ELSE alerts.notification_count END,
 			last_notified_at=CASE WHEN alerts.state='resolved' THEN NULL ELSE alerts.last_notified_at END,
 			next_notification_at=CASE WHEN alerts.state='resolved' THEN excluded.last_seen ELSE alerts.next_notification_at END,
@@ -107,17 +109,40 @@ func (s *Store) ResolveAlert(ctx context.Context, serverID string, scope model.S
 
 // AckAlert marks an alert as acknowledged so it stops being counted as new
 // while the underlying problem is being worked on.
-func (s *Store) AckAlert(ctx context.Context, id, by string) error {
-	res, err := s.db.Exec(ctx, `UPDATE alerts SET state=?, acked_by=?, acked_at=?,
-		next_notification_at=? WHERE id=?`,
-		string(model.AlertAcked), by, time.Now().UTC(), time.Now().UTC(), id)
-	if err != nil {
-		return fmt.Errorf("ack alert: %w", err)
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return ErrNotFound
-	}
-	return nil
+//
+// Принять можно только активное оповещение: закрытое принимать незачем, а
+// повторное принятие переписало бы, кто и когда взял его в работу. Пояснение
+// записывается той же транзакцией — либо принято вместе с ним, либо никак.
+func (s *Store) AckAlert(ctx context.Context, id, by, comment string) error {
+	comment = strings.TrimSpace(comment)
+	now := time.Now().UTC()
+	return s.db.InTx(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx, s.db.Rebind(`UPDATE alerts SET state=?, acked_by=?, acked_at=?,
+			next_notification_at=? WHERE id=? AND state=?`),
+			string(model.AlertAcked), by, now, now, id, string(model.AlertFiring))
+		if err != nil {
+			return fmt.Errorf("ack alert: %w", err)
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			var exists int
+			if err := tx.QueryRowContext(ctx, s.db.Rebind(`SELECT COUNT(*) FROM alerts WHERE id=?`), id).Scan(&exists); err != nil {
+				return fmt.Errorf("ack alert: %w", err)
+			}
+			if exists == 0 {
+				return ErrNotFound
+			}
+			return fmt.Errorf("%w: оповещение уже принято или закрыто", ErrConflict)
+		}
+		if comment == "" {
+			return nil
+		}
+		if _, err := tx.ExecContext(ctx, s.db.Rebind(`INSERT INTO alert_comments
+			(id, alert_id, author, message, created_at) VALUES (?,?,?,?,?)`),
+			uuid.NewString(), id, by, comment, now); err != nil {
+			return fmt.Errorf("ack alert comment: %w", err)
+		}
+		return nil
+	})
 }
 
 // AlertFilter narrows an alert listing.
@@ -127,6 +152,9 @@ type AlertFilter struct {
 	ObjectID string
 	States   []model.AlertState
 	Severity model.Severity
+	// Accepted оставляет принятые в работу и те, к которым есть пояснение;
+	// вместе с ними читаются сами пояснения.
+	Accepted bool
 	// Audience отбирает оповещения по адресату. Отбор идёт по списку типов, а
 	// не по колонке: адресата в базе нет, он выводится из типа.
 	Audience model.AlertAudience
@@ -137,6 +165,9 @@ type AlertFilter struct {
 func (s *Store) ListAlerts(ctx context.Context, f AlertFilter) ([]*model.Alert, error) {
 	var where []string
 	var args []any
+	if f.Accepted {
+		where = append(where, acceptedAlertCondition)
+	}
 
 	if f.ServerID != "" {
 		where = append(where, `server_id=?`)
@@ -228,7 +259,23 @@ func (s *Store) ListAlerts(ctx context.Context, f AlertFilter) ([]*model.Alert, 
 		a.NextNotificationAt = nullTime(nextNotification)
 		out = append(out, &a)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if f.Accepted {
+		ids := make([]string, len(out))
+		for i, a := range out {
+			ids[i] = a.ID
+		}
+		comments, err := s.alertComments(ctx, ids)
+		if err != nil {
+			return nil, err
+		}
+		for _, a := range out {
+			a.Comments = comments[a.ID]
+		}
+	}
+	return out, nil
 }
 
 // CountOpenAlerts returns the number of firing and acked alerts, and how many
@@ -248,8 +295,13 @@ func (s *Store) CountOpenAlerts(ctx context.Context, serverID string) (open int,
 }
 
 // PurgeResolvedAlerts drops resolved alerts older than the cutoff.
+//
+// Оповещения с пояснениями не трогает: их писал человек, чтобы потом можно
+// было прочитать, почему так случилось. Срок хранения истории опроса к этому
+// журналу не относится, а самих таких записей единицы.
 func (s *Store) PurgeResolvedAlerts(ctx context.Context, before time.Time) (int64, error) {
-	res, err := s.db.Exec(ctx, `DELETE FROM alerts WHERE state=? AND resolved_at IS NOT NULL AND resolved_at < ?`,
+	res, err := s.db.Exec(ctx, `DELETE FROM alerts WHERE state=? AND resolved_at IS NOT NULL AND resolved_at < ?
+		AND NOT EXISTS (SELECT 1 FROM alert_comments c WHERE c.alert_id=alerts.id)`,
 		string(model.AlertResolved), before)
 	if err != nil {
 		return 0, err

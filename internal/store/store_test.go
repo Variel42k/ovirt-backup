@@ -429,7 +429,7 @@ func TestAlertDeduplication(t *testing.T) {
 
 	// Acknowledging must survive a re-raise, otherwise a flapping object would
 	// keep un-acking itself and drown the operator.
-	if err := s.AckAlert(ctx, alerts[0].ID, "operator"); err != nil {
+	if err := s.AckAlert(ctx, alerts[0].ID, "operator", ""); err != nil {
 		t.Fatalf("ack: %v", err)
 	}
 	raise()

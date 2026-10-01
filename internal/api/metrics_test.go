@@ -21,7 +21,7 @@ func testQualitySettings() model.BackupQualitySettings {
 		PerformanceDegradationPct: 50, PerformanceConsecutiveRuns: 3,
 		StorageWarningFreePct: 15, StorageCriticalFreePct: 5,
 		StorageWarningForecastDays: 30, StorageCriticalForecastDays: 7,
-		HistoryRetentionDays: 90,
+		HistoryRetentionDays: 90, DomainWarningFreePct: 12, DomainCriticalFreePct: 4,
 	}
 }
 

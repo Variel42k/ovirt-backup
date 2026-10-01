@@ -15,6 +15,17 @@ const auth = useAuthStore()
 
 const tab = ref('alerts')
 const alerts = ref<Alert[]>([])
+/**
+ * Принятые в работу и всё, к чему есть пояснения, — вместе с закрытыми.
+ *
+ * Это журнал, а не рабочая лента: «Принять» убирает оповещение из активных,
+ * но ответ на вопрос «почему так случилось» должен остаться там, где его
+ * будут искать, когда то же самое загорится через месяц.
+ */
+const accepted = ref<Alert[]>([])
+const commentDrafts = ref<Record<string, string>>({})
+const commenting = ref<string[]>([])
+const COMMENT_MAX = 4000
 const remediations = ref<RemediationRecord[]>([])
 const loading = ref(false)
 const pageError = ref('')
@@ -37,21 +48,40 @@ let loadInFlight = false
  */
 const audienceFilter = ref('')
 
+/** Активные: принятые в работу ушли в свой раздел и здесь не повторяются. */
+const activeAlerts = computed(() => alerts.value.filter((a) => a.state !== 'acked'))
+const tabAlerts = computed(() => (tab.value === 'accepted' ? accepted.value : activeAlerts.value))
+
 const visibleAlerts = computed(() =>
-  audienceFilter.value ? alerts.value.filter((a) => a.audience === audienceFilter.value) : alerts.value,
+  audienceFilter.value ? tabAlerts.value.filter((a) => a.audience === audienceFilter.value) : tabAlerts.value,
 )
 
 /** Сколько оповещений у каждого адресата — для подписей на переключателе. */
 const audienceCounts = computed(() => {
   const counts: Record<string, number> = {}
-  for (const alert of alerts.value) counts[alert.audience] = (counts[alert.audience] ?? 0) + 1
+  for (const alert of tabAlerts.value) counts[alert.audience] = (counts[alert.audience] ?? 0) + 1
   return counts
+})
+
+const emptyText = computed(() => {
+  if (audienceFilter.value) return 'Для этого адресата оповещений нет'
+  if (tab.value === 'accepted') return 'Принятых оповещений нет. «Принять» на активном оповещении переносит его сюда.'
+  return includeResolved.value ? 'Оповещений нет' : 'Активных оповещений нет'
 })
 let liveSource: EventSource | null = null
 let fallbackPoll: number | undefined
 
 const SEVERITY_RU: Record<string, string> = { critical: 'критично', warning: 'предупреждение', info: 'информация' }
 const STATE_RU: Record<string, string> = { firing: 'активно', acked: 'принято в работу', resolved: 'закрыто' }
+
+/**
+ * Подпись состояния. В разделе принятых «активно» значит другое: оповещение
+ * закрылось и загорелось снова, и принять его нужно заново.
+ */
+function stateLabel(alert: Alert): string {
+  if (tab.value === 'accepted' && alert.state === 'firing') return 'снова активно'
+  return STATE_RU[alert.state] ?? alert.state
+}
 const REM_STATUS_RU: Record<string, string> = {
   planned: 'запланировано',
   skipped: 'пропущено',
@@ -69,6 +99,7 @@ async function load(silent = false, force = false) {
   const results = await Promise.allSettled([
     api.listAlerts(includeResolved.value ? { include_resolved: true, limit: 300 } : { limit: 300 }),
     api.listRemediations(),
+    api.listAlerts({ accepted: true, limit: 300 }),
   ])
   if (sequence !== loadSequence) return
 
@@ -82,6 +113,11 @@ async function load(silent = false, force = false) {
     remediations.value = results[1].value
   } else {
     errors.push(`журнал действий: ${errorMessage(results[1].reason)}`)
+  }
+  if (results[2].status === 'fulfilled') {
+    accepted.value = results[2].value
+  } else {
+    errors.push(`принятые: ${errorMessage(results[2].reason)}`)
   }
   pageError.value = errors.join('; ')
 
@@ -99,17 +135,58 @@ function setBusy(list: typeof acking, id: string, active: boolean) {
   }
 }
 
-async function ack(alert: Alert) {
+/**
+ * Принять в работу. Пояснение можно написать сразу или позже, в разделе
+ * принятых: в момент принятия причина часто ещё неизвестна.
+ */
+function ack(alert: Alert) {
   if (acking.value.includes(alert.id)) return
-  setBusy(acking, alert.id, true)
+  $q.dialog({
+    title: `Принять в работу: «${alert.object_name}»`,
+    message:
+      `${alert.message}\n\nОповещение перейдёт в раздел «Принятые» и перестанет считаться новым. ` +
+      'Проблема при этом не закрывается: оно закроется само, когда причина исчезнет.',
+    prompt: {
+      model: '',
+      type: 'textarea',
+      label: 'Почему так случилось и что делаете (можно дописать позже)',
+      outlined: true,
+      autogrow: true,
+      maxlength: COMMENT_MAX,
+      counter: true,
+    },
+    style: 'white-space: pre-line; width: 560px; max-width: 95vw',
+    cancel: { label: 'Отмена', flat: true },
+    ok: { label: 'Принять', color: 'primary', unelevated: true },
+  }).onOk(async (comment: string) => {
+    if (acking.value.includes(alert.id)) return
+    setBusy(acking, alert.id, true)
+    try {
+      await api.ackAlert(alert.id, (comment ?? '').trim())
+      notifyOk('Оповещение принято в работу — оно в разделе «Принятые»')
+      await load(true, true)
+    } catch (err) {
+      notifyError(err, 'Не удалось принять оповещение')
+      await load(true, true)
+    } finally {
+      setBusy(acking, alert.id, false)
+    }
+  })
+}
+
+async function addComment(alert: Alert) {
+  const message = (commentDrafts.value[alert.id] ?? '').trim()
+  if (!message || commenting.value.includes(alert.id)) return
+  setBusy(commenting, alert.id, true)
   try {
-    await api.ackAlert(alert.id)
-    notifyOk('Оповещение принято в работу')
+    await api.addAlertComment(alert.id, message)
+    commentDrafts.value = { ...commentDrafts.value, [alert.id]: '' }
+    notifyOk('Пояснение добавлено')
     await load(true, true)
   } catch (err) {
-    notifyError(err, 'Не удалось изменить статус')
+    notifyError(err, 'Не удалось добавить пояснение')
   } finally {
-    setBusy(acking, alert.id, false)
+    setBusy(commenting, alert.id, false)
   }
 }
 
@@ -232,6 +309,11 @@ function remediate(alert: Alert) {
 onMounted(async () => {
   await app.bootstrap()
   await load()
+  // Ссылка на оповещение, которое уже приняли, ведёт в его раздел.
+  const wanted = highlightedAlert.value
+  if (wanted && !activeAlerts.value.some((a) => a.id === wanted) && accepted.value.some((a) => a.id === wanted)) {
+    tab.value = 'accepted'
+  }
   liveSource = new EventSource('/api/v1/events', { withCredentials: true })
   liveSource.addEventListener('alert', () => void load(true))
   liveSource.addEventListener('remediation', () => void load(true))
@@ -260,13 +342,20 @@ onBeforeUnmount(() => {
 
     <q-card flat bordered>
       <q-tabs v-model="tab" align="left" active-color="primary" indicator-color="primary" dense>
-        <q-tab name="alerts" :label="`Оповещения (${visibleAlerts.length})`" />
+        <q-tab name="alerts" :label="`Активные (${activeAlerts.length})`" />
+        <q-tab name="accepted" :label="`Принятые (${accepted.length})`" />
         <q-tab name="remediations" :label="`Журнал действий (${remediations.length})`" />
       </q-tabs>
       <q-separator />
 
-      <q-tab-panels v-model="tab" animated>
-        <q-tab-panel name="alerts" class="q-pa-none">
+      <!-- Активные и принятые — один список с разным составом: одинаковые
+           строки, у принятых добавлены пояснения. -->
+      <div v-if="tab !== 'remediations'">
+          <div v-if="tab === 'accepted'" class="q-pa-md jhv-reason">
+            Оповещения, принятые в работу, и пояснения к ним: почему так случилось и что сделано.
+            «Принято» не значит «устранено» — оповещение закроется само, когда причина исчезнет.
+            Записи с пояснениями остаются здесь и после закрытия.
+          </div>
           <!-- Отбор по адресату. Одна лента одинаково будит и того, кто
                отвечает за бэкапы, и того, кто отвечает за гипервизоры; человек,
                которому девять из десяти сообщений не адресованы, перестаёт
@@ -279,7 +368,7 @@ onBeforeUnmount(() => {
               :text-color="audienceFilter === '' ? 'white' : 'primary'"
               @click="audienceFilter = ''"
             >
-              Все ({{ alerts.length }})
+              Все ({{ tabAlerts.length }})
             </q-chip>
             <q-chip
               v-for="audience in app.meta?.alert_audiences ?? []"
@@ -297,9 +386,7 @@ onBeforeUnmount(() => {
           <q-separator />
           <q-list separator>
             <q-item v-if="!loading && !visibleAlerts.length" class="text-grey-6">
-              <q-item-section>
-                {{ audienceFilter ? 'Для этого адресата оповещений нет' : includeResolved ? 'Оповещений нет' : 'Активных оповещений нет' }}
-              </q-item-section>
+              <q-item-section>{{ emptyText }}</q-item-section>
             </q-item>
             <q-item v-for="alert in visibleAlerts" :key="alert.id" class="jhv-alert-item" :class="highlightedAlert === alert.id ? 'bg-blue-1' : ''">
               <q-item-section avatar top>
@@ -319,7 +406,10 @@ onBeforeUnmount(() => {
                 <q-item-label caption>
                   впервые {{ dateTime(alert.first_seen) }} · последний раз {{ ago(alert.last_seen) }} ·
                   повторов {{ alert.count }}
-                  <template v-if="alert.acked_by"> · принял: {{ alert.acked_by }}</template>
+                  <template v-if="alert.acked_by">
+                    · принял: {{ alert.acked_by }}<template v-if="alert.acked_at">, {{ dateTime(alert.acked_at) }}</template>
+                  </template>
+                  <template v-if="alert.resolved_at"> · закрыто {{ dateTime(alert.resolved_at) }}</template>
                 </q-item-label>
                 <q-item-label v-if="alert.notifications_muted || alert.notifications_muted_until" caption class="text-warning">
                   Внешние уведомления
@@ -329,6 +419,44 @@ onBeforeUnmount(() => {
                   циклов внешней доставки: {{ alert.notification_count }}
                   <template v-if="alert.next_notification_at"> · следующий повтор {{ dateTime(alert.next_notification_at) }}</template>
                 </q-item-label>
+
+                <div v-if="tab === 'accepted'" class="q-mt-sm" data-testid="alert-comments">
+                  <q-item-label v-if="alert.state === 'firing'" caption class="text-warning q-mb-xs">
+                    Оповещение закрывалось и загорелось снова — принять его можно в разделе «Активные».
+                  </q-item-label>
+                  <div v-for="comment in alert.comments ?? []" :key="comment.id" class="jhv-alert-comment">
+                    <div class="text-caption text-grey-7">{{ comment.author }} · {{ dateTime(comment.created_at) }}</div>
+                    <div class="jhv-alert-comment__text">{{ comment.message }}</div>
+                  </div>
+                  <div v-if="!(alert.comments ?? []).length" class="text-caption text-grey-7">
+                    Пояснений пока нет.
+                  </div>
+                  <div v-if="auth.can('alerts.write')" class="row items-end q-col-gutter-sm q-mt-xs">
+                    <div class="col-12 col-sm">
+                      <q-input
+                        v-model="commentDrafts[alert.id]"
+                        type="textarea"
+                        autogrow
+                        outlined
+                        dense
+                        :maxlength="COMMENT_MAX"
+                        label="Почему так случилось, что сделано"
+                        :disable="commenting.includes(alert.id)"
+                      />
+                    </div>
+                    <div class="col-12 col-sm-auto">
+                      <q-btn
+                        outline
+                        color="primary"
+                        icon="add_comment"
+                        label="Добавить"
+                        :loading="commenting.includes(alert.id)"
+                        :disable="!(commentDrafts[alert.id] ?? '').trim()"
+                        @click="addComment(alert)"
+                      />
+                    </div>
+                  </div>
+                </div>
               </q-item-section>
               <q-item-section side top class="jhv-alert-state">
                 <q-chip
@@ -336,14 +464,14 @@ onBeforeUnmount(() => {
                   :color="alert.state === 'firing' ? 'negative' : alert.state === 'acked' ? 'warning' : 'positive'"
                   text-color="white"
                 >
-                  {{ STATE_RU[alert.state] ?? alert.state }}
+                  {{ stateLabel(alert) }}
                 </q-chip>
                 <div class="text-caption text-grey-7 text-center">{{ SEVERITY_RU[alert.severity] }}</div>
               </q-item-section>
               <q-item-section side top class="jhv-alert-actions">
                 <div class="column q-gutter-xs jhv-alert-actions__buttons">
                   <q-btn
-                    v-if="auth.can('alerts.write') && alert.state === 'firing'"
+                    v-if="auth.can('alerts.write') && alert.state === 'firing' && tab === 'alerts'"
                     flat
                     dense
                     size="sm"
@@ -378,9 +506,9 @@ onBeforeUnmount(() => {
               </q-item-section>
             </q-item>
           </q-list>
-        </q-tab-panel>
+      </div>
 
-        <q-tab-panel name="remediations" class="q-pa-none">
+      <div v-else>
           <div class="q-pa-md jhv-reason">
             Здесь фиксируется каждое решение системы, включая те, что она сознательно не выполнила —
             иначе на вопрос «почему ночью ничего не произошло» нет ответа.
@@ -434,13 +562,21 @@ onBeforeUnmount(() => {
               <q-item-section class="text-grey-7">Восстановительных действий пока не было.</q-item-section>
             </q-item>
           </q-list>
-        </q-tab-panel>
-      </q-tab-panels>
+      </div>
     </q-card>
   </q-page>
 </template>
 
 <style scoped>
+.jhv-alert-comment {
+  border-left: 3px solid var(--q-primary);
+  padding: 2px 0 2px 10px;
+  margin-bottom: 6px;
+}
+.jhv-alert-comment__text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 @media (max-width: 700px) {
   .jhv-alert-item { flex-wrap: wrap; row-gap: 8px; }
   .jhv-alert-state { padding-left: 0; }

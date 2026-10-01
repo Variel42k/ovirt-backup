@@ -1046,6 +1046,7 @@ type restoreRequest struct {
 	OutputDir      string   `json:"output_dir"`
 	OutputFormat   string   `json:"output_format"` // raw | qcow2
 	TargetServerID string   `json:"target_server_id"`
+	TargetHostID   string   `json:"target_host_id"`
 	TargetDiskID   string   `json:"target_disk_id"`
 	TargetDomainID string   `json:"target_domain_id"`
 	AttachToVMID   string   `json:"attach_to_vm_id"`
@@ -1102,6 +1103,7 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		OutputDir:      req.OutputDir,
 		OutputFormat:   req.OutputFormat,
 		TargetServerID: req.TargetServerID,
+		TargetHostID:   req.TargetHostID,
 		TargetDiskID:   req.TargetDiskID,
 		TargetDomainID: req.TargetDomainID,
 		AttachToVMID:   req.AttachToVMID,
@@ -1114,6 +1116,25 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.writeError(w, r, err)
 		return
+	}
+	if target == model.RestoreToNewDisk {
+		if restoreReq.TargetServerID == "" {
+			restoreReq.TargetServerID = set.Leaf.ServerID
+		}
+		if req.TargetHostID != "" {
+			targets, targetErr := s.diskRestoreHostTargets(r.Context(), restoreReq.TargetServerID, req.TargetHostID)
+			if targetErr != nil {
+				set.Close()
+				s.writeError(w, r, targetErr)
+				return
+			}
+			if !slices.ContainsFunc(targets.Domains, func(d *model.StorageDomain) bool { return d.ID == req.TargetDomainID }) {
+				set.Close()
+				s.writeError(w, r, badRequest("хранилище не является активным доменом данных дата-центра выбранного хоста"))
+				return
+			}
+			restoreReq.TargetClusterID = targets.ClusterID
+		}
 	}
 	set.Close()
 

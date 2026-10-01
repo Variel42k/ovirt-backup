@@ -8,6 +8,7 @@ import (
 
 	"github.com/Variel42k/ovirt-backup/internal/libvirtx"
 	"github.com/Variel42k/ovirt-backup/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/ovirt"
 )
 
 func (s *Server) handleListClusters(w http.ResponseWriter, r *http.Request) {
@@ -20,12 +21,65 @@ func (s *Server) handleListClusters(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListHosts(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Get("live") == "true" {
+		srv, err := s.store.GetServer(r.Context(), r.PathValue("id"))
+		if err != nil {
+			s.writeError(w, r, err)
+			return
+		}
+		if !srv.Enabled || !srv.Kind.UsesOVirtAPI() {
+			s.writeError(w, r, badRequest("для свежего списка хостов выберите включённое подключение oVirt"))
+			return
+		}
+		client, err := s.pool.ForServer(srv)
+		if err != nil {
+			s.writeError(w, r, err)
+			return
+		}
+		items, err := client.ListHosts(r.Context(), srv.ID)
+		if err != nil {
+			s.writeError(w, r, err)
+			return
+		}
+		writeList(w, items)
+		return
+	}
 	items, err := s.store.ListHosts(r.Context(), r.PathValue("id"))
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
 	writeList(w, items)
+}
+
+func (s *Server) diskRestoreHostTargets(ctx context.Context, serverID, hostID string) (*ovirt.HostStorageTargets, error) {
+	srv, err := s.store.GetServer(ctx, serverID)
+	if err != nil {
+		return nil, err
+	}
+	if !srv.Enabled || !srv.Kind.UsesOVirtAPI() {
+		return nil, badRequest("выберите включённое подключение oVirt, РЕД Виртуализация или RHV")
+	}
+	client, err := s.pool.ForServer(srv)
+	if err != nil {
+		return nil, err
+	}
+	targets, err := client.HostStorageDomains(ctx, serverID, hostID)
+	if err != nil {
+		return nil, badRequest("%s", err)
+	}
+	return targets, nil
+}
+
+func (s *Server) handleHostStorageDomains(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
+	defer cancel()
+	targets, err := s.diskRestoreHostTargets(ctx, r.PathValue("id"), r.PathValue("hostID"))
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, targets)
 }
 
 func (s *Server) handleListVMs(w http.ResponseWriter, r *http.Request) {

@@ -360,6 +360,12 @@ export interface BackupQualitySettings {
   storage_warning_forecast_days: number
   storage_critical_forecast_days: number
   history_retention_days: number
+  /**
+   * Пороги доменов хранения виртуализации — остаток свободного места, %.
+   * В форме настроек показываются заполнением: 5 → «заполнено на 95 %».
+   */
+  domain_warning_free_percent: number
+  domain_critical_free_percent: number
 }
 
 export interface NotificationSettings {

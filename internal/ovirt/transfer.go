@@ -22,6 +22,8 @@ type TransferRequest struct {
 	// BackupID переводит передачу в режим чтения точки Backup API; вместе с
 	// DiskID это единственный способ прочитать данные горячего бэкапа.
 	BackupID string
+	// HostID pins ImageIO to the selected upload host, including oVirt 4.3.
+	HostID string
 
 	Direction string // download | upload
 	// raw отдаёт гостевые данные как есть — то, что нужно для бэкапа.
@@ -76,6 +78,9 @@ func (c *Client) CreateTransfer(ctx context.Context, req TransferRequest) (*Imag
 	}
 	if req.BackupID != "" {
 		body["backup"] = map[string]string{"id": req.BackupID}
+	}
+	if req.HostID != "" {
+		body["host"] = map[string]string{"id": req.HostID}
 	}
 	if req.Shallow {
 		body["shallow"] = true
@@ -147,6 +152,9 @@ func (c *Client) CreateUploadForNewDisk(ctx context.Context, req TransferRequest
 			if candidate.Terminal() || candidate.Direction != "upload" ||
 				(candidate.Disk.ID != req.DiskID && candidate.Image.ID != req.DiskID) {
 				continue
+			}
+			if req.HostID != "" && candidate.Host.ID != "" && candidate.Host.ID != req.HostID {
+				return nil, fmt.Errorf("%w; передача нового диска открыта на другом хосте %s, выбран %s", err, candidate.Host.ID, req.HostID)
 			}
 			if found != nil {
 				return nil, fmt.Errorf("%w; у нового диска %s несколько передач — нельзя однозначно продолжить", err, req.DiskID)

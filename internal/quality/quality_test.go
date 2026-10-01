@@ -17,7 +17,7 @@ func qualityDefaults() model.BackupQualitySettings {
 		PerformanceDegradationPct: 50, PerformanceConsecutiveRuns: 3,
 		StorageWarningFreePct: 15, StorageCriticalFreePct: 5,
 		StorageWarningForecastDays: 30, StorageCriticalForecastDays: 7,
-		HistoryRetentionDays: 90,
+		HistoryRetentionDays: 90, DomainWarningFreePct: 12, DomainCriticalFreePct: 4,
 	}
 }
 
@@ -190,6 +190,21 @@ func TestCapacityForecastAndUnknownObjectStorageQuota(t *testing.T) {
 	capacity := capacityFor(local, samples, settings)
 	if capacity.ForecastDays == nil || capacity.GrowthBytesDay != 10 || capacity.State != "critical" {
 		t.Fatalf("unexpected forecast: %+v", capacity)
+	}
+
+	// Причина называет и число, и порог, который оно перешло.
+	if !strings.Contains(capacity.Reason, "места хватит на 3 дн.") || !strings.Contains(capacity.Reason, "заполнено на 70.0%") {
+		t.Fatalf("forecast reason hides the numbers: %q", capacity.Reason)
+	}
+	filled := capacityFor(&model.StorageTarget{ID: "full", Kind: model.StorageLocal, LastCheckOK: true,
+		FreeBytes: 12, UsedBytes: 88}, nil, settings)
+	if filled.State != "warning" || filled.Reason != "заполнено на 88.0% — выше порога предупреждения 85%" {
+		t.Fatalf("fill reason: %+v", filled)
+	}
+	roomy := capacityFor(&model.StorageTarget{ID: "roomy", Kind: model.StorageLocal, LastCheckOK: true,
+		FreeBytes: 94, UsedBytes: 6}, nil, settings)
+	if roomy.State != "ok" {
+		t.Fatalf("storage filled to 6%% raised %q: %s", roomy.State, roomy.Reason)
 	}
 
 	s3 := &model.StorageTarget{ID: "s3", Name: "bucket", Kind: model.StorageS3,

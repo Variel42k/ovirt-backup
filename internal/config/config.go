@@ -1254,6 +1254,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("monitor.backup_quality.storage_warning_forecast_days", 30)
 	v.SetDefault("monitor.backup_quality.storage_critical_forecast_days", 7)
 	v.SetDefault("monitor.backup_quality.history_retention_days", 90)
+	v.SetDefault("monitor.backup_quality.domain_warning_free_percent", model.DefaultDomainWarningFreePct)
+	v.SetDefault("monitor.backup_quality.domain_critical_free_percent", model.DefaultDomainCriticalFreePct)
 	v.SetDefault("monitor.remediation.dry_run", true)
 	v.SetDefault("monitor.remediation.archive_dir", "data/remediation-archives")
 	v.SetDefault("monitor.remediation.cooldown", "10m")

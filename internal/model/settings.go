@@ -19,7 +19,19 @@ type BackupQualitySettings struct {
 	StorageWarningForecastDays  int `json:"storage_warning_forecast_days" mapstructure:"storage_warning_forecast_days"`
 	StorageCriticalForecastDays int `json:"storage_critical_forecast_days" mapstructure:"storage_critical_forecast_days"`
 	HistoryRetentionDays        int `json:"history_retention_days" mapstructure:"history_retention_days"`
+	// Пороги заполнения доменов хранения виртуализации — в процентах
+	// свободного места, как и у хранилищ бэкапов выше. Web показывает их
+	// заполнением: 5 % свободного — это «заполнено на 95 %».
+	DomainWarningFreePct  int `json:"domain_warning_free_percent" mapstructure:"domain_warning_free_percent"`
+	DomainCriticalFreePct int `json:"domain_critical_free_percent" mapstructure:"domain_critical_free_percent"`
 }
+
+// Пороги доменов виртуализации до того, как их стало можно настраивать:
+// предупреждение при 90 % заполнения, критично при 95 %.
+const (
+	DefaultDomainWarningFreePct  = 10
+	DefaultDomainCriticalFreePct = 5
+)
 
 func (s BackupQualitySettings) Validate() error {
 	ranges := []struct {
@@ -37,6 +49,8 @@ func (s BackupQualitySettings) Validate() error {
 		{"storage_warning_forecast_days", s.StorageWarningForecastDays, 1, 365},
 		{"storage_critical_forecast_days", s.StorageCriticalForecastDays, 1, 365},
 		{"history_retention_days", s.HistoryRetentionDays, 7, 3650},
+		{"domain_warning_free_percent", s.DomainWarningFreePct, 1, 99},
+		{"domain_critical_free_percent", s.DomainCriticalFreePct, 1, 99},
 	}
 	for _, r := range ranges {
 		if r.value < r.min || r.value > r.max {
@@ -48,6 +62,9 @@ func (s BackupQualitySettings) Validate() error {
 	}
 	if s.StorageCriticalForecastDays >= s.StorageWarningForecastDays {
 		return fmt.Errorf("критический срок заполнения должен быть меньше предупреждающего")
+	}
+	if s.DomainCriticalFreePct >= s.DomainWarningFreePct {
+		return fmt.Errorf("критический процент свободного места домена должен быть меньше предупреждающего")
 	}
 	return nil
 }
@@ -70,10 +87,17 @@ type RuntimeSettings struct {
 	QualityStorageWarningForecastDays  *int      `json:"quality_storage_warning_forecast_days,omitempty"`
 	QualityStorageCriticalForecastDays *int      `json:"quality_storage_critical_forecast_days,omitempty"`
 	QualityHistoryRetentionDays        *int      `json:"quality_history_retention_days,omitempty"`
+	QualityDomainWarningFreePct        *int      `json:"quality_domain_warning_free_percent,omitempty"`
+	QualityDomainCriticalFreePct       *int      `json:"quality_domain_critical_free_percent,omitempty"`
 	UpdatedBy                          string    `json:"updated_by,omitempty"`
 	UpdatedAt                          time.Time `json:"updated_at,omitempty"`
 }
 
+// HasBackupQuality reports whether the quality override is stored.
+//
+// Пороги доменов сюда не входят: колонки появились позже остальных, и у
+// настроек, сохранённых до них, они пусты. Требовать их значило бы молча
+// отбросить всё, что оператор уже настроил.
 func (s RuntimeSettings) HasBackupQuality() bool {
 	return s.QualityStaleIntervals != nil && s.QualityVerifyMaxAgeDays != nil &&
 		s.QualityPerformanceWindowRuns != nil && s.QualityPerformanceDegradationPct != nil &&
@@ -82,11 +106,13 @@ func (s RuntimeSettings) HasBackupQuality() bool {
 		s.QualityStorageCriticalForecastDays != nil && s.QualityHistoryRetentionDays != nil
 }
 
-func (s RuntimeSettings) BackupQuality() BackupQualitySettings {
+// BackupQuality собирает сохранённые пороги. Поля, которых в базе нет,
+// берутся из base — конфигурации запуска.
+func (s RuntimeSettings) BackupQuality(base BackupQualitySettings) BackupQualitySettings {
 	if !s.HasBackupQuality() {
-		return BackupQualitySettings{}
+		return base
 	}
-	return BackupQualitySettings{
+	out := BackupQualitySettings{
 		StaleIntervals: *s.QualityStaleIntervals, VerifyMaxAgeDays: *s.QualityVerifyMaxAgeDays,
 		PerformanceWindowRuns:       *s.QualityPerformanceWindowRuns,
 		PerformanceDegradationPct:   *s.QualityPerformanceDegradationPct,
@@ -96,7 +122,14 @@ func (s RuntimeSettings) BackupQuality() BackupQualitySettings {
 		StorageWarningForecastDays:  *s.QualityStorageWarningForecastDays,
 		StorageCriticalForecastDays: *s.QualityStorageCriticalForecastDays,
 		HistoryRetentionDays:        *s.QualityHistoryRetentionDays,
+		DomainWarningFreePct:        base.DomainWarningFreePct,
+		DomainCriticalFreePct:       base.DomainCriticalFreePct,
 	}
+	if s.QualityDomainWarningFreePct != nil && s.QualityDomainCriticalFreePct != nil {
+		out.DomainWarningFreePct = *s.QualityDomainWarningFreePct
+		out.DomainCriticalFreePct = *s.QualityDomainCriticalFreePct
+	}
+	return out
 }
 
 // HasLogRotation reports whether all fields of the rotation override exist.

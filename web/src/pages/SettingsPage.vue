@@ -5,6 +5,7 @@ import { useQuasar } from 'quasar'
 import {
   api,
   errorMessage,
+  notify,
   notifyError,
   notifyOk,
   popupNotificationsEnabled,
@@ -46,7 +47,7 @@ const settingsCategory = ref('system')
 const settingsGroups = computed(() => [
   { value: 'system', label: 'Общие', icon: 'settings', tabs: [{ value: 'system', label: 'Система' }] },
   { value: 'operations', label: 'Эксплуатация', icon: 'monitor_heart', tabs: [
-    ...(auth.can('settings.read') ? [{ value: 'monitoring', label: 'Пороги качества' }] : []),
+    ...(auth.can('settings.read') ? [{ value: 'monitoring', label: 'Пороги оповещений' }] : []),
     ...(auth.can('alerts.admin') ? [{ value: 'notifications', label: 'Уведомления' }] : []),
     ...(auth.can('dr.read') ? [{ value: 'dr', label: 'Аварийная готовность' }] : []),
     ...(auth.can('logs.read') ? [{ value: 'logs', label: 'Журнал' }] : []),
@@ -158,6 +159,52 @@ const qualityForm = ref<BackupQualitySettings>({
   storage_warning_forecast_days: 30,
   storage_critical_forecast_days: 7,
   history_retention_days: 90,
+  domain_warning_free_percent: 10,
+  domain_critical_free_percent: 5,
+})
+
+/**
+ * Пороги заполнения в форме — в процентах заполнения, а не свободного места.
+ *
+ * Служба хранит остаток свободного места: так записаны YAML и база. Но
+ * спрашивают всегда наоборот — «сообщать, когда заполнено на 95 %», и поле,
+ * в которое для этого надо ввести 5, заполняют неверно.
+ */
+type FreePercentField =
+  | 'storage_warning_free_percent' | 'storage_critical_free_percent'
+  | 'domain_warning_free_percent' | 'domain_critical_free_percent'
+
+function fillPercent(field: FreePercentField) {
+  return computed<number | null>({
+    get: () => {
+      const free = qualityForm.value[field]
+      return typeof free === 'number' && Number.isFinite(free) ? 100 - free : null
+    },
+    set: (filled) => {
+      // Пустое поле не превращается в 100 % свободного: сервер отклонит
+      // значение вне диапазона и назовёт поле.
+      qualityForm.value[field] = typeof filled === 'number' && Number.isFinite(filled) ? 100 - filled : Number.NaN
+    },
+  })
+}
+const domainWarningFill = fillPercent('domain_warning_free_percent')
+const domainCriticalFill = fillPercent('domain_critical_free_percent')
+const storageWarningFill = fillPercent('storage_warning_free_percent')
+const storageCriticalFill = fillPercent('storage_critical_free_percent')
+
+/** Что не так с порогами заполнения — до отправки, словами формы. */
+const fillThresholdError = computed(() => {
+  const pairs: Array<[string, number | null, number | null]> = [
+    ['домены виртуализации', domainWarningFill.value, domainCriticalFill.value],
+    ['хранилища бэкапов', storageWarningFill.value, storageCriticalFill.value],
+  ]
+  for (const [title, warning, critical] of pairs) {
+    if (warning === null || critical === null) return `Заполните оба порога: ${title}.`
+    if (!Number.isInteger(warning) || !Number.isInteger(critical)) return `Пороги задаются целыми процентами: ${title}.`
+    if (warning < 1 || critical > 99) return `Пороги должны быть от 1 до 99 %: ${title}.`
+    if (critical <= warning) return `Критичный порог должен быть выше порога предупреждения: ${title}.`
+  }
+  return ''
 })
 
 const dialog = ref(false)
@@ -435,6 +482,10 @@ async function resetRotation() {
 }
 
 async function saveQuality() {
+  if (fillThresholdError.value) {
+    notify({ type: 'negative', message: fillThresholdError.value })
+    return
+  }
   qualityBusy.value = true
   try {
     applyRuntimeSettings(await api.setRuntimeBackupQuality(qualityForm.value))
@@ -1467,7 +1518,7 @@ watch(() => [route.query, route.meta.settingsTab], applyDeepLink)
         <q-tab-panel v-if="auth.can('settings.read')" name="monitoring">
           <PageLoadError
             :message="sectionErrors.runtime"
-            title="Не удалось загрузить пороги качества"
+            title="Не удалось загрузить пороги оповещений"
             :loading="sectionLoading.runtime"
             @retry="loadRuntimeSettings"
           />
@@ -1505,25 +1556,53 @@ watch(() => [route.query, route.meta.settingsTab], applyDeepLink)
               </div>
 
               <q-separator class="q-my-md" />
-              <div class="text-subtitle2 q-mb-md">Свободное место и прогноз</div>
-              <div class="row q-col-gutter-md">
-                <div class="col-6 col-sm-3">
-                  <q-input v-model.number="qualityForm.storage_warning_free_percent" type="number" min="1" max="99"
-                           label="Предупреждение, %" outlined dense :disable="qualityBusy || runtimeUnavailable || !auth.can('settings.admin')" />
+              <div class="text-subtitle2 q-mb-xs">Заполнение хранилищ</div>
+              <div class="jhv-reason q-mb-md">
+                Оповещение появляется, когда хранилище заполнено не меньше порога, и закрывается само,
+                когда заполнение опускается ниже. Пока порог не достигнут, оповещения нет. Чтобы узнавать
+                о заполнении только с 95 %, поставьте 95 в «Предупреждение».
+              </div>
+              <div class="text-caption text-weight-medium q-mb-sm">Домены хранения виртуализации</div>
+              <div class="row q-col-gutter-md q-mb-lg" data-testid="domain-fill-thresholds">
+                <div class="col-12 col-sm-6">
+                  <q-input v-model.number="domainWarningFill" type="number" min="1" max="98" suffix="%"
+                           label="Предупреждение при заполнении" outlined dense
+                           hint="Тип storage_domain_low_space"
+                           :disable="qualityBusy || runtimeUnavailable || !auth.can('settings.admin')" />
                 </div>
-                <div class="col-6 col-sm-3">
-                  <q-input v-model.number="qualityForm.storage_critical_free_percent" type="number" min="1" max="99"
-                           label="Критично, %" outlined dense :disable="qualityBusy || runtimeUnavailable || !auth.can('settings.admin')" />
-                </div>
-                <div class="col-6 col-sm-3">
-                  <q-input v-model.number="qualityForm.storage_warning_forecast_days" type="number" min="1" max="365"
-                           label="Прогноз, дней" outlined dense :disable="qualityBusy || runtimeUnavailable || !auth.can('settings.admin')" />
-                </div>
-                <div class="col-6 col-sm-3">
-                  <q-input v-model.number="qualityForm.storage_critical_forecast_days" type="number" min="1" max="365"
-                           label="Критичный прогноз" outlined dense :disable="qualityBusy || runtimeUnavailable || !auth.can('settings.admin')" />
+                <div class="col-12 col-sm-6">
+                  <q-input v-model.number="domainCriticalFill" type="number" min="2" max="99" suffix="%"
+                           label="Критично при заполнении" outlined dense
+                           hint="На полном домене движок ставит ВМ на паузу"
+                           :disable="qualityBusy || runtimeUnavailable || !auth.can('settings.admin')" />
                 </div>
               </div>
+              <div class="text-caption text-weight-medium q-mb-sm">Хранилища бэкапов</div>
+              <div class="row q-col-gutter-md" data-testid="storage-fill-thresholds">
+                <div class="col-12 col-sm-6">
+                  <q-input v-model.number="storageWarningFill" type="number" min="1" max="98" suffix="%"
+                           label="Предупреждение при заполнении" outlined dense
+                           hint="Тип storage_capacity_low"
+                           :disable="qualityBusy || runtimeUnavailable || !auth.can('settings.admin')" />
+                </div>
+                <div class="col-12 col-sm-6">
+                  <q-input v-model.number="storageCriticalFill" type="number" min="2" max="99" suffix="%"
+                           label="Критично при заполнении" outlined dense
+                           :disable="qualityBusy || runtimeUnavailable || !auth.can('settings.admin')" />
+                </div>
+                <div class="col-12 col-sm-6">
+                  <q-input v-model.number="qualityForm.storage_warning_forecast_days" type="number" min="1" max="365"
+                           label="Предупреждение, если места хватит меньше чем на, дней" outlined dense
+                           hint="Прогноз по росту за последние дни; тип storage_capacity_forecast"
+                           :disable="qualityBusy || runtimeUnavailable || !auth.can('settings.admin')" />
+                </div>
+                <div class="col-12 col-sm-6">
+                  <q-input v-model.number="qualityForm.storage_critical_forecast_days" type="number" min="1" max="365"
+                           label="Критично, если места хватит меньше чем на, дней" outlined dense
+                           :disable="qualityBusy || runtimeUnavailable || !auth.can('settings.admin')" />
+                </div>
+              </div>
+              <div v-if="fillThresholdError" class="text-negative text-caption q-mt-sm">{{ fillThresholdError }}</div>
 
               <div class="row items-center q-gutter-sm q-mt-lg">
                 <q-btn v-if="auth.can('settings.admin')" color="primary" unelevated icon="save" label="Сохранить" :loading="qualityBusy" :disable="runtimeUnavailable" @click="saveQuality" />

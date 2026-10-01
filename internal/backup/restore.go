@@ -462,19 +462,33 @@ func (e *Engine) restoreToEngine(ctx context.Context, set *ChainSet, reader *Cha
 
 	record.Phase = "opening_transfer"
 	_ = e.store.UpdateRestoreRun(ctx, record)
-	transfer, err := client.CreateTransfer(ctx, ovirt.TransferRequest{
-		DiskID:    targetDiskID,
-		Direction: "upload",
-		Format:    "raw",
+	openingWatch := newRestoreTransferWatch(e.log.With().Str("restore", record.ID).Logger(), "",
+		targetDiskID, record.TargetDiskName, "", client.BaseURL())
+	openingWatch.Observe("opening_transfer", 0, 0)
+	e.log.Info().Str("restore", record.ID).Str("диск-id", targetDiskID).
+		Dur("таймаут-запроса", e.imageioTimeouts(0).Block).Msg("ожидаю открытие передачи на запись в движке")
+	transferRequest := ovirt.TransferRequest{
+		DiskID:         targetDiskID,
+		Direction:      "upload",
+		Format:         "raw",
+		RequestTimeout: e.imageioTimeouts(0).Block,
 		// Обнуление больших диапазонов — один долгий запрос: движок не должен
 		// закрыть передачу как простаивающую посреди него.
 		InactivityTimeout: e.transferInactivity(e.imageioTimeouts(leaf.VirtualSize).Scan),
-	})
+	}
+	openTransfer := client.CreateTransfer
+	if freshDisk {
+		openTransfer = client.CreateUploadForNewDisk
+	}
+	transfer, err := openTransfer(ctx, transferRequest)
+	openingWatch.Stop()
 	if err != nil {
 		return fmt.Errorf("открытие передачи на запись: %w", err)
 	}
-	record.TransferID = transfer.ID
+	record.TransferID, record.Phase = transfer.ID, "waiting_transfer"
 	_ = e.store.UpdateRestoreRun(ctx, record)
+	e.log.Info().Str("restore", record.ID).Str("диск-id", targetDiskID).
+		Str("transfer", transfer.ID).Str("фаза", transfer.Phase).Msg("передача зарегистрирована, ожидаю готовность ImageIO")
 	success := false
 	transferClosed := false
 	defer func() {

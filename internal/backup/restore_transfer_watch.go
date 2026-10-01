@@ -88,6 +88,8 @@ func (w *restoreTransferWatch) loop() {
 
 func restoreStageHint(stage string) string {
 	switch stage {
+	case "opening_transfer":
+		return "движок ожидает подготовку тома и ticket на гипервизоре; проверьте VDSM, ImageIO и доступность домена хранения"
 	case "reading_backup":
 		return "доступность и задержки хранилища резервных копий"
 	case "writing_imageio":

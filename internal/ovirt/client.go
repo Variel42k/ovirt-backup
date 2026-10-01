@@ -568,7 +568,16 @@ func (c *Client) doOnce(ctx context.Context, method, endpoint, path string, payl
 		req.Header.Set("Idempotency-Key", o.correlationID)
 	}
 
-	resp, err := c.http.Do(req)
+	requestClient := c.http
+	if o.timeout > 0 {
+		// A context deadline alone cannot extend http.Client.Timeout. Copy
+		// the client so a long operation uses its own limit without changing
+		// concurrent inventory requests or their shared transport.
+		copy := *c.http
+		copy.Timeout = o.timeout
+		requestClient = &copy
+	}
+	resp, err := requestClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("запрос %s %s: %w", method, path, err)
 	}

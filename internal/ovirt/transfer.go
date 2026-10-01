@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"time"
 )
@@ -34,6 +35,11 @@ type TransferRequest struct {
 	// Shallow читает только верхний слой цепочки образов (используется при
 	// покотором бэкапе снапшотов).
 	Shallow bool
+
+	// RequestTimeout bounds the control-plane POST, independently of the
+	// short inventory timeout. Preparing an upload may involve slow storage
+	// activation and ticket creation on the host.
+	RequestTimeout time.Duration
 }
 
 // CreateTransfer opens an image transfer.
@@ -76,7 +82,12 @@ func (c *Client) CreateTransfer(ctx context.Context, req TransferRequest) (*Imag
 	}
 
 	var transfer ImageTransfer
-	err := c.post(ctx, "/imagetransfers", body, &transfer)
+	requestTimeout := req.RequestTimeout
+	if requestTimeout <= 0 {
+		requestTimeout = max(2*time.Minute, c.http.Timeout)
+	}
+	longRequest := func(o *requestOptions) { o.timeout = requestTimeout }
+	err := c.post(ctx, "/imagetransfers", body, &transfer, longRequest)
 	if err == nil {
 		return &transfer, nil
 	}
@@ -90,7 +101,7 @@ func (c *Client) CreateTransfer(ctx context.Context, req TransferRequest) (*Imag
 	if !legacyRequest && errors.As(err, &apiErr) && apiErr.Status == http.StatusBadRequest {
 		delete(body, "timeout_policy")
 		transfer = ImageTransfer{}
-		if retryErr := c.post(ctx, "/imagetransfers", body, &transfer); retryErr != nil {
+		if retryErr := c.post(ctx, "/imagetransfers", body, &transfer, longRequest); retryErr != nil {
 			// A conflict means the 4.3-shaped document was understood and only
 			// the disk state rejected it. Remember the downgrade now; otherwise
 			// every lock retry would first send another known-invalid 4.4 request.
@@ -103,6 +114,57 @@ func (c *Client) CreateTransfer(ctx context.Context, req TransferRequest) (*Imag
 		return &transfer, nil
 	}
 	return nil, err
+}
+
+// CreateUploadForNewDisk can recover a lost POST response for a disk created
+// exclusively by this operation. Never use it for an existing disk: another
+// uploader's session must not be adopted. The POST itself is never repeated.
+func (c *Client) CreateUploadForNewDisk(ctx context.Context, req TransferRequest) (*ImageTransfer, error) {
+	if req.DiskID == "" || req.Direction != "upload" || req.SnapshotID != "" || req.BackupID != "" {
+		return nil, fmt.Errorf("восстановление ответа передачи допустимо только для загрузки в новый диск")
+	}
+	transfer, err := c.CreateTransfer(ctx, req)
+	if err == nil {
+		return transfer, nil
+	}
+	var networkErr net.Error
+	if ctx.Err() != nil || !errors.As(err, &networkErr) {
+		return nil, err
+	}
+
+	// The engine can finish the request after the HTTP client has timed out.
+	// Locate that session by its exclusive disk ID, including the 4.3 image
+	// reference, rather than creating a duplicate session.
+	lookupCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	for {
+		all, lookupErr := c.ListImageTransfers(lookupCtx)
+		if lookupErr != nil {
+			return nil, fmt.Errorf("%w; состояние передачи диска %s не удалось проверить: %v", err, req.DiskID, lookupErr)
+		}
+		var found *ImageTransfer
+		for _, candidate := range all {
+			if candidate.Terminal() || candidate.Direction != "upload" ||
+				(candidate.Disk.ID != req.DiskID && candidate.Image.ID != req.DiskID) {
+				continue
+			}
+			if found != nil {
+				return nil, fmt.Errorf("%w; у нового диска %s несколько передач — нельзя однозначно продолжить", err, req.DiskID)
+			}
+			copy := candidate
+			found = &copy
+		}
+		if found != nil {
+			c.log.Warn().Str("диск-id", req.DiskID).Str("transfer", found.ID).Str("фаза", found.Phase).
+				Msg("ответ открытия передачи потерян, найдена передача нового диска; продолжаю без повторного POST")
+			return found, nil
+		}
+		select {
+		case <-lookupCtx.Done():
+			return nil, fmt.Errorf("%w; передача нового диска %s не найдена, проверьте ImageTransfer в движке", err, req.DiskID)
+		case <-time.After(time.Second):
+		}
+	}
 }
 
 // CreateTransferWhenReady opens a transfer after transient disk locks clear.

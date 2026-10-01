@@ -69,6 +69,11 @@ func (e *Engine) closeInterruptedRestoreTransfer(ctx context.Context, run *model
 			ID: run.TransferID, Direction: "upload", Disk: ovirt.Ref{ID: run.TargetDiskID},
 		})
 	} else {
+		if run.Target != model.RestoreToNewDisk {
+			// Without a saved transfer ID an existing disk does not prove
+			// ownership: its upload may belong to another operator.
+			return nil
+		}
 		// Совместимость с операциями, начатыми до сохранения transfer_id: диск
 		// создан этой записью восстановления, поэтому его открытый upload тоже
 		// принадлежит службе.
@@ -77,7 +82,8 @@ func (e *Engine) closeInterruptedRestoreTransfer(ctx context.Context, run *model
 			return fmt.Errorf("список ImageTransfer для диска %s: %w", run.TargetDiskID, listErr)
 		}
 		for _, transfer := range all {
-			if !transfer.Terminal() && transfer.Disk.ID == run.TargetDiskID {
+			if !transfer.Terminal() && transfer.Direction == "upload" &&
+				(transfer.Disk.ID == run.TargetDiskID || transfer.Image.ID == run.TargetDiskID) {
 				transfers = append(transfers, transfer)
 			}
 		}

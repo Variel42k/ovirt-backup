@@ -151,6 +151,7 @@ export function transferPauseHint(phase?: string): string {
     case 'restoring_disks':
       return 'нет новых подтверждённых диапазонов; журнал различит чтение копии и ожидание ImageIO'
     case 'opening_transfer':
+    case 'waiting_transfer':
       return 'движок или ImageIO ещё не подготовил ticket передачи'
     case 'waiting_disk':
     case 'creating_disk':

@@ -3,11 +3,97 @@ package ovirt
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func TestCreateTransferUsesOperationTimeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/ovirt-engine/sso/oauth/token" {
+			_, _ = w.Write([]byte(`{"access_token":"token","exp":"9999999999999"}`))
+			return
+		}
+		time.Sleep(150 * time.Millisecond)
+		_, _ = w.Write([]byte(`{"id":"slow-transfer","phase":"initializing"}`))
+	}))
+	defer server.Close()
+	client, err := New(Config{EngineURL: server.URL, Timeout: 50 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	transfer, err := client.CreateTransfer(context.Background(), TransferRequest{
+		DiskID: "disk-1", Direction: "upload", RequestTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("длинный POST ограничен таймаутом инвентаря: %v", err)
+	}
+	if transfer.ID != "slow-transfer" {
+		t.Fatalf("transfer = %+v", transfer)
+	}
+	if client.http.Timeout != 50*time.Millisecond {
+		t.Fatal("изменился таймаут общего клиента")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
+	defer cancel()
+	_, err = client.CreateTransfer(ctx, TransferRequest{DiskID: "disk-1", RequestTimeout: time.Second})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("не соблюдён таймаут контекста: %v", err)
+	}
+}
+
+func TestCreateUploadForNewDiskRecoversLostResponseWithoutRepeatingPost(t *testing.T) {
+	for _, ambiguous := range []bool{false, true} {
+		t.Run(fmt.Sprintf("ambiguous=%t", ambiguous), func(t *testing.T) {
+			var posts atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/ovirt-engine/sso/oauth/token" {
+					_, _ = w.Write([]byte(`{"access_token":"token","exp":"9999999999999"}`))
+					return
+				}
+				if r.Method == http.MethodPost {
+					posts.Add(1)
+					// The engine created the session, but the POST response was lost.
+					time.Sleep(150 * time.Millisecond)
+					return
+				}
+				items := []ImageTransfer{
+					{ID: "other-disk", Direction: "upload", Phase: "transferring", Image: Ref{ID: "disk-2"}},
+					{ID: "other-direction", Direction: "download", Phase: "transferring", Image: Ref{ID: "disk-1"}},
+					{ID: "old-terminal", Direction: "upload", Phase: "finished_success", Image: Ref{ID: "disk-1"}},
+					{ID: "created-upload", Direction: "upload", Phase: "transferring", Image: Ref{ID: "disk-1"}},
+				}
+				if ambiguous {
+					items = append(items, ImageTransfer{ID: "second-upload", Direction: "upload", Phase: "initializing", Disk: Ref{ID: "disk-1"}})
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"image_transfer": items})
+			}))
+			defer server.Close()
+			client, err := New(Config{EngineURL: server.URL, Timeout: time.Second})
+			if err != nil {
+				t.Fatal(err)
+			}
+			transfer, err := client.CreateUploadForNewDisk(context.Background(), TransferRequest{
+				DiskID: "disk-1", Direction: "upload", RequestTimeout: 50 * time.Millisecond,
+			})
+			if ambiguous {
+				if err == nil || transfer != nil {
+					t.Fatalf("выбрана неоднозначная передача: %+v, %v", transfer, err)
+				}
+			} else if err != nil || transfer.ID != "created-upload" {
+				t.Fatalf("передача oVirt 4.3 не найдена по image.id: %+v, %v", transfer, err)
+			}
+			if posts.Load() != 1 {
+				t.Fatalf("POST повторён %d раз", posts.Load())
+			}
+		})
+	}
+}
 
 func TestCreateTransferFallsBackToOVirt43Request(t *testing.T) {
 	mux := http.NewServeMux()

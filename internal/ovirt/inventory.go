@@ -346,6 +346,18 @@ func (c *Client) GetDisk(ctx context.Context, id string) (*Disk, error) {
 	return &d, nil
 }
 
+// DiskVMs returns live attachments, including ones absent from cached inventory.
+func (c *Client) DiskVMs(ctx context.Context, diskID string) ([]Ref, error) {
+	var disk Disk
+	if err := c.get(ctx, "/disks/"+diskID, &disk, withQuery(url.Values{"all_content": {"true"}})); err != nil {
+		return nil, err
+	}
+	if disk.VMs == nil {
+		return nil, nil
+	}
+	return disk.VMs.VM, nil
+}
+
 // ListVMDisks returns the disks attached to a VM, in attachment order, with the
 // bootable flag taken from the attachment rather than the disk.
 func (c *Client) ListVMDisks(ctx context.Context, vmID string) ([]Disk, error) {

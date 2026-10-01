@@ -237,9 +237,15 @@ func (e *Engine) VerifyCopy(ctx context.Context, runID, copyID string, mode mode
 	if err != nil {
 		record.Status = model.RunFailed
 		record.Phase = "failed"
+		if errors.Is(err, context.Canceled) {
+			record.Status, record.Phase = model.RunCanceled, "canceled"
+			err = fmt.Errorf("проверка отменена: %w", err)
+		}
 		record.Error = err.Error()
 		_ = e.store.UpdateVerifyRun(context.WithoutCancel(ctx), record)
-		e.markRunVerified(ctx, runID, copyID, model.RunFailed)
+		if record.Status != model.RunCanceled {
+			e.markRunVerified(ctx, runID, copyID, model.RunFailed)
+		}
 		log.Warn().Err(err).Msg("проверка выявила проблему")
 		return record, err
 	}

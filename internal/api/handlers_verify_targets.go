@@ -548,12 +548,50 @@ func (s *Server) handleRemoveVerifyLeftover(w http.ResponseWriter, r *http.Reque
 		s.writeError(w, r, badRequest("нужны kind, server_id и ref"))
 		return
 	}
-	err := s.engine.RemoveVerifyLeftover(r.Context(), req.Kind, req.ServerID, req.Ref)
+	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Minute)
+	defer cancel()
+	err := s.engine.RemoveVerifyLeftover(ctx, req.Kind, req.ServerID, req.Ref)
 	s.audit(r, "verify.leftover.remove", model.ScopeBackup, req.Ref, err == nil, req.Kind)
 	if err != nil {
 		if errors.Is(err, dispatch.ErrLeftoverActive) {
 			err = fmt.Errorf("%w: %v", store.ErrConflict, err)
 		}
+		s.writeError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleCancelBootCheck(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, err := s.store.GetVerifyRun(r.Context(), id); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	err := s.engine.CancelBootCheck(id)
+	s.audit(r, "verify.cancel", model.ScopeBackup, id, err == nil, "")
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "cancelling"})
+}
+
+func (s *Server) handleCancelVerifyDiskTransfer(w http.ResponseWriter, r *http.Request) {
+	var req verifyLeftoverRemoveRequest
+	if err := decodeJSON(r, &req); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	if req.Kind != dispatch.LeftoverEngineDisk || req.ServerID == "" || req.Ref == "" {
+		s.writeError(w, r, badRequest("нужны kind=engine_disk, server_id и ref"))
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Minute)
+	defer cancel()
+	err := s.engine.CancelVerifyDisk(ctx, req.ServerID, req.Ref)
+	s.audit(r, "verify.disk.cancel_transfer", model.ScopeBackup, req.Ref, err == nil, req.ServerID)
+	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}

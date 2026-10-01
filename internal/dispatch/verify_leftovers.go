@@ -32,9 +32,10 @@ import (
 
 // Виды остатков.
 const (
-	LeftoverEngineVM  = "engine_vm"
-	LeftoverKVMDomain = "kvm_domain"
-	LeftoverKVMImage  = "kvm_image"
+	LeftoverEngineVM   = "engine_vm"
+	LeftoverEngineDisk = "engine_disk"
+	LeftoverKVMDomain  = "kvm_domain"
+	LeftoverKVMImage   = "kvm_image"
 )
 
 // VerifyLeftover — объект, оставшийся от проверки загрузкой.
@@ -54,9 +55,14 @@ type VerifyLeftover struct {
 	VerifyID     string          `json:"verify_id,omitempty"`
 	VerifyStatus model.RunStatus `json:"verify_status,omitempty"`
 	SourceVMName string          `json:"source_vm_name,omitempty"`
-	// Active — проверка идёт прямо сейчас: объект не остаток, трогать нельзя.
-	Active bool   `json:"active"`
-	Reason string `json:"reason"`
+	// Active — проверка идёт прямо сейчас. Для отдельного диска действие
+	// сначала отменяет работника, остальные объекты удаляются после проверки.
+	Active            bool     `json:"active"`
+	Reason            string   `json:"reason"`
+	TransferIDs       []string `json:"transfer_ids,omitempty"`
+	TransferPhase     string   `json:"transfer_phase,omitempty"`
+	StorageDomainName string   `json:"storage_domain_name,omitempty"`
+	Blocked           string   `json:"blocked,omitempty"`
 
 	// short — короткий идентификатор проверки из имени, если полного нет.
 	short string
@@ -159,7 +165,9 @@ func (d *Dispatcher) engineVerifyLeftovers(ctx context.Context, srv *model.Serve
 		item.VerifyID, item.short = engineVerifyID(vm)
 		out = append(out, item)
 	}
-	return out, nil
+	disks, diskErr := d.engineVerifyDiskLeftovers(ctx, srv, client)
+	out = append(out, disks...)
+	return out, diskErr
 }
 
 // engineVerifyID достаёт идентификатор проверки из метки в описании или
@@ -258,8 +266,25 @@ func (d *Dispatcher) annotateLeftover(item *VerifyLeftover, checks []*model.Boot
 	}
 	if item.VerifyID != "" {
 		_, item.Active = d.activeVerify.Load(item.VerifyID)
+	} else if item.short != "" {
+		d.activeVerify.Range(func(key, _ any) bool {
+			if id := key.(string); shortID(id) == item.short {
+				item.VerifyID, item.Active = id, true
+				return false
+			}
+			return true
+		})
 	}
 	item.Reason = leftoverReason(item, check)
+	if item.Kind == LeftoverEngineDisk {
+		item.Reason += "; диск создан восстановлением проверочной ВМ"
+		if item.Active {
+			item.Reason = "идёт запись проверочного диска; можно остановить проверку и отменить передачу"
+		}
+		if item.Blocked != "" {
+			item.Reason = item.Blocked
+		}
+	}
 }
 
 func leftoverReason(item *VerifyLeftover, check *model.BootCheck) string {
@@ -289,6 +314,8 @@ func (d *Dispatcher) RemoveVerifyLeftover(ctx context.Context, kind, serverID, r
 		return err
 	}
 	switch kind {
+	case LeftoverEngineDisk:
+		return d.manageVerifyDisk(ctx, srv, ref, true)
 	case LeftoverEngineVM:
 		return d.removeEngineLeftover(ctx, srv, ref)
 	case LeftoverKVMDomain:

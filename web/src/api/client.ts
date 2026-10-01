@@ -571,7 +571,11 @@ export const api = {
   listVerifyLeftovers: () =>
     http.get<import('./types').VerifyLeftoverScan>('/verify/leftovers', { timeout: 120_000 }).then((r) => r.data),
   removeVerifyLeftover: (payload: { kind: string; server_id: string; ref: string }) =>
-    http.post('/verify/leftovers/remove', payload, { timeout: 300_000 }).then(() => undefined),
+    http.post('/verify/leftovers/remove', payload, { timeout: 540_000 }).then(() => undefined),
+  cancelVerifyDiskTransfer: (payload: { kind: string; server_id: string; ref: string }) =>
+    http.post('/verify/leftovers/cancel-transfer', payload, { timeout: 540_000 }).then(() => undefined),
+  cancelBootCheck: (id: string) =>
+    http.post(`/verify/checks/${id}/cancel`).then(() => undefined),
   verifyRun: (id: string, mode: string, options: Partial<BootVerifyOptions> & { copy_id?: string } = {}) =>
     http.post<VerifyRun>(`/backups/${id}/verify`, { mode, ...options }, { timeout: 300_000 }).then((r) => r.data),
   listVerifications: (runId?: string) =>

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useQuasar } from 'quasar'
 import { api, errorMessage, notifyError, notifyOk } from '@/api/client'
@@ -408,6 +408,7 @@ async function loadChecks() {
     const params: Record<string, string | number> = { limit: 200 }
     for (const [key, value] of Object.entries(journalFilter.value)) if (value) params[key] = value
     checks.value = await api.listBootChecks(params)
+    cancellingChecks.value = cancellingChecks.value.filter((id) => checks.value.some((check) => check.id === id && check.status === 'running'))
   } catch (err) {
     checksError.value = errorMessage(err)
   } finally {
@@ -436,6 +437,7 @@ function checkPhaseTitle(phase?: string): string {
     creating_networks: 'создание сетевых интерфейсов', starting_vm: 'запуск ВМ',
     waiting_guest: 'ожидание ответа гостевого агента', cleanup: 'удаление временной ВМ и дисков',
     rollback: 'уборка после ошибки', completed: 'завершено', failed: 'ошибка',
+    canceled: 'отменено',
   } as Record<string, string>)[phase || ''] || phase || '—'
 }
 
@@ -445,6 +447,8 @@ const leftovers = ref<VerifyLeftoverScan | null>(null)
 const leftoversLoading = ref(false)
 const leftoversError = ref('')
 const removing = ref('')
+const cleanupMessage = ref('')
+const cancellingChecks = ref<string[]>([])
 const leftoverColumns = [
   { name: 'server', label: 'Подключение', field: 'server_name', align: 'left' as const },
   { name: 'name', label: 'Объект', field: 'name', align: 'left' as const },
@@ -454,6 +458,7 @@ const leftoverColumns = [
 ]
 const leftoverKind: Record<VerifyLeftover['kind'], string> = {
   engine_vm: 'ВМ в движке',
+  engine_disk: 'диск проверки в движке',
   kvm_domain: 'домен на KVM-хосте',
   kvm_image: 'образ на KVM-хосте',
 }
@@ -470,24 +475,55 @@ async function loadLeftovers() {
   }
 }
 
-function removeLeftover(item: VerifyLeftover) {
+function cancelCheck(check: BootCheck) {
+  $q.dialog({
+    title: 'Отменить проверку ВМ',
+    message: `Остановить проверку ${check.vm_name}? Запись дисков будет прервана, затем начнётся уборка временной ВМ.`,
+    cancel: { label: 'Назад', flat: true }, ok: { label: 'Остановить', color: 'negative' },
+  }).onOk(async () => {
+    cancellingChecks.value.push(check.id)
+    try {
+      await api.cancelBootCheck(check.id)
+      notifyOk('Отмена запрошена: запись останавливается, выполняется уборка')
+      await loadChecks()
+    } catch (err) {
+      cancellingChecks.value = cancellingChecks.value.filter((id) => id !== check.id)
+      notifyError(err, 'Не удалось отменить проверку')
+    }
+  })
+}
+
+function removeLeftover(item: VerifyLeftover, cancelOnly = false) {
   const what = item.kind === 'engine_vm' ? 'ВМ будет выключена и удалена вместе с дисками'
+    : item.kind === 'engine_disk' ? (cancelOnly
+      ? 'запись будет остановлена, передача отменена; отдельный запрос удаления диска не отправляется. Уборка проверки или отмена незавершённой загрузки может удалить временные объекты'
+      : 'запись будет остановлена, передача отменена, диск удалён после снятия блокировки')
     : item.kind === 'kvm_domain' ? 'домен будет остановлен и удалён вместе с образами проверки'
       : 'файл образа будет удалён'
   $q.dialog({
-    title: 'Удалить остаток проверки',
-    message: `${item.name} на ${item.server_name}: ${what}.`,
-    cancel: { label: 'Отмена', flat: true }, ok: { label: 'Удалить', color: 'negative' },
+    title: cancelOnly ? 'Отменить передачу проверочного диска' : 'Удалить остаток проверки',
+    message: `${item.name} (${item.ref}) на ${item.server_name}: ${what}.`,
+    cancel: { label: 'Назад', flat: true }, ok: { label: cancelOnly ? 'Отменить передачу' : 'Удалить', color: 'negative' },
   }).onOk(async () => {
-    removing.value = item.ref
+    removing.value = item.server_id + '/' + item.ref
+    cleanupMessage.value = item.kind === 'engine_disk'
+      ? (cancelOnly ? 'Останавливаем запись и ожидаем закрытия передачи…' : 'Останавливаем запись, закрываем передачу и удаляем диск после снятия блокировки…')
+      : 'Удаляем остаток проверки…'
+    leftoversError.value = ''
     try {
-      await api.removeVerifyLeftover({ kind: item.kind, server_id: item.server_id, ref: item.ref })
-      notifyOk('Остаток удалён')
+      const payload = { kind: item.kind, server_id: item.server_id, ref: item.ref }
+      if (cancelOnly) await api.cancelVerifyDiskTransfer(payload)
+      else await api.removeVerifyLeftover(payload)
+      notifyOk(cancelOnly ? 'Передача остановлена' : 'Остаток удалён')
       await loadLeftovers()
     } catch (err) {
-      notifyError(err, 'Не удалось удалить остаток')
+      const detail = errorMessage(err)
+      await loadLeftovers()
+      leftoversError.value = detail
+      notifyError(err, cancelOnly ? 'Не удалось отменить передачу' : 'Уборка не завершена')
     } finally {
       removing.value = ''
+      cleanupMessage.value = ''
     }
   })
 }
@@ -502,6 +538,11 @@ onMounted(async () => {
   await app.bootstrap()
   await load()
 })
+
+const checkRefresh = setInterval(() => {
+  if (tab.value === 'journal' && !checksLoading.value && checks.value.some((check) => check.status === 'running')) void loadChecks()
+}, 5000)
+onUnmounted(() => clearInterval(checkRefresh))
 </script>
 
 <template>
@@ -733,6 +774,12 @@ onMounted(async () => {
                 <div v-for="(note, index) in p.row.notes ?? []" :key="'n' + index" class="text-caption text-grey-8 jhv-wrap">• {{ note }}</div>
                 <q-btn flat dense no-caps color="primary" icon="backup" label="Открыть точку" class="q-mt-xs"
                   :to="{ name: 'backups', query: { run: p.row.run_id } }" />
+                <q-btn v-if="canRun && p.row.status === 'running'" flat dense no-caps color="negative" icon="stop_circle"
+                  label="Отменить проверку" :loading="cancellingChecks.includes(p.row.id)"
+                  :disable="cancellingChecks.includes(p.row.id)" @click="cancelCheck(p.row)" />
+                <div v-if="p.row.status === 'running' && cancellingChecks.includes(p.row.id)" class="text-caption text-warning">
+                  Отмена запрошена: ожидаем остановки записи и уборки временных объектов.
+                </div>
               </q-td>
             </q-tr>
           </template>
@@ -742,14 +789,18 @@ onMounted(async () => {
       <q-tab-panel name="leftovers" class="q-pa-none">
         <div class="row items-center q-mb-sm">
           <div class="text-body2 text-grey-8">
-            Проверочные ВМ, домены и образы jhv-verify-… на всех включённых движках и KVM-хостах. Объекты идущих
-            проверок не удаляются.
+            Проверочные ВМ, отдельные диски и образы на всех включённых движках и KVM-хостах.
+            Для зависшего диска можно отменить передачу или отменить её и удалить диск.
           </div>
           <q-space />
           <q-btn outline icon="search" label="Искать заново" :loading="leftoversLoading" @click="loadLeftovers" />
         </div>
         <q-banner v-if="leftoversError" dense class="bg-red-1 q-mb-sm">
           <template #avatar><q-icon name="error" color="negative" /></template>{{ leftoversError }}
+        </q-banner>
+        <q-banner v-if="removing" dense class="bg-blue-1 q-mb-sm" role="status">
+          {{ cleanupMessage }}
+          <q-linear-progress indeterminate color="primary" class="q-mt-sm" />
         </q-banner>
         <q-banner v-if="leftovers?.errors?.length" dense class="bg-orange-1 q-mb-sm">
           <template #avatar><q-icon name="warning" color="warning" /></template>
@@ -766,6 +817,11 @@ onMounted(async () => {
                 {{ leftoverKind[p.row.kind as VerifyLeftover['kind']] }}<template v-if="p.row.state"> · {{ p.row.state }}</template>
                 <template v-if="p.row.size_bytes"> · {{ bytes(p.row.size_bytes) }}</template>
                 <template v-if="p.row.created_at"> · {{ dateTime(p.row.created_at) }}</template>
+                <template v-if="p.row.storage_domain_name"> · домен {{ p.row.storage_domain_name }}</template>
+              </div>
+              <div v-if="p.row.kind === 'engine_disk'" class="text-caption jhv-mono">{{ p.row.ref }}</div>
+              <div v-if="p.row.transfer_ids?.length" class="text-caption jhv-wrap">
+                Передача: {{ p.row.transfer_phase }} · {{ p.row.transfer_ids.join(', ') }}
               </div>
             </q-td>
           </template>
@@ -787,9 +843,14 @@ onMounted(async () => {
           </template>
           <template #body-cell-actions="p">
             <q-td :props="p">
-              <q-btn v-if="canRun" flat round dense icon="delete" color="negative" :disable="p.row.active || Boolean(removing)"
-                :loading="removing === p.row.ref" @click="removeLeftover(p.row)">
-                <q-tooltip>{{ p.row.active ? 'Проверка идёт — объект уберётся сам' : 'Удалить' }}</q-tooltip>
+              <q-btn v-if="canRun && p.row.kind === 'engine_disk' && (p.row.active || p.row.transfer_ids?.length)" flat dense no-caps
+                icon="stop_circle" color="warning" label="Отменить передачу" :disable="Boolean(removing) || Boolean(p.row.blocked)"
+                @click="removeLeftover(p.row, true)" />
+              <q-btn v-if="canRun" flat dense no-caps icon="delete" color="negative"
+                :label="p.row.kind === 'engine_disk' ? 'Отменить и удалить диск' : 'Удалить'"
+                :disable="(p.row.active && p.row.kind !== 'engine_disk') || Boolean(removing) || Boolean(p.row.blocked)"
+                :loading="removing === p.row.server_id + '/' + p.row.ref" @click="removeLeftover(p.row)">
+                <q-tooltip>{{ p.row.blocked || (p.row.active && p.row.kind !== 'engine_disk' ? 'Сначала отмените проверку в журнале' : 'Удалить объект проверки') }}</q-tooltip>
               </q-btn>
             </q-td>
           </template>

@@ -223,6 +223,9 @@ func (e *Engine) Restore(ctx context.Context, req RestoreRequest) (*model.Restor
 	if err != nil {
 		record.Status = model.RunFailed
 		record.Phase = "failed"
+		if errors.Is(err, context.Canceled) {
+			record.Status, record.Phase = model.RunCanceled, "canceled"
+		}
 		record.Error = err.Error()
 		_ = e.store.UpdateRestoreRun(context.WithoutCancel(ctx), record)
 		log.Error().Err(err).Msg("восстановление не выполнено")

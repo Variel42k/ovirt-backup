@@ -32,9 +32,18 @@ func (d *Dispatcher) registerVerifiers() {
 	d.Engine.RegisterVerifier(model.VerifyBoot, d.verifyBoot)
 }
 
-func (d *Dispatcher) verifyBoot(ctx context.Context, req backup.ExternalVerifyRequest) error {
-	d.activeVerify.Store(req.Record.ID, struct{}{})
-	defer d.activeVerify.Delete(req.Record.ID)
+func (d *Dispatcher) verifyBoot(ctx context.Context, req backup.ExternalVerifyRequest) (resultErr error) {
+	ctx, cancel := context.WithCancel(ctx)
+	control := &verifyControl{cancel: cancel, done: make(chan struct{})}
+	d.activeVerify.Store(req.Record.ID, control)
+	defer func() {
+		if ctx.Err() != nil {
+			resultErr = ctx.Err()
+		}
+		cancel()
+		d.activeVerify.Delete(req.Record.ID)
+		close(control.done)
+	}()
 
 	if req.Options.TargetID != "" {
 		opts, note, err := d.applyVerifyTarget(ctx, req)

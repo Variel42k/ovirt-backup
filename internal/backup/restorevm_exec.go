@@ -192,6 +192,9 @@ func (e *Engine) RestoreVM(ctx context.Context, req *model.RestoreVMRequest) (*R
 	fail := func(cause error) (*RestoreVMResult, error) {
 		ended := time.Now().UTC()
 		record.Status, record.Error, record.EndedAt = model.RunFailed, cause.Error(), &ended
+		if errors.Is(cause, context.Canceled) {
+			record.Status = model.RunCanceled
+		}
 		if record.Phase != "rollback" {
 			record.Phase = "failed"
 		}

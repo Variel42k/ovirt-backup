@@ -774,6 +774,27 @@ func (s *Store) GetRestoreRun(ctx context.Context, id string) (*model.RestoreRun
 	return scanRestore(row)
 }
 
+// ListVerifyDiskRestores retains exact ownership even if the verification VM
+// was rolled back. It intentionally has no history-page limit.
+func (s *Store) ListVerifyDiskRestores(ctx context.Context, serverID string) ([]*model.RestoreRun, error) {
+	rows, err := s.db.Query(ctx, `SELECT `+restoreColumns+` FROM restore_runs
+		WHERE target_server_id=? AND target=? AND target_disk_id<>''
+		AND target_vm_name LIKE ? ORDER BY created_at DESC`, serverID, model.RestoreToNewDisk, model.VerifyVMPrefix+"%")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*model.RestoreRun
+	for rows.Next() {
+		item, err := scanRestore(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
 // ListRestoreRuns returns restore history, newest first.
 func (s *Store) ListRestoreRuns(ctx context.Context, runID string, limit int) ([]*model.RestoreRun, error) {
 	query := `SELECT ` + restoreColumns + ` FROM restore_runs`

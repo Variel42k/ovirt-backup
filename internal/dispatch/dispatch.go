@@ -51,7 +51,8 @@ type Dispatcher struct {
 	targetSlots   map[string]chan struct{}
 	// activeVerify — проверки загрузкой, идущие в этом процессе: их
 	// проверочные ВМ — не остатки.
-	activeVerify sync.Map
+	activeVerify      sync.Map
+	verifyDiskActions sync.Map
 }
 
 // SetProxmoxPool enables the native Proxmox data path while keeping New

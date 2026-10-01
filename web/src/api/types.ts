@@ -1201,7 +1201,7 @@ export interface BootCheck extends VerifyRun {
 
 /** Объект, оставшийся от проверки загрузкой. */
 export interface VerifyLeftover {
-  kind: 'engine_vm' | 'kvm_domain' | 'kvm_image'
+  kind: 'engine_vm' | 'engine_disk' | 'kvm_domain' | 'kvm_image'
   server_id: string
   server_name: string
   ref: string
@@ -1214,6 +1214,10 @@ export interface VerifyLeftover {
   source_vm_name?: string
   active: boolean
   reason: string
+  transfer_ids?: string[]
+  transfer_phase?: string
+  storage_domain_name?: string
+  blocked?: string
 }
 
 export interface VerifyLeftoverScan {

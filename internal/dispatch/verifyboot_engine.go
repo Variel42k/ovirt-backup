@@ -171,7 +171,7 @@ func (d *Dispatcher) verifyBootOnEngine(ctx context.Context, req backup.External
 	if opts.DiskID != "" {
 		notes = append(notes, "в движке восстанавливаются все диски ВМ: выбор диска для запуска не применяется")
 	}
-	kept := boot.Failure != "" && opts.KeepOnFailure
+	kept := boot.Failure != "" && ctx.Err() == nil && opts.KeepOnFailure
 	if kept {
 		notes = append(notes, fmt.Sprintf("проверочная ВМ %s оставлена в движке для разбора — удалите её вместе "+
 			"с дисками вручную", name))

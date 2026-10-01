@@ -61,6 +61,8 @@ func run() error {
 	showVersion := flag.Bool("version", false, "показать версию и выйти")
 	checkConfig := flag.Bool("check-config", false, "проверить конфигурацию и выйти")
 	setupOperation := flag.String("setup", "", "операция установщика с YAML/JSON через stdin")
+	registerStorage := flag.String("register-backup-storage", "", "зарегистрировать локальный каталог копий в БД и выйти (с доверенного хоста)")
+	registerReadOnly := flag.Bool("register-backup-storage-read-only", true, "новое хранилище только для чтения; существующее не меняется")
 	resetUser := flag.String("reset-password", "",
 		"задать новый пароль учётной записи (укажите имя пользователя) и выйти; "+
 			"новый пароль берётся из JHV_NEW_PASSWORD либо генерируется и печатается")
@@ -69,6 +71,9 @@ func run() error {
 	revokeAllAccess := flag.Bool("revoke-all-access", false,
 		"при -reset-password закрыть все сессии и отозвать API-токены и делегирования из БД")
 	flag.Parse()
+	if *registerStorage != "" && (*setupOperation != "" || *showVersion || *checkConfig || *resetUser != "") {
+		return fmt.Errorf("-register-backup-storage нельзя совмещать с другими служебными операциями")
+	}
 	if *setupOperation != "" {
 		return setup.Run(append([]string{*setupOperation}, flag.Args()...), os.Stdin, os.Stdout)
 	}
@@ -167,6 +172,11 @@ func run() error {
 		return fmt.Errorf("ключ шифрования секретов: %w", err)
 	}
 	st := store.New(db, cipher)
+	if *registerStorage != "" {
+		// Exit before any inventory polling, scheduler, retention or network
+		// listener starts. This operation is local installer administration.
+		return setup.RegisterBackupStorage(ctx, st, *registerStorage, *registerReadOnly, os.Stdout)
+	}
 	// Recovery is deliberately completed before any scheduler, notification,
 	// DR or replication work starts. The one-off process has one job and exits.
 	if *resetUser != "" {

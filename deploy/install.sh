@@ -23,6 +23,10 @@
 #                                      пакет для репетиции; старый узел продолжит работу
 #   ./install.sh --migrate-from /root/jhvirt-migration.tar.gz
 #                                      восстановить пакет на новом сервере
+#   ./install.sh --restore-from /root/update-20261001-120000.tar.gz
+#                                      восстановить БД, настройки и ключ в пустую установку
+#   ./install.sh --reuse-backups /srv/backups --backup-key-file /root/secret.key
+#                                      подключить существующие копии ВМ без удаления данных
 #   ./install.sh --migration-export /root/jhvirt.tar.gz \
 #                --migration-to user@10.0.0.5:/home/user
 #                                      создать пакет и сразу отправить его
@@ -113,6 +117,7 @@ MIGRATION_ACTION=""; MIGRATION_EXPORT_FILE=""; MIGRATION_IMPORT_FILE=""
 # переносе приезжают из пакета. Заданы — заменить, о чём установщик скажет вслух.
 BACKUP_DIR_OVERRIDE=""; RESTORE_DIR_OVERRIDE=""
 DR_BACKUP_DIR_OVERRIDE=""
+REUSE_BACKUPS=0; BACKUP_KEY_FILE=""
 # Куда отправить пакет переноса: user@сервер:/каталог. Пусто — оставить рядом.
 MIGRATION_TO=""
 MIGRATION_TMP=""; MIGRATION_ACTIVE=0; MIGRATION_SOURCE_MODE=""
@@ -170,6 +175,12 @@ while [ $# -gt 0 ]; do
         --migration-export=*) MIGRATION_ACTION="export"; MIGRATION_EXPORT_FILE="${1#--migration-export=}"; shift ;;
         --migrate-from) [ $# -ge 2 ] || die "--migrate-from требует путь"; MIGRATION_ACTION="import"; MIGRATION_IMPORT_FILE="$2"; shift 2 ;;
         --migrate-from=*) MIGRATION_ACTION="import"; MIGRATION_IMPORT_FILE="${1#--migrate-from=}"; shift ;;
+        --restore-from) [ $# -ge 2 ] || die "--restore-from требует архив tar.gz"; MIGRATION_ACTION="import"; MIGRATION_IMPORT_FILE="$2"; shift 2 ;;
+        --restore-from=*) MIGRATION_ACTION="import"; MIGRATION_IMPORT_FILE="${1#--restore-from=}"; shift ;;
+        --reuse-backups) [ $# -ge 2 ] || die "--reuse-backups требует каталог"; REUSE_BACKUPS=1; BACKUP_DIR_OVERRIDE="$2"; shift 2 ;;
+        --reuse-backups=*) REUSE_BACKUPS=1; BACKUP_DIR_OVERRIDE="${1#--reuse-backups=}"; shift ;;
+        --backup-key-file) [ $# -ge 2 ] || die "--backup-key-file требует путь к прежнему secret.key"; BACKUP_KEY_FILE="$2"; shift 2 ;;
+        --backup-key-file=*) BACKUP_KEY_FILE="${1#--backup-key-file=}"; shift ;;
         --keep-source-running) MIGRATION_KEEP_SOURCE=1; shift ;;
         # Куда отправить готовый пакет: пользователь, сервер и каталог одной
         # строкой, как у scp. Пакет остаётся и здесь — неудачная передача не
@@ -749,7 +760,7 @@ ensure_service_user() {
 # --- Удаление ---------------------------------------------------------------
 
 docker_bundle_present() {
-    [ -f "$PREFIX/compose/.env" ]
+    [ -f "$PREFIX/compose/.env" ] || { [ "$BUNDLE" -eq 0 ] && [ -f "$COMPOSE_DIR/.env" ]; }
 }
 
 systemd_install_present() {
@@ -868,7 +879,9 @@ rewrite_prefix_file() {
 }
 
 migration_docker_work() {
-    if [ -f "$PREFIX/compose/.env" ] && [ -f "$PREFIX/compose/docker-compose.yml" ]; then
+    if [ "$BUNDLE" -eq 0 ] && [ -f "$COMPOSE_DIR/.env" ]; then
+        printf '%s' "$COMPOSE_DIR"
+    elif [ -f "$PREFIX/compose/.env" ] && [ -f "$PREFIX/compose/docker-compose.yml" ]; then
         printf '%s' "$PREFIX/compose"
     elif [ -f "$COMPOSE_DIR/.env" ]; then
         printf '%s' "$COMPOSE_DIR"
@@ -1920,6 +1933,8 @@ create_update_backup() {
     chmod 700 "$UPDATE_TMP"
 
     step "резервная копия перед обновлением"
+    say "    БД, настройки и ключ будут сохранены в: $UPDATE_BACKUP_FILE"
+    say "    Образы ВМ в этот архив не входят; их хранилища сохраняются отдельно."
     case "$MODE" in
         docker|docker-compose) migration_export_docker "$UPDATE_TMP" ;;
         systemd) migration_export_systemd "$UPDATE_TMP" ;;
@@ -1937,7 +1952,211 @@ create_update_backup() {
     chmod 600 "$UPDATE_BACKUP_FILE"
     rm -rf "$UPDATE_TMP"
     umask 022
-    say "    backup: $UPDATE_BACKUP_FILE"
+    say "    Архив создан (0600): $UPDATE_BACKUP_FILE"
+    say "    Восстановление на пустой установке: --restore-from $UPDATE_BACKUP_FILE"
+}
+
+# Только выбранные оператором каталоги; не создаём отсутствующий mount при reuse.
+validate_data_path() {
+    case "$1" in
+        /*) ;;
+        *) die "нужен абсолютный путь к каталогу: $1" ;;
+    esac
+    case "$1" in
+        /|*/../*|*/..|*/./*|*/.|*//*|*[!A-Za-z0-9_./-]*)
+            die "неподдерживаемый путь к каталогу: $1 (допустимы буквы ASCII, цифры, /, _, . и -)" ;;
+    esac
+    if [ -d "$1" ]; then
+        VDP_REAL="$(cd -P "$1" && pwd -P)" || die "каталог недоступен: $1"
+        [ "$VDP_REAL" != / ] || die "каталог указывает на корень файловой системы: $1"
+    fi
+}
+
+service_archive_candidates() {
+    for SAC_FILE in "$PREFIX"/backups/update-*.tar.gz "$PREFIX"/backups/*migration*.tar.gz; do
+        [ -f "$SAC_FILE" ] && [ -r "$SAC_FILE" ] || continue
+        printf '%s\n' "$SAC_FILE"
+    done
+}
+
+ask_service_archive() {
+    say ""
+    say "Служебный архив: БД, настройки и secret.key; файлы ВМ подключаются отдельно."
+    ASA_FILES="$(service_archive_candidates)"
+    if [ -n "$ASA_FILES" ]; then
+        say "Найденные архивы:"
+        printf '%s\n' "$ASA_FILES" | awk '{printf "  %d) %s\n", NR, $0}'
+    fi
+    migration_ask_nonempty "Номер архива из списка или полный путь к tar.gz: "
+    case "$ANSWER" in
+        *[!0-9]*) ;;
+        *)
+            ASA_PICK="$(printf '%s\n' "$ASA_FILES" | awk -v n="$ANSWER" 'NR == n {print; exit}')"
+            [ -n "$ASA_PICK" ] || die "архив с таким номером не найден"
+            ANSWER="$ASA_PICK"
+            ;;
+    esac
+}
+
+choose_backup_source() {
+    [ "$UPDATE_REQUESTED" -eq 0 ] && [ -z "$MIGRATION_ACTION" ] || return 0
+    [ "$MODE" != uninstall ] || return 0
+    [ -z "$BACKUP_DIR_OVERRIDE" ] && [ -z "$BACKUP_KEY_FILE" ] || return 0
+    # При переустановке не предлагать пустое хранилище вместо действующего.
+    docker_bundle_present && return 0
+    systemd_install_present && return 0
+    [ -t 0 ] || return 0
+    say ""
+    say "Резервные копии для этой установки:"
+    say "  1) новое хранилище ВМ (по умолчанию)"
+    say "  2) подключить существующий каталог копий ВМ"
+    say "  3) восстановить БД, настройки и ключ из служебного архива tar.gz"
+    say "Файлы ВМ не входят в служебный архив; их каталог подключается отдельно."
+    while :; do
+        printf 'Номер [1]: '
+        read -r CBS_CHOICE || CBS_CHOICE=""
+        case "${CBS_CHOICE:-1}" in
+            1|2)
+                [ "${CBS_CHOICE:-1}" = 1 ] || REUSE_BACKUPS=1
+                printf 'Каталог копий ВМ [%s/backups]: ' "$PREFIX"
+                read -r BACKUP_DIR_OVERRIDE || BACKUP_DIR_OVERRIDE=""
+                [ -n "$BACKUP_DIR_OVERRIDE" ] || BACKUP_DIR_OVERRIDE="$PREFIX/backups"
+                if [ "$REUSE_BACKUPS" -eq 1 ]; then
+                    say "Старые файлы сохраняются. Хранилище подключится только для чтения."
+                    say "Для зашифрованных копий нужен прежний secret.key."
+                    printf 'Файл прежнего secret.key (Enter — копии без шифрования): '
+                    read -r BACKUP_KEY_FILE || BACKUP_KEY_FILE=""
+                fi
+                return 0
+                ;;
+            3)
+                MIGRATION_ACTION=import
+                ask_service_archive
+                MIGRATION_IMPORT_FILE="$ANSWER"
+                return 0
+                ;;
+            *) say "Нет такого варианта." ;;
+        esac
+    done
+}
+
+validate_backup_source() {
+    [ -z "$BACKUP_DIR_OVERRIDE" ] || validate_data_path "$BACKUP_DIR_OVERRIDE"
+    [ -z "$RESTORE_DIR_OVERRIDE" ] || validate_data_path "$RESTORE_DIR_OVERRIDE"
+    [ -z "$DR_BACKUP_DIR_OVERRIDE" ] || validate_data_path "$DR_BACKUP_DIR_OVERRIDE"
+    if [ "$REUSE_BACKUPS" -eq 1 ]; then
+        [ -n "$BACKUP_DIR_OVERRIDE" ] && [ -d "$BACKUP_DIR_OVERRIDE" ] &&
+            [ -r "$BACKUP_DIR_OVERRIDE" ] && [ -x "$BACKUP_DIR_OVERRIDE" ] ||
+            die "каталог существующих копий недоступен; подключите диск/NFS до запуска установщика"
+        [ -d "$BACKUP_DIR_OVERRIDE/jhvirt" ] ||
+            die "в $BACKUP_DIR_OVERRIDE нет jhvirt; укажите корень репозитория копий ВМ"
+        say "    существующие копии ВМ: $BACKUP_DIR_OVERRIDE (данные не удаляются)"
+    fi
+    [ -n "$BACKUP_KEY_FILE" ] || return 0
+    [ -s "$BACKUP_KEY_FILE" ] && [ -r "$BACKUP_KEY_FILE" ] || die "прежний secret.key недоступен"
+    have base64 || die "для проверки secret.key нужна утилита base64"
+    base64 -d < "$BACKUP_KEY_FILE" >/dev/null 2>&1 || die "secret.key содержит неверный base64"
+    VBS_BYTES="$(base64 -d < "$BACKUP_KEY_FILE" 2>/dev/null | wc -c | tr -d ' ')"
+    [ "$VBS_BYTES" = 32 ] || die "secret.key повреждён: требуется base64-ключ AES-256"
+    # Существующая БД может содержать секреты под другим ключом. Его замена
+    # без восстановления согласованной БД сделает подключения нечитаемыми.
+    if docker_bundle_present || systemd_install_present; then
+        die "--backup-key-file разрешён только для новой установки; существующий ключ не заменяется"
+    fi
+    if [ "$MIGRATION_ACTIVE" -eq 1 ]; then
+        [ "$(tr -d '[:space:]' < "$BACKUP_KEY_FILE")" = "$(tr -d '[:space:]' < "$MIGRATION_TMP/data/secret.key")" ] ||
+            die "ключ каталога ВМ отличается от ключа служебного архива"
+    fi
+}
+
+choose_archive_backups() {
+    [ -t 0 ] && [ -z "$BACKUP_DIR_OVERRIDE" ] || return 0
+    say ""
+    say "Служебный архив возвращает БД и ключ, но не образы ВМ."
+    say "Подключите диск/NFS со старыми копиями до запуска службы."
+    if [ "$MIGRATION_SOURCE_MODE" = docker ]; then
+        CAB_OLD="$(env_file_value "$MIGRATION_TMP/environment/docker.env" JHV_BACKUP_DIR)"
+        say "    каталог копий в архиве: ${CAB_OLD:-не задан} → /backups в контейнере"
+        printf 'Каталог копий на этом сервере (Enter — сохранить путь из архива): '
+    else
+        say "Пути хранилищ systemd сохранены в БД; переподключите их по прежним путям."
+        printf 'Дополнительный каталог копий (Enter — не добавлять): '
+    fi
+    read -r BACKUP_DIR_OVERRIDE || BACKUP_DIR_OVERRIDE=""
+    if [ -n "$BACKUP_DIR_OVERRIDE" ]; then
+        REUSE_BACKUPS=1
+        validate_backup_source
+    fi
+}
+
+choose_storage_destinations() {
+    [ -t 0 ] && [ "$UPDATE_REQUESTED" -eq 0 ] || return 0
+    # Не менять действующие пути при повторной установке без явных ключей.
+    [ "$MIGRATION_ACTIVE" -eq 1 ] || {
+        docker_bundle_present && return 0
+        systemd_install_present && return 0
+    }
+    say ""
+    if [ "$MIGRATION_ACTIVE" -eq 1 ]; then
+        say "Enter сохраняет каталоги восстановления и аварийных копий из архива."
+        CSD_RESTORE=""; CSD_DR=""
+    else
+        CSD_RESTORE="$PREFIX/restores"
+        if [ "$MODE" = systemd ]; then CSD_DR=/var/backups/ovirt-backup; else CSD_DR="$PREFIX/dr-backups"; fi
+    fi
+    if [ -z "$RESTORE_DIR_OVERRIDE" ]; then
+        printf 'Каталог восстановления и временных образов [%s]: ' "${CSD_RESTORE:-из архива}"
+        read -r RESTORE_DIR_OVERRIDE || RESTORE_DIR_OVERRIDE=""
+        [ -n "$RESTORE_DIR_OVERRIDE" ] || RESTORE_DIR_OVERRIDE="$CSD_RESTORE"
+    fi
+    if [ -z "$DR_BACKUP_DIR_OVERRIDE" ]; then
+        printf 'Каталог ежедневных dump БД и копии ключа [%s]: ' "${CSD_DR:-из архива}"
+        read -r DR_BACKUP_DIR_OVERRIDE || DR_BACKUP_DIR_OVERRIDE=""
+        [ -n "$DR_BACKUP_DIR_OVERRIDE" ] || DR_BACKUP_DIR_OVERRIDE="$CSD_DR"
+    fi
+    validate_backup_source
+}
+
+show_backup_locations() {
+    say ""
+    say "Места хранения резервных копий:"
+    case "$MODE" in
+        docker|docker-compose)
+            SBL_VM="$(env_file_value "$WORK/.env" JHV_BACKUP_DIR)"
+            [ -n "$SBL_VM" ] || SBL_VM=./backups
+            SBL_DR="$(env_file_value "$WORK/.env" JHV_DR_BACKUP_DIR)"
+            [ -n "$SBL_DR" ] || SBL_DR=./dr-backups
+            SBL_RESTORE="$(env_file_value "$WORK/.env" JHV_RESTORE_DIR)"
+            [ -n "$SBL_RESTORE" ] || SBL_RESTORE=./restores
+            say "  Локальный каталог ВМ: $(docker_host_path "$WORK" "$SBL_VM") → /backups"
+            say "  Каталог восстановления: $(docker_host_path "$WORK" "$SBL_RESTORE") → /restores"
+            say "  Ежедневные dump БД: $(docker_host_path "$WORK" "$SBL_DR")/app/postgres"
+            say "  Копия ключа: $(docker_host_path "$WORK" "$SBL_DR")/app/secret.key"
+            if [ "$OIDC_MODE" = keycloak ]; then
+                say "  Dump Keycloak: $(docker_host_path "$WORK" "$SBL_DR")/keycloak/postgres"
+            fi
+            ;;
+        systemd)
+            SBL_VM="$(env_file_value "$ENV_FILE" JHV_INSTALL_BACKUP_DIR)"
+            say "  Локальный каталог ВМ: ${SBL_VM:-заданный в разделе «Хранилища» web}"
+            SBL_RESTORE="$(env_file_value "$ENV_FILE" JHV_BACKUP_TEMP_DIR)"
+            [ -z "$SBL_RESTORE" ] || say "  Временные образы: $SBL_RESTORE"
+            if [ "$SYSTEMD_DR_LOCAL" -eq 1 ]; then
+                say "  Ежедневные dump БД: $DR_BACKUP_DIR/postgres"
+                say "  Копия ключа: $DR_BACKUP_DIR/secret.key"
+            else
+                say "  Внешняя БД: резервирование и dump выполняются на стороне СУБД."
+            fi
+            ;;
+    esac
+    [ -z "$UPDATE_BACKUP_FILE" ] || say "  Архив перед обновлением: $UPDATE_BACKUP_FILE"
+    [ -z "$MIGRATION_IMPORT_FILE" ] || say "  Восстановленный архив: $MIGRATION_IMPORT_FILE"
+    say "  Фактическое назначение каждого задания выбирается в web → Хранилища."
+    if [ "$REUSE_BACKUPS" -eq 1 ]; then
+        say "  Новое подключение копий — только чтение; уже существующие настройки сохраняются."
+        say "  Если БД не восстановлена: Хранилища → Каталог → Сканировать → Импортировать."
+        say "  Без прежнего secret.key зашифрованные копии восстановить нельзя."
+    fi
 }
 
 # --- Выбор ------------------------------------------------------------------
@@ -1949,7 +2168,7 @@ choose() {
         fi
         say ""
         say "Обнаружена существующая установка."
-        docker_bundle_present && say "  Docker Compose: $PREFIX/compose"
+        docker_bundle_present && say "  Docker Compose: $(migration_docker_work)"
         systemd_install_present && say "  systemd: jhvirt.service"
         say ""
         say "Что сделать?"
@@ -1957,7 +2176,8 @@ choose() {
         say "  2) изменить параметры / переустановить"
         say "  3) подготовить перенос"
         say "  4) удалить"
-        say "  5) выйти"
+        say "  5) восстановить служебный архив (только в пустую цель)"
+        say "  6) выйти"
         say ""
         while :; do
             printf 'Номер [1]: '
@@ -1968,7 +2188,8 @@ choose() {
                 2) break ;;
                 3) MIGRATION_ACTION="export"; MODE=migration-export; return ;;
                 4) MODE=uninstall; return ;;
-                5) exit 0 ;;
+                5) MIGRATION_ACTION=import; MODE=migration-import; return ;;
+                6) exit 0 ;;
                 *) say "Нет такого варианта." ;;
             esac
         done
@@ -1993,7 +2214,7 @@ choose() {
     [ -n "$a" ] && say "  $a) docker compose   — сервис и PostgreSQL в контейнерах"
     [ -n "$b" ] && say "  $b) docker-compose   — то же, старой командой через дефис"
     [ -n "$d" ] && say "  $d) systemd          — нативная служба и локальная PostgreSQL"
-    say "  $m) перенести сюда    — восстановить пакет со старого сервера"
+    say "  $m) восстановить архив — БД, настройки и ключ из переноса/обновления"
     say "  $e) подготовить перенос — создать защищённый пакет настроек и БД"
     say "  $u) удалить          — выбрать Docker Compose, systemd или оба варианта"
     say ""
@@ -2035,7 +2256,7 @@ fi
 
 if [ "$MODE" = migration-import ]; then
     MODE=""
-    migration_ask_nonempty "Путь к пакету миграции: "
+    ask_service_archive
     MIGRATION_IMPORT_FILE="$ANSWER"
 elif [ "$MODE" = migration-export ]; then
     MODE=""
@@ -2053,6 +2274,10 @@ elif [ "$MODE" = migration-export ]; then
     fi
 fi
 
+choose_backup_source
+# Проверить путь/ключ до создания marker и любых изменений целевой установки.
+validate_backup_source
+
 case "$MIGRATION_ACTION" in
     "") ;;
     export)
@@ -2063,6 +2288,8 @@ case "$MIGRATION_ACTION" in
     import)
         [ -z "$MIGRATION_EXPORT_FILE" ] || die "нельзя одновременно экспортировать и импортировать миграцию"
         migration_prepare_import
+        validate_backup_source
+        choose_archive_backups
         ;;
     *) die "неизвестное действие миграции" ;;
 esac
@@ -2079,6 +2306,7 @@ if [ "$MODE" = uninstall ]; then
     uninstall
 fi
 
+choose_storage_destinations
 load_update_runtime_settings
 
 # Права root нужны там, где скрипт трогает систему: раскладывает комплект в
@@ -2576,6 +2804,13 @@ wait_ready() {
 # Внешний OIDC доступен в обоих режимах; встроенный Keycloak требует Compose.
 choose_oidc() {
     [ -z "$OIDC_MODE" ] || return 0
+    # load_existing_* уже восстановили включённый OIDC. Пустое значение
+    # здесь означает прежний парольный вход, а не новую установку.
+    if [ "$UPDATE_REQUESTED" -eq 1 ] || [ "$MIGRATION_ACTIVE" -eq 1 ]; then
+        OIDC_MODE=none
+        say "    сохраняется локальный парольный вход"
+        return 0
+    fi
     if [ ! -t 0 ]; then
         OIDC_MODE=none
         return 0
@@ -2839,7 +3074,8 @@ prepare_keycloak_ad() {
         return 0
     }
 
-    if [ -t 0 ] && [ "$KEYCLOAK_AD_REQUESTED" -eq 0 ]; then
+    if [ -t 0 ] && [ "$KEYCLOAK_AD_REQUESTED" -eq 0 ] &&
+            [ "$UPDATE_REQUESTED" -eq 0 ] && [ "$MIGRATION_ACTIVE" -eq 0 ]; then
         say ""
         say "Active Directory можно подключить сейчас или позднее повторным запуском .run."
         say "Достаточно DNS-домена, контроллера, bind-пользователя и корпоративного CA."
@@ -3107,7 +3343,8 @@ prepare_oidc() {
         fi
     fi
 
-    if [ -t 0 ] && [ "$OIDC_MODE" != none ]; then
+    if [ -t 0 ] && [ "$OIDC_MODE" != none ] &&
+            [ "$UPDATE_REQUESTED" -eq 0 ] && [ "$MIGRATION_ACTIVE" -eq 0 ]; then
         say ""
         say "Группы допуска. Кто не попал ни в одну — в систему не допускается."
         # if, а не «[ -n ... ] && VAR=...». Разница не косметическая: при
@@ -4259,6 +4496,7 @@ apply_data_dir_overrides() {
 # исключение.
 ask_data_dir() {
     ADD_KEY="$1"; ADD_MISSING="$2"; ADD_ANSWER=""
+    {
     say ""
     say "Каталог из пакета не найден на этом сервере:"
     say "  $ADD_KEY = $ADD_MISSING"
@@ -4268,6 +4506,7 @@ ask_data_dir() {
     say "и подключить прежнее хранилище."
     say ""
     printf 'Путь: '
+    } >&2
     read -r ADD_ANSWER || ADD_ANSWER=""
     printf '%s' "$ADD_ANSWER"
 }
@@ -4278,6 +4517,14 @@ prepare_docker_data_paths() {
         PDP_VALUE="$(env_file_value "$PDP_WORK/.env" "$PDP_KEY")"
         [ -n "$PDP_VALUE" ] || continue
         PDP_PATH="$(docker_host_path "$PDP_WORK" "$PDP_VALUE")"
+        if [ "$REUSE_BACKUPS" -eq 1 ] && [ "$PDP_KEY" = JHV_BACKUP_DIR ]; then
+            # Никаких mkdir/chown/chmod в подключённом репозитории, даже
+            # если на NFS нет права записи. Для restore нужно только чтение.
+            docker run --rm --network none --user 10001:10001 -v "$PDP_PATH:/target:ro" \
+                "$POSTGRES_HELPER_IMAGE" sh -c 'test -r /target && test -x /target && test -d /target/jhvirt' >/dev/null 2>&1 ||
+                die "UID 10001 не может читать существующие копии в $PDP_PATH; проверьте ACL/mount/SELinux"
+            continue
+        fi
         if [ "$MIGRATION_ACTIVE" -eq 1 ] && [ ! -d "$PDP_PATH" ]; then
             case "$PDP_PATH" in
                 "$PREFIX"/*|"$PDP_WORK"/*) ;;
@@ -4286,6 +4533,8 @@ prepare_docker_data_paths() {
                     # сервер с иной разметкой — обычное дело. Без терминала
                     # спрашивать некого, поэтому там прежний отказ.
                     PDP_NEW=""
+                    # Сообщения диалога не должны становиться частью пути
+                    # при подстановке $(...). Только ответ идёт в stdout.
                     [ -t 0 ] && PDP_NEW="$(ask_data_dir "$PDP_KEY" "$PDP_PATH")"
                     [ -n "$PDP_NEW" ] || die "внешний каталог из $PDP_KEY не найден: $PDP_PATH
 Подключите прежнее хранилище, создайте каталог или укажите другой путь:
@@ -4820,6 +5069,10 @@ install_containers() {
     fi
 	DOCKER_ENV_EXISTED=0
 	[ -f "$WORK/.env" ] && DOCKER_ENV_EXISTED=1
+    if [ "$DOCKER_ENV_EXISTED" -eq 1 ] && [ -z "$BACKUP_DIR_OVERRIDE" ] &&
+            [ "$(env_file_value "$WORK/.env" JHV_INSTALL_STORAGE_READ_ONLY)" = true ]; then
+        REUSE_BACKUPS=1
+    fi
     if [ "$UPDATE_REQUESTED" -eq 1 ]; then
         [ "$DOCKER_ENV_EXISTED" -eq 1 ] || die "обновление запрошено, но $WORK/.env не найден"
         create_update_backup
@@ -4889,7 +5142,7 @@ install_containers() {
         OIDC_MODE=""
         select_oidc_config
         load_existing_oidc
-        [ -n "$OIDC_MODE" ] || OIDC_MODE=none
+        choose_oidc
         prepare_oidc
     fi
 
@@ -5021,7 +5274,8 @@ PostgreSQL хранит пароль внутри тома и новый не п
 	fi
 
 	if [ "$BUNDLE" -eq 1 ]; then
-		chown -R "$USER_NAME:$USER_NAME" "$PREFIX"
+		chown -R "$USER_NAME:$USER_NAME" "$PREFIX/bin" "$PREFIX/web" \
+            "$PREFIX/config" "$PREFIX/data" "$PREFIX/logs" "$PREFIX/docs"
 		if [ -f "$PREFIX/proxmox/jhvirt-pve-data-plane" ]; then
 			chown root:root "$PREFIX/proxmox" "$PREFIX/proxmox/jhvirt-pve-data-plane"
 			chmod 0755 "$PREFIX/proxmox" "$PREFIX/proxmox/jhvirt-pve-data-plane"
@@ -5056,6 +5310,12 @@ PostgreSQL хранит пароль внутри тома и новый не п
 	step "token-файл Prometheus"
 	ensure_docker_metrics_token
 	migration_restore_docker_data
+	if [ -n "$BACKUP_KEY_FILE" ] && [ "$MIGRATION_ACTIVE" -eq 0 ]; then
+		BKI_VOL="$(docker_metrics_volume)"
+		BKI_EXISTING="$(docker_volume_value "$BKI_VOL" secret.key)"
+		[ -z "$BKI_EXISTING" ] || die "в томе $BKI_VOL уже есть secret.key; замена ключа запрещена"
+		docker_volume_put "$BKI_VOL" "$BACKUP_KEY_FILE" secret.key 600
+	fi
 	prepare_docker_runtime_secrets "$WORK"
 	install_tls_docker "$WORK/.env"
 	prepare_keycloak_runtime
@@ -5075,9 +5335,15 @@ PostgreSQL хранит пароль внутри тома и новый не п
 	# Миграция/восстановление могли заменить сам файл после первого прохода.
 	normalize_docker_keycloak_vault_permissions "$WORK"
 	prepare_docker_dr_backup "$WORK"
+	show_backup_locations
 	migration_restore_docker_database "$WORK" "$RUN"
 	ensure_docker_database_roles "$WORK" "$RUN"
 
+    if [ -n "$BACKUP_DIR_OVERRIDE" ] || [ "$DOCKER_ENV_EXISTED" -eq 0 ]; then
+        set_plain_env JHV_INSTALL_STORAGE_PENDING true "$WORK/.env"
+        if [ "$REUSE_BACKUPS" -eq 1 ]; then BSR_READ_ONLY=true; else BSR_READ_ONLY=false; fi
+        set_plain_env JHV_INSTALL_STORAGE_READ_ONLY "$BSR_READ_ONLY" "$WORK/.env"
+    fi
     if [ "$START" -eq 0 ]; then
         # shellcheck disable=SC2086
         (cd "$WORK" && $RUN stop postgres) >/dev/null 2>&1 || true
@@ -5085,10 +5351,24 @@ PostgreSQL хранит пароль внутри тома и новый не п
         say "Подготовлено без запуска. Для безопасного первого старта повторите"
         say "эту установку без --no-start: установщик удалит bootstrap-файл и"
         say "пересоздаст первый контейнер. Не запускайте compose вручную до этого."
+        say "Повторно указывать --backup-key-file не нужно: ключ уже сохранён."
+        show_backup_locations
         return
     fi
 
-    step "сборка образа и запуск (в первый раз это несколько минут)"
+    step "сборка образа (в первый раз это несколько минут)"
+    # Зарегистрировать каталог до запуска scheduler/retention приложения.
+    if [ "$(env_file_value "$WORK/.env" JHV_INSTALL_STORAGE_PENDING)" = true ]; then
+        # shellcheck disable=SC2086
+        (cd "$WORK" && $RUN build "$COMPOSE_SERVICE") || die "сборка образа не удалась"
+        BSR_READ_ONLY="$(env_file_value "$WORK/.env" JHV_INSTALL_STORAGE_READ_ONLY)"
+        # shellcheck disable=SC2086
+        (cd "$WORK" && $RUN run --rm --no-deps -T "$COMPOSE_SERVICE" \
+            -config /app/config/ovirt-backup.yaml -register-backup-storage /backups \
+            "-register-backup-storage-read-only=$BSR_READ_ONLY") || die "не удалось зарегистрировать каталог копий"
+        set_plain_env JHV_INSTALL_STORAGE_PENDING false "$WORK/.env"
+    fi
+    step "запуск приложения"
     # shellcheck disable=SC2086
     (cd "$WORK" && $RUN up -d --build --remove-orphans) || die "запуск не удался; смотрите вывод выше"
     # Последняя проверка выполняется уже внутри реального контейнера Keycloak.
@@ -5176,6 +5456,7 @@ PostgreSQL хранит пароль внутри тома и новый не п
     fi
     say ""
     say "  интерфейс:     $URL"
+    show_backup_locations
     [ -z "$UPDATE_BACKUP_FILE" ] || say "  backup до обновления: $UPDATE_BACKUP_FILE"
     if [ "$OIDC_MODE" != none ] && [ "$OIDC_ALLOW_LOCAL_LOGIN" = false ]; then
         say "  локальный вход: выключен"
@@ -5513,6 +5794,13 @@ systemd_write_paths() {
         *" $PREFIX/file-restores "*) ;;
         *) SWP_VALUE="$SWP_VALUE $PREFIX/file-restores" ;;
     esac
+    for SWP_EXTRA in "$(env_file_value "$ENV_FILE" JHV_INSTALL_BACKUP_DIR)" \
+            "$(env_file_value "$ENV_FILE" JHV_BACKUP_TEMP_DIR)" "$RESTORE_DIR_OVERRIDE"; do
+        [ -n "$SWP_EXTRA" ] || continue
+        [ "$SWP_EXTRA" != "$(env_file_value "$ENV_FILE" JHV_INSTALL_BACKUP_DIR)" ] ||
+            [ "$(env_file_value "$ENV_FILE" JHV_INSTALL_STORAGE_READ_ONLY)" != true ] || continue
+        case " $SWP_VALUE " in *" $SWP_EXTRA "*) ;; *) SWP_VALUE="$SWP_VALUE $SWP_EXTRA" ;; esac
+    done
     for SWP_PATH in $SWP_VALUE; do
         case "$SWP_PATH" in
             /*) ;;
@@ -5523,6 +5811,44 @@ systemd_write_paths() {
         esac
     done
     printf '%s' "$SWP_VALUE"
+}
+
+prepare_systemd_backup_paths() {
+    if [ -n "$BACKUP_DIR_OVERRIDE" ] || [ "$ENV_EXISTED" -eq 0 ]; then
+        [ -n "$BACKUP_DIR_OVERRIDE" ] || BACKUP_DIR_OVERRIDE="$PREFIX/backups"
+        validate_data_path "$BACKUP_DIR_OVERRIDE"
+        case "$BACKUP_DIR_OVERRIDE" in /home/*|/root/*) die "ProtectHome скрывает этот каталог от службы; используйте /srv или /mnt" ;; esac
+        if [ ! -d "$BACKUP_DIR_OVERRIDE" ]; then
+            [ "$REUSE_BACKUPS" -eq 0 ] || die "каталог существующих копий исчез: $BACKUP_DIR_OVERRIDE"
+            install -d -o "$USER_NAME" -g "$USER_NAME" -m 0750 "$BACKUP_DIR_OVERRIDE"
+        fi
+        runuser -u "$USER_NAME" -- test -r "$BACKUP_DIR_OVERRIDE" &&
+            runuser -u "$USER_NAME" -- test -x "$BACKUP_DIR_OVERRIDE" || die "$USER_NAME не может читать $BACKUP_DIR_OVERRIDE"
+        set_env JHV_INSTALL_BACKUP_DIR "$BACKUP_DIR_OVERRIDE" "$ENV_FILE"
+        set_env JHV_INSTALL_STORAGE_PENDING true "$ENV_FILE"
+        if [ "$REUSE_BACKUPS" -eq 1 ]; then BSR_READ_ONLY=true; else BSR_READ_ONLY=false; fi
+        set_env JHV_INSTALL_STORAGE_READ_ONLY "$BSR_READ_ONLY" "$ENV_FILE"
+    fi
+    if [ -n "$RESTORE_DIR_OVERRIDE" ]; then
+        [ -d "$RESTORE_DIR_OVERRIDE" ] || install -d -o "$USER_NAME" -g "$USER_NAME" -m 0750 "$RESTORE_DIR_OVERRIDE"
+        set_env JHV_BACKUP_RESTORE_DIRS "$RESTORE_DIR_OVERRIDE" "$ENV_FILE"
+        set_env JHV_BACKUP_TEMP_DIR "$RESTORE_DIR_OVERRIDE/.tmp" "$ENV_FILE"
+        [ -d "$RESTORE_DIR_OVERRIDE/.tmp" ] || install -d -o "$USER_NAME" -g "$USER_NAME" -m 0700 "$RESTORE_DIR_OVERRIDE/.tmp"
+    fi
+}
+
+register_systemd_backup_storage() {
+    [ "$(env_file_value "$ENV_FILE" JHV_INSTALL_STORAGE_PENDING)" = true ] || return 0
+    step "подключение каталога копий в БД"
+    BSR_PATH="$(env_file_value "$ENV_FILE" JHV_INSTALL_BACKUP_DIR)"
+    BSR_READ_ONLY="$(env_file_value "$ENV_FILE" JHV_INSTALL_STORAGE_READ_ONLY)"
+    systemd-run --quiet --wait --pipe --collect --unit="jhvirt-storage-setup-$$" \
+        --uid="$USER_NAME" --gid="$USER_NAME" --working-directory="$PREFIX" \
+        --property="EnvironmentFile=$ENV_FILE" \
+        "$PREFIX/bin/$SERVER_BINARY" -config "$PREFIX/config/$CONFIG_NAME" \
+        -register-backup-storage "$BSR_PATH" "-register-backup-storage-read-only=$BSR_READ_ONLY" ||
+        die "не удалось подключить каталог копий в БД"
+    set_env JHV_INSTALL_STORAGE_PENDING false "$ENV_FILE"
 }
 
 prepare_systemd_write_paths() {
@@ -5560,10 +5886,12 @@ install_systemd() {
 
     detect_postgres_family
     [ "$START" -eq 0 ] || ensure_http_client
-    select_oidc_config
-    load_systemd_oidc
-    choose_oidc
-    prepare_oidc
+    if [ "$MIGRATION_ACTIVE" -eq 0 ]; then
+        select_oidc_config
+        load_systemd_oidc
+        choose_oidc
+        prepare_oidc
+    fi
 
     UPGRADE=0
     # Бинарь мог остаться от прерванной первой установки; наличие unit
@@ -5617,8 +5945,20 @@ install_systemd() {
     # Конфигурацию не трогаем: в ней уже могут быть правки оператора.
     install_bundle_config
 	migration_apply_systemd_files
+    if [ "$MIGRATION_ACTIVE" -eq 1 ]; then
+        select_oidc_config
+        load_systemd_oidc
+        choose_oidc
+        prepare_oidc
+    fi
+    if [ -n "$BACKUP_KEY_FILE" ] && [ "$MIGRATION_ACTIVE" -eq 0 ]; then
+        [ ! -e "$PREFIX/data/secret.key" ] || die "secret.key уже существует; замена ключа запрещена"
+        install -m 0600 "$BACKUP_KEY_FILE" "$PREFIX/data/secret.key"
+    fi
 
-    chown -R "$USER_NAME:$USER_NAME" "$PREFIX"
+    # Не менять владельцев существующих копий и подключённых хранилищ.
+    chown -R "$USER_NAME:$USER_NAME" "$PREFIX/bin" "$PREFIX/web" \
+        "$PREFIX/config" "$PREFIX/data" "$PREFIX/logs" "$PREFIX/docs"
 	if [ -f "$PREFIX/proxmox/jhvirt-pve-data-plane" ]; then
 		chown root:root "$PREFIX/proxmox" "$PREFIX/proxmox/jhvirt-pve-data-plane"
 		chmod 0755 "$PREFIX/proxmox" "$PREFIX/proxmox/jhvirt-pve-data-plane"
@@ -5634,6 +5974,7 @@ install_systemd() {
     ENV_FILE="$PREFIX/config/jhvirt.env"
     ENV_EXISTED=0
     [ -f "$ENV_FILE" ] && ENV_EXISTED=1
+    prepare_systemd_backup_paths
 
     DATABASE_URL=""
     if [ -n "$DATABASE_URL_FILE" ]; then
@@ -5781,6 +6122,7 @@ install_systemd() {
 
     step "проверка конфигурации"
     check_installed_config || die "установленная конфигурация не прошла проверку"
+    register_systemd_backup_storage
     rm -f "$PREFIX/bin/$LEGACY_SERVER_BINARY"
 
     SHOULD_START=0
@@ -5837,6 +6179,7 @@ install_systemd() {
     say ""
     say "  каталог:        $PREFIX"
     say "  интерфейс:      $URL"
+    show_backup_locations
     [ -z "$UPDATE_BACKUP_FILE" ] || say "  backup до обновления: $UPDATE_BACKUP_FILE"
     if [ -n "$ADMPASS" ]; then
         say "  пользователь:   $LOCAL_ADMIN_USER"

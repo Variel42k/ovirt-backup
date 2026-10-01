@@ -1894,7 +1894,12 @@ const replicationColumns = [
             </q-item>
           </q-list>
 
-          <div class="text-subtitle2 q-mb-xs q-mt-md">Восстановления с этой точки</div>
+          <div class="row items-center q-mt-md q-mb-xs">
+            <div class="text-subtitle2">Восстановления с этой точки</div>
+            <q-space />
+            <q-btn flat dense no-caps color="primary" icon="cleaning_services" label="Передачи и остатки проверки"
+              :to="{ name: 'verify', query: { tab: 'leftovers' } }" />
+          </div>
           <q-list dense bordered separator>
             <q-item v-for="item in runRestores" :key="item.id">
               <q-item-section avatar>

@@ -619,7 +619,18 @@ func (e *Engine) restoreToEngine(ctx context.Context, set *ChainSet, reader *Cha
 		record.Phase = "attaching_disk"
 		_ = e.store.UpdateRestoreRun(ctx, record)
 		iface := ovirt.DiskInterfaceForBus(req.DiskBuses[diskID])
-		if err := client.AttachDisk(ctx, req.AttachToVMID, targetDiskID, iface, leaf.Bootable); err != nil {
+		// Диск уже ok, но движок ещё может держать блокировку своей команды
+		// загрузки: отказ «Disk is locked» здесь не повод выбрасывать записанный
+		// диск, а повод подождать.
+		err := client.AttachDiskWhenUnlocked(ctx, req.AttachToVMID, targetDiskID, iface, leaf.Bootable,
+			restoreAttachLockWait, func(attempt int, lockErr error) {
+				if attempt == 1 {
+					e.log.Warn().Err(lockErr).Str("restore", record.ID).Str("диск-id", targetDiskID).
+						Str("вм-id", req.AttachToVMID).Dur("жду-до", restoreAttachLockWait).
+						Msg("движок ещё держит блокировку диска после загрузки, повторяю подключение")
+				}
+			})
+		if err != nil {
 			return fmt.Errorf("подключение диска к ВМ: %w", err)
 		}
 		e.log.Info().Str("restore", record.ID).Str("диск", record.TargetDiskName).
@@ -628,6 +639,11 @@ func (e *Engine) restoreToEngine(ctx context.Context, set *ChainSet, reader *Cha
 	}
 	return nil
 }
+
+// restoreAttachLockWait — сколько ждать, пока движок снимет блокировку с
+// только что загруженного диска. Обычно это секунды; запас нужен на случай,
+// когда после загрузки движок ещё уменьшает том тонкого диска на блочном домене.
+const restoreAttachLockWait = 10 * time.Minute
 
 // writeZeros erases a range on daemons that do not support the zero operation,
 // by writing actual zero bytes.

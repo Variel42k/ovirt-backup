@@ -307,6 +307,48 @@ func (c *Client) AttachDisk(ctx context.Context, vmID, diskID, iface string, boo
 	return c.post(ctx, "/vms/"+vmID+"/diskattachments", body, nil)
 }
 
+// AttachDiskWhenUnlocked binds a disk to a VM and waits out the engine's lock
+// on the disk.
+//
+// После загрузки движок показывает status=ok и конечную фазу ImageTransfer
+// раньше, чем снимает блокировку своей команды: подключение, отправленное
+// сразу, получает 409 «Disk is locked. Please try again later». На РЕД
+// Виртуализации 7.3 так пропала проверка, записавшая 300 ГиБ за пять часов:
+// отказ пришёл через 25 мс после того, как диск стал ok. Состояние диска
+// этой блокировки не показывает, поэтому остаётся повторять сам запрос.
+//
+// Повторяется только отказ из-за блокировки. Остальные 409 — диск уже
+// подключён, ВМ в неподходящем состоянии — ожиданием не лечатся и
+// возвращаются сразу. onLocked вызывается перед каждым ожиданием.
+func (c *Client) AttachDiskWhenUnlocked(ctx context.Context, vmID, diskID, iface string, bootable bool,
+	timeout time.Duration, onLocked func(attempt int, err error)) error {
+	return c.attachDiskWhenUnlocked(ctx, vmID, diskID, iface, bootable, timeout, 3*time.Second, onLocked)
+}
+
+func (c *Client) attachDiskWhenUnlocked(ctx context.Context, vmID, diskID, iface string, bootable bool,
+	timeout, interval time.Duration, onLocked func(attempt int, err error)) error {
+	deadline := time.Now().Add(timeout)
+	for attempt := 1; ; attempt++ {
+		err := c.AttachDisk(ctx, vmID, diskID, iface, bootable)
+		if err == nil || !IsLockConflict(err) {
+			return err
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("движок не снял блокировку диска за %s: %w", timeout, err)
+		}
+		if onLocked != nil {
+			onLocked(attempt, err)
+		}
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
 // DeleteDisk removes a disk permanently.
 func (c *Client) DeleteDisk(ctx context.Context, diskID string) error {
 	return c.del(ctx, "/disks/"+diskID)

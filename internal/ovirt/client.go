@@ -111,6 +111,23 @@ func IsConflict(err error) bool {
 	return errors.As(err, &apiErr) && apiErr.Status == http.StatusConflict
 }
 
+// IsLockConflict reports whether a 409 says the object is locked by another
+// engine operation — отказ, который проходит сам, в отличие от 409 о
+// неподходящем состоянии объекта.
+func IsLockConflict(err error) bool {
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusConflict {
+		return false
+	}
+	text := strings.ToLower(apiErr.Detail + " " + apiErr.Reason + " " + apiErr.Body)
+	for _, marker := range []string{"locked", "try again", "заблокирован", "повторите"} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // IsAuthError reports whether credentials were rejected.
 func IsAuthError(err error) bool {
 	var apiErr *APIError

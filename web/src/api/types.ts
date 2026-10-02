@@ -745,6 +745,9 @@ export interface RestoreRun {
   transfer_id?: string
   phase?: string
   cleanup_errors?: string[]
+  /** Чья это копия и от какого времени — приходит в списках восстановлений. */
+  source_vm_name?: string
+  source_created_at?: string
   progress: number
   transferred_bytes: number
   total_bytes: number
@@ -1134,6 +1137,8 @@ export interface BootVerifyOptions {
   vcpus: number
   timeout_sec: number
   keep_on_failure: boolean
+  /** Оставить проверочную ВМ и после успешной проверки. Только для ручного запуска. */
+  keep_on_success?: boolean
   /** Проверочная ВМ в движке oVirt вместо KVM-хоста: движок, кластер, домен хранения. */
   boot_engine_id?: string
   boot_cluster_id?: string
@@ -1220,6 +1225,8 @@ export interface BootCheck extends VerifyRun {
   hostname?: string
   elapsed?: string
   notes?: string[]
+  filesystems?: GuestFilesystemUsage[]
+  kept?: boolean
 }
 
 /** Объект, оставшийся от проверки загрузкой. */
@@ -1295,6 +1302,19 @@ export interface BootReport {
   notes?: string[]
   /** assembly — проверочную ВМ не удалось собрать: до запуска дело не дошло. */
   stage?: string
+  /** Что гость смонтировал после загрузки, по данным гостевого агента. */
+  filesystems?: GuestFilesystemUsage[]
+  /** Проверочная ВМ оставлена на площадке. */
+  kept?: boolean
+}
+
+/** Файловая система гостя с занятым местом. Размеров нет, если агент их не сообщил. */
+export interface GuestFilesystemUsage {
+  mountpoint: string
+  type?: string
+  device?: string
+  total_bytes?: number
+  used_bytes?: number
 }
 
 /** Один отрисовываемый кусок статьи справки. */

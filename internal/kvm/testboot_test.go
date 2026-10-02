@@ -106,3 +106,19 @@ func TestShellQuoteHandlesApostrophe(t *testing.T) {
 		t.Fatalf("shellQuote = %q, ожидалось %q", got, want)
 	}
 }
+
+func TestParseAgentFilesystems(t *testing.T) {
+	got := parseAgentFilesystems(`{"return":[
+		{"name":"dm-1","mountpoint":"/var","type":"xfs","used-bytes":2048,"total-bytes":4096,"disk":[]},
+		{"name":"vda2","mountpoint":"/","type":"ext4","used-bytes":10,"total-bytes":100,"disk":[]},
+		{"name":"vda2","mountpoint":"/","type":"ext4","disk":[]},
+		{"name":"vda1","mountpoint":"/boot","type":"ext4","disk":[]}]}`)
+	if len(got) != 3 || got[0].Mountpoint != "/" || got[0].Device != "vda2" || got[0].UsedBytes != 10 ||
+		got[0].TotalBytes != 100 || got[1].Mountpoint != "/boot" || got[1].TotalBytes != 0 ||
+		got[2].Mountpoint != "/var" || got[2].Type != "xfs" {
+		t.Fatalf("неожиданный список файловых систем: %+v", got)
+	}
+	if got := parseAgentFilesystems(`{"error":{"class":"CommandNotFound"}}`); len(got) != 0 {
+		t.Fatalf("ответ без списка разобран в %+v", got)
+	}
+}

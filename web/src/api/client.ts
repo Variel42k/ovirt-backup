@@ -587,8 +587,9 @@ export const api = {
     http.post<RestoreVMPlan>(`/backups/${id}/restore-vm/plan`, payload).then((r) => r.data),
   restoreVM: (id: string, payload: Record<string, unknown>) =>
     http.post(`/backups/${id}/restore-vm`, payload).then((r) => r.data),
-  listRestores: (runId?: string) =>
-    http.get<ListResponse<RestoreRun>>('/restores', { params: runId ? { run_id: runId } : undefined }).then((r) => unwrap(r.data)),
+  /** Отбор идёт на сервере: status и target — через запятую, origin — verify | manual, q — подстрока. */
+  listRestores: (runId?: string, params: Record<string, string | number> = {}) =>
+    http.get<ListResponse<RestoreRun>>('/restores', { params: { ...params, ...(runId ? { run_id: runId } : {}) } }).then((r) => unwrap(r.data)),
 
   // Ретенция
   retentionPreview: (payload: { server_id: string; vm_id: string; storage_target_id: string; policy: RetentionPolicy }) =>

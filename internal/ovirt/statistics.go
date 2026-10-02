@@ -2,8 +2,10 @@ package ovirt
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -36,6 +38,8 @@ type statisticList struct {
 		Values struct {
 			Value []struct {
 				Datum decimal `json:"datum"`
+				// Detail — значение строковых показателей, например disks.usage.
+				Detail string `json:"detail"`
 			} `json:"value"`
 		} `json:"values"`
 	} `json:"statistic"`
@@ -108,4 +112,56 @@ func (c *Client) DiskStatistics(ctx context.Context, serverID, vmID string, disk
 		out = append(out, diskSampleFromStatistics(serverID, vmID, disk, statistics, at))
 	}
 	return out, nil
+}
+
+// guestDiskUsage — запись показателя disks.usage: движок отдаёт его строкой
+// JSON, а числа в ней — строками.
+type guestDiskUsage struct {
+	Path  string  `json:"path"`
+	FS    string  `json:"fs"`
+	Total decimal `json:"total"`
+	Used  decimal `json:"used"`
+}
+
+// VMGuestFilesystems returns the filesystems the guest has mounted, as the
+// guest agent reported them to the engine (statistic disks.usage).
+//
+// Пустой список без ошибки — агент ещё не сообщил: движок получает эти
+// сведения позже, чем имя хоста и версию ОС.
+func (c *Client) VMGuestFilesystems(ctx context.Context, vmID string) ([]model.GuestFilesystem, error) {
+	var statistics statisticList
+	if err := c.get(ctx, "/vms/"+vmID+"/statistics", &statistics); err != nil {
+		return nil, err
+	}
+	for _, statistic := range statistics.Statistic {
+		if statistic.Name != "disks.usage" || len(statistic.Values.Value) == 0 {
+			continue
+		}
+		return parseGuestDiskUsage(statistic.Values.Value[0].Detail), nil
+	}
+	return nil, nil
+}
+
+func parseGuestDiskUsage(detail string) []model.GuestFilesystem {
+	detail = strings.TrimSpace(detail)
+	if detail == "" {
+		return nil
+	}
+	var usage []guestDiskUsage
+	if err := json.Unmarshal([]byte(detail), &usage); err != nil {
+		return nil
+	}
+	out := make([]model.GuestFilesystem, 0, len(usage))
+	seen := map[string]bool{}
+	for _, u := range usage {
+		if u.Path == "" || seen[u.Path] {
+			continue
+		}
+		seen[u.Path] = true
+		out = append(out, model.GuestFilesystem{
+			Mountpoint: u.Path, Type: u.FS, TotalBytes: int64(u.Total), UsedBytes: int64(u.Used),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Mountpoint < out[j].Mountpoint })
+	return out
 }

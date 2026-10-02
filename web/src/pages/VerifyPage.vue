@@ -3,7 +3,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useQuasar } from 'quasar'
 import { api, errorMessage, notifyError, notifyOk } from '@/api/client'
-import { ago, bytes, dateTime, runStatus, staleFor, statusColor, transferPauseHint, transferRatio, transferSummary, usesOVirtAPI } from '@/api/format'
+import { ago, bytes, dateTime, fsUsage, runStatus, staleFor, statusColor, transferPauseHint, transferRatio, transferSummary, usesOVirtAPI } from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import { useUnsavedChanges } from '@/composables/unsavedChanges'
@@ -435,7 +435,8 @@ function checkPhaseTitle(phase?: string): string {
     finalizing_transfer: 'завершение ImageTransfer и разблокировка диска',
     attaching_disk: 'подключение диска к ВМ', restoring_disks: 'восстановление дисков',
     creating_networks: 'создание сетевых интерфейсов', starting_vm: 'запуск ВМ',
-    waiting_guest: 'ожидание ответа гостевого агента', cleanup: 'удаление временной ВМ и дисков',
+    waiting_guest: 'ожидание ответа гостевого агента', reading_guest: 'чтение файловых систем гостя',
+    cleanup: 'удаление временной ВМ и дисков',
     rollback: 'уборка после ошибки', completed: 'завершено', failed: 'ошибка',
     canceled: 'отменено',
   } as Record<string, string>)[phase || ''] || phase || '—'
@@ -756,6 +757,10 @@ onUnmounted(() => clearInterval(checkRefresh))
                 <template v-if="p.row.agent_replied">
                   <q-icon name="check_circle" color="positive" /> {{ p.row.guest_os || 'агент ответил' }}
                   <div class="text-caption text-grey-7">{{ p.row.hostname }}<template v-if="p.row.elapsed"> · за {{ p.row.elapsed }}</template></div>
+                  <div v-if="p.row.filesystems?.length" class="text-caption text-grey-7">
+                    файловых систем: {{ p.row.filesystems.length }}
+                  </div>
+                  <q-badge v-if="p.row.kept" color="warning" text-color="dark">ВМ оставлена</q-badge>
                 </template>
                 <div v-else-if="p.row.error || p.row.summary" class="text-caption text-negative jhv-wrap">{{ p.row.error || p.row.summary }}</div>
               </q-td>
@@ -763,7 +768,29 @@ onUnmounted(() => clearInterval(checkRefresh))
             <q-tr v-show="p.expand" :props="p">
               <q-td colspan="100%" class="bg-grey-1">
                 <div v-if="p.row.summary" class="text-body2">{{ p.row.summary }}</div>
-                <div v-if="p.row.check_vm_name" class="text-caption">Проверочная ВМ: <span class="jhv-mono">{{ p.row.check_vm_name }}</span></div>
+                <div v-if="p.row.check_vm_name" class="text-caption">
+                  Проверочная ВМ: <span class="jhv-mono">{{ p.row.check_vm_name }}</span>
+                  <template v-if="p.row.kept"> — оставлена на площадке, удаляется во вкладке «Остатки»</template>
+                </div>
+                <q-markup-table v-if="p.row.filesystems?.length" flat dense bordered class="q-my-sm" style="max-width: 640px"
+                                data-testid="guest-filesystems">
+                  <thead>
+                    <tr>
+                      <th class="text-left">Файловая система гостя</th>
+                      <th class="text-left">Тип</th>
+                      <th class="text-right">Размер</th>
+                      <th class="text-right">Занято</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="fs in p.row.filesystems" :key="fs.mountpoint">
+                      <td class="jhv-mono">{{ fs.mountpoint }}</td>
+                      <td>{{ fs.type || '—' }}</td>
+                      <td class="text-right">{{ fs.total_bytes ? bytes(fs.total_bytes) : '—' }}</td>
+                      <td class="text-right">{{ fsUsage(fs) }}</td>
+                    </tr>
+                  </tbody>
+                </q-markup-table>
                 <div v-if="p.row.host" class="text-caption">
                   Место: {{ p.row.host }}<template v-if="p.row.cluster_name"> · кластер {{ p.row.cluster_name }}</template><template v-if="p.row.storage_domain_name"> · домен {{ p.row.storage_domain_name }}</template>
                 </div>

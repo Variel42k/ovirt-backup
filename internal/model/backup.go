@@ -453,6 +453,11 @@ type VerifyOptions struct {
 	TimeoutSec int `json:"timeout_sec,omitempty"`
 	// KeepOnFailure оставляет ВМ и образ на гипервизоре для разбора.
 	KeepOnFailure bool `json:"keep_on_failure,omitempty"`
+	// KeepOnSuccess оставляет проверочную ВМ и после успешной проверки —
+	// чтобы зайти в неё и посмотреть самому. Действует только у проверки,
+	// запущенной вручную: задание и расписание оставляли бы по ВМ на каждый
+	// запуск, пока не кончится место на домене.
+	KeepOnSuccess bool `json:"keep_on_success,omitempty"`
 
 	// BootEngineID — подключение oVirt (РЕД Виртуализация), в котором служба
 	// восстанавливает проверочную ВМ без сети, запускает её, ждёт ответа
@@ -1125,6 +1130,12 @@ type RestoreRun struct {
 	TransferID        string   `json:"transfer_id,omitempty"`
 	Phase             string   `json:"phase,omitempty"`
 	CleanupErrors     []string `json:"cleanup_errors,omitempty"`
+
+	// SourceVMName и SourceCreatedAt — чья это копия и от какого времени.
+	// Заполняются только в списке восстановлений: по имени созданной ВМ или
+	// диска исходную машину не узнать.
+	SourceVMName    string     `json:"source_vm_name,omitempty"`
+	SourceCreatedAt *time.Time `json:"source_created_at,omitempty"`
 
 	Progress         int        `json:"progress"`
 	TransferredBytes int64      `json:"transferred_bytes"`

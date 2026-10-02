@@ -28,6 +28,11 @@ const (
 	engineBootPoll           = 10 * time.Second
 )
 
+// engineFilesystemsWait — сколько ждать после ответа агента, пока движок
+// получит от него список файловых систем. Обычно он приходит следующим
+// обновлением статистики; без него проверка всё равно пройдена.
+var engineFilesystemsWait = 3 * time.Minute
+
 // engineDeleteRetry — пауза перед повторным удалением проверочной ВМ, которую
 // движок ещё держит после выключения.
 var engineDeleteRetry = 10 * time.Second
@@ -165,17 +170,33 @@ func (d *Dispatcher) verifyBootOnEngine(ctx context.Context, req backup.External
 	boot := waitGuestOnEngine(ctx, client, result.VMID, timeout, engineBootPoll)
 
 	var notes []string
+	var filesystems []model.GuestFilesystem
+	if boot.Failure == "" {
+		d.Engine.UpdateVerifyPhase(ctx, req.Record, "reading_guest", 90)
+		filesystems = waitGuestFilesystemsOnEngine(ctx, client, result.VMID, engineFilesystemsWait, engineBootPoll)
+		if len(filesystems) == 0 {
+			notes = append(notes, fmt.Sprintf("гостевой агент не сообщил движку список файловых систем за %s — "+
+				"смонтированные разделы проверьте в консоли ВМ", engineFilesystemsWait))
+		}
+	}
 	if space.Verdict == backup.BootSpaceTight {
 		notes = append(notes, space.Message)
 	}
 	if opts.DiskID != "" {
 		notes = append(notes, "в движке восстанавливаются все диски ВМ: выбор диска для запуска не применяется")
 	}
-	kept := boot.Failure != "" && ctx.Err() == nil && opts.KeepOnFailure
-	if kept {
+	keptFailed := boot.Failure != "" && ctx.Err() == nil && opts.KeepOnFailure
+	keptPassed := boot.Failure == "" && ctx.Err() == nil && keepOnSuccess(opts)
+	kept := keptFailed || keptPassed
+	switch {
+	case keptFailed:
 		notes = append(notes, fmt.Sprintf("проверочная ВМ %s оставлена в движке для разбора — удалите её вместе "+
 			"с дисками вручную", name))
-	} else {
+	case keptPassed:
+		notes = append(notes, fmt.Sprintf("проверочная ВМ %s оставлена в движке по вашему выбору: она запущена, "+
+			"сеть не подключена. Когда закончите, удалите её вместе с дисками в «Проверка ВМ → Остатки»", name))
+		log.Info().Str("вм-id", result.VMID).Msg("проверочная ВМ оставлена после успешной проверки по выбору оператора")
+	default:
 		d.Engine.UpdateVerifyPhase(ctx, req.Record, "cleanup", 95)
 		notes = append(notes, d.removeEngineVerifyVM(ctx, client, result.VMID, name)...)
 	}
@@ -194,7 +215,7 @@ func (d *Dispatcher) verifyBootOnEngine(ctx context.Context, req backup.External
 		Host: engineSrv.Name, DomainName: name, Started: boot.Started, AgentReplied: boot.AgentReplied,
 		ClusterName: clusterName, StorageDomainName: domain.Name, VMName: name,
 		Elapsed: boot.Elapsed.Round(time.Second).String(), GuestOS: boot.GuestOS, Hostname: boot.Hostname,
-		ImageBytes: data, Notes: notes,
+		ImageBytes: data, Notes: notes, Filesystems: filesystems, Kept: kept,
 	}
 	log.Info().Bool("загрузилась", passed).Dur("ожидание", boot.Elapsed).Msg("проверка загрузкой через движок завершена")
 	return nil
@@ -251,6 +272,34 @@ func waitGuestOnEngine(ctx context.Context, client *ovirt.Client, vmID string, t
 			res.Elapsed = time.Since(started)
 			res.Failure = "проверка прервана: " + ctx.Err().Error()
 			return res
+		case <-time.After(poll):
+		}
+	}
+}
+
+// keepOnSuccess — оставлять ли проверочную ВМ после успешной проверки. Только
+// у проверки, запущенной вручную: по расписанию и из задания ВМ копились бы
+// по одной на запуск, пока не кончится место на домене.
+func keepOnSuccess(opts model.VerifyOptions) bool {
+	return opts.KeepOnSuccess && opts.TriggeredBy == model.VerifyTriggerManual
+}
+
+// waitGuestFilesystemsOnEngine ждёт, пока движок получит от гостевого агента
+// список файловых систем. Пустой результат — не дождались; проверку это не
+// проваливает.
+func waitGuestFilesystemsOnEngine(ctx context.Context, client *ovirt.Client, vmID string,
+	limit, poll time.Duration) []model.GuestFilesystem {
+	deadline := time.Now().Add(limit)
+	for {
+		if filesystems, err := client.VMGuestFilesystems(ctx, vmID); err == nil && len(filesystems) > 0 {
+			return filesystems
+		}
+		if !time.Now().Before(deadline) {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return nil
 		case <-time.After(poll):
 		}
 	}

@@ -44,6 +44,13 @@ export function bytes(value?: number | null): string {
 }
 
 /** Доля фактически переданных данных для индикатора, всегда от 0 до 1. */
+/** Занятое место файловой системы гостя: объём и доля от размера. */
+export function fsUsage(fs: { total_bytes?: number; used_bytes?: number }): string {
+  if (!fs.total_bytes) return '—'
+  const used = fs.used_bytes ?? 0
+  return `${bytes(used)} · ${Math.round((used / fs.total_bytes) * 100)}%`
+}
+
 export function transferRatio(transferred?: number | null, total?: number | null): number {
   if (!total || total <= 0) return 0
   return Math.max(0, Math.min(1, (transferred ?? 0) / total))

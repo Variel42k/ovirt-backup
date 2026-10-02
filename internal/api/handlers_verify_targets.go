@@ -469,6 +469,9 @@ type bootCheckView struct {
 	Hostname          string   `json:"hostname,omitempty"`
 	Elapsed           string   `json:"elapsed,omitempty"`
 	Notes             []string `json:"notes,omitempty"`
+	// Filesystems — что гость смонтировал; Kept — проверочная ВМ оставлена.
+	Filesystems []model.GuestFilesystem `json:"filesystems,omitempty"`
+	Kept        bool                    `json:"kept,omitempty"`
 }
 
 // handleListBootChecks: GET /verify/checks — журнал проверок загрузкой.
@@ -506,6 +509,7 @@ func bootCheckViewOf(c *model.BootCheck) bootCheckView {
 			view.Host, view.CheckVMName, view.Started, view.AgentReplied = b.Host, firstNonEmpty(b.VMName, b.DomainName), b.Started, b.AgentReplied
 			view.ClusterName, view.StorageDomainName = b.ClusterName, b.StorageDomainName
 			view.GuestOS, view.Hostname, view.Elapsed, view.Notes = b.GuestOS, b.Hostname, b.Elapsed, b.Notes
+			view.Filesystems, view.Kept = b.Filesystems, b.Kept
 		}
 	}
 	c.Details = ""

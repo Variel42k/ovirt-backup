@@ -842,6 +842,7 @@ type verifyRequest struct {
 	VCPUs         int    `json:"vcpus"`
 	TimeoutSec    int    `json:"timeout_sec"`
 	KeepOnFailure bool   `json:"keep_on_failure"`
+	KeepOnSuccess bool   `json:"keep_on_success"`
 	// Проверочная ВМ в движке oVirt вместо KVM-хоста.
 	BootEngineID        string `json:"boot_engine_id"`
 	BootClusterID       string `json:"boot_cluster_id"`
@@ -879,6 +880,7 @@ func (s *Server) handleVerifyRun(w http.ResponseWriter, r *http.Request) {
 		VCPUs:         req.VCPUs,
 		TimeoutSec:    req.TimeoutSec,
 		KeepOnFailure: req.KeepOnFailure,
+		KeepOnSuccess: req.KeepOnSuccess,
 
 		BootEngineID:        req.BootEngineID,
 		BootClusterID:       req.BootClusterID,
@@ -1160,12 +1162,46 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListRestores(w http.ResponseWriter, r *http.Request) {
-	items, err := s.store.ListRestoreRuns(r.Context(), r.URL.Query().Get("run_id"), queryInt(r, "limit", 100))
+	q := r.URL.Query()
+	filter := store.RestoreFilter{
+		RunID:  q.Get("run_id"),
+		Search: strings.TrimSpace(q.Get("q")),
+		Limit:  queryInt(r, "limit", 100),
+	}
+	for _, value := range queryList(r, "status") {
+		filter.Statuses = append(filter.Statuses, model.RunStatus(value))
+	}
+	for _, value := range queryList(r, "target") {
+		filter.Targets = append(filter.Targets, model.RestoreTarget(value))
+	}
+	switch origin := q.Get("origin"); origin {
+	case "", store.RestoreOriginVerify, store.RestoreOriginManual:
+		filter.Origin = origin
+	default:
+		s.writeError(w, r, badRequest("origin: ожидается %s или %s", store.RestoreOriginVerify, store.RestoreOriginManual))
+		return
+	}
+	if days := queryInt(r, "days", 0); days > 0 {
+		since := time.Now().UTC().AddDate(0, 0, -days)
+		filter.Since = &since
+	}
+	items, err := s.store.ListRestoreRuns(r.Context(), filter)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
 	writeList(w, items)
+}
+
+// queryList reads a comma-separated query parameter, dropping empty items.
+func queryList(r *http.Request, name string) []string {
+	var out []string
+	for _, value := range strings.Split(r.URL.Query().Get(name), ",") {
+		if value = strings.TrimSpace(value); value != "" {
+			out = append(out, value)
+		}
+	}
+	return out
 }
 
 func (s *Server) handleGetRestore(w http.ResponseWriter, r *http.Request) {

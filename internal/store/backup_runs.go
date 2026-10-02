@@ -795,19 +795,101 @@ func (s *Store) ListVerifyDiskRestores(ctx context.Context, serverID string) ([]
 	return out, rows.Err()
 }
 
+// Кем создано восстановление — для отбора в списке.
+const (
+	// RestoreOriginVerify — пробным запуском: сборка проверочной ВМ и запись
+	// её дисков. Узнаётся по имени ВМ, которое служба назначает сама.
+	RestoreOriginVerify = "verify"
+	// RestoreOriginManual — всё остальное: запущено человеком или через API.
+	RestoreOriginManual = "manual"
+)
+
+// restoreListMax — предел одной выборки списка восстановлений.
+const restoreListMax = 500
+
+// RestoreFilter narrows the restore history.
+//
+// Отбор идёт в базе, а не в браузере: список отдаётся ограниченной порцией,
+// и отбор по ней на клиенте молча терял бы всё, что в порцию не попало.
+type RestoreFilter struct {
+	RunID    string
+	Statuses []model.RunStatus
+	Targets  []model.RestoreTarget
+	// Origin — RestoreOriginVerify или RestoreOriginManual; пусто — все.
+	Origin string
+	// Search ищет подстроку без учёта регистра в именах и идентификаторах
+	// исходной и созданной ВМ, диска, площадки, пути файла и в тексте ошибки.
+	Search string
+	Since  *time.Time
+	Limit  int
+}
+
+// likePattern экранирует подстановочные знаки LIKE в пользовательской строке.
+func likePattern(term string) string {
+	replacer := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return "%" + replacer.Replace(strings.ToLower(term)) + "%"
+}
+
 // ListRestoreRuns returns restore history, newest first.
-func (s *Store) ListRestoreRuns(ctx context.Context, runID string, limit int) ([]*model.RestoreRun, error) {
-	query := `SELECT ` + restoreColumns + ` FROM restore_runs`
+func (s *Store) ListRestoreRuns(ctx context.Context, f RestoreFilter) ([]*model.RestoreRun, error) {
+	var where []string
 	args := []any{}
-	if runID != "" {
-		query += ` WHERE run_id=?`
-		args = append(args, runID)
+	if f.RunID != "" {
+		where = append(where, `run_id=?`)
+		args = append(args, f.RunID)
+	}
+	if len(f.Statuses) > 0 {
+		ph := make([]string, len(f.Statuses))
+		for i, status := range f.Statuses {
+			ph[i] = "?"
+			args = append(args, string(status))
+		}
+		where = append(where, `status IN (`+strings.Join(ph, ",")+`)`)
+	}
+	if len(f.Targets) > 0 {
+		ph := make([]string, len(f.Targets))
+		for i, target := range f.Targets {
+			ph[i] = "?"
+			args = append(args, string(target))
+		}
+		where = append(where, `target IN (`+strings.Join(ph, ",")+`)`)
+	}
+	switch f.Origin {
+	case RestoreOriginVerify:
+		where = append(where, `target_vm_name LIKE ?`)
+		args = append(args, model.VerifyVMPrefix+"%")
+	case RestoreOriginManual:
+		where = append(where, `COALESCE(target_vm_name, '') NOT LIKE ?`)
+		args = append(args, model.VerifyVMPrefix+"%")
+	}
+	if f.Search != "" {
+		columns := []string{"id", "run_id", "target_vm_name", "target_vm_id", "target_disk_name", "target_disk_id",
+			"target_server_name", "target_cluster_name", "target_domain_name", "transfer_id", "output_path", "error"}
+		pattern := likePattern(f.Search)
+		conds := make([]string, 0, len(columns)+1)
+		for _, column := range columns {
+			conds = append(conds, `LOWER(`+column+`) LIKE ?`)
+			args = append(args, pattern)
+		}
+		conds = append(conds, `run_id IN (SELECT id FROM backup_runs WHERE LOWER(vm_name) LIKE ?)`)
+		args = append(args, pattern)
+		where = append(where, `(`+strings.Join(conds, ` OR `)+`)`)
+	}
+	if f.Since != nil {
+		where = append(where, `created_at >= ?`)
+		args = append(args, *f.Since)
+	}
+	query := `SELECT ` + restoreColumns + ` FROM restore_runs`
+	if len(where) > 0 {
+		query += ` WHERE ` + strings.Join(where, ` AND `)
 	}
 	query += ` ORDER BY created_at DESC`
-	if limit > 0 {
-		query += ` LIMIT ?`
-		args = append(args, limit)
+	limit := f.Limit
+	if limit <= 0 || limit > restoreListMax {
+		limit = restoreListMax
 	}
+	query += ` LIMIT ?`
+	args = append(args, limit)
 
 	rows, err := s.db.Query(ctx, query, args...)
 	if err != nil {
@@ -823,7 +905,66 @@ func (s *Store) ListRestoreRuns(ctx context.Context, runID string, limit int) ([
 		}
 		out = append(out, r)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := s.fillRestoreSources(ctx, out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// fillRestoreSources дописывает к восстановлениям имя исходной ВМ и время её
+// копии: в самой записи есть только то, что создано, а не то, из чего.
+func (s *Store) fillRestoreSources(ctx context.Context, items []*model.RestoreRun) error {
+	if len(items) == 0 {
+		return nil
+	}
+	seen := map[string]bool{}
+	var ph []string
+	var args []any
+	for _, item := range items {
+		if item.RunID == "" || seen[item.RunID] {
+			continue
+		}
+		seen[item.RunID] = true
+		ph = append(ph, "?")
+		args = append(args, item.RunID)
+	}
+	if len(args) == 0 {
+		return nil
+	}
+	rows, err := s.db.Query(ctx, `SELECT id, vm_name, created_at FROM backup_runs
+		WHERE id IN (`+strings.Join(ph, ",")+`)`, args...)
+	if err != nil {
+		return fmt.Errorf("list restore sources: %w", err)
+	}
+	defer rows.Close()
+	type source struct {
+		name string
+		at   time.Time
+	}
+	sources := map[string]source{}
+	for rows.Next() {
+		var (
+			id  string
+			src source
+		)
+		if err := rows.Scan(&id, &src.name, &src.at); err != nil {
+			return fmt.Errorf("scan restore source: %w", err)
+		}
+		sources[id] = src
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, item := range items {
+		if src, ok := sources[item.RunID]; ok {
+			at := utc(src.at)
+			item.SourceVMName, item.SourceCreatedAt = src.name, &at
+		}
+	}
+	return nil
 }
 
 // ListInterruptedRestoreRuns returns restores left pending or running by the

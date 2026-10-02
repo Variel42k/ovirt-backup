@@ -128,6 +128,7 @@ func (d *Dispatcher) verifyBoot(ctx context.Context, req backup.ExternalVerifyRe
 		VCPUs:         opts.VCPUs,
 		Timeout:       timeout,
 		KeepOnFailure: opts.KeepOnFailure,
+		KeepOnSuccess: keepOnSuccess(opts),
 		Name:          set.Leaf.VMName,
 		DomainName:    verifyVMName(set.Leaf.VMName, req.Record.ID),
 	}, log)
@@ -175,6 +176,8 @@ func (d *Dispatcher) verifyBoot(ctx context.Context, req backup.ExternalVerifyRe
 		Hostname:     result.Hostname,
 		ImageBytes:   uploaded,
 		Notes:        notes,
+		Filesystems:  result.Filesystems,
+		Kept:         result.Kept,
 	}
 	return nil
 }

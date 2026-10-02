@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"path"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/Variel42k/ovirt-backup/internal/backup"
 	"github.com/Variel42k/ovirt-backup/internal/libvirtx"
+	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
 // The strongest verification available: boot the restored image and wait for
@@ -50,6 +52,8 @@ type BootTest struct {
 	Timeout time.Duration
 	// KeepOnFailure оставляет ВМ и образ для разбора, если тест не прошёл.
 	KeepOnFailure bool
+	// KeepOnSuccess оставляет ВМ и образы и после успешной проверки.
+	KeepOnSuccess bool
 	// Name используется в имени временного домена.
 	Name string
 	// DomainName задаёт имя временного домена целиком; пусто — из Name и
@@ -121,6 +125,10 @@ type BootTestResult struct {
 	GuestOS      string        `json:"guest_os,omitempty"`
 	Hostname     string        `json:"hostname,omitempty"`
 	Notes        []string      `json:"notes,omitempty"`
+	// Filesystems — что гость смонтировал, по данным агента.
+	Filesystems []model.GuestFilesystem `json:"filesystems,omitempty"`
+	// Kept — ВМ и образы оставлены на гипервизоре.
+	Kept bool `json:"kept,omitempty"`
 }
 
 // Passed reports whether the guest actually came up.
@@ -282,6 +290,7 @@ func (d *Driver) RunBootTest(ctx context.Context, test BootTest, log zerolog.Log
 	if err != nil {
 		result.Notes = append(result.Notes, err.Error())
 		if test.KeepOnFailure {
+			result.Kept = true
 			result.Notes = append(result.Notes,
 				fmt.Sprintf("ВМ %s и %d образ(а) оставлены для разбора — удалите их вручную",
 					domainName, len(test.Disks)))
@@ -295,7 +304,20 @@ func (d *Driver) RunBootTest(ctx context.Context, test BootTest, log zerolog.Log
 	result.AgentReplied = true
 	result.Hostname = agentInfo.hostname
 	result.GuestOS = agentInfo.os
-	cleanup()
+	result.Filesystems = d.agentFilesystems(dom)
+	if len(result.Filesystems) == 0 {
+		result.Notes = append(result.Notes,
+			"гостевой агент не сообщил список файловых систем — смонтированные разделы проверьте в консоли ВМ")
+	}
+	if test.KeepOnSuccess && ctx.Err() == nil {
+		result.Kept = true
+		result.Notes = append(result.Notes,
+			fmt.Sprintf("ВМ %s и %d образ(а) оставлены на гипервизоре по вашему выбору: ВМ запущена, сеть не "+
+				"подключена. Когда закончите, удалите их в «Проверка ВМ → Остатки»", domainName, len(test.Disks)))
+		log.Info().Str("домен", domainName).Msg("проверочная ВМ оставлена после успешной проверки по выбору оператора")
+	} else {
+		cleanup()
+	}
 
 	log.Info().Str("домен", domainName).Dur("за", result.Elapsed).
 		Str("хост", result.Hostname).Msg("гостевая система из бэкапа поднялась")
@@ -418,6 +440,46 @@ func (d *Driver) agentHostname(dom golibvirt.Domain) string {
 		return ""
 	}
 	return parsed.Return.HostName
+}
+
+// agentFilesystems спрашивает у гостевого агента смонтированные файловые
+// системы вместе с размером и занятым местом (guest-get-fsinfo).
+func (d *Driver) agentFilesystems(dom golibvirt.Domain) []model.GuestFilesystem {
+	reply, err := d.conn.Libvirt().QEMUDomainAgentCommand(dom,
+		`{"execute":"guest-get-fsinfo"}`, 10, 0)
+	if err != nil || len(reply) == 0 {
+		return nil
+	}
+	return parseAgentFilesystems(reply[0])
+}
+
+func parseAgentFilesystems(reply string) []model.GuestFilesystem {
+	var parsed struct {
+		Return []struct {
+			Name       string `json:"name"`
+			Mountpoint string `json:"mountpoint"`
+			Type       string `json:"type"`
+			UsedBytes  int64  `json:"used-bytes"`
+			TotalBytes int64  `json:"total-bytes"`
+		} `json:"return"`
+	}
+	if json.Unmarshal([]byte(reply), &parsed) != nil {
+		return nil
+	}
+	out := make([]model.GuestFilesystem, 0, len(parsed.Return))
+	seen := map[string]bool{}
+	for _, fs := range parsed.Return {
+		if fs.Mountpoint == "" || seen[fs.Mountpoint] {
+			continue
+		}
+		seen[fs.Mountpoint] = true
+		out = append(out, model.GuestFilesystem{
+			Mountpoint: fs.Mountpoint, Type: fs.Type, Device: fs.Name,
+			TotalBytes: fs.TotalBytes, UsedBytes: fs.UsedBytes,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Mountpoint < out[j].Mountpoint })
+	return out
 }
 
 func (d *Driver) agentOSName(dom golibvirt.Domain) string {

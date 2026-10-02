@@ -2,6 +2,7 @@ package dispatch
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path"
@@ -297,9 +298,24 @@ func leftoverReason(item *VerifyLeftover, check *model.BootCheck) string {
 		return "проверка прервана перезапуском службы — уборка не выполнялась"
 	case check.Status == model.RunFailed:
 		return "проверка не пройдена: объект оставлен для разбора или его не удалось удалить"
+	case bootKept(check.Details):
+		return "проверка пройдена, ВМ оставлена по выбору оператора — удалите, когда она больше не нужна"
 	default:
 		return "проверка завершена, но объект удалить не удалось"
 	}
+}
+
+// bootKept — оставлена ли проверочная ВМ намеренно, по отчёту проверки.
+func bootKept(details string) bool {
+	var report struct {
+		Boot *struct {
+			Kept bool `json:"kept"`
+		} `json:"boot"`
+	}
+	if json.Unmarshal([]byte(details), &report) != nil || report.Boot == nil {
+		return false
+	}
+	return report.Boot.Kept
 }
 
 // ErrLeftoverActive — объект принадлежит идущей проверке.

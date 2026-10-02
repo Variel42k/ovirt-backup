@@ -6,7 +6,7 @@ import { api, errorMessage, notify, notifyError, notifyOk } from '@/api/client'
 import DirectoryPicker from '@/components/DirectoryPicker.vue'
 import ManualSteps from '@/components/ManualSteps.vue'
 import EngineLeftovers from '@/components/EngineLeftovers.vue'
-import { ago, bootTargetReady, bytes, consistencyColor, consistencyLabel, dateTime, elapsed, runStatus, staleFor, statusColor, transferPauseHint, transferRatio, transferSummary, usesOVirtAPI } from '@/api/format'
+import { ago, bootTargetReady, bytes, consistencyColor, consistencyLabel, dateTime, elapsed, fsUsage, runStatus, staleFor, statusColor, transferPauseHint, transferRatio, transferSummary, usesOVirtAPI } from '@/api/format'
 import BootTargetPicker from '@/components/BootTargetPicker.vue'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
@@ -513,6 +513,78 @@ const runRestores = ref<RestoreRun[]>([])
 const restores = ref<RestoreRun[]>([])
 const restoresLoading = ref(false)
 
+/**
+ * Отбор списка восстановлений.
+ *
+ * Отбирает сервер, а не страница: список приходит ограниченной порцией, и
+ * отбор по ней в браузере молча терял бы всё, что в порцию не попало.
+ * Пробный запуск создаёт по записи на ВМ и на каждый её диск, поэтому без
+ * отбора «кем создано» ручные восстановления тонут в проверках.
+ */
+const RESTORE_LIMIT = 200
+const restoreFilters = ref({
+  q: '',
+  status: [] as string[],
+  target: [] as string[],
+  origin: '' as '' | 'manual' | 'verify',
+  days: 30,
+})
+const restoreStatusOptions = [
+  { label: 'Выполняется', value: 'running' },
+  { label: 'В очереди', value: 'pending' },
+  { label: 'Успешно', value: 'succeeded' },
+  { label: 'Ошибка', value: 'failed' },
+  { label: 'Отменено', value: 'canceled' },
+]
+const restoreTargetFilterOptions = ['new_vm', 'new_disk', 'disk', 'file'].map((value) => ({
+  label: restoreTargetTitle(value), value,
+}))
+const restoreOriginOptions = [
+  { label: 'Все', value: '' },
+  { label: 'Ручные', value: 'manual' },
+  { label: 'Проверки', value: 'verify' },
+]
+const restorePeriodOptions = [
+  { label: 'За сутки', value: 1 },
+  { label: 'За 7 дней', value: 7 },
+  { label: 'За 30 дней', value: 30 },
+  { label: 'За 90 дней', value: 90 },
+  { label: 'За всё время', value: 0 },
+]
+const restoreFiltersActive = computed(() => {
+  const f = restoreFilters.value
+  return Boolean(f.q.trim() || f.status.length || f.target.length || f.origin || f.days !== 30)
+})
+
+function restoreQuery(): Record<string, string | number> {
+  const f = restoreFilters.value
+  const query: Record<string, string | number> = { limit: RESTORE_LIMIT }
+  if (f.q.trim()) query.q = f.q.trim()
+  if (f.status.length) query.status = f.status.join(',')
+  if (f.target.length) query.target = f.target.join(',')
+  if (f.origin) query.origin = f.origin
+  if (f.days > 0) query.days = f.days
+  return query
+}
+
+function resetRestoreFilters() {
+  restoreFilters.value = { q: '', status: [], target: [], origin: '', days: 30 }
+  void loadRestores()
+}
+
+/** Запись создана пробным запуском: имя проверочной ВМ служба назначает сама. */
+function isVerifyRestore(item: RestoreRun): boolean {
+  return (item.target_vm_name ?? '').startsWith('jhv-verify-')
+}
+
+async function openRunById(id: string) {
+  try {
+    await openDetail(runs.value.find((item) => item.id === id) ?? await api.getRun(id))
+  } catch (err) {
+    notifyError(err, 'Не удалось открыть точку восстановления')
+  }
+}
+
 /** Восстановление идёт в фоне и нигде больше не видно — этот список и есть его окно. */
 async function loadRestores(silent = false) {
   if (silent && restoresLoading.value) return
@@ -522,7 +594,7 @@ async function loadRestores(silent = false) {
     restoresError.value = ''
   }
   try {
-    const value = await api.listRestores()
+    const value = await api.listRestores(undefined, restoreQuery())
     if (sequence === restoresLoadSequence) {
       restores.value = value
       restoresError.value = ''
@@ -567,6 +639,7 @@ function restorePhaseTitle(phase?: string): string {
     defining_vm: 'регистрация ВМ',
     starting_vm: 'запуск ВМ',
     waiting_guest: 'ожидание ответа гостевого агента',
+    reading_guest: 'чтение файловых систем гостя',
     cleanup: 'удаление проверочной ВМ и дисков',
     rollback: 'удаление созданных объектов после ошибки',
     completed: 'завершено',
@@ -591,6 +664,7 @@ const verifyForm = ref({
   vcpus: 0,
   timeout_sec: 300,
   keep_on_failure: false,
+  keep_on_success: false,
 })
 
 // Движок обновляет сведения от гостевого агента раз в минуту-другую: пять
@@ -629,6 +703,8 @@ async function verify(run: BackupRun) {
 	}
 	verifyTarget.value = selected
   verifyForm.value.mode = 'manifest'
+  // Оставленная ВМ занимает место на площадке: выбор не переходит на следующую проверку.
+  verifyForm.value.keep_on_success = false
 	verifyForm.value.copy_id = healthyCopies(selected)[0]?.id ?? ''
   verifyForm.value.disk_id = ''
   // Бэкап с KVM-хоста проверяется на нём же — это ожидаемый выбор по умолчанию.
@@ -670,6 +746,7 @@ async function submitVerify() {
           vcpus: verifyForm.value.vcpus,
           timeout_sec: verifyForm.value.timeout_sec,
           keep_on_failure: verifyForm.value.keep_on_failure,
+          keep_on_success: verifyForm.value.keep_on_success,
         }
 			: { copy_id: verifyForm.value.copy_id }
     const result = await api.verifyRun(run.id, verifyForm.value.mode, options)
@@ -763,7 +840,11 @@ function verifyOutcome(check: VerifyRun): string {
   if (check.status === 'running') return `этап: ${restorePhaseTitle(check.phase)} · ${check.progress}%`
   const boot = bootReport(check)
   if (boot) {
-    if (boot.agent_replied) return `гость ответил за ${boot.elapsed ?? '—'}`
+    if (boot.agent_replied) {
+      return `гость ответил за ${boot.elapsed ?? '—'}` +
+        (boot.filesystems?.length ? ` · файловых систем: ${boot.filesystems.length}` : '') +
+        (boot.kept ? ' · ВМ оставлена' : '')
+    }
     if (boot.started) return 'ВМ запустилась, гостевой агент не ответил'
     if (boot.stage === 'assembly') return 'проверочную ВМ не удалось собрать'
     return 'ВМ не удалось запустить'
@@ -827,6 +908,14 @@ watch([verifications, runRestores], () => {
   if (check) attemptVerify.value = verifications.value.find((item) => item.id === check.id) ?? check
   const restore = attemptRestore.value
   if (restore) attemptRestore.value = runRestores.value.find((item) => item.id === restore.id) ?? restore
+})
+
+/** Чья копия и от какого времени — подзаголовок листа попытки. */
+const attemptSource = computed(() => {
+  const restore = attemptRestore.value
+  const name = restore?.source_vm_name || detail.value?.vm_name || ''
+  const at = restore?.source_created_at || detail.value?.created_at
+  return [name, at ? `точка ${dateTime(at)}` : ''].filter(Boolean).join(' · ')
 })
 
 async function openRestore(run: BackupRun) {
@@ -1276,6 +1365,7 @@ onBeforeUnmount(() => {
 
 const restoreColumns = [
   { name: 'created', label: 'Начато', field: 'created_at', align: 'left' as const, sortable: true },
+  { name: 'source', label: 'Откуда', field: 'source_vm_name', align: 'left' as const, sortable: true },
   { name: 'target', label: 'Куда', field: 'target', align: 'left' as const },
   { name: 'status', label: 'Статус', field: 'status', align: 'left' as const, sortable: true },
   { name: 'result', label: 'Результат', field: 'output_path', align: 'left' as const },
@@ -1335,6 +1425,66 @@ const replicationColumns = [
         образ, собранный в файл, остаётся на сервере бэкапов по указанному пути — заберите его
         оттуда сами, через веб файлы не отдаются.
       </div>
+      <q-card flat bordered class="q-mb-md" data-testid="restore-filters">
+        <q-card-section class="row q-col-gutter-md items-center">
+          <div class="col-12 col-md-3">
+            <q-input
+              v-model="restoreFilters.q"
+              label="Поиск"
+              hint="ВМ, диск, площадка, идентификатор, текст ошибки"
+              outlined dense clearable debounce="400"
+              @update:model-value="() => loadRestores()"
+            >
+              <template #prepend><q-icon name="search" /></template>
+            </q-input>
+          </div>
+          <div class="col-12 col-sm-6 col-md-2">
+            <q-select
+              v-model="restoreFilters.status"
+              :options="restoreStatusOptions"
+              label="Статус" hint="пусто — любой"
+              multiple emit-value map-options outlined dense clearable
+              @update:model-value="() => loadRestores()"
+            />
+          </div>
+          <div class="col-12 col-sm-6 col-md-2">
+            <q-select
+              v-model="restoreFilters.target"
+              :options="restoreTargetFilterOptions"
+              label="Куда" hint="пусто — всё"
+              multiple emit-value map-options outlined dense clearable
+              @update:model-value="() => loadRestores()"
+            />
+          </div>
+          <div class="col-12 col-sm-6 col-md-2">
+            <q-select
+              v-model="restoreFilters.days"
+              :options="restorePeriodOptions"
+              label="Период" hint="по времени начала"
+              emit-value map-options outlined dense
+              @update:model-value="() => loadRestores()"
+            />
+          </div>
+          <div class="col-12 col-sm-6 col-md-3">
+            <q-btn-toggle
+              v-model="restoreFilters.origin"
+              :options="restoreOriginOptions"
+              spread no-caps unelevated dense
+              toggle-color="primary" color="grey-3" text-color="dark"
+              @update:model-value="() => loadRestores()"
+            />
+            <div class="text-caption text-grey-7 q-mt-xs">кем создано</div>
+          </div>
+          <div class="col-12 row items-center q-gutter-sm">
+            <div class="text-caption text-grey-7" data-testid="restore-count">
+              Найдено: {{ restores.length }}<template v-if="restores.length >= RESTORE_LIMIT">
+                — показаны последние {{ RESTORE_LIMIT }}, уточните отбор</template>
+            </div>
+            <q-btn v-if="restoreFiltersActive" flat dense no-caps color="primary" icon="filter_alt_off"
+                   label="Сбросить отбор" @click="resetRestoreFilters" />
+          </div>
+        </q-card-section>
+      </q-card>
       <q-table
         :rows="restores"
         :columns="restoreColumns"
@@ -1343,14 +1493,28 @@ const replicationColumns = [
         bordered
         :loading="restoresLoading"
         :grid="$q.screen.lt.md"
-        class="jhv-table"
+        class="jhv-table jhv-table--clickable"
         :pagination="{ rowsPerPage: 50 }"
-        :no-data-label="restoresError ? 'История восстановлений недоступна' : 'Восстановлений не было'"
+        :no-data-label="restoresError ? 'История восстановлений недоступна'
+          : restoreFiltersActive ? 'Под отбор ничего не подошло' : 'Восстановлений за этот период не было'"
+        @row-click="(_event: Event, row: RestoreRun) => openRestoreAttempt(row)"
       >
         <template #body-cell-created="props">
           <q-td :props="props">
             {{ dateTime(props.row.created_at) }}
             <div class="text-caption text-grey-7">{{ elapsed(props.row.created_at, props.row.ended_at) }}</div>
+          </q-td>
+        </template>
+        <template #body-cell-source="props">
+          <q-td :props="props">
+            <template v-if="props.row.source_vm_name">
+              <a class="text-primary cursor-pointer" @click.stop="openRunById(props.row.run_id)">{{ props.row.source_vm_name }}</a>
+              <div v-if="props.row.source_created_at" class="text-caption text-grey-7">
+                точка {{ dateTime(props.row.source_created_at) }}
+              </div>
+            </template>
+            <span v-else class="text-grey-6">точка удалена</span>
+            <div v-if="isVerifyRestore(props.row)"><q-badge outline color="grey-7">проверка</q-badge></div>
           </q-td>
         </template>
         <template #body-cell-target="props">
@@ -1384,7 +1548,7 @@ const replicationColumns = [
           </q-td>
         </template>
         <template #body-cell-result="props">
-          <q-td :props="props" class="jhv-wrap">
+          <q-td :props="props" class="jhv-wrap" style="max-width: 380px">
             <span v-if="props.row.output_path" class="jhv-mono">{{ props.row.output_path }}</span>
             <template v-else-if="props.row.target_disk_name || props.row.target_disk_id">
               <span class="jhv-mono">диск {{ props.row.target_disk_name || props.row.target_disk_id }}</span>
@@ -1395,7 +1559,8 @@ const replicationColumns = [
               <div v-if="props.row.target_vm_id" class="text-caption text-grey-7 jhv-mono">{{ props.row.target_vm_id }}</div>
             </template>
             <span v-else class="text-grey-6">—</span>
-            <div v-if="props.row.error" class="text-negative">{{ props.row.error }}</div>
+            <!-- Полный текст ошибки — в листе попытки, по щелчку на строке. -->
+            <div v-if="props.row.error" class="text-negative ellipsis-2-lines">{{ props.row.error }}</div>
           </q-td>
         </template>
       </q-table>
@@ -2099,9 +2264,7 @@ const replicationColumns = [
         <q-card-section class="row items-start no-wrap q-pb-sm">
           <div>
             <div class="text-h6">{{ attemptTitle }}</div>
-            <div class="text-caption text-grey-7">
-              {{ detail?.vm_name }} · точка {{ dateTime(detail?.created_at) }}
-            </div>
+            <div class="text-caption text-grey-7">{{ attemptSource }}</div>
           </div>
           <q-space />
           <q-chip dense :color="statusColor(attemptStatus)" text-color="white">{{ runStatus(attemptStatus) }}</q-chip>
@@ -2192,7 +2355,15 @@ const replicationColumns = [
                   </tr>
                   <tr v-if="bootReport(attemptVerify)!.vm_name || bootReport(attemptVerify)!.domain_name">
                     <td>Проверочная ВМ</td>
-                    <td class="jhv-mono jhv-wrap">{{ bootReport(attemptVerify)!.vm_name || bootReport(attemptVerify)!.domain_name }}</td>
+                    <td class="jhv-wrap">
+                      <span class="jhv-mono">{{ bootReport(attemptVerify)!.vm_name || bootReport(attemptVerify)!.domain_name }}</span>
+                      <template v-if="bootReport(attemptVerify)!.kept">
+                        <q-badge color="warning" text-color="dark" class="q-ml-sm">оставлена на площадке</q-badge>
+                        <div>
+                          <router-link :to="{ name: 'verify', query: { tab: 'leftovers' } }">Удалить в «Проверка ВМ → Остатки»</router-link>
+                        </div>
+                      </template>
+                    </td>
                   </tr>
                   <tr v-if="bootReport(attemptVerify)!.notes?.length">
                     <td>Заметки</td>
@@ -2202,6 +2373,32 @@ const replicationColumns = [
                   </tr>
                 </tbody>
               </q-markup-table>
+
+              <template v-if="bootReport(attemptVerify)!.filesystems?.length">
+                <div class="text-subtitle2 q-mb-xs">Файловые системы гостя</div>
+                <div class="jhv-reason q-mb-sm">
+                  Что гость смонтировал после загрузки, по данным гостевого агента. Сверьте с боевой ВМ:
+                  раздел, которого здесь нет, в проверочной ВМ не смонтировался.
+                </div>
+                <q-markup-table flat dense bordered class="q-mb-md" data-testid="guest-filesystems">
+                  <thead>
+                    <tr>
+                      <th class="text-left">Точка монтирования</th>
+                      <th class="text-left">Тип</th>
+                      <th class="text-right">Размер</th>
+                      <th class="text-right">Занято</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="fs in bootReport(attemptVerify)!.filesystems" :key="fs.mountpoint">
+                      <td class="jhv-mono">{{ fs.mountpoint }}</td>
+                      <td>{{ fs.type || '—' }}</td>
+                      <td class="text-right">{{ fs.total_bytes ? bytes(fs.total_bytes) : '—' }}</td>
+                      <td class="text-right">{{ fsUsage(fs) }}</td>
+                    </tr>
+                  </tbody>
+                </q-markup-table>
+              </template>
             </template>
 
             <template v-if="attemptRelatedRestores.length">
@@ -2439,6 +2636,20 @@ const replicationColumns = [
                 Все диски передаются на гипервизор целиком (по сети — сжатыми, на диске — разреженными),
                 а вывод «загрузилась» даёт только гостевой агент: без него проверка честно скажет,
                 что ВМ стартовала, но подтвердить загрузку нечем.
+              </q-banner>
+            </template>
+
+            <template v-if="verifyForm.boot_host_id || verifyForm.boot_engine_id || verifyForm.target_id">
+              <q-toggle
+                v-model="verifyForm.keep_on_success"
+                data-testid="keep-on-success"
+                label="Оставить проверочную ВМ после успешной проверки"
+              />
+              <q-banner v-if="verifyForm.keep_on_success" dense class="bg-orange-1">
+                <template #avatar><q-icon name="warning" color="warning" /></template>
+                ВМ останется запущенной и без сети, вместе со всеми дисками: зайдите в неё через консоль
+                виртуализации и проверьте данные сами. Она занимает место на площадке, пока вы не удалите
+                её в «Проверка ВМ → Остатки».
               </q-banner>
             </template>
           </template>
@@ -2945,5 +3156,8 @@ const replicationColumns = [
 }
 @media (max-width: 600px) {
   .jhv-attempt-facts td:first-child { width: 110px; }
+}
+.jhv-table--clickable :deep(tbody tr) {
+  cursor: pointer;
 }
 </style>

@@ -366,6 +366,10 @@ type Disk struct {
 	// sata). It is needed to reconnect a restored image with the same guest
 	// driver during a boot verification.
 	Interface string `json:"-"`
+	// Inactive — диск подключён к ВМ, но деактивирован: гость его не видит.
+	// Берётся из подключения, как и Interface. Backup API отказывается
+	// открывать бэкап, если в списке есть такой диск.
+	Inactive bool `json:"-"`
 	// backup: none | incremental — включает changed block tracking.
 	Backup string `json:"backup"`
 	// BackupMode есть только у дисков конкретного бэкапа (oVirt 4.4.5+):
@@ -445,13 +449,20 @@ func (d *Disk) DomainName() string {
 
 // DiskAttachment binds a disk to a VM.
 type DiskAttachment struct {
-	ID        string `json:"id"`
-	Bootable  Bool   `json:"bootable"`
-	Active    Bool   `json:"active"`
+	ID       string `json:"id"`
+	Bootable Bool   `json:"bootable"`
+	// Active — указатель, чтобы отличить «движок не сообщил» от «выключен»:
+	// считать диск деактивированным только потому, что поля нет в ответе,
+	// значило бы молча выбросить его из копии.
+	Active    *Bool  `json:"active"`
 	Interface string `json:"interface"`
 	Disk      *Disk  `json:"disk,omitempty"`
 	VM        Ref    `json:"vm"`
 }
+
+// Inactive reports whether the engine explicitly says the attachment is
+// deactivated.
+func (a DiskAttachment) Inactive() bool { return a.Active != nil && !a.Active.Bool() }
 
 type diskAttachmentList struct {
 	DiskAttachment []DiskAttachment `json:"disk_attachment"`

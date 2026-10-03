@@ -249,6 +249,18 @@ func (e *Engine) Execute(ctx context.Context, req RunRequest) (*model.BackupRun,
 	if err != nil {
 		return e.failRun(ctx, run, err)
 	}
+	// Backup API отказывает всему бэкапу, если среди дисков есть
+	// деактивированный. Бэкап через снапшот идёт другим путём, его это не
+	// касается.
+	if plan.usesBackupAPI() {
+		var inactive []model.SkippedDisk
+		disks, inactive = dropInactiveDisks(disks)
+		skippedDisks = append(skippedDisks, inactive...)
+		if len(disks) == 0 && req.Type != model.BackupConfig {
+			return e.failRun(ctx, run, errors.New("все диски ВМ деактивированы: движок не отдаёт такие диски в бэкап. "+
+				"Активируйте диски в ВМ (Диски → Активировать) и повторите"))
+		}
+	}
 	run.Type = plan.Type
 	run.LegacyIncrementalMode = plan.LegacyMode
 	run.ParentRunID = plan.ParentRunID
@@ -954,6 +966,47 @@ func (e *Engine) selectDisks(ctx context.Context, client *ovirt.Client, vmID str
 	return out, skipped, nil
 }
 
+// usesBackupAPI — диски этого запуска читаются через Backup API движка
+// (runCBT), а не через временный снапшот.
+func (p plan) usesBackupAPI() bool {
+	if p.LegacyMode != "" {
+		return false
+	}
+	return p.Type == model.BackupFull || p.Type == model.BackupIncremental || p.Type == model.BackupDifferential
+}
+
+// dropInactiveDisks убирает из бэкапа деактивированные диски ВМ и объясняет,
+// почему их нет в копии.
+//
+// Диск подключён к ВМ, но выключен в ней: гость его не видит, а движок на
+// запрос бэкапа с таким диском отвечает 409 «disks are not active on VM» и не
+// снимает копию ни одного диска. Раньше запуск на этом падал, а текст ошибки
+// отправлял искать остатки прошлых бэкапов, которых не было.
+func dropInactiveDisks(disks []ovirt.Disk) ([]ovirt.Disk, []model.SkippedDisk) {
+	active := make([]ovirt.Disk, 0, len(disks))
+	var skipped []model.SkippedDisk
+	for _, d := range disks {
+		if !d.Inactive {
+			active = append(active, d)
+			continue
+		}
+		skipped = append(skipped, model.SkippedDisk{
+			DiskID: d.ID, Name: d.AliasOrName(),
+			Reason: "диск подключён к ВМ, но деактивирован: гость его не видит, а движок не открывает бэкап, " +
+				"пока такой диск в списке. Данные диска в копию не попали — активируйте его в ВМ, если их " +
+				"нужно защищать, или исключите диск в задании",
+		})
+	}
+	return active, skipped
+}
+
+// inactiveDisksRejected — движок отказал в бэкапе из-за деактивированного
+// диска. Предварительный отбор такие диски убирает; сюда попадает диск,
+// который выключили между отбором и запуском.
+func inactiveDisksRejected(err error) bool {
+	return ovirt.IsConflict(err) && strings.Contains(strings.ToLower(err.Error()), "not active on vm")
+}
+
 // transferInactivity — таймаут неактивности передачи, не короче longest:
 // самой долгой операции, которую служба выполнит на этой передаче одним
 // запросом. Иначе движок сочтёт передачу простаивающей и удалит билет.
@@ -1313,6 +1366,12 @@ func (e *Engine) startEngineBackup(ctx context.Context, client *ovirt.Client, sr
 	started := time.Now().UTC()
 	backup, err := client.StartBackup(ctx, vm.ID, diskIDs, p.FromCheckpointID, ovirt.BackupMarker(run.ID), requireConsistency)
 	if backup == nil {
+		if inactiveDisksRejected(err) {
+			// Это не блокировка и не остатки: убирать нечего, и отправлять
+			// к ручной уборке значило бы искать то, чего нет.
+			return nil, fmt.Errorf("запуск бэкапа на движке: %w. Диск подключён к ВМ, но деактивирован — "+
+				"движок не снимает копию, пока он в списке. Активируйте диск в ВМ или исключите его в задании", err)
+		}
 		if ovirt.IsConflict(err) {
 			// Уборка перед заморозкой ничего не нашла, а диски заняты: их
 			// держит что-то другое — передача образа, снапшот, перенос диска.

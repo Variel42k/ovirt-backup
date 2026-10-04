@@ -587,6 +587,27 @@ export const api = {
     http.post<RestoreVMPlan>(`/backups/${id}/restore-vm/plan`, payload).then((r) => r.data),
   restoreVM: (id: string, payload: Record<string, unknown>) =>
     http.post(`/backups/${id}/restore-vm`, payload).then((r) => r.data),
+  // Очистка истории репозиториев GitLab
+  gitCleanDefaults: () => http.get<import('./types').GitCleanRules>('/gitlab-clean/defaults').then((r) => r.data),
+  listGitlabHosts: () =>
+    http.get<ListResponse<import('./types').GitlabHost>>('/gitlab-clean/hosts').then((r) => unwrap(r.data)),
+  createGitlabHost: (payload: Record<string, unknown>) =>
+    http.post<import('./types').GitlabHost>('/gitlab-clean/hosts', payload).then((r) => r.data),
+  updateGitlabHost: (id: string, payload: Record<string, unknown>) =>
+    http.put<import('./types').GitlabHost>(`/gitlab-clean/hosts/${id}`, payload).then((r) => r.data),
+  deleteGitlabHost: (id: string) => http.delete(`/gitlab-clean/hosts/${id}`).then(() => undefined),
+  probeGitlabHost: (id: string) =>
+    http.post<import('./types').GitlabHost>(`/gitlab-clean/hosts/${id}/probe`, {}, { timeout: 90_000 }).then((r) => r.data),
+  startGitAnalyze: (hostId: string, rules: import('./types').GitCleanRules) =>
+    http.post<import('./types').GitCleanRun>(`/gitlab-clean/hosts/${hostId}/analyze`, { rules }, { timeout: 90_000 }).then((r) => r.data),
+  startGitClean: (hostId: string, payload: Record<string, unknown>) =>
+    http.post<import('./types').GitCleanRun>(`/gitlab-clean/hosts/${hostId}/clean`, payload, { timeout: 90_000 }).then((r) => r.data),
+  listGitCleanRuns: (hostId = '') =>
+    http.get<ListResponse<import('./types').GitCleanRun>>('/gitlab-clean/runs', { params: hostId ? { host_id: hostId } : undefined })
+      .then((r) => unwrap(r.data)),
+  getGitCleanRun: (id: string) => http.get<import('./types').GitCleanRun>(`/gitlab-clean/runs/${id}`).then((r) => r.data),
+  cancelGitCleanRun: (id: string) => http.post(`/gitlab-clean/runs/${id}/cancel`).then(() => undefined),
+
   // Импорт образов дисков из подключённого хранилища
   listStorageFiles: (storageId: string, path = '') =>
     http.get<import('./types').StorageFiles>(`/storages/${storageId}/files`, { params: path ? { path } : undefined, timeout: 50_000 })

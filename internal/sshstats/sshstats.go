@@ -20,6 +20,8 @@ const (
 	SFTPRepo  = "sftp-repo" // хранилище копий SFTP
 	HostKey   = "host-key"  // чтение ключа хоста без входа
 	Discovery = "discovery" // ограниченный помощник инвентаризации гостя
+	// GitlabClean — помощник анализа и очистки репозиториев на ВМ с GitLab.
+	GitlabClean = "gitlab-clean"
 )
 
 type key struct{ host, component string }

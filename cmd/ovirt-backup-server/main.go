@@ -30,6 +30,7 @@ import (
 	drcheck "github.com/Variel42k/ovirt-backup/internal/dr"
 	"github.com/Variel42k/ovirt-backup/internal/events"
 	"github.com/Variel42k/ovirt-backup/internal/filebackup"
+	"github.com/Variel42k/ovirt-backup/internal/gitclean"
 	"github.com/Variel42k/ovirt-backup/internal/libvirtx"
 	"github.com/Variel42k/ovirt-backup/internal/logging"
 	"github.com/Variel42k/ovirt-backup/internal/model"
@@ -354,6 +355,8 @@ func run() error {
 	discoveryEngine := discovery.New(st, cfg.Discovery, log)
 	dispatcher.SetTelemetryMonitor(dbDumpEngine)
 	dbDumpEngine.RecoverInterrupted(ctx)
+	gitCleanEngine := gitclean.New(st, log)
+	gitCleanEngine.FailInterrupted(ctx)
 
 	if backup.QemuImgAvailable(cfg.Backup.QemuImgPath) {
 		log.Info().Msg("qemu-img найден: доступны бэкап qcow2 с oVirt 4.3, экспорт в qcow2 и проверка qemu-img check")
@@ -456,7 +459,7 @@ func run() error {
 		Scheduler: sched, Monitor: mon, Remediator: remediator, Bus: bus, Logger: log,
 		Logs: logs, Quality: qualityService, Replicator: replicator, Notifier: notifier,
 		Notifications: notificationManager, DR: drChecker,
-		FileBackup: fileBackupEngine, DBDump: dbDumpEngine, AuditFile: auditFile,
+		FileBackup: fileBackupEngine, DBDump: dbDumpEngine, GitClean: gitCleanEngine, AuditFile: auditFile,
 		Discovery: discoveryEngine,
 	})
 

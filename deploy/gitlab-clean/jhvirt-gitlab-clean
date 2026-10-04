@@ -1,0 +1,283 @@
+#!/usr/bin/env bash
+# jhvirt-gitlab-clean — хелпер анализа и очистки истории репозиториев GitLab
+# для службы копий jhvirt.
+#
+# Ставится на ВМ с GitLab и запускается только как forced command от имени
+# пользователя git:
+#
+#   restrict,command="sudo -n -u git /usr/local/sbin/jhvirt-gitlab-clean" ssh-ed25519 AAAA… jhvirt
+#
+# в ~/.ssh/authorized_keys отдельного системного пользователя (по умолчанию
+# jhvirt_gitclean). Пользователю git хелпер нужен потому, что репозитории
+# Gitaly принадлежат ему; root хелперу не нужен, и от root он не работает.
+#
+# Протокол jhvirt-gitlab-clean/1 — фиксированный набор операций:
+#   probe                                 версия протокола и состояние хоста
+#   list                                  репозитории: путь, размер, проект
+#   analyze REPO dirs=… exts=… big=N top=N
+#                                         что в истории репозитория подпадает
+#                                         под правила; ничего не меняет
+#   clean REPO dirs=… exts=… big=N        переписать историю репозитория
+#
+# REPO — путь репозитория внутри каталога Gitaly (@hashed/ab/cd/….git).
+# dirs — имена каталогов через запятую (node_modules,venv): из истории
+# убирается всё, что лежит в каталоге с таким именем на любой глубине.
+# exts — расширения файлов через запятую (pyc,class). big — размер в байтах:
+# analyze показывает файлы не меньше него, clean удаляет их из истории;
+# 0 — правило выключено.
+#
+# Очистка необратима, поэтому выключена, пока администратор не разрешит её на
+# этой конкретной машине:
+#
+#   touch /etc/jhvirt/gitlab-clean.allow
+#
+# Файл создают только на КОПИИ ВМ с GitLab, поднятой из бэкапа: на рабочей
+# машине его быть не должно, и тогда ошибка в адресе хоста в службе не
+# перепишет рабочие репозитории. Кроме того, очистка отказывается работать,
+# пока запущены puma или sidekiq: в это время в репозитории могут писать.
+#
+# Историю переписывает git filter-repo (пакет git-filter-repo). Карта «старый
+# коммит → новый» остаётся в REPO/filter-repo/commit-map.
+set -Eeuo pipefail
+
+PATH=/opt/gitlab/embedded/bin:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
+export PATH LC_ALL=C
+
+PROTOCOL=jhvirt-gitlab-clean/1
+CONF=/etc/jhvirt/gitlab-clean.conf
+ALLOW=/etc/jhvirt/gitlab-clean.allow
+JHVIRT_GITLAB_REPOS=/var/opt/gitlab/git-data/repositories
+NAME_RE='^[A-Za-z0-9._-]{1,64}$'
+
+fail() {
+    printf 'jhvirt-gitlab-clean: %s\n' "$*" >&2
+    exit 64
+}
+
+# Со forced command sshd кладёт запрос в SSH_ORIGINAL_COMMAND. Слова разбираются
+# только после проверки всей строки на алфавит без метасимволов оболочки.
+if [[ $# -eq 0 && -n "${SSH_ORIGINAL_COMMAND:-}" ]]; then
+    [[ "$SSH_ORIGINAL_COMMAND" =~ ^(/usr/local/sbin/)?jhvirt-gitlab-clean(\ [A-Za-z0-9_.=@/,+-]+)+$ ]] ||
+        fail "invalid forced command"
+    IFS=' ' read -r -a original <<<"$SSH_ORIGINAL_COMMAND"
+    set -- "${original[@]:1}"
+fi
+
+[[ ${EUID} -ne 0 ]] || fail "run the helper as the git user, not root"
+
+# Настройки — только из файла root, недоступного на запись другим: хелпер
+# выполняет его как shell-код. Нужен, если репозитории лежат не в стандартном
+# каталоге Omnibus.
+if [[ -e "$CONF" ]]; then
+    [[ "$(stat -c '%u' "$CONF")" == 0 ]] || fail "$CONF must be owned by root"
+    (( (8#$(stat -c '%a' "$CONF") & 8#022) == 0 )) || fail "$CONF must not be writable by group or others"
+    # shellcheck disable=SC1090
+    . "$CONF"
+fi
+ROOT="$(readlink -f "$JHVIRT_GITLAB_REPOS" 2>/dev/null || true)"
+[[ -n "$ROOT" && -d "$ROOT" ]] || fail "repository directory $JHVIRT_GITLAB_REPOS not found"
+[[ -r "$ROOT" ]] || fail "repository directory $ROOT is not readable by $(id -un)"
+
+clean_allowed() {
+    [[ -e "$ALLOW" && "$(stat -c '%u' "$ALLOW")" == 0 ]]
+}
+
+# running_services перечисляет службы GitLab, при которых переписывать историю
+# нельзя: они принимают запись в репозитории.
+running_services() {
+    local out=()
+    pgrep -f 'puma [0-9]' >/dev/null 2>&1 && out+=(puma)
+    pgrep -f 'sidekiq [0-9]' >/dev/null 2>&1 && out+=(sidekiq)
+    local IFS=,
+    printf '%s' "${out[*]:-}"
+}
+
+filter_repo_version() {
+    git filter-repo --version 2>/dev/null | head -n1 || true
+}
+
+# repo_dir проверяет путь репозитория и печатает его полный путь. Путь обязан
+# лежать внутри каталога Gitaly и оканчиваться на .git.
+repo_dir() {
+    local rel="$1" dir
+    [[ "$rel" =~ ^[A-Za-z0-9@._/+-]+\.git$ && "$rel" != /* && "$rel" != *..* ]] || fail "invalid repository path"
+    dir="$(readlink -f "$ROOT/$rel" 2>/dev/null || true)"
+    [[ -n "$dir" && "$dir" == "$ROOT"/* && -d "$dir" && -f "$dir/HEAD" ]] || fail "repository $rel not found"
+    printf '%s' "$dir"
+}
+
+# parse_rules разбирает dirs=…, exts=…, big=…, top=… в переменные DIRS, EXTS,
+# BIG, TOP. Имена — только из букв, цифр, точки, подчёркивания и дефиса.
+parse_rules() {
+    DIRS='' EXTS='' BIG=0 TOP=30
+    local arg item
+    for arg in "$@"; do
+        case "$arg" in
+        dirs=*)
+            DIRS="${arg#dirs=}"
+            for item in ${DIRS//,/ }; do [[ "$item" =~ $NAME_RE ]] || fail "invalid directory name: $item"; done
+            ;;
+        exts=*)
+            EXTS="${arg#exts=}"
+            for item in ${EXTS//,/ }; do [[ "$item" =~ $NAME_RE ]] || fail "invalid extension: $item"; done
+            ;;
+        big=*)
+            BIG="${arg#big=}"
+            [[ "$BIG" =~ ^[0-9]{1,15}$ ]] || fail "invalid size"
+            ;;
+        top=*)
+            TOP="${arg#top=}"
+            [[ "$TOP" =~ ^[0-9]{1,4}$ ]] || fail "invalid top"
+            ;;
+        *) fail "unknown argument: $arg" ;;
+        esac
+    done
+}
+
+op_probe() {
+    local gitlab=''
+    [[ -r /opt/gitlab/version-manifest.txt ]] && gitlab="$(head -n1 /opt/gitlab/version-manifest.txt)"
+    printf '%s\n' "$PROTOCOL"
+    printf 'hostname=%s\n' "$(hostname -f 2>/dev/null || hostname)"
+    printf 'user=%s\n' "$(id -un)"
+    printf 'repos_root=%s\n' "$ROOT"
+    printf 'gitlab=%s\n' "$gitlab"
+    printf 'git=%s\n' "$(git --version 2>/dev/null | awk '{print $3}')"
+    printf 'filter_repo=%s\n' "$(filter_repo_version)"
+    if clean_allowed; then printf 'clean_allowed=1\n'; else printf 'clean_allowed=0\n'; fi
+    printf 'services_running=%s\n' "$(running_services)"
+}
+
+# op_list печатает репозитории: «repo<TAB>путь<TAB>КиБ<TAB>проект». Пулы объектов
+# форков и служебные каталоги Gitaly не перечисляются: у них нет своей истории.
+op_list() {
+    local dir rel full kb
+    find "$ROOT" -type d \( -name '+gitaly' -o -name '@pools' \) -prune -o \
+        -type d -name '*.git' -prune -print 2>/dev/null | sort | while IFS= read -r dir; do
+        rel="${dir#"$ROOT"/}"
+        full="$(git config --file "$dir/config" --get gitlab.fullpath 2>/dev/null || true)"
+        kb="$(du -sk "$dir" 2>/dev/null | awk '{print $1}')"
+        printf 'repo\t%s\t%s\t%s\n' "$rel" "${kb:-0}" "${full//$'\t'/ }"
+    done
+}
+
+# op_analyze читает все объекты истории и считает, что подпадает под правила.
+# Репозиторий не меняется.
+op_analyze() {
+    local rel="$1" dir tmp
+    shift
+    parse_rules "$@"
+    dir="$(repo_dir "$rel")"
+    tmp="$(mktemp)"
+    # shellcheck disable=SC2064
+    trap "rm -f '$tmp'" EXIT
+
+    printf 'repo\t%s\t%s\t%s\n' "$rel" "$(du -sk "$dir" | awk '{print $1}')" \
+        "$(git config --file "$dir/config" --get gitlab.fullpath 2>/dev/null || true)"
+    [[ -e "$dir/objects/info/alternates" ]] && printf 'note\tpool\n'
+
+    { git -C "$dir" rev-list --objects --all 2>/dev/null || true; } |
+        git -C "$dir" cat-file --batch-check='%(objecttype) %(objectname) %(objectsize) %(objectsize:disk) %(rest)' |
+        awk -v dirs="$DIRS" -v exts="$EXTS" -v big="$BIG" '
+        BEGIN {
+            n = split(dirs, d, ","); for (i = 1; i <= n; i++) if (d[i] != "") isdir[d[i]] = 1
+            n = split(exts, e, ","); for (i = 1; i <= n; i++) if (e[i] != "") isext[e[i]] = 1
+        }
+        $1 == "blob" {
+            size = $3 + 0; disk = $4 + 0
+            path = substr($0, length($1) + length($2) + length($3) + length($4) + 5)
+            if (path == "") next
+            gsub(/\t/, " ", path)
+            blobs++; total += size; totaldisk += disk
+
+            rule = ""; key = ""
+            parts = split(path, seg, "/")
+            prefix = ""
+            for (i = 1; i < parts; i++) {
+                prefix = (i == 1 ? seg[i] : prefix "/" seg[i])
+                if (seg[i] in isdir) { rule = "dir:" seg[i]; key = prefix; break }
+            }
+            if (rule == "") {
+                name = seg[parts]
+                dot = match(name, /\.[^.]+$/)
+                if (dot > 0) {
+                    ext = substr(name, dot + 1)
+                    if (ext in isext) { rule = "ext:" ext; key = "*." ext }
+                }
+            }
+            if (rule == "" && big > 0 && size >= big) { rule = "big"; key = path }
+            if (rule == "") next
+
+            rc[rule]++; rs[rule] += size; rd[rule] += disk
+            k = rule "\t" key
+            kc[k]++; ks[k] += size; kd[k] += disk
+        }
+        END {
+            printf "total\t%d\t%d\t%d\n", blobs, total, totaldisk
+            for (r in rc) printf "rule\t%s\t%d\t%d\t%d\n", r, rc[r], rs[r], rd[r]
+            for (k in kc) printf "path\t%d\t%d\t%d\t%s\n", kd[k], kc[k], ks[k], k
+        }' >"$tmp"
+
+    grep -E '^(total|rule)' "$tmp" || true
+    # Самые тяжёлые пути — первыми; остальные в отчёт не идут.
+    grep '^path' "$tmp" | sort -t$'\t' -k2,2nr | head -n "$TOP" || true
+    printf 'done\t%s\n' "$rel"
+}
+
+# op_clean переписывает историю репозитория: убирает пути по правилам и,
+# если задано, файлы не меньше big байт.
+op_clean() {
+    local rel="$1" dir before after item services
+    shift
+    parse_rules "$@"
+    clean_allowed || fail "cleanup is not allowed on this host: create $ALLOW on the COPY of the GitLab VM"
+    services="$(running_services)"
+    [[ -z "$services" ]] || fail "GitLab services are running ($services): stop them first (gitlab-ctl stop puma; gitlab-ctl stop sidekiq)"
+    [[ -n "$(filter_repo_version)" ]] || fail "git filter-repo is not installed (package git-filter-repo)"
+    dir="$(repo_dir "$rel")"
+    [[ -w "$dir" ]] || fail "repository $rel is not writable by $(id -un)"
+
+    local args=()
+    for item in ${DIRS//,/ }; do
+        args+=(--path-glob "*/$item/*" --path-glob "$item/*")
+    done
+    for item in ${EXTS//,/ }; do
+        args+=(--path-glob "*.$item")
+    done
+    [[ ${#args[@]} -eq 0 ]] || args+=(--invert-paths)
+    [[ "$BIG" == 0 ]] || args+=(--strip-blobs-bigger-than "$BIG")
+    [[ ${#args[@]} -gt 0 ]] || fail "no cleanup rules given"
+
+    before="$(du -sk "$dir" | awk '{print $1}')"
+    [[ -e "$dir/objects/info/alternates" ]] && printf 'note\tpool\n'
+    # Вывод filter-repo идёт в stderr: в stdout только строки протокола.
+    git -C "$dir" filter-repo --force "${args[@]}" >&2 || fail "git filter-repo failed for $rel"
+    git -C "$dir" reflog expire --expire=now --all >&2 || true
+    git -C "$dir" gc --prune=now --quiet >&2 || true
+    after="$(du -sk "$dir" | awk '{print $1}')"
+    printf 'cleaned\t%s\t%s\t%s\n' "$rel" "$before" "$after"
+    printf 'done\t%s\n' "$rel"
+}
+
+[[ $# -ge 1 ]] || fail "operation required"
+operation="$1"
+shift
+case "$operation" in
+probe)
+    [[ $# -eq 0 ]] || fail "probe takes no arguments"
+    op_probe
+    ;;
+list)
+    [[ $# -eq 0 ]] || fail "list takes no arguments"
+    op_list
+    ;;
+analyze)
+    [[ $# -ge 1 ]] || fail "analyze requires a repository"
+    op_analyze "$@"
+    ;;
+clean)
+    [[ $# -ge 2 ]] || fail "clean requires a repository and rules"
+    op_clean "$@"
+    ;;
+*) fail "unknown operation: $operation" ;;
+esac

@@ -54,6 +54,7 @@ const allLinks = [
   { name: 'backups', label: 'Точки восстановления', icon: 'backup', perm: 'backups.read', group: 'Защита данных' },
   { name: 'verify', label: 'Проверка ВМ', icon: 'fact_check', perm: 'backups.read', group: 'Защита данных' },
   { name: 'image-import', label: 'ВМ из образа', icon: 'upload_file', perm: 'backups.read', group: 'Защита данных' },
+  { name: 'gitlab-clean', label: 'Очистка GitLab', icon: 'cleaning_services', perm: 'servers.read', group: 'Защита данных' },
   { name: 'coverage', label: 'Покрытие защитой', icon: 'shield', perm: 'monitoring.read', group: 'Защита данных' },
   { name: 'retention', label: 'Правила хранения', icon: 'auto_delete', perm: 'backups.read', group: 'Защита данных' },
   { name: 'engine-config', label: 'Конфигурация Engine', icon: 'account_tree', perm: 'engine_config.read', group: 'Защита данных' },

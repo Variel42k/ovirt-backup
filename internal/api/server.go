@@ -24,6 +24,7 @@ import (
 	drcheck "github.com/Variel42k/ovirt-backup/internal/dr"
 	"github.com/Variel42k/ovirt-backup/internal/events"
 	"github.com/Variel42k/ovirt-backup/internal/filebackup"
+	"github.com/Variel42k/ovirt-backup/internal/gitclean"
 	"github.com/Variel42k/ovirt-backup/internal/hosthelper"
 	"github.com/Variel42k/ovirt-backup/internal/libvirtx"
 	"github.com/Variel42k/ovirt-backup/internal/logging"
@@ -61,6 +62,7 @@ type Server struct {
 	dr            *drcheck.Checker
 	fileBackup    *filebackup.Engine
 	dbDump        *dbdump.Engine
+	gitClean      *gitclean.Engine
 	discovery     *discovery.Engine
 	hostHelper    *hosthelper.Client
 	metricsToken  []byte
@@ -114,6 +116,7 @@ type Deps struct {
 	DR            *drcheck.Checker
 	FileBackup    *filebackup.Engine
 	DBDump        *dbdump.Engine
+	GitClean      *gitclean.Engine
 	Discovery     *discovery.Engine
 	// StorageMounts supplies browsable mount roots for local repositories. Production
 	// uses repo.BrowsableStorageMounts; tests may provide isolated temporary roots.
@@ -148,6 +151,7 @@ func New(d Deps) *Server {
 		dr:            d.DR, metricsToken: metricsToken,
 		fileBackup:    d.FileBackup,
 		dbDump:        d.DBDump,
+		gitClean:      d.GitClean,
 		discovery:     d.Discovery,
 		hostHelper:    hosthelper.New(os.Getenv("JHV_HOST_HELPER_SOCKET")),
 		storageMounts: d.StorageMounts,
@@ -459,6 +463,19 @@ func (s *Server) routes(mux *http.ServeMux) {
 
 	// Логические дампы СУБД: хост — как подключение гипервизора, задания и
 	// точки — теми же правами, что задания и копии ВМ.
+	// Очистка истории репозиториев GitLab через хелпер на ВМ.
+	mux.HandleFunc("GET /gitlab-clean/defaults", s.perm(model.PermServersRead, s.handleGitCleanDefaults))
+	mux.HandleFunc("GET /gitlab-clean/hosts", s.perm(model.PermServersRead, s.handleListGitlabHosts))
+	mux.HandleFunc("POST /gitlab-clean/hosts", s.perm(model.PermServersAdmin, s.handleCreateGitlabHost))
+	mux.HandleFunc("PUT /gitlab-clean/hosts/{id}", s.perm(model.PermServersAdmin, s.handleUpdateGitlabHost))
+	mux.HandleFunc("DELETE /gitlab-clean/hosts/{id}", s.perm(model.PermServersAdmin, s.handleDeleteGitlabHost))
+	mux.HandleFunc("POST /gitlab-clean/hosts/{id}/probe", s.perm(model.PermServersAdmin, s.handleProbeGitlabHost))
+	mux.HandleFunc("POST /gitlab-clean/hosts/{id}/analyze", s.perm(model.PermServersAdmin, s.handleStartGitAnalyze))
+	mux.HandleFunc("POST /gitlab-clean/hosts/{id}/clean", s.perm(model.PermServersAdmin, s.handleStartGitClean))
+	mux.HandleFunc("GET /gitlab-clean/runs", s.perm(model.PermServersRead, s.handleListGitCleanRuns))
+	mux.HandleFunc("GET /gitlab-clean/runs/{id}", s.perm(model.PermServersRead, s.handleGetGitCleanRun))
+	mux.HandleFunc("POST /gitlab-clean/runs/{id}/cancel", s.perm(model.PermServersAdmin, s.handleCancelGitCleanRun))
+
 	mux.HandleFunc("GET /db-dump/hosts", s.perm(model.PermServersRead, s.handleListDBHosts))
 	mux.HandleFunc("POST /db-dump/hosts", s.perm(model.PermServersAdmin, s.handleCreateDBHost))
 	mux.HandleFunc("PUT /db-dump/hosts/{id}", s.perm(model.PermServersAdmin, s.handleUpdateDBHost))

@@ -1,0 +1,42 @@
+-- Загрузка образов дисков из подключённого хранилища в движок. Отдельно от
+-- restore_runs: те всегда привязаны к точке восстановления, а образ из другой
+-- системы точкой не является.
+CREATE TABLE IF NOT EXISTS image_imports (
+    id                  TEXT PRIMARY KEY,
+    storage_target_id   TEXT NOT NULL,
+    storage_target_name TEXT NOT NULL DEFAULT '',
+    path                TEXT NOT NULL,
+    format              TEXT NOT NULL DEFAULT '',
+    file_size           BIGINT NOT NULL DEFAULT 0,
+    virtual_size        BIGINT NOT NULL DEFAULT 0,
+    server_id           TEXT NOT NULL,
+    server_name         TEXT NOT NULL DEFAULT '',
+    cluster_id          TEXT NOT NULL DEFAULT '',
+    cluster_name        TEXT NOT NULL DEFAULT '',
+    domain_id           TEXT NOT NULL DEFAULT '',
+    domain_name         TEXT NOT NULL DEFAULT '',
+    host_id             TEXT NOT NULL DEFAULT '',
+    disk_name           TEXT NOT NULL DEFAULT '',
+    disk_id             TEXT NOT NULL DEFAULT '',
+    disk_interface      TEXT NOT NULL DEFAULT '',
+    create_vm           BOOLEAN NOT NULL DEFAULT FALSE,
+    vm_name             TEXT NOT NULL DEFAULT '',
+    vm_id               TEXT NOT NULL DEFAULT '',
+    memory_mib          INTEGER NOT NULL DEFAULT 0,
+    vcpus               INTEGER NOT NULL DEFAULT 0,
+    firmware            TEXT NOT NULL DEFAULT '',
+    transfer_id         TEXT NOT NULL DEFAULT '',
+    status              TEXT NOT NULL,
+    phase               TEXT NOT NULL DEFAULT '',
+    progress            INTEGER NOT NULL DEFAULT 0,
+    transferred_bytes   BIGINT NOT NULL DEFAULT 0,
+    bytes_per_second    BIGINT NOT NULL DEFAULT 0,
+    last_progress_at    TIMESTAMPTZ,
+    error               TEXT NOT NULL DEFAULT '',
+    notes               JSONB NOT NULL DEFAULT '[]'::jsonb,
+    triggered_by        TEXT NOT NULL DEFAULT '',
+    created_at          TIMESTAMPTZ NOT NULL,
+    started_at          TIMESTAMPTZ,
+    ended_at            TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS image_imports_created_idx ON image_imports(created_at DESC);

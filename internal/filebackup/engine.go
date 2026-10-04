@@ -84,8 +84,8 @@ func (e *Engine) Start(ctx context.Context, jobID string) (*model.FileBackupRun,
 	if len(job.StorageTargetIDs) == 0 {
 		return nil, fmt.Errorf("no storage target selected")
 	}
-	if _, ok := e.cfg.FileBackup.Root(job.RootID); !ok {
-		return nil, fmt.Errorf("allowed file root %q is not configured", job.RootID)
+	if err := e.RootExists(ctx, job.RootID); err != nil {
+		return nil, err
 	}
 	if job.Encrypt && e.cipher == nil {
 		return nil, fmt.Errorf("file backup encryption was requested but the encryption key is unavailable")
@@ -155,10 +155,26 @@ func (e *Engine) execute(ctx context.Context, job *model.FileBackupJob, run *mod
 		return err
 	}
 
-	root, _ := e.cfg.FileBackup.Root(job.RootID)
-	canonicalRoot, err := canonicalDirectory(root.Path)
-	if err != nil {
-		return fail(err)
+	// Источник — либо именованный каталог на сервере бэкапов, либо
+	// подключённое хранилище, которое служба читает сама.
+	var (
+		canonicalRoot string
+		source        repo.Backend
+		err           error
+	)
+	if sourceID, ok := StorageRootTarget(job.RootID); ok {
+		if sourceID == run.StorageTargetID {
+			return fail(fmt.Errorf("источник и назначение — одно и то же хранилище: копия легла бы рядом с оригиналом"))
+		}
+		if source, _, err = e.OpenStorageSource(ctx, sourceID); err != nil {
+			return fail(err)
+		}
+		defer source.Close()
+	} else {
+		root, _ := e.cfg.FileBackup.Root(job.RootID)
+		if canonicalRoot, err = canonicalDirectory(root.Path); err != nil {
+			return fail(err)
+		}
 	}
 	target, err := e.store.GetStorageTarget(ctx, run.StorageTargetID)
 	if err != nil {
@@ -211,6 +227,53 @@ func (e *Engine) execute(ctx context.Context, job *model.FileBackupJob, run *mod
 		}
 	}
 
+	if source != nil {
+		if err := e.walkStorage(ctx, source, backend, job, run, manifest, previous, prefix); err != nil {
+			return fail(err)
+		}
+	} else if err := e.walkLocal(ctx, canonicalRoot, backend, job, run, manifest, previous, prefix); err != nil {
+		return fail(err)
+	}
+	if !hasContent(manifest.Entries) {
+		return fail(emptySourceError(job.IncludePaths, source != nil))
+	}
+
+	sort.Slice(manifest.Entries, func(i, j int) bool { return manifest.Entries[i].Path < manifest.Entries[j].Path })
+	body, err := backup.EncodeManifest(manifest)
+	if err != nil {
+		return fail(err)
+	}
+	run.ManifestKey = prefix + "files.manifest"
+	n, err := backend.Put(ctx, run.ManifestKey, bytes.NewReader(body), int64(len(body)))
+	if err != nil {
+		return fail(err)
+	}
+	run.StoredBytes += n
+	ended := time.Now().UTC()
+	run.EndedAt, run.Status = &ended, model.RunSucceeded
+	if len(run.UnstablePaths) > 0 {
+		run.Status = model.RunPartial
+	}
+	if job.StorageMode != model.StorageModeSeparate && len(job.StorageTargetIDs) > 1 {
+		run.EndedAt, run.Status = nil, model.RunWaitingCopies
+	}
+	return e.store.UpdateFileBackupRun(ctx, run)
+}
+
+// hasContent — есть ли в точке хоть что-то кроме каталогов.
+func hasContent(entries []Entry) bool {
+	for _, entry := range entries {
+		if entry.Type != "directory" {
+			return true
+		}
+	}
+	return false
+}
+
+// walkLocal обходит именованный корень на сервере бэкапов.
+func (e *Engine) walkLocal(ctx context.Context, canonicalRoot string, backend repo.Backend, job *model.FileBackupJob,
+	run *model.FileBackupRun, manifest *Manifest, previous map[string]Entry, prefix string) error {
+
 	includes := job.IncludePaths
 	if len(includes) == 0 {
 		includes = []string{"."}
@@ -220,7 +283,7 @@ func (e *Engine) execute(ctx context.Context, job *model.FileBackupJob, run *mod
 	for _, include := range includes {
 		start, err := safeSourcePath(canonicalRoot, include)
 		if err != nil {
-			return fail(err)
+			return err
 		}
 		err = filepath.WalkDir(start, func(path string, d os.DirEntry, walkErr error) error {
 			if walkErr != nil {
@@ -290,30 +353,10 @@ func (e *Engine) execute(ctx context.Context, job *model.FileBackupJob, run *mod
 			return nil
 		})
 		if err != nil {
-			return fail(err)
+			return err
 		}
 	}
-
-	sort.Slice(manifest.Entries, func(i, j int) bool { return manifest.Entries[i].Path < manifest.Entries[j].Path })
-	body, err := backup.EncodeManifest(manifest)
-	if err != nil {
-		return fail(err)
-	}
-	run.ManifestKey = prefix + "files.manifest"
-	n, err := backend.Put(ctx, run.ManifestKey, bytes.NewReader(body), int64(len(body)))
-	if err != nil {
-		return fail(err)
-	}
-	run.StoredBytes += n
-	ended := time.Now().UTC()
-	run.EndedAt, run.Status = &ended, model.RunSucceeded
-	if len(run.UnstablePaths) > 0 {
-		run.Status = model.RunPartial
-	}
-	if job.StorageMode != model.StorageModeSeparate && len(job.StorageTargetIDs) > 1 {
-		run.EndedAt, run.Status = nil, model.RunWaitingCopies
-	}
-	return e.store.UpdateFileBackupRun(ctx, run)
+	return nil
 }
 
 func (e *Engine) finishCopies(ctx context.Context, job *model.FileBackupJob, primary *model.FileBackupRun) {
@@ -501,14 +544,24 @@ func (e *Engine) storeFile(ctx context.Context, backend repo.Backend, prefix, ru
 	if err != nil {
 		return nil, err
 	}
+	m, _, err := e.storeReader(ctx, backend, prefix, runID, filepath.ToSlash(path), index, encrypt, f, info.Size())
+	return m, err
+}
+
+// storeReader записывает поток в репозиторий одним объектом данных и
+// возвращает его описание и число прочитанных байт. size — ожидаемый размер;
+// в описание попадает фактический.
+func (e *Engine) storeReader(ctx context.Context, backend repo.Backend, prefix, runID, name string, index int,
+	encrypt bool, f io.Reader, size int64) (*backup.DiskManifest, int64, error) {
+
 	m := &backup.DiskManifest{
 		RunID:       runID,
 		ChainID:     runID,
 		Type:        model.BackupFull,
-		DiskID:      filepath.ToSlash(path),
-		Alias:       filepath.Base(path),
+		DiskID:      name,
+		Alias:       pathBase(name),
 		Index:       index,
-		VirtualSize: info.Size(),
+		VirtualSize: size,
 		DiskFormat:  "file",
 	}
 	dataKey := fmt.Sprintf("%sfile-%06d.data", prefix, index)
@@ -525,28 +578,39 @@ func (e *Engine) storeFile(ctx context.Context, backend repo.Backend, prefix, ru
 		Cipher:      cipher,
 	})
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	buf := make([]byte, max(64<<10, e.cfg.Backup.ChunkSize))
-	var chunk int64
+	var chunk, total int64
 	for {
 		n, readErr := io.ReadFull(f, buf)
 		if n > 0 {
 			if err := w.WriteChunk(chunk, buf[:n]); err != nil {
 				w.Abort(context.WithoutCancel(ctx), backend, err)
-				return nil, err
+				return nil, 0, err
 			}
 			chunk++
+			total += int64(n)
 		}
 		if errors.Is(readErr, io.EOF) || errors.Is(readErr, io.ErrUnexpectedEOF) {
 			break
 		}
 		if readErr != nil {
 			w.Abort(context.WithoutCancel(ctx), backend, readErr)
-			return nil, readErr
+			return nil, 0, readErr
 		}
 	}
-	return w.Close()
+	m.VirtualSize = total
+	manifest, err := w.Close()
+	return manifest, total, err
+}
+
+// pathBase — имя файла из пути с прямыми слэшами.
+func pathBase(name string) string {
+	if i := strings.LastIndex(name, "/"); i >= 0 {
+		return name[i+1:]
+	}
+	return name
 }
 
 func (e *Engine) Manifest(ctx context.Context, runID string) (*Manifest, error) {
@@ -651,14 +715,14 @@ func (e *Engine) Restore(ctx context.Context, req RestoreRequest) (*RestoreResul
 	if run.Status != model.RunSucceeded && run.Status != model.RunPartial {
 		return nil, fmt.Errorf("file backup run %s is not restorable in status %s", run.ID, run.Status)
 	}
-	root, ok := e.cfg.FileBackup.Root(run.RootID)
-	if !ok {
+	restoreRoots := e.RestoreRoots(run.RootID)
+	if restoreRoots == nil {
 		return nil, fmt.Errorf("allowed file root %q is not configured", run.RootID)
 	}
-	if req.RestoreRootIndex < 0 || req.RestoreRootIndex >= len(root.RestoreRoots) {
+	if req.RestoreRootIndex < 0 || req.RestoreRootIndex >= len(restoreRoots) {
 		return nil, fmt.Errorf("restore_root_index is outside the configured allowlist")
 	}
-	restoreRoot, err := ensureCanonicalDirectory(root.RestoreRoots[req.RestoreRootIndex])
+	restoreRoot, err := ensureCanonicalDirectory(restoreRoots[req.RestoreRootIndex])
 	if err != nil {
 		return nil, err
 	}

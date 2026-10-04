@@ -151,6 +151,12 @@ func Resolve(roots []Root, rootID, path string) (Root, string, error) {
 	if !found {
 		return Root{}, "", ErrOutsideRoots
 	}
+	// Корень без расположения — не каталог на этом сервере (например,
+	// подключённое хранилище): пустой путь разрешился бы относительно рабочего
+	// каталога службы.
+	if strings.TrimSpace(root.dir) == "" {
+		return Root{}, "", ErrOutsideRoots
+	}
 
 	clean := filepath.Clean(filepath.FromSlash(strings.TrimSpace(path)))
 	switch {

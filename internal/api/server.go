@@ -353,6 +353,13 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /backups/{id}/restore-vm/plan", s.perm(model.PermBackupsWrite, s.handlePlanRestoreVM))
 	mux.HandleFunc("POST /backups/{id}/restore-vm", s.perm(model.PermBackupsWrite, s.handleRestoreVM))
 	mux.HandleFunc("GET /restores", s.perm(model.PermBackupsRead, s.handleListRestores))
+	// Импорт образов дисков из подключённого хранилища в движок.
+	mux.HandleFunc("GET /storages/{id}/files", s.perm(model.PermBackupsWrite, s.handleListStorageFiles))
+	mux.HandleFunc("POST /image-imports/inspect", s.perm(model.PermBackupsWrite, s.handleInspectImage))
+	mux.HandleFunc("POST /image-imports", s.perm(model.PermBackupsWrite, s.handleStartImageImport))
+	mux.HandleFunc("GET /image-imports", s.perm(model.PermBackupsRead, s.handleListImageImports))
+	mux.HandleFunc("GET /image-imports/{id}", s.perm(model.PermBackupsRead, s.handleGetImageImport))
+	mux.HandleFunc("POST /image-imports/{id}/cancel", s.perm(model.PermBackupsWrite, s.handleCancelImageImport))
 	mux.HandleFunc("GET /restores/{id}", s.perm(model.PermBackupsRead, s.handleGetRestore))
 
 	// Ретенция — это удаление копий, поэтому право то же, что на их удаление.

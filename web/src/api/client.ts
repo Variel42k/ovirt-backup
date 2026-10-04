@@ -587,6 +587,18 @@ export const api = {
     http.post<RestoreVMPlan>(`/backups/${id}/restore-vm/plan`, payload).then((r) => r.data),
   restoreVM: (id: string, payload: Record<string, unknown>) =>
     http.post(`/backups/${id}/restore-vm`, payload).then((r) => r.data),
+  // Импорт образов дисков из подключённого хранилища
+  listStorageFiles: (storageId: string, path = '') =>
+    http.get<import('./types').StorageFiles>(`/storages/${storageId}/files`, { params: path ? { path } : undefined, timeout: 50_000 })
+      .then((r) => r.data),
+  inspectImage: (storageTargetId: string, path: string) =>
+    http.post<import('./types').ImageInfo>('/image-imports/inspect', { storage_target_id: storageTargetId, path }, { timeout: 50_000 })
+      .then((r) => r.data),
+  startImageImport: (payload: Record<string, unknown>) =>
+    http.post<import('./types').ImageImport>('/image-imports', payload, { timeout: 120_000 }).then((r) => r.data),
+  listImageImports: () =>
+    http.get<ListResponse<import('./types').ImageImport>>('/image-imports').then((r) => unwrap(r.data)),
+  cancelImageImport: (id: string) => http.post(`/image-imports/${id}/cancel`).then(() => undefined),
   /** Отбор идёт на сервере: status и target — через запятую, origin — verify | manual, q — подстрока. */
   listRestores: (runId?: string, params: Record<string, string | number> = {}) =>
     http.get<ListResponse<RestoreRun>>('/restores', { params: { ...params, ...(runId ? { run_id: runId } : {}) } }).then((r) => unwrap(r.data)),

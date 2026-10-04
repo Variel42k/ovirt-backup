@@ -120,8 +120,35 @@ watch(restoreForm, () => {
   if (!restoreForm.value.overwrite) restoreForm.value.confirmOverwrite = false
 }, { deep: true })
 
-const rootOptions = computed(() => roots.value.map((root) => ({ label: root.name, value: root.id })))
-const storageOptions = computed(() => app.enabledStorages.map((storage) => ({ label: storage.name, value: storage.id })))
+const rootOptions = computed(() => roots.value.map((root) => ({
+  label: root.name,
+  value: root.id,
+  caption: root.kind === 'storage' ? 'служба читает хранилище сама' : 'каталог на сервере бэкапов',
+})))
+const selectedRoot = computed(() => roots.value.find((root) => root.id === form.value.root_id))
+/** Хранилище-источник нельзя выбрать ещё и назначением: копия легла бы рядом с оригиналом. */
+const storageOptions = computed(() => app.enabledStorages
+  .filter((storage) => storage.id !== selectedRoot.value?.storage_target_id)
+  .map((storage) => ({ label: storage.name, value: storage.id })))
+const sourceHint = computed(() => {
+  if (!selectedRoot.value) return ''
+  return selectedRoot.value.kind === 'storage'
+    ? 'Служба читает это хранилище сама, с учётной записью, указанной в его настройках. Монтировать его на сервер не нужно.'
+    : 'Каталог на самом сервере бэкапов. Сетевую папку удобнее подключить как хранилище (SMB, SFTP) и выбрать источником его.'
+})
+const emptyRootHint = computed(() => selectedRoot.value?.kind === 'storage'
+  ? 'В корне хранилища нет каталогов, видимых его учётной записи. Проверьте путь и права в настройках хранилища.'
+  : 'Этот каталог на сервере бэкапов пуст. Скопируйте в него данные или выберите источником подключённое ' +
+    'хранилище (SMB, SFTP): тогда служба прочитает сетевую папку сама, без монтирования на сервер.')
+
+/** Смена источника: пути и назначения прежнего источника к новому не относятся. */
+function changeRoot(id: string) {
+  if (id === form.value.root_id) return
+  form.value.root_id = id
+  form.value.include_paths = ['.']
+  const source = roots.value.find((root) => root.id === id)?.storage_target_id
+  if (source) form.value.storage_target_ids = form.value.storage_target_ids.filter((item) => item !== source)
+}
 const pathOptions = computed(() => (manifest.value?.entries ?? []).map((entry) => ({
   label: `${entry.type === 'directory' ? '📁' : '📄'} ${entry.path || '/'}`,
   value: entry.path,
@@ -137,9 +164,14 @@ const destinationPicker = ref(false)
  */
 function addIncludePath(value: { rootId: string; path: string }) {
   const path = value.path || '.'
-  if (!form.value.include_paths.includes(path)) {
-    form.value.include_paths = [...form.value.include_paths, path]
+  // «.» — весь источник. Выбранная папка заменяет его, а не добавляется рядом:
+  // иначе задание с путями «.» и «gitlab» по-прежнему копировало бы всё.
+  if (path === '.') {
+    form.value.include_paths = ['.']
+    return
   }
+  const paths = form.value.include_paths.filter((item) => item !== '.' && item.trim() !== '')
+  form.value.include_paths = paths.includes(path) ? paths : [...paths, path]
 }
 
 function useRestoreDestination(value: { rootId: string; path: string }) {
@@ -158,7 +190,7 @@ const hasActiveRuns = computed(() => runs.value.some((run) => ['pending', 'runni
 
 const jobColumns = [
   { name: 'name', label: 'Задание', field: 'name', align: 'left' as const },
-  { name: 'root', label: 'Разрешённый корень', field: 'root_id', align: 'left' as const },
+  { name: 'root', label: 'Источник', field: 'root_id', align: 'left' as const },
   { name: 'paths', label: 'Пути', field: 'include_paths', align: 'left' as const },
   { name: 'schedule', label: 'Расписание', field: 'schedule', align: 'left' as const },
   { name: 'delivery', label: 'Доставка', field: 'storage_mode', align: 'left' as const },
@@ -268,7 +300,7 @@ function relativePathError(value: string, label: string, allowEmpty = false): st
 
 function validateJobForm(): string {
   if (!form.value.name.trim()) return 'Укажите название задания'
-  if (!form.value.root_id) return 'Выберите разрешённый корень'
+  if (!form.value.root_id) return 'Выберите источник'
   if (!form.value.storage_target_ids.length) return 'Выберите хотя бы одно хранилище'
 
   for (const path of form.value.include_paths) {
@@ -545,7 +577,25 @@ onBeforeUnmount(() => {
           <div class="row q-col-gutter-md">
             <div class="col-12 col-md-8"><q-input v-model="form.name" outlined dense label="Название" /></div>
             <div class="col-12 col-md-4"><q-toggle v-model="form.enabled" label="Включено" /></div>
-            <div class="col-12 col-md-6"><q-select v-model="form.root_id" :options="rootOptions" emit-value map-options outlined dense label="Разрешённый корень" /></div>
+            <div class="col-12 col-md-6">
+              <q-select
+                :model-value="form.root_id" :options="rootOptions" emit-value map-options outlined dense
+                label="Источник" data-testid="file-backup-source" @update:model-value="changeRoot"
+              >
+                <template #option="scope">
+                  <q-item v-bind="scope.itemProps">
+                    <q-item-section avatar>
+                      <q-icon :name="scope.opt.caption.startsWith('служба') ? 'dns' : 'folder'" />
+                    </q-item-section>
+                    <q-item-section>
+                      <q-item-label>{{ scope.opt.label }}</q-item-label>
+                      <q-item-label caption>{{ scope.opt.caption }}</q-item-label>
+                    </q-item-section>
+                  </q-item>
+                </template>
+              </q-select>
+              <div v-if="sourceHint" class="jhv-reason">{{ sourceHint }}</div>
+            </div>
             <div class="col-12 col-md-6">
               <q-input v-model="form.schedule" outlined dense label="Cron-расписание" class="jhv-mono">
                 <template #append>
@@ -566,7 +616,7 @@ onBeforeUnmount(() => {
               </div>
             </div>
             <div class="col-12">
-              <q-select v-model="form.include_paths" multiple use-input use-chips new-value-mode="add-unique" hide-dropdown-icon outlined dense label="Относительные пути" hint="Пустой список означает весь корень. Папку можно выбрать, а не набирать по памяти.">
+              <q-select v-model="form.include_paths" multiple use-input use-chips new-value-mode="add-unique" hide-dropdown-icon outlined dense label="Пути внутри источника" hint="Пустой список означает весь источник. Папку можно выбрать, а не набирать по памяти.">
                 <template #append>
                   <q-btn flat dense no-caps icon="folder_open" label="Выбрать папку" :disable="!form.root_id" @click="includePicker = true" />
                 </template>
@@ -658,6 +708,7 @@ onBeforeUnmount(() => {
       scope="file-backup"
       title="Что бэкапить"
       :initial-root="form.root_id"
+      :empty-root-hint="emptyRootHint"
       @picked="addIncludePath"
     />
 

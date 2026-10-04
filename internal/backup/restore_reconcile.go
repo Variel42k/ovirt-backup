@@ -15,16 +15,17 @@ import (
 // marks the corresponding operations as failed. oVirt 4.3 otherwise keeps a
 // paused_system ImageTransfer and its disk lock indefinitely.
 func (e *Engine) ReconcileStaleRestores(ctx context.Context) error {
+	importErr := e.reconcileInterruptedImageImports(ctx)
 	restores, err := e.store.ListInterruptedRestoreRuns(ctx)
 	if err != nil {
-		return err
+		return errors.Join(importErr, err)
 	}
 	checks, err := e.store.ListInterruptedVerifyRuns(ctx)
 	if err != nil {
 		return err
 	}
 	if len(restores) == 0 && len(checks) == 0 {
-		return nil
+		return importErr
 	}
 	e.log.Warn().Int("восстановлений", len(restores)).Int("проверок", len(checks)).
 		Msg("найдены операции, прерванные предыдущим запуском службы")
@@ -52,7 +53,7 @@ func (e *Engine) ReconcileStaleRestores(ctx context.Context) error {
 			failures = append(failures, err)
 		}
 	}
-	return errors.Join(failures...)
+	return errors.Join(append(failures, importErr)...)
 }
 
 func (e *Engine) closeInterruptedRestoreTransfer(ctx context.Context, run *model.RestoreRun, closed map[string]bool) error {

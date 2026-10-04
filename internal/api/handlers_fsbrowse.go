@@ -1,12 +1,19 @@
 package api
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"net/http"
+	"path"
 	"strconv"
+	"strings"
+	"time"
 
+	"github.com/Variel42k/ovirt-backup/internal/filebackup"
 	"github.com/Variel42k/ovirt-backup/internal/fsbrowse"
 	"github.com/Variel42k/ovirt-backup/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/repo"
 )
 
 // Выбор каталога мышью вместо пути, набранного по памяти.
@@ -59,10 +66,18 @@ func browseScopes() map[string]scopeRule {
 		},
 		scopeFileBackup: {
 			permission: model.PermJobsAdmin,
-			roots: func(s *Server, _ *http.Request) []fsbrowse.Root {
+			roots: func(s *Server, r *http.Request) []fsbrowse.Root {
 				var out []fsbrowse.Root
 				for _, root := range s.cfg.FileBackup.Roots {
 					out = append(out, fsbrowse.NewNamedRoot(root.ID, root.Name, root.Path))
+				}
+				// Подключённые хранилища — тоже источники. Их каталоги читает
+				// не файловая система службы, а само хранилище, поэтому у
+				// таких корней нет расположения: handleBrowse разбирает их сам.
+				if storages, err := s.fileBackupStorageRoots(r.Context()); err == nil {
+					for _, item := range storages {
+						out = append(out, fsbrowse.NewNamedRoot(item.ID, item.Name, ""))
+					}
 				}
 				return out
 			},
@@ -73,12 +88,20 @@ func browseScopes() map[string]scopeRule {
 		scopeFileRestore: {
 			permission: model.PermBackupsWrite,
 			roots: func(s *Server, r *http.Request) []fsbrowse.Root {
-				root, ok := s.cfg.FileBackup.Root(r.URL.Query().Get("owner"))
-				if !ok {
+				// У хранилища-источника своих областей нет: файлы возвращаются
+				// в области первого именованного корня.
+				owner := r.URL.Query().Get("owner")
+				var dirs []string
+				if s.fileBackup != nil {
+					dirs = s.fileBackup.RestoreRoots(owner)
+				} else if root, ok := s.cfg.FileBackup.Root(owner); ok {
+					dirs = root.RestoreRoots
+				}
+				if len(dirs) == 0 {
 					return nil
 				}
 				var out []fsbrowse.Root
-				for index, dir := range root.RestoreRoots {
+				for index, dir := range dirs {
 					// Идентификатор — номер области: именно его ждёт
 					// восстановление, и придумывать второй способ адресации
 					// значило бы разойтись с ним при первой же правке.
@@ -131,6 +154,15 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 	}
 
 	roots := rule.roots(s, r)
+	if targetID, ok := filebackup.StorageRootTarget(r.URL.Query().Get("root")); ok && scope == scopeFileBackup {
+		listing, err := s.browseStorageRoot(r.Context(), roots, targetID, r.URL.Query().Get("path"))
+		if err != nil {
+			s.writeError(w, r, badRequest("%v", err))
+			return
+		}
+		writeJSON(w, http.StatusOK, browseResponse{Listing: listing, Scope: scope})
+		return
+	}
 	listing, err := fsbrowse.List(roots, r.URL.Query().Get("root"), r.URL.Query().Get("path"))
 	if err != nil {
 		if errors.Is(err, fsbrowse.ErrOutsideRoots) {
@@ -148,6 +180,58 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 		response.Hint = rule.emptyHint
 	}
 	writeJSON(w, http.StatusOK, response)
+}
+
+// storageBrowseTimeout ограничивает чтение одного каталога хранилища: окно
+// выбора не должно висеть, пока сетевая папка не отвечает.
+const storageBrowseTimeout = 45 * time.Second
+
+// browseStorageRoot lists the directories of one level of a connected storage
+// for the picker.
+//
+// Каталоги читает само хранилище, теми же учётными данными, что и проверка
+// его доступности. Выйти за его корень путём нельзя: путь нормализуется от
+// корня. Скрытые каталоги и служебные данные репозитория не показываются.
+func (s *Server) browseStorageRoot(ctx context.Context, roots []fsbrowse.Root, targetID, dir string) (*fsbrowse.Listing, error) {
+	if err := s.requireFileBackup(); err != nil {
+		return nil, err
+	}
+	rootID := filebackup.StorageRootID(targetID)
+	known := false
+	for _, root := range roots {
+		known = known || root.ID == rootID
+	}
+	if !known {
+		return nil, fmt.Errorf("хранилище недоступно как источник: оно отключено или не отдаёт каталоги")
+	}
+	ctx, cancel := context.WithTimeout(ctx, storageBrowseTimeout)
+	defer cancel()
+	backend, _, err := s.fileBackup.OpenStorageSource(ctx, targetID)
+	if err != nil {
+		return nil, err
+	}
+	defer backend.Close()
+
+	rel := repo.CleanDir(dir)
+	entries, err := repo.ListDir(ctx, backend, rel)
+	if err != nil {
+		return nil, err
+	}
+	listing := &fsbrowse.Listing{Roots: roots, RootID: rootID, Path: rel, Entries: []fsbrowse.Entry{}}
+	if rel != "" {
+		parent := path.Dir(rel)
+		if parent == "." {
+			parent = ""
+		}
+		listing.Parent = &parent
+	}
+	for _, entry := range entries {
+		if !entry.IsDir || strings.HasPrefix(entry.Name, ".") || strings.HasPrefix(entry.Name, "$") {
+			continue
+		}
+		listing.Entries = append(listing.Entries, fsbrowse.Entry{Name: entry.Name, Path: path.Join(rel, entry.Name)})
+	}
+	return listing, nil
 }
 
 // resolveBrowsable reports where a chosen path really is, refusing anything

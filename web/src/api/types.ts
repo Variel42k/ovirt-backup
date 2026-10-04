@@ -812,10 +812,80 @@ export interface RepositoryArtifact {
   created_at: string
 }
 
+/** Один уровень каталогов и файлов подключённого хранилища. */
+export interface StorageFileEntry {
+  name: string
+  path: string
+  is_dir: boolean
+  size: number
+  modified: string
+}
+
+export interface StorageFiles {
+  storage_target_id: string
+  path: string
+  /** null — корень хранилища: выше подниматься некуда. */
+  parent: string | null
+  entries: StorageFileEntry[]
+}
+
+/** Что служба узнала об образе диска по его заголовку. */
+export interface ImageInfo {
+  path: string
+  /** qcow2 | raw; для остального — название распознанного формата. */
+  format: string
+  file_size: number
+  virtual_size: number
+  qcow_version?: number
+  /** Почему образ нельзя загрузить как есть; пусто — можно. */
+  problem?: string
+  notes?: string[]
+}
+
+/** Загрузка образа диска из подключённого хранилища в движок. */
+export interface ImageImport {
+  id: string
+  storage_target_id: string
+  storage_target_name: string
+  path: string
+  format: string
+  file_size: number
+  virtual_size: number
+  server_id: string
+  server_name: string
+  cluster_name?: string
+  domain_id: string
+  domain_name: string
+  disk_name: string
+  disk_id?: string
+  disk_interface?: string
+  create_vm: boolean
+  vm_name?: string
+  vm_id?: string
+  status: RunStatus
+  phase?: string
+  progress: number
+  transferred_bytes: number
+  bytes_per_second: number
+  error?: string
+  notes?: string[]
+  triggered_by?: string
+  created_at: string
+  started_at?: string
+  ended_at?: string
+}
+
 export interface FileBackupRoot {
   id: string
   name: string
   restore_root_count: number
+  /**
+   * named — каталог на сервере бэкапов из конфигурации; storage — подключённое
+   * хранилище, которое служба читает сама (id вида `storage:<id хранилища>`).
+   */
+  kind?: 'named' | 'storage'
+  storage_target_id?: string
+  storage_kind?: string
 }
 
 export interface FileBackupJob {

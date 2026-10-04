@@ -9,6 +9,7 @@ import (
 
 	"github.com/Variel42k/ovirt-backup/internal/filebackup"
 	"github.com/Variel42k/ovirt-backup/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/repo"
 	"github.com/Variel42k/ovirt-backup/internal/scheduler"
 )
 
@@ -16,6 +17,37 @@ type fileBackupRootResponse struct {
 	ID               string `json:"id"`
 	Name             string `json:"name"`
 	RestoreRootCount int    `json:"restore_root_count"`
+	// Kind — named (каталог на сервере бэкапов из конфигурации) или storage
+	// (подключённое хранилище, которое служба читает сама).
+	Kind            string `json:"kind"`
+	StorageTargetID string `json:"storage_target_id,omitempty"`
+	StorageKind     string `json:"storage_kind,omitempty"`
+}
+
+// fileBackupStorageRoots — подключённые хранилища, которые можно читать как
+// каталоги: источники файлового бэкапа помимо именованных корней.
+func (s *Server) fileBackupStorageRoots(ctx context.Context) ([]fileBackupRootResponse, error) {
+	targets, err := s.store.ListStorageTargets(ctx)
+	if err != nil {
+		return nil, err
+	}
+	restoreRoots := 0
+	if len(s.cfg.FileBackup.Roots) > 0 {
+		restoreRoots = len(s.cfg.FileBackup.Roots[0].RestoreRoots)
+	}
+	var out []fileBackupRootResponse
+	for _, target := range targets {
+		if !target.Enabled || !repo.ListsDirs(target.Kind) {
+			continue
+		}
+		out = append(out, fileBackupRootResponse{
+			ID:               filebackup.StorageRootID(target.ID),
+			Name:             fmt.Sprintf("Хранилище «%s» (%s)", target.Name, strings.ToUpper(string(target.Kind))),
+			RestoreRootCount: restoreRoots,
+			Kind:             "storage", StorageTargetID: target.ID, StorageKind: string(target.Kind),
+		})
+	}
+	return out, nil
 }
 
 type fileBackupJobPayload struct {
@@ -75,8 +107,11 @@ func (s *Server) validateFileBackupJob(ctx context.Context, job *model.FileBacku
 	if err := job.Validate(); err != nil {
 		return badRequest("%v", err)
 	}
-	if _, ok := s.cfg.FileBackup.Root(job.RootID); !ok {
-		return badRequest("allowed file root %q is not configured", job.RootID)
+	if err := s.fileBackup.RootExists(ctx, job.RootID); err != nil {
+		return badRequest("%v", err)
+	}
+	if sourceID, ok := filebackup.StorageRootTarget(job.RootID); ok && slices.Contains(job.StorageTargetIDs, sourceID) {
+		return badRequest("хранилище-источник нельзя выбрать ещё и назначением: копия легла бы рядом с оригиналом")
 	}
 	for _, id := range job.StorageTargetIDs {
 		target, err := s.store.GetStorageTarget(ctx, id)
@@ -105,8 +140,15 @@ func (s *Server) validateFileBackupJob(ctx context.Context, job *model.FileBacku
 func (s *Server) handleListFileBackupRoots(w http.ResponseWriter, r *http.Request) {
 	items := make([]fileBackupRootResponse, 0, len(s.cfg.FileBackup.Roots))
 	for _, root := range s.cfg.FileBackup.Roots {
-		items = append(items, fileBackupRootResponse{ID: root.ID, Name: root.Name, RestoreRootCount: len(root.RestoreRoots)})
+		items = append(items, fileBackupRootResponse{ID: root.ID, Name: root.Name,
+			RestoreRootCount: len(root.RestoreRoots), Kind: "named"})
 	}
+	storages, err := s.fileBackupStorageRoots(r.Context())
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	items = append(items, storages...)
 	writeJSON(w, http.StatusOK, map[string]any{"enabled": true, "items": items, "total": len(items)})
 }
 

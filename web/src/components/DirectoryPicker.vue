@@ -39,6 +39,12 @@ const props = defineProps<{
    * через уже открытое SSH-соединение, а не файловая система службы.
    */
   serverId?: string
+  /**
+   * Что сказать, когда сам корень пуст. «Вложенных каталогов нет» в корне
+   * источника означает не «выберите его», а «данных здесь нет», и без
+   * объяснения непонятно, откуда им взяться.
+   */
+  emptyRootHint?: string
 }>()
 
 const emit = defineEmits<{
@@ -222,7 +228,9 @@ watch(
               </q-item-section>
               <q-item-section>
                 <q-item-label>{{ entry.name }}</q-item-label>
-                <q-item-label v-if="!entry.writable" caption class="text-warning">
+                <!-- Право записи важно только там, куда пишут: у источника
+                     «только чтение» — норма, а не предупреждение. -->
+                <q-item-label v-if="requireWritable && !entry.writable" caption class="text-warning">
                   только чтение
                 </q-item-label>
               </q-item-section>
@@ -232,6 +240,15 @@ watch(
               <q-item-section class="text-grey-6">Вложенных каталогов нет</q-item-section>
             </q-item>
           </q-list>
+          <q-banner
+            v-if="emptyRootHint && !listing.entries.length && listing.parent === null"
+            dense
+            class="bg-orange-1 text-dark q-mt-sm"
+            data-testid="empty-root-hint"
+          >
+            <template #avatar><q-icon name="info" color="warning" /></template>
+            {{ emptyRootHint }}
+          </q-banner>
         </template>
       </q-card-section>
 

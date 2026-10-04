@@ -33,6 +33,7 @@ const routes = [
       { path: 'engine-config', name: 'engine-config', component: () => import('@/pages/EngineConfigPage.vue'), meta: { perm: 'engine_config.read' } },
 			{ path: 'file-backups', name: 'file-backups', component: () => import('@/pages/FileBackupsPage.vue'), meta: { perm: 'file_backups.read' } },
       { path: 'verify', name: 'verify', component: () => import('@/pages/VerifyPage.vue'), meta: { perm: 'backups.read' } },
+      { path: 'image-import', name: 'image-import', component: () => import('@/pages/ImageImportPage.vue'), meta: { perm: 'backups.read' } },
       { path: 'db-dumps', name: 'db-dumps', component: () => import('@/pages/DbDumpsPage.vue'), meta: { perm: 'jobs.read' } },
       { path: 'coverage', name: 'coverage', component: () => import('@/pages/CoveragePage.vue'), meta: { perm: 'monitoring.read' } },
       { path: 'discovery', name: 'discovery', component: () => import('@/pages/DiscoveryPage.vue'), meta: { perm: 'monitoring.read' } },

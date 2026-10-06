@@ -488,6 +488,30 @@ func IsTicketGone(err error) bool {
 	return e.Status == http.StatusForbidden && strings.Contains(strings.ToLower(e.Body), "no such ticket")
 }
 
+// Alive проверяет, отвечает ли imageio по адресу передачи dataURL. Билет из
+// адреса не используется: запрос идёт на /images/*, и любой ответ HTTP значит,
+// что демон принимает соединения. Читается ли сам том, проверка не знает —
+// это покажет только запрос тома.
+func Alive(ctx context.Context, client *http.Client, dataURL string, timeout time.Duration) error {
+	u, err := url.Parse(dataURL)
+	if err != nil || u.Host == "" {
+		return errors.New("адрес передачи imageio не разобран")
+	}
+	ctx, cancel := bound(ctx, timeout)
+	defer cancel()
+	probe := url.URL{Scheme: u.Scheme, Host: u.Host, Path: "/images/*"}
+	req, err := http.NewRequestWithContext(ctx, http.MethodOptions, probe.String(), nil)
+	if err != nil {
+		return err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("imageio %s не отвечает: %w", u.Host, err)
+	}
+	drain(resp)
+	return nil
+}
+
 // IsNetworkError сообщает, что до imageio не удалось достучаться или ответ не
 // пришёл: соединение отклонено, нет маршрута, обрыв, тайм-аут запроса. В
 // отличие от ответа HTTP с ошибкой, это состояние сети или хоста — оно

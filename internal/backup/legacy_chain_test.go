@@ -408,3 +408,242 @@ func TestDownloadVolumeDoesNotRetryLockedDisk(t *testing.T) {
 		t.Fatalf("POST /imagetransfers: %d — отказ движка повторять как обрыв потока нельзя", posts)
 	}
 }
+
+// fakeImageioStatusEngine — движок, у которого каждая новая передача получает
+// свой билет, а демон imageio отвечает на билет так, как велит answer.
+type fakeImageioStatusEngine struct {
+	mu        sync.Mutex
+	created   int
+	finalized map[string]bool
+	// probes — проверки «отвечает ли imageio»: OPTIONS /images/*.
+	probes int
+}
+
+func (f *fakeImageioStatusEngine) counts() (created, finalized, probes int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.created, len(f.finalized), f.probes
+}
+
+// stalledStream — ответ answer: демон начал отдавать том и замолчал.
+const stalledStream = -1
+
+// startFakeImageioStatusEngine поднимает такой движок. answer получает номер
+// передачи и возвращает код ответа демона: 200 отдаёт том, stalledStream
+// обрывает поток, остальное — ошибка демона. При imageioDown адрес передачи
+// ведёт на закрытый порт: демон не отвечает совсем.
+func startFakeImageioStatusEngine(t *testing.T, volume []byte, imageioDown bool,
+	answer func(attempt int) int) (*fakeImageioStatusEngine, *httptest.Server) {
+
+	f := &fakeImageioStatusEngine{finalized: map[string]bool{}}
+	mux := http.NewServeMux()
+	var srv *httptest.Server
+	dataBase := func() string { return srv.URL }
+	if imageioDown {
+		dead := httptest.NewServer(http.NotFoundHandler())
+		deadURL := dead.URL
+		dead.Close()
+		dataBase = func() string { return deadURL }
+	}
+	mux.HandleFunc("/ovirt-engine/sso/oauth/token", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"access_token":"token","exp":"9999999999999"}`))
+	})
+	mux.HandleFunc("POST /ovirt-engine/api/imagetransfers", func(w http.ResponseWriter, _ *http.Request) {
+		f.mu.Lock()
+		f.created++
+		id := "tr-" + strconv.Itoa(f.created)
+		f.mu.Unlock()
+		_, _ = fmt.Fprintf(w, `{"id":%q,"phase":"initializing"}`, id)
+	})
+	mux.HandleFunc("GET /ovirt-engine/api/imagetransfers/{id}", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		f.mu.Lock()
+		done := f.finalized[id]
+		f.mu.Unlock()
+		if done {
+			_, _ = fmt.Fprintf(w, `{"id":%q,"phase":"finished_success"}`, id)
+			return
+		}
+		_, _ = fmt.Fprintf(w, `{"id":%q,"phase":"transferring","transfer_url":%q}`, id, dataBase()+"/images/"+id)
+	})
+	mux.HandleFunc("POST /ovirt-engine/api/imagetransfers/{id}/finalize", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		f.finalized[r.PathValue("id")] = true
+		f.mu.Unlock()
+		_, _ = w.Write([]byte(`{}`))
+	})
+	mux.HandleFunc("OPTIONS /images/{id}", func(w http.ResponseWriter, r *http.Request) {
+		if r.PathValue("id") != "*" {
+			http.Error(w, "проверка не должна нести билет", http.StatusBadRequest)
+			return
+		}
+		f.mu.Lock()
+		f.probes++
+		f.mu.Unlock()
+		_, _ = w.Write([]byte(`{"features":[]}`))
+	})
+	mux.HandleFunc("GET /images/{id}", func(w http.ResponseWriter, r *http.Request) {
+		attempt, _ := strconv.Atoi(strings.TrimPrefix(r.PathValue("id"), "tr-"))
+		switch status := answer(attempt); status {
+		case http.StatusOK:
+			_, _ = w.Write(volume)
+		case stalledStream:
+			_, _ = w.Write([]byte("incomplete"))
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+		case http.StatusForbidden:
+			http.Error(w, "Ticket forbids read", status)
+		default:
+			http.Error(w, "Server failed to perform the request, check logs", status)
+		}
+	})
+	srv = httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	oldWait, oldDelay, oldRecovery := legacyTransferCloseWait, legacyVolumeRetryDelay, legacyVolumeRecoveryDelay
+	legacyTransferCloseWait, legacyVolumeRetryDelay, legacyVolumeRecoveryDelay = time.Second, time.Millisecond, time.Millisecond
+	t.Cleanup(func() {
+		legacyTransferCloseWait, legacyVolumeRetryDelay, legacyVolumeRecoveryDelay = oldWait, oldDelay, oldRecovery
+	})
+	return f, srv
+}
+
+func downloadFromFakeImageio(t *testing.T, srv *httptest.Server, e *Engine) (int64, string, error) {
+	t.Helper()
+	client, err := ovirt.New(ovirt.Config{EngineURL: srv.URL, Username: "admin@internal", Password: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "base.qcow2")
+	n, err := e.downloadVolume(context.Background(), client, "vol-base", "cow", path, nil)
+	return n, path, err
+}
+
+// Демон imageio хоста ответил 500 на первый же запрос тома: это сбой хоста, и
+// том запрашивается новой передачей сразу, а не губит запуск, в котором
+// верхние слои цепочки уже скачаны.
+func TestDownloadVolumeRetriesImageioHostError(t *testing.T) {
+	volume := bytes.Repeat([]byte("base-volume"), 1024)
+	f, srv := startFakeImageioStatusEngine(t, volume, false, func(attempt int) int {
+		if attempt == 1 {
+			return http.StatusInternalServerError
+		}
+		return http.StatusOK
+	})
+	n, path, err := downloadFromFakeImageio(t, srv, &Engine{log: zerolog.Nop()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(path)
+	if n != int64(len(volume)) || !bytes.Equal(got, volume) {
+		t.Fatalf("после повтора: %d байт, совпал %v", n, bytes.Equal(got, volume))
+	}
+	if created, finalized, probes := f.counts(); created != 2 || finalized != 2 || probes != 0 {
+		t.Fatalf("передач %d, закрыто %d, проверок %d — ждали две передачи без проверок", created, finalized, probes)
+	}
+}
+
+// Три попытки подряд не помогли: служба ждёт хост и перед новой передачей
+// проверяет, отвечает ли imageio. Хост ожил — том скачан.
+func TestDownloadVolumeWaitsForHostAfterQuickAttempts(t *testing.T) {
+	volume := bytes.Repeat([]byte("base-volume"), 1024)
+	f, srv := startFakeImageioStatusEngine(t, volume, false, func(attempt int) int {
+		if attempt <= legacyVolumeDownloadAttempts {
+			return http.StatusInternalServerError
+		}
+		return http.StatusOK
+	})
+	n, path, err := downloadFromFakeImageio(t, srv, &Engine{log: zerolog.Nop()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(path)
+	if n != int64(len(volume)) || !bytes.Equal(got, volume) {
+		t.Fatalf("после ожидания хоста: %d байт, совпал %v", n, bytes.Equal(got, volume))
+	}
+	want := legacyVolumeDownloadAttempts + 1
+	if created, finalized, probes := f.counts(); created != want || finalized != want || probes != 1 {
+		t.Fatalf("передач %d, закрыто %d, проверок %d — ждали %d передачи и одну проверку", created, finalized, probes, want)
+	}
+}
+
+// Хост отказывает каждый раз: попытки конечны, а ошибка говорит, где искать
+// причину, — в ответе демона её нет.
+func TestDownloadVolumeGivesUpOnPersistentImageioHostError(t *testing.T) {
+	f, srv := startFakeImageioStatusEngine(t, nil, false, func(int) int {
+		return http.StatusInternalServerError
+	})
+	_, _, err := downloadFromFakeImageio(t, srv, &Engine{log: zerolog.Nop()})
+	if err == nil {
+		t.Fatal("ждали ошибку: хост не отдал том ни разу")
+	}
+	for _, want := range []string{"том не скачан", "3 попытки подряд и ещё 5 с паузой",
+		"/var/log/ovirt-imageio-daemon/daemon.log", "на хосте 127.0.0.1", "HTTP 500"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("в ошибке нет %q: %v", want, err)
+		}
+	}
+	if strings.Contains(err.Error(), "/images/tr-") {
+		t.Fatalf("в ошибку попал билет передачи: %v", err)
+	}
+	want := legacyVolumeDownloadAttempts + legacyVolumeRecoveryAttempts
+	if created, finalized, probes := f.counts(); created != want || finalized != want || probes != legacyVolumeRecoveryAttempts {
+		t.Fatalf("передач %d, закрыто %d, проверок %d — ждали %d передач и %d проверок",
+			created, finalized, probes, want, legacyVolumeRecoveryAttempts)
+	}
+}
+
+// imageio хоста не отвечает совсем: после трёх попыток подряд новые передачи
+// не открываются, пока проверка не пройдёт, — движок не дёргается зря.
+func TestDownloadVolumeDoesNotOpenTransferWhileImageioIsDown(t *testing.T) {
+	f, srv := startFakeImageioStatusEngine(t, nil, true, func(int) int { return http.StatusOK })
+	_, _, err := downloadFromFakeImageio(t, srv, &Engine{log: zerolog.Nop()})
+	if err == nil || !strings.Contains(err.Error(), "не отвечает") {
+		t.Fatalf("ждали ошибку о молчащем imageio: %v", err)
+	}
+	if created, finalized, _ := f.counts(); created != legacyVolumeDownloadAttempts || finalized != legacyVolumeDownloadAttempts {
+		t.Fatalf("передач %d, закрыто %d — ждали только %d, без новых при молчащем imageio",
+			created, finalized, legacyVolumeDownloadAttempts)
+	}
+}
+
+// Поток, оборвавшийся после начала передачи, — это том, скачанный заново с
+// нуля. Таких повторов по-прежнему три, ожидание хоста их не добавляет.
+func TestDownloadVolumeStillLimitsBrokenStreams(t *testing.T) {
+	f, srv := startFakeImageioStatusEngine(t, nil, false, func(int) int { return stalledStream })
+	e := &Engine{cfg: config.BackupConfig{Transfer: config.TransferConfig{RequestTimeout: 40 * time.Millisecond}}, log: zerolog.Nop()}
+	_, _, err := downloadFromFakeImageio(t, srv, e)
+	if err == nil || !strings.Contains(err.Error(), "передача тома оборвалась 3 раза") {
+		t.Fatalf("ждали ошибку об оборванной передаче: %v", err)
+	}
+	if created, _, probes := f.counts(); created != legacyVolumeDownloadAttempts || probes != 0 {
+		t.Fatalf("передач %d, проверок %d — ждали %d передачи без проверок", created, probes, legacyVolumeDownloadAttempts)
+	}
+}
+
+// Ответ 4xx — отказ по самому запросу или билету: повтор дал бы то же самое.
+func TestDownloadVolumeDoesNotRetryImageioClientError(t *testing.T) {
+	f, srv := startFakeImageioStatusEngine(t, nil, false, func(int) int { return http.StatusForbidden })
+	_, _, err := downloadFromFakeImageio(t, srv, &Engine{log: zerolog.Nop()})
+	if err == nil || !strings.Contains(err.Error(), "HTTP 403") {
+		t.Fatalf("ждали ответ 403 без повтора: %v", err)
+	}
+	if created, _, probes := f.counts(); created != 1 || probes != 0 {
+		t.Fatalf("передач %d, проверок %d — ответ 4xx повторяться не должен", created, probes)
+	}
+}
+
+// В ошибке сборки виден слой цепочки и формат тома, на котором она встала.
+func TestMaterializeLegacyChainNamesFailedLayer(t *testing.T) {
+	_, srv := startFakeImageioStatusEngine(t, nil, false, func(int) int { return http.StatusForbidden })
+	client, err := ovirt.New(ovirt.Config{EngineURL: srv.URL, Username: "admin@internal", Password: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := &Engine{log: zerolog.Nop()}
+	_, _, err = e.materializeLegacyChain(context.Background(), client,
+		legacyVolume{ImageID: "base", Format: "raw"}, map[string]string{"base": "raw"}, t.TempDir(), nil)
+	if err == nil || !strings.Contains(err.Error(), "скачивание тома base (слой 1 цепочки, raw)") {
+		t.Fatalf("в ошибке нет слоя и формата тома: %v", err)
+	}
+}

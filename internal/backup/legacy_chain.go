@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -67,6 +68,13 @@ var (
 	// этого, а следующий том цепочки — новая передача того же диска.
 	legacyTransferFinalizeWait = 10 * time.Minute
 	legacyVolumeRetryDelay     = 2 * time.Second
+	// Том, который не скачался за legacyVolumeDownloadAttempts попыток подряд,
+	// запрашивается ещё legacyVolumeRecoveryAttempts раз с паузой
+	// legacyVolumeRecoveryDelay. Перед каждой такой попыткой проверяется,
+	// отвечает ли imageio хоста: пока он молчит, передача не открывается.
+	legacyVolumeRecoveryAttempts = 5
+	legacyVolumeRecoveryDelay    = time.Minute
+	legacyVolumeProbeTimeout     = 10 * time.Second
 	// legacyTransferOpenWait — сколько повторять открытие передачи тома, пока
 	// движок отвечает 409 «disks are locked».
 	legacyTransferOpenWait = 10 * time.Minute
@@ -164,6 +172,7 @@ func (e *Engine) materializeLegacyChain(ctx context.Context, client *ovirt.Clien
 		if depth == 0 {
 			vol.DiskID = top.DiskID
 		}
+		started := time.Now()
 		n, err := e.downloadVolumeFrom(ctx, client, vol, path, func(done int64) {
 			if onDownload != nil {
 				onDownload(downloaded + done)
@@ -171,8 +180,14 @@ func (e *Engine) materializeLegacyChain(ctx context.Context, client *ovirt.Clien
 		})
 		downloaded += n
 		if err != nil {
-			return "", downloaded, fmt.Errorf("скачивание тома %s: %w", id, err)
+			return "", downloaded, fmt.Errorf("скачивание тома %s (слой %d цепочки, %s): %w",
+				id, depth+1, qemuFormat(format), err)
 		}
+		// По этим записям в карточке запуска видно, из каких томов собран
+		// диск и на каком слое остановилась сборка.
+		run, _ := ctx.Value(transferOwnerKey{}).(*model.BackupRun)
+		e.event(ctx, run, model.RunEventLegacyAssembly, time.Since(started), fmt.Sprintf(
+			"слой %d цепочки: том %s (%s) скачан, %s", depth+1, id, qemuFormat(format), humanBytes(n)))
 		chain = append(chain, localVolume{id: id, format: format, path: path})
 		if format != "cow" {
 			break
@@ -225,49 +240,135 @@ func (e *Engine) downloadVolume(ctx context.Context, client *ovirt.Client, image
 }
 
 // downloadVolumeFrom скачивает том или, если задан DiskID, диск целиком.
+//
+// Сбой повторяется в два приёма. Сначала legacyVolumeDownloadAttempts попыток
+// подряд: их хватает на оборванный поток и короткий сбой хоста. Затем служба
+// ждёт хост: ещё legacyVolumeRecoveryAttempts попыток с паузой, перед каждой
+// проверяется, что imageio отвечает. Несколько минут ожидания дешевле запуска,
+// в котором верхние слои цепочки уже скачаны.
 func (e *Engine) downloadVolumeFrom(ctx context.Context, client *ovirt.Client, vol legacyVolume, path string,
 	onProgress func(int64)) (int64, error) {
 	imageID := vol.ImageID
-	var lastN int64
-	for attempt := 1; attempt <= legacyVolumeDownloadAttempts; attempt++ {
-		n, err := e.downloadVolumeAttempt(ctx, client, vol, path, onProgress)
+	attempts := legacyVolumeDownloadAttempts + legacyVolumeRecoveryAttempts
+	var (
+		lastN   int64
+		lastErr error
+		dataURL string
+		// broken — сколько раз поток оборвался уже после начала передачи.
+		broken int
+	)
+	for attempt := 1; attempt <= attempts; attempt++ {
+		if attempt > legacyVolumeDownloadAttempts {
+			select {
+			case <-ctx.Done():
+				return lastN, ctx.Err()
+			case <-time.After(legacyVolumeRecoveryDelay):
+			}
+			if dataURL != "" {
+				if err := imageio.Alive(ctx, client.DataHTTPClient(), dataURL, legacyVolumeProbeTimeout); err != nil {
+					if ctx.Err() != nil {
+						return lastN, ctx.Err()
+					}
+					lastErr = err
+					e.log.Warn().Err(err).Str("том", imageID).Int("попытка", attempt).
+						Msg("imageio хоста не отвечает — передача тома пока не открывается")
+					continue
+				}
+			}
+		}
+		n, usedURL, err := e.downloadVolumeAttempt(ctx, client, vol, path, onProgress)
 		lastN = n
+		if usedURL != "" {
+			dataURL = usedURL
+		}
 		if err == nil {
 			return n, nil
 		}
-		// Повторяется только оборванный поток данных. Отказ движка (в том
-		// числе 409 «disks are locked» после 10 минут ожидания) и не
-		// освобождённая передача — не обрыв: новая попытка получила бы тот
-		// же ответ.
+		// Повторяется оборванный поток данных и отказ самого хоста — ответ
+		// imageio 5xx: новая передача даёт новый билет, и движок готовит том
+		// заново. Отказ движка (в том числе 409 «disks are locked» после 10
+		// минут ожидания) и не освобождённая передача — не обрыв: новая
+		// попытка получила бы тот же ответ.
 		var apiErr *ovirt.APIError
+		hostErr := imageioHostError(err)
 		if ctx.Err() != nil || errors.Is(err, errTransferNotReleased) || errors.As(err, &apiErr) ||
-			!imageio.IsNetworkError(err) {
+			(hostErr == nil && !imageio.IsNetworkError(err)) {
 			return n, err
 		}
-		if attempt == legacyVolumeDownloadAttempts {
-			return n, fmt.Errorf("передача тома оборвалась после %d попыток; каждая попытка начиналась заново, так как imageio oVirt 4.3 не поддерживает продолжение: %w",
-				legacyVolumeDownloadAttempts, err)
+		lastErr = err
+		// Оборванный поток — это том, скачанный заново с нулевого байта:
+		// таких повторов не больше, чем было всегда.
+		if n > 0 {
+			broken++
+		}
+		if broken == legacyVolumeDownloadAttempts {
+			return n, fmt.Errorf("передача тома оборвалась %d раза; каждая попытка начиналась заново, так как imageio oVirt 4.3 не поддерживает продолжение: %w",
+				broken, err)
+		}
+		if attempt == attempts {
+			break
 		}
 		if onProgress != nil {
 			onProgress(0)
 		}
-		e.log.Warn().Err(err).Str("том", imageID).Int("попытка", attempt).
-			Msg("поток imageio остановился — предыдущий билет закрыт, том будет скачан заново")
-		select {
-		case <-ctx.Done():
-			return lastN, ctx.Err()
-		case <-time.After(legacyVolumeRetryDelay):
+		if hostErr != nil {
+			e.log.Warn().Err(err).Str("том", imageID).Int("попытка", attempt).
+				Msg("imageio хоста ответил ошибкой — том будет запрошен новой передачей")
+		} else {
+			e.log.Warn().Err(err).Str("том", imageID).Int("попытка", attempt).
+				Msg("поток imageio остановился — предыдущий билет закрыт, том будет скачан заново")
+		}
+		switch {
+		case attempt < legacyVolumeDownloadAttempts:
+			select {
+			case <-ctx.Done():
+				return lastN, ctx.Err()
+			case <-time.After(legacyVolumeRetryDelay):
+			}
+		case attempt == legacyVolumeDownloadAttempts:
+			run, _ := ctx.Value(transferOwnerKey{}).(*model.BackupRun)
+			e.event(ctx, run, model.RunEventLegacyAssembly, 0, fmt.Sprintf(
+				"том %s не скачан за %d попытки подряд: %v. Ещё до %d попыток с паузой %s; перед каждой "+
+					"проверяется, отвечает ли imageio хоста", imageID, legacyVolumeDownloadAttempts, err,
+				legacyVolumeRecoveryAttempts, humanDuration(legacyVolumeRecoveryDelay)))
 		}
 	}
-	return lastN, fmt.Errorf("исчерпаны попытки скачивания тома")
+	where := ""
+	if hostErr := imageioHostError(lastErr); hostErr != nil {
+		where = fmt.Sprintf("; причину imageio пишет в /var/log/ovirt-imageio-daemon/daemon.log на хосте %s",
+			imageioHost(hostErr))
+	}
+	return lastN, fmt.Errorf("том не скачан: не удались %d попытки подряд и ещё %d с паузой %s%s: %w",
+		legacyVolumeDownloadAttempts, legacyVolumeRecoveryAttempts, humanDuration(legacyVolumeRecoveryDelay),
+		where, lastErr)
 }
 
+// imageioHostError — ответ imageio 5xx: демон на хосте не смог открыть или
+// прочитать том. В отличие от 4xx это сбой хоста, а не неверный запрос.
+func imageioHostError(err error) *imageio.Error {
+	var e *imageio.Error
+	if errors.As(err, &e) && e.Status >= 500 {
+		return e
+	}
+	return nil
+}
+
+// imageioHost — имя хоста из адреса передачи, без порта и билета.
+func imageioHost(e *imageio.Error) string {
+	if u, err := url.Parse(e.URL); err == nil && u.Hostname() != "" {
+		return u.Hostname()
+	}
+	return "передачи"
+}
+
+// downloadVolumeAttempt — одна передача тома. dataURL — адрес, с которого
+// шло чтение: по нему потом проверяется, отвечает ли imageio хоста.
 func (e *Engine) downloadVolumeAttempt(ctx context.Context, client *ovirt.Client, vol legacyVolume, path string,
-	onProgress func(int64)) (n int64, retErr error) {
+	onProgress func(int64)) (n int64, dataURL string, retErr error) {
 
 	transfer, err := e.openVolumeTransfer(ctx, client, vol.transferRequest(e.cfg.Transfer.InactivityTimeout))
 	if err != nil {
-		return 0, fmt.Errorf("открытие передачи тома: %w", err)
+		return 0, "", fmt.Errorf("открытие передачи тома: %w", err)
 	}
 	e.noteTransferOpened(ctx, transfer)
 	success := false
@@ -302,18 +403,18 @@ func (e *Engine) downloadVolumeAttempt(ctx context.Context, client *ovirt.Client
 	}()
 	ready, err := client.WaitTransferReady(ctx, transfer.ID, 10*time.Minute)
 	if err != nil {
-		return 0, err
+		return 0, "", err
 	}
-	url := ovirt.DataURL(ready, e.cfg.Transfer.PreferProxy)
-	urls := []string{url}
-	if !e.cfg.Transfer.PreferProxy && ready.ProxyURL != "" && ready.ProxyURL != url {
+	dataURL = ovirt.DataURL(ready, e.cfg.Transfer.PreferProxy)
+	urls := []string{dataURL}
+	if !e.cfg.Transfer.PreferProxy && ready.ProxyURL != "" && ready.ProxyURL != dataURL {
 		urls = append(urls, ready.ProxyURL)
 	}
 	for _, candidate := range urls {
 		var file *os.File
 		file, err = os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o640)
 		if err != nil {
-			return 0, err
+			return 0, dataURL, err
 		}
 		out := &sparseFileWriter{file: file, onProgress: onProgress}
 		source := imageio.New(candidate, client.DataHTTPClient()).WithTimeouts(e.imageioTimeouts(0))
@@ -329,10 +430,10 @@ func (e *Engine) downloadVolumeAttempt(ctx context.Context, client *ovirt.Client
 		}
 	}
 	if err != nil {
-		return n, err
+		return n, dataURL, err
 	}
 	success = true
-	return n, nil
+	return n, dataURL, nil
 }
 
 // sparseFileWriter пишет поток в файл, пропуская нулевые блоки: вместо них

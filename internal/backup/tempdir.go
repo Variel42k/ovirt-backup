@@ -93,7 +93,10 @@ func (e *Engine) legacyWorkspaceBase(ctx context.Context, run *model.BackupRun, 
 // legacyAssemblyNeed — сколько места займёт сборка образа диска: скачанные
 // тома и собранный сырой образ (для тома raw без предков — только он).
 func legacyAssemblyNeed(d ovirt.Disk, format string) int64 {
-	data := d.ActualSize.Int64()
+	// Скачивается вся цепочка томов, а actual_size описывает только активный
+	// том: после предыдущего бэкапа это гигабайты, и по ним служба выбирала
+	// каталог, куда не помещался и первый том. Место цепочки — total_size.
+	data := max(d.ActualSize.Int64(), d.TotalSize.Int64())
 	if size := d.ProvisionedSize.Int64(); size > 0 && (data <= 0 || data > size) {
 		data = size
 	}

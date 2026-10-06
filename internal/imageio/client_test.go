@@ -156,3 +156,27 @@ func TestIsNetworkError(t *testing.T) {
 		t.Fatal("отмена и отсутствие ошибки — не сетевые ошибки")
 	}
 }
+
+// Проверка «отвечает ли imageio» идёт на /images/* без билета: любой ответ
+// HTTP значит, что демон жив, а закрытый порт — что нет.
+func TestAliveAsksDaemonWithoutTicket(t *testing.T) {
+	var gotMethod, gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}))
+	if err := Alive(context.Background(), srv.Client(), srv.URL+"/images/secret-ticket", time.Second); err != nil {
+		t.Fatalf("демон ответил, пусть и отказом, — он жив: %v", err)
+	}
+	if gotMethod != http.MethodOptions || gotPath != "/images/*" {
+		t.Fatalf("проверка ушла как %s %s — ждали OPTIONS /images/* без билета", gotMethod, gotPath)
+	}
+	srv.Close()
+	err := Alive(context.Background(), srv.Client(), srv.URL+"/images/secret-ticket", time.Second)
+	if err == nil {
+		t.Fatal("порт закрыт — ждали ошибку")
+	}
+	if !IsNetworkError(err) {
+		t.Fatalf("молчащий демон — состояние сети, а не ответ демона: %v", err)
+	}
+}

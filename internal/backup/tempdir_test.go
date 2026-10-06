@@ -35,6 +35,12 @@ func TestLegacyAssemblyNeed(t *testing.T) {
 	if got := legacyAssemblyNeed(disk, "raw"); got != int64(142*gib) {
 		t.Fatalf("том raw — только данные: %d", got)
 	}
+	// У диска со снапшотами actual_size — только активный том: оценка идёт
+	// по месту всей цепочки, иначе под 142 ГБ выбирается каталог на 50 ГБ.
+	chained := ovirt.Disk{ActualSize: 3 * gib, TotalSize: 142 * gib, ProvisionedSize: 300 * gib}
+	if got := legacyAssemblyNeed(chained, "cow"); got != int64(284*gib) {
+		t.Fatalf("диск с цепочкой томов оценён по активному тому: %d", got)
+	}
 	// Цепочка с метаданными бывает больше диска, а данных в образе больше
 	// его размера не будет.
 	if got := legacyAssemblyNeed(ovirt.Disk{ActualSize: 400 * gib, ProvisionedSize: 300 * gib}, "raw"); got != int64(300*gib) {

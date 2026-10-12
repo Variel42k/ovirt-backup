@@ -761,12 +761,19 @@ func (s *Server) handleRunChain(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDeleteRun(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	// Кто удалил, записывается в саму копию: рядом со сроком карантина видно,
+	// человек её убрал или правило хранения.
+	actor := "anonymous"
+	if p := principalFrom(r.Context()); p != nil {
+		actor = p.Username
+	}
 
 	// purge=true стирает данные немедленно, минуя карантин. Нужно, когда место
 	// требуется прямо сейчас; в остальных случаях промежуток, за который можно
 	// передумать, важнее освободившихся гигабайт.
 	if queryBool(r, "purge") {
-		if err := s.engine.PurgeRunData(context.WithoutCancel(r.Context()), id); err != nil {
+		if err := s.engine.PurgeRunData(context.WithoutCancel(r.Context()), id,
+			backup.DeleteReasonErased+": "+actor); err != nil {
 			s.audit(r, "backup.purge", model.ScopeBackup, id, false, err.Error())
 			s.writeError(w, r, err)
 			return
@@ -776,7 +783,8 @@ func (s *Server) handleDeleteRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.engine.DeleteRunData(context.WithoutCancel(r.Context()), id); err != nil {
+	if err := s.engine.DeleteRunData(context.WithoutCancel(r.Context()), id,
+		backup.DeleteReasonManual+": "+actor); err != nil {
 		s.audit(r, "backup.delete", model.ScopeBackup, id, false, err.Error())
 		s.writeError(w, r, err)
 		return

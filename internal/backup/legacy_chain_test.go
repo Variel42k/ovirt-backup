@@ -294,7 +294,7 @@ func TestMaterializeLegacyChainRawBase(t *testing.T) {
 	}
 	e := &Engine{log: zerolog.Nop()}
 	path, n, err := e.materializeLegacyChain(context.Background(), client,
-		legacyVolume{ImageID: "base", Format: "raw"}, map[string]string{"base": "raw"}, t.TempDir(), nil)
+		legacyVolume{ImageID: "base", Format: "raw"}, map[string]string{"base": "raw"}, 1, t.TempDir(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -486,6 +486,8 @@ func startFakeImageioStatusEngine(t *testing.T, volume []byte, imageioDown bool,
 		attempt, _ := strconv.Atoi(strings.TrimPrefix(r.PathValue("id"), "tr-"))
 		switch status := answer(attempt); status {
 		case http.StatusOK:
+			// Настоящий демон называет длину тома: по ней виден ход скачивания.
+			w.Header().Set("Content-Length", strconv.Itoa(len(volume)))
 			_, _ = w.Write(volume)
 		case stalledStream:
 			_, _ = w.Write([]byte("incomplete"))
@@ -642,8 +644,210 @@ func TestMaterializeLegacyChainNamesFailedLayer(t *testing.T) {
 	}
 	e := &Engine{log: zerolog.Nop()}
 	_, _, err = e.materializeLegacyChain(context.Background(), client,
-		legacyVolume{ImageID: "base", Format: "raw"}, map[string]string{"base": "raw"}, t.TempDir(), nil)
+		legacyVolume{ImageID: "base", Format: "raw"}, map[string]string{"base": "raw"}, 1, t.TempDir(), nil)
 	if err == nil || !strings.Contains(err.Error(), "скачивание тома base (слой 1 цепочки, raw)") {
 		t.Fatalf("в ошибке нет слоя и формата тома: %v", err)
 	}
+}
+
+// Ход скачивания считается по слоям и по длине, которую назвал хост: процент
+// растёт внутри слоя и доходит до конца, а не упирается в размер диска.
+func TestMaterializeLegacyChainReportsProgress(t *testing.T) {
+	volume := bytes.Repeat([]byte{7}, 64*sparseBlock)
+	_, srv := startFakeImageioStatusEngine(t, volume, false, func(int) int { return http.StatusOK })
+	client, err := ovirt.New(ovirt.Config{EngineURL: srv.URL, Username: "admin@internal", Password: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := &Engine{log: zerolog.Nop()}
+	var seen []chainProgress
+	_, _, err = e.materializeLegacyChain(context.Background(), client,
+		legacyVolume{ImageID: "base", Format: "raw"}, map[string]string{"base": "raw"}, 1, t.TempDir(),
+		func(p chainProgress) { seen = append(seen, p) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) < 2 {
+		t.Fatalf("ждали отчёт в ходе скачивания и по его окончании, получили %d", len(seen))
+	}
+	if first := seen[0]; first.Download <= 0 || first.Download >= 1 || first.Downloaded >= int64(len(volume)) {
+		t.Fatalf("первый отчёт должен показывать часть слоя по длине от хоста: %+v", first)
+	}
+	if last := seen[len(seen)-1]; last.Download != 1 || last.Downloaded != int64(len(volume)) {
+		t.Fatalf("последний отчёт: %+v — ждали весь том и долю 1", last)
+	}
+	if first := seen[0]; first.Layers != 1 || len(first.Seen) != 1 || first.Seen[0].Size != int64(len(volume)) ||
+		first.Seen[0].Finished || first.Seen[0].Format != "raw" {
+		t.Fatalf("в отчёте нет слоя и его размера от хоста: %+v", first)
+	}
+	if last := seen[len(seen)-1]; len(last.Seen) != 1 || !last.Seen[0].Finished || last.Seen[0].Done != int64(len(volume)) {
+		t.Fatalf("последний отчёт не закрывает слой: %+v", last)
+	}
+	for i := 1; i < len(seen); i++ {
+		if seen[i].Download < seen[i-1].Download {
+			t.Fatalf("доля скачивания пошла назад: %+v", seen)
+		}
+	}
+}
+
+func TestLayerLabel(t *testing.T) {
+	for _, c := range []struct {
+		layer, layers int
+		want          string
+	}{
+		{2, 3, "слой 2 из 3"},
+		{3, 3, "слой 3 из 3"},
+		{2, 0, "слой 2"}, // длина цепочки неизвестна
+		{4, 3, "слой 4"}, // цепочка длиннее, чем обещали снапшоты
+	} {
+		if got := layerLabel(c.layer, c.layers); got != c.want {
+			t.Fatalf("layerLabel(%d, %d) = %q, want %q", c.layer, c.layers, got, c.want)
+		}
+	}
+}
+
+// Процент запуска складывается из скачивания, сборки и записи: к концу
+// скачивания он не 99, а 70.
+func TestLegacyStagePercent(t *testing.T) {
+	for _, c := range []struct {
+		download, assembly, write float64
+		want                      int
+	}{
+		{0, 0, 0, 0},
+		{0.5, 0, 0, 35},
+		{1, 0, 0, 70},
+		{1, 0.5, 0, 75},
+		{1, 1, 0, 80},
+		{1, 1, 0.5, 90},
+		{1, 1, 1, 100},
+	} {
+		if got := legacyStagePercent(c.download, c.assembly, c.write); got != c.want {
+			t.Fatalf("legacyStagePercent(%v, %v, %v) = %d, want %d", c.download, c.assembly, c.write, got, c.want)
+		}
+	}
+}
+
+// Число слоёв цепочки — это число томов диска в снапшотах ВМ: активный
+// снапшот томов не добавляет, а том, названный дважды, считается один раз.
+func TestSnapshotVolumeFormatsCountsLayers(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ovirt-engine/sso/oauth/token", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"access_token":"token","exp":"9999999999999"}`))
+	})
+	mux.HandleFunc("GET /ovirt-engine/api/vms/vm-1/snapshots", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"snapshot":[{"id":"act","snapshot_type":"active"},` +
+			`{"id":"s1","snapshot_type":"regular"},{"id":"s2","snapshot_type":"regular"}]}`))
+	})
+	mux.HandleFunc("GET /ovirt-engine/api/vms/vm-1/snapshots/{id}/disks", func(w http.ResponseWriter, r *http.Request) {
+		switch r.PathValue("id") {
+		case "s1":
+			_, _ = w.Write([]byte(`{"disk":[{"id":"disk-a","image_id":"a1","format":"raw"},` +
+				`{"id":"disk-b","image_id":"b1","format":"cow"}]}`))
+		case "s2":
+			_, _ = w.Write([]byte(`{"disk":[{"id":"disk-a","image_id":"a2","format":"cow"},` +
+				`{"id":"disk-b","image_id":"b1","format":"cow"}]}`))
+		default:
+			_, _ = w.Write([]byte(`{"disk":[{"id":"disk-a","image_id":"a3","format":"cow"}]}`))
+		}
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	client, err := ovirt.New(ovirt.Config{EngineURL: srv.URL, Username: "admin@internal", Password: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	formats, layers, err := snapshotVolumeFormats(context.Background(), client, "vm-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(formats) != 3 || formats["a1"] != "raw" || formats["a2"] != "cow" || formats["b1"] != "cow" {
+		t.Fatalf("форматы томов: %v", formats)
+	}
+	if layers["disk-a"] != 2 || layers["disk-b"] != 1 {
+		t.Fatalf("слоёв по дискам: %v — ждали disk-a 2, disk-b 1", layers)
+	}
+}
+
+// Этап называет номер, действие и то, от чего считается его ход.
+func TestLegacyStageText(t *testing.T) {
+	const gib = int64(1) << 30
+	done := chainLayer{Format: "qcow2", Done: 200 * gib, Size: 200 * gib, Finished: true}
+	for _, c := range []struct {
+		name string
+		got  string
+		want string
+	}{
+		{"Слой с известным размером",
+			chainProgress{Layers: 3, Seen: []chainLayer{done, {Format: "qcow2", Done: 35 * gib, Size: 70 * gib}}}.stage(300 * gib),
+			"Этап 1 из 3 — скачивание томов, слой 2 из 3: 35.0 ГБ из 70.0 ГБ"},
+		{"хост не назвал размер слоя",
+			chainProgress{Seen: []chainLayer{{Format: "qcow2", Done: 5 * gib, Size: -1}}}.stage(300 * gib),
+			"Этап 1 из 3 — скачивание томов, слой 1: 5.0 ГБ"},
+		{"сборка",
+			chainProgress{Assembling: true, Assembly: 0.5, Layers: 3, Seen: []chainLayer{done, done, done}}.stage(300 * gib),
+			"Этап 2 из 3 — сборка образа из слоёв (3) через qemu-img: 150.0 ГБ из 300.0 ГБ"},
+		{"запись", legacyWriteStage(120*gib, 300*gib),
+			"Этап 3 из 3 — запись образа в хранилище: 120.0 ГБ из 300.0 ГБ"},
+	} {
+		if c.got != c.want {
+			t.Fatalf("%s:\n  получено %q\n  ждали    %q", c.name, c.got, c.want)
+		}
+	}
+}
+
+// Карточка запуска показывает каждый слой отдельной полоской: скачанные,
+// текущий и те, до которых очередь ещё не дошла, а за ними сборку и запись.
+func TestLegacyRunSteps(t *testing.T) {
+	const gib = int64(1) << 30
+	type row struct {
+		title, state string
+		done, total  int64
+	}
+	check := func(name string, got []model.RunStep, want []row) {
+		t.Helper()
+		if len(got) != len(want) {
+			t.Fatalf("%s: частей %d, ждали %d: %+v", name, len(got), len(want), got)
+		}
+		for i, w := range want {
+			if g := got[i]; g.Title != w.title || g.State != w.state || g.Done != w.done || g.Total != w.total {
+				t.Fatalf("%s, часть %d: %+v — ждали %+v", name, i+1, g, w)
+			}
+		}
+	}
+	first := chainLayer{Format: "qcow2", Done: 200 * gib, Size: 200 * gib, Finished: true}
+	second := chainLayer{Format: "qcow2", Done: 35 * gib, Size: 70 * gib}
+
+	check("идёт второй слой", chainProgress{Layers: 3, Seen: []chainLayer{first, second}}.runSteps(300*gib, -1), []row{
+		{"Слой 1 из 3 · qcow2", "done", 200 * gib, 200 * gib},
+		{"Слой 2 из 3 · qcow2", "running", 35 * gib, 70 * gib},
+		{"Слой 3 из 3", "pending", 0, 0},
+		{legacyAssemblyTitle, "pending", 0, 300 * gib},
+		{legacyWriteTitle, "pending", 0, 300 * gib},
+	})
+
+	second.Done, second.Finished = 70*gib, true
+	third := chainLayer{Format: "raw", Done: 200 * gib, Size: 200 * gib, Finished: true}
+	all := []chainLayer{first, second, third}
+	check("сборка", chainProgress{Layers: 3, Seen: all, Assembling: true, Assembly: 0.5}.runSteps(300*gib, -1), []row{
+		{"Слой 1 из 3 · qcow2", "done", 200 * gib, 200 * gib},
+		{"Слой 2 из 3 · qcow2", "done", 70 * gib, 70 * gib},
+		{"Слой 3 из 3 · raw", "done", 200 * gib, 200 * gib},
+		{legacyAssemblyTitle, "running", 150 * gib, 300 * gib},
+		{legacyWriteTitle, "pending", 0, 300 * gib},
+	})
+	check("запись", chainProgress{Layers: 3, Seen: all, Assembling: true, Assembly: 1}.runSteps(300*gib, 120*gib), []row{
+		{"Слой 1 из 3 · qcow2", "done", 200 * gib, 200 * gib},
+		{"Слой 2 из 3 · qcow2", "done", 70 * gib, 70 * gib},
+		{"Слой 3 из 3 · raw", "done", 200 * gib, 200 * gib},
+		{legacyAssemblyTitle, "done", 300 * gib, 300 * gib},
+		{legacyWriteTitle, "running", 120 * gib, 300 * gib},
+	})
+
+	// Том raw без предков — уже образ диска: сборки нет, и слои, которых
+	// цепочка не дала, после скачивания не ждут.
+	raw := chainLayer{Format: "raw", Done: 300 * gib, Size: 300 * gib, Finished: true}
+	check("том raw без предков", chainProgress{Layers: 2, Seen: []chainLayer{raw}}.runSteps(300*gib, 10*gib), []row{
+		{"Слой 1 из 2 · raw", "done", 300 * gib, 300 * gib},
+		{legacyWriteTitle, "running", 10 * gib, 300 * gib},
+	})
 }

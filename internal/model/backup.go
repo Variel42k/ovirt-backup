@@ -711,6 +711,24 @@ const MinReadLimitMBps = 10
 // MaxFreezeLimit — верхняя граница предела заморозки в задании.
 const MaxFreezeLimit = 10 * time.Minute
 
+// RunStep — часть работы идущего запуска со своим ходом: слой цепочки томов,
+// сборка образа, запись в хранилище.
+type RunStep struct {
+	Title string `json:"title"`
+	// State — pending: ещё не начата, running: идёт, done: закончена.
+	State string `json:"state"`
+	// Done и Total — ход в байтах. Total 0 — размер ещё не известен.
+	Done  int64 `json:"done"`
+	Total int64 `json:"total"`
+}
+
+// Состояния части работы запуска.
+const (
+	RunStepPending = "pending"
+	RunStepRunning = "running"
+	RunStepDone    = "done"
+)
+
 // BackupRun is one execution: one VM, one point in time, one repository.
 type BackupRun struct {
 	ID       string     `json:"id"`
@@ -770,6 +788,11 @@ type BackupRun struct {
 	// синхронизируется, а состав объектов после этого не меняется.
 	ConfigStored bool `json:"-"`
 	Progress     int  `json:"progress"` // 0..100
+	// Stage — этап идущего запуска словами: что он делает сейчас и от чего
+	// считается ход этапа. Steps — части работы с ходом каждой. У завершённого
+	// запуска оба пусты.
+	Stage string    `json:"stage,omitempty"`
+	Steps []RunStep `json:"steps,omitempty"`
 
 	Encrypted   bool   `json:"encrypted"`
 	Compression string `json:"compression"`
@@ -794,7 +817,12 @@ type BackupRun struct {
 	// инфраструктуру, и секунды между командой и потерей истории слишком мало,
 	// чтобы кто-то успел вмешаться.
 	PurgeAfter *time.Time `json:"purge_after,omitempty"`
-	Imported   bool       `json:"imported"`
+	// DeleteReason — почему копия удалена: кто удалил её вручную или какое
+	// правило хранения сработало. DeletedAt — когда. Без этого у копии в
+	// карантине виден только срок, а не то, как она туда попала.
+	DeleteReason string     `json:"delete_reason,omitempty"`
+	DeletedAt    *time.Time `json:"deleted_at,omitempty"`
+	Imported     bool       `json:"imported"`
 	// ManifestSHA256 позволяет отличить ту же точку в другом хранилище от
 	// конфликта идентификаторов при восстановлении каталога.
 	ManifestSHA256 string    `json:"manifest_sha256,omitempty"`

@@ -575,9 +575,11 @@ type plan struct {
 	LegacyMode model.LegacyIncrementalMode
 	// LegacyChain — диски движка без Backup API, том снапшота которых в
 	// формате qcow2: imageio 4.3 отдаёт его как есть, и образ собирается из
-	// цепочки томов (legacy_chain.go). LegacyFormats — форматы томов ВМ.
+	// цепочки томов (legacy_chain.go). LegacyFormats — форматы томов ВМ,
+	// LegacyLayers — сколько томов в цепочке каждого диска.
 	LegacyChain   map[string]legacyVolume
 	LegacyFormats map[string]string
+	LegacyLayers  map[string]int
 }
 
 // markFullDisk отмечает диск инкрементального запуска, который копируется
@@ -1722,7 +1724,7 @@ func (e *Engine) runSnapshot(ctx context.Context, client *ovirt.Client, backend 
 		p.LegacyChain[sd.ID] = legacyVolume{ImageID: sd.ImageID, Format: sd.Format}
 	}
 	if len(p.LegacyChain) > 0 {
-		if p.LegacyFormats, err = snapshotVolumeFormats(ctx, client, vm.ID); err != nil {
+		if p.LegacyFormats, p.LegacyLayers, err = snapshotVolumeFormats(ctx, client, vm.ID); err != nil {
 			return nil, err
 		}
 		names := make([]string, 0, len(p.LegacyChain))
@@ -1748,6 +1750,7 @@ func (e *Engine) runSnapshot(ctx context.Context, client *ovirt.Client, backend 
 		// qcow2 скачивается целиком и переводится в сырой образ локально.
 		p.LegacyChain = map[string]legacyVolume{}
 		p.LegacyFormats = map[string]string{}
+		p.LegacyLayers = map[string]int{}
 		for sourceID, c := range clones {
 			if c.Format != "cow" {
 				cloneStream[sourceID] = c.ID
@@ -1755,6 +1758,7 @@ func (e *Engine) runSnapshot(ctx context.Context, client *ovirt.Client, backend 
 			}
 			p.LegacyChain[sourceID] = legacyVolume{ImageID: c.ImageID, Format: c.Format, DiskID: c.ID}
 			p.LegacyFormats[c.ImageID] = c.Format
+			p.LegacyLayers[sourceID] = 1
 		}
 	}
 
@@ -1858,7 +1862,7 @@ func (e *Engine) copyDisks(ctx context.Context, client *ovirt.Client, backend re
 			if top, ok := p.LegacyChain[disk.ID]; ok {
 				compare := p.LegacyMode == model.LegacyIncrementalCompare && run.Type.NeedsParent()
 				manifest, read, stored, err = e.copyLegacyChainDisk(ctx, client, backend, srv, vm, run, req,
-					disk, index, chunkSize, top, p.LegacyFormats, compare)
+					disk, index, chunkSize, top, p.LegacyFormats, p.LegacyLayers[disk.ID], compare)
 			} else {
 				manifest, read, stored, err = e.copyOneDisk(ctx, client, backend, srv, vm, run, req,
 					disk, index, chunkSize, factory(disk), diskContext, diskType, p, pacer)

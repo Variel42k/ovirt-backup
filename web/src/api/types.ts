@@ -454,6 +454,15 @@ export interface ManualStep {
  */
 export type FreezeBy = '' | 'service' | 'engine' | 'mixed'
 
+/** Часть работы идущего запуска со своим ходом. */
+export interface RunStep {
+  title: string
+  state: 'pending' | 'running' | 'done'
+  /** Ход в байтах; total 0 — размер ещё не известен. */
+  done: number
+  total: number
+}
+
 export interface BackupRun {
   id: string
   job_run_id?: string
@@ -482,6 +491,10 @@ export interface BackupRun {
   read_bytes: number
   stored_bytes: number
   progress: number
+  /** Этап идущего запуска словами: что делается сейчас и от чего считается ход. */
+  stage?: string
+  /** Части работы идущего запуска с ходом каждой: слои цепочки, сборка, запись. */
+  steps?: RunStep[]
   encrypted: boolean
   compression: string
   verify_status?: RunStatus
@@ -500,6 +513,9 @@ export interface BackupRun {
    * можно вернуть. Пусто при deleted=true — данные уже стёрты.
    */
   purge_after?: string
+  /** Почему копия удалена: кто удалил вручную или какое правило хранения сработало. */
+  delete_reason?: string
+  deleted_at?: string
   created_at: string
   disks?: BackupDisk[]
   skipped_disks?: SkippedDisk[]

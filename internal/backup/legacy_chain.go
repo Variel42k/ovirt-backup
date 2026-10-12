@@ -99,13 +99,15 @@ func transferNotReleased(cause error, transferID, phase string, err error) error
 // snapshotVolumeFormats — формат каждого тома ВМ по её снапшотам. По нему
 // видно, как скачивать том и надо ли искать у него предка. Снапшот, диски
 // которого не прочитались, пропускается: если его том понадобится, сборка
-// цепочки остановится с понятной ошибкой.
-func snapshotVolumeFormats(ctx context.Context, client *ovirt.Client, vmID string) (map[string]string, error) {
+// цепочки остановится с понятной ошибкой. Второй результат — сколько томов у
+// каждого диска: столько слоёв в его цепочке.
+func snapshotVolumeFormats(ctx context.Context, client *ovirt.Client, vmID string) (map[string]string, map[string]int, error) {
 	snapshots, err := client.ListSnapshots(ctx, vmID)
 	if err != nil {
-		return nil, fmt.Errorf("список снапшотов ВМ: %w", err)
+		return nil, nil, fmt.Errorf("список снапшотов ВМ: %w", err)
 	}
 	formats := map[string]string{}
+	layers := map[string]int{}
 	for _, s := range snapshots {
 		if s.SnapshotType == "active" {
 			continue
@@ -116,11 +118,14 @@ func snapshotVolumeFormats(ctx context.Context, client *ovirt.Client, vmID strin
 		}
 		for _, d := range disks {
 			if d.ImageID != "" && d.Format != "" {
+				if _, seen := formats[d.ImageID]; !seen {
+					layers[d.ID]++
+				}
 				formats[d.ImageID] = d.Format
 			}
 		}
 	}
-	return formats, nil
+	return formats, layers, nil
 }
 
 // needsLegacyChain — надо ли собирать диск из цепочки: движок без Backup API
@@ -154,14 +159,133 @@ type localVolume struct {
 	id, format, path string
 }
 
+// chainLayer — слой цепочки, до которого дошло скачивание.
+type chainLayer struct {
+	Format string // qcow2 | raw
+	// Done — сколько байт слоя скачано; Size — его размер, −1, пока хост его
+	// не назвал.
+	Done, Size int64
+	Finished   bool
+}
+
+// chainProgress — ход сборки образа из цепочки томов.
+type chainProgress struct {
+	// Downloaded — сколько байт скачано по всем слоям.
+	Downloaded int64
+	// Download и Assembly — доли выполненного от 0 до 1: скачивание томов и
+	// сведение слоёв через qemu-img.
+	Download, Assembly float64
+	// Layers — сколько слоёв в цепочке по снапшотам ВМ (0 — неизвестно);
+	// Seen — слои, до которых дошло скачивание, по порядку.
+	Layers int
+	Seen   []chainLayer
+	// Assembling — тома скачаны, qemu-img сводит слои в образ.
+	Assembling bool
+}
+
+// legacySteps — этапов у сборки образа из цепочки: скачивание, сборка, запись.
+const legacySteps = 3
+
+// Названия частей работы после скачивания слоёв.
+const (
+	legacyAssemblyTitle = "Сборка образа через qemu-img"
+	legacyWriteTitle    = "Запись образа в хранилище"
+)
+
+// stage — этап одной строкой: его номер, что делается и от чего считается
+// ход. diskSize — размер образа, который собирает qemu-img.
+func (p chainProgress) stage(diskSize int64) string {
+	if p.Assembling {
+		return fmt.Sprintf("Этап 2 из %d — сборка образа из слоёв (%d) через qemu-img: %s из %s", legacySteps,
+			len(p.Seen), humanBytes(int64(p.Assembly*float64(diskSize))), humanBytes(diskSize))
+	}
+	if len(p.Seen) == 0 {
+		return fmt.Sprintf("Этап 1 из %d — скачивание томов", legacySteps)
+	}
+	layer := p.Seen[len(p.Seen)-1]
+	done := humanBytes(layer.Done)
+	if layer.Size > 0 {
+		done += " из " + humanBytes(layer.Size)
+	}
+	return fmt.Sprintf("Этап 1 из %d — скачивание томов, %s: %s", legacySteps, layerLabel(len(p.Seen), p.Layers), done)
+}
+
+// legacyWriteStage — этап записи собранного образа в хранилище.
+func legacyWriteStage(done, total int64) string {
+	return fmt.Sprintf("Этап 3 из %d — запись образа в хранилище: %s из %s", legacySteps, humanBytes(done), humanBytes(total))
+}
+
+// runSteps — части работы для карточки запуска: каждый слой цепочки, сборка
+// образа и запись в хранилище, со своим ходом у каждой. written — сколько байт
+// образа прошла запись; −1 — она ещё не началась.
+func (p chainProgress) runSteps(diskSize, written int64) []model.RunStep {
+	writing := written >= 0
+	downloading := !p.Assembling && !writing
+	var steps []model.RunStep
+	for i, layer := range p.Seen {
+		step := model.RunStep{Title: layerTitle(i+1, p.Layers) + " · " + layer.Format,
+			State: model.RunStepRunning, Done: layer.Done, Total: max(layer.Size, 0)}
+		if layer.Finished || !downloading {
+			step.State, step.Total = model.RunStepDone, layer.Done
+		}
+		steps = append(steps, step)
+	}
+	if downloading {
+		for i := len(p.Seen) + 1; i <= p.Layers; i++ {
+			steps = append(steps, model.RunStep{Title: layerTitle(i, p.Layers), State: model.RunStepPending})
+		}
+	}
+	// Том raw без предков — уже образ диска: сборки у него нет.
+	if len(p.Seen) == 0 || p.Seen[0].Format == "qcow2" {
+		assembly := model.RunStep{Title: legacyAssemblyTitle, State: model.RunStepPending, Total: diskSize}
+		switch {
+		case writing:
+			assembly.State, assembly.Done = model.RunStepDone, diskSize
+		case p.Assembling:
+			assembly.State, assembly.Done = model.RunStepRunning, int64(p.Assembly*float64(diskSize))
+		}
+		steps = append(steps, assembly)
+	}
+	write := model.RunStep{Title: legacyWriteTitle, State: model.RunStepPending, Total: diskSize}
+	if writing {
+		write.State, write.Done = model.RunStepRunning, written
+	}
+	return append(steps, write)
+}
+
+// layerLabel — «слой 2 из 3», а если длина цепочки неизвестна — «слой 2».
+func layerLabel(layer, layers int) string {
+	if layers >= layer {
+		return fmt.Sprintf("слой %d из %d", layer, layers)
+	}
+	return fmt.Sprintf("слой %d", layer)
+}
+
+// layerTitle — layerLabel с заглавной буквы: название части работы в карточке.
+func layerTitle(layer, layers int) string {
+	return "Слой" + strings.TrimPrefix(layerLabel(layer, layers), "слой")
+}
+
 // materializeLegacyChain собирает сырой образ диска на момент снапшота: top —
-// том снапшота, formats — форматы томов ВМ. Возвращает путь к сырому образу и
+// том снапшота, formats — форматы томов ВМ, layers — сколько томов в цепочке
+// диска по снапшотам (0 — неизвестно). Возвращает путь к сырому образу и
 // сколько байт скачано. Всё создаётся в workDir; вызывающий удаляет каталог.
 func (e *Engine) materializeLegacyChain(ctx context.Context, client *ovirt.Client, top legacyVolume,
-	formats map[string]string, workDir string, onDownload func(int64)) (string, int64, error) {
+	formats map[string]string, layers int, workDir string, report func(chainProgress)) (string, int64, error) {
 
+	run, _ := ctx.Value(transferOwnerKey{}).(*model.BackupRun)
 	var chain []localVolume
 	var downloaded int64
+	// seen — слои, до которых дошло скачивание; в отчёт уходит копия, чтобы
+	// получатель не видел, как она меняется дальше.
+	var seen []chainLayer
+	emit := func(p chainProgress) {
+		if report == nil {
+			return
+		}
+		p.Layers, p.Seen = layers, append([]chainLayer(nil), seen...)
+		report(p)
+	}
 	id, format := top.ImageID, top.Format
 	for depth := 0; ; depth++ {
 		if depth >= legacyChainDepth {
@@ -172,22 +296,38 @@ func (e *Engine) materializeLegacyChain(ctx context.Context, client *ovirt.Clien
 		if depth == 0 {
 			vol.DiskID = top.DiskID
 		}
+		// Доля скачивания считается по слоям: размер слоя известен, только
+		// когда хост начал его отдавать, а число слоёв — заранее.
+		layer := depth + 1
+		of := max(layers, layer)
+		label := layerLabel(layer, layers)
+		announced := false
 		started := time.Now()
-		n, err := e.downloadVolumeFrom(ctx, client, vol, path, func(done int64) {
-			if onDownload != nil {
-				onDownload(downloaded + done)
+		seen = append(seen, chainLayer{Format: qemuFormat(format), Size: -1})
+		n, err := e.downloadVolumeFrom(ctx, client, vol, path, func(done, size int64) {
+			if size > 0 && !announced {
+				announced = true
+				e.event(ctx, run, model.RunEventLegacyAssembly, 0, fmt.Sprintf(
+					"%s: том %s (%s), %s — скачивается", label, id, qemuFormat(format), humanBytes(size)))
 			}
+			part := 0.0
+			if size > 0 {
+				part = min(float64(done)/float64(size), 1)
+			}
+			seen[depth].Done, seen[depth].Size = done, size
+			emit(chainProgress{Downloaded: downloaded + done, Download: (float64(depth) + part) / float64(of)})
 		})
 		downloaded += n
 		if err != nil {
 			return "", downloaded, fmt.Errorf("скачивание тома %s (слой %d цепочки, %s): %w",
-				id, depth+1, qemuFormat(format), err)
+				id, layer, qemuFormat(format), err)
 		}
 		// По этим записям в карточке запуска видно, из каких томов собран
 		// диск и на каком слое остановилась сборка.
-		run, _ := ctx.Value(transferOwnerKey{}).(*model.BackupRun)
 		e.event(ctx, run, model.RunEventLegacyAssembly, time.Since(started), fmt.Sprintf(
-			"слой %d цепочки: том %s (%s) скачан, %s", depth+1, id, qemuFormat(format), humanBytes(n)))
+			"%s: том %s (%s) скачан, %s", label, id, qemuFormat(format), humanBytes(n)))
+		seen[depth] = chainLayer{Format: qemuFormat(format), Done: n, Size: n, Finished: true}
+		emit(chainProgress{Downloaded: downloaded, Download: float64(layer) / float64(of)})
 		chain = append(chain, localVolume{id: id, format: format, path: path})
 		if format != "cow" {
 			break
@@ -222,9 +362,16 @@ func (e *Engine) materializeLegacyChain(ctx context.Context, client *ovirt.Clien
 		return topVolume.path, downloaded, nil
 	}
 	rawPath := filepath.Join(workDir, "image.raw")
-	if err := ConvertQcow2ToRaw(ctx, e.cfg.QemuImgPath, topVolume.path, rawPath); err != nil {
+	assembling := time.Now()
+	e.event(ctx, run, model.RunEventLegacyAssembly, 0, fmt.Sprintf(
+		"скачивание закончено, слоёв: %d; qemu-img сводит их в образ диска", len(chain)))
+	err := ConvertQcow2ToRaw(ctx, e.cfg.QemuImgPath, topVolume.path, rawPath, func(done float64) {
+		emit(chainProgress{Downloaded: downloaded, Download: 1, Assembly: done, Assembling: true})
+	})
+	if err != nil {
 		return "", downloaded, err
 	}
+	e.event(ctx, run, model.RunEventLegacyAssembly, time.Since(assembling), "образ диска собран")
 	for _, v := range chain {
 		_ = os.Remove(v.path)
 	}
@@ -236,7 +383,11 @@ func (e *Engine) materializeLegacyChain(ctx context.Context, client *ovirt.Clien
 // в нём данных, а не весь размер диска.
 func (e *Engine) downloadVolume(ctx context.Context, client *ovirt.Client, imageID, format, path string,
 	onProgress func(int64)) (int64, error) {
-	return e.downloadVolumeFrom(ctx, client, legacyVolume{ImageID: imageID, Format: format}, path, onProgress)
+	var progress func(done, size int64)
+	if onProgress != nil {
+		progress = func(done, _ int64) { onProgress(done) }
+	}
+	return e.downloadVolumeFrom(ctx, client, legacyVolume{ImageID: imageID, Format: format}, path, progress)
 }
 
 // downloadVolumeFrom скачивает том или, если задан DiskID, диск целиком.
@@ -246,8 +397,11 @@ func (e *Engine) downloadVolume(ctx context.Context, client *ovirt.Client, image
 // ждёт хост: ещё legacyVolumeRecoveryAttempts попыток с паузой, перед каждой
 // проверяется, что imageio отвечает. Несколько минут ожидания дешевле запуска,
 // в котором верхние слои цепочки уже скачаны.
+//
+// onProgress получает, сколько байт тома скачано и его размер; размер −1,
+// пока хост его не назвал.
 func (e *Engine) downloadVolumeFrom(ctx context.Context, client *ovirt.Client, vol legacyVolume, path string,
-	onProgress func(int64)) (int64, error) {
+	onProgress func(done, size int64)) (int64, error) {
 	imageID := vol.ImageID
 	attempts := legacyVolumeDownloadAttempts + legacyVolumeRecoveryAttempts
 	var (
@@ -309,7 +463,7 @@ func (e *Engine) downloadVolumeFrom(ctx context.Context, client *ovirt.Client, v
 			break
 		}
 		if onProgress != nil {
-			onProgress(0)
+			onProgress(0, -1)
 		}
 		if hostErr != nil {
 			e.log.Warn().Err(err).Str("том", imageID).Int("попытка", attempt).
@@ -364,7 +518,7 @@ func imageioHost(e *imageio.Error) string {
 // downloadVolumeAttempt — одна передача тома. dataURL — адрес, с которого
 // шло чтение: по нему потом проверяется, отвечает ли imageio хоста.
 func (e *Engine) downloadVolumeAttempt(ctx context.Context, client *ovirt.Client, vol legacyVolume, path string,
-	onProgress func(int64)) (n int64, dataURL string, retErr error) {
+	onProgress func(done, size int64)) (n int64, dataURL string, retErr error) {
 
 	transfer, err := e.openVolumeTransfer(ctx, client, vol.transferRequest(e.cfg.Transfer.InactivityTimeout))
 	if err != nil {
@@ -416,9 +570,13 @@ func (e *Engine) downloadVolumeAttempt(ctx context.Context, client *ovirt.Client
 		if err != nil {
 			return 0, dataURL, err
 		}
-		out := &sparseFileWriter{file: file, onProgress: onProgress}
+		size := int64(-1)
+		out := &sparseFileWriter{file: file}
+		if onProgress != nil {
+			out.onProgress = func(done int64) { onProgress(done, size) }
+		}
 		source := imageio.New(candidate, client.DataHTTPClient()).WithTimeouts(e.imageioTimeouts(0))
-		n, err = source.Download(ctx, out)
+		n, err = source.DownloadSized(ctx, out, func(total int64) { size = total })
 		if err == nil {
 			err = out.finish()
 		}
@@ -476,12 +634,26 @@ func (w *sparseFileWriter) finish() error {
 
 var _ io.Writer = (*sparseFileWriter)(nil)
 
+// Доли запуска по этапам сборки образа, в процентах: скачивание томов,
+// сведение слоёв через qemu-img, остальное — запись образа в хранилище.
+// Скачивание занимает большую часть времени.
+const (
+	legacyDownloadShare = 70
+	legacyAssemblyShare = 10
+)
+
+// legacyStagePercent — процент запуска по долям этапов, каждая от 0 до 1.
+func legacyStagePercent(download, assembly, write float64) int {
+	return int(download*legacyDownloadShare + assembly*legacyAssemblyShare +
+		write*(100-legacyDownloadShare-legacyAssemblyShare))
+}
+
 // copyLegacyChainDisk сохраняет диск, том снапшота которого надо собирать из
 // цепочки. В режиме сравнения с основой в репозиторий идут только
 // изменившиеся чанки, иначе — все непустые.
 func (e *Engine) copyLegacyChainDisk(ctx context.Context, client *ovirt.Client, backend repo.Backend,
 	srv *model.Server, vm *model.VM, run *model.BackupRun, req RunRequest, disk ovirt.Disk, index int,
-	chunkSize int64, top legacyVolume, formats map[string]string, compare bool) (*DiskManifest, int64, int64, error) {
+	chunkSize int64, top legacyVolume, formats map[string]string, layers int, compare bool) (*DiskManifest, int64, int64, error) {
 
 	if _, err := FindQemuImg(e.cfg.QemuImgPath); err != nil {
 		return nil, 0, 0, fmt.Errorf("диск %s: на oVirt без Backup API том qcow2 собирается только через qemu-img — "+
@@ -507,21 +679,38 @@ func (e *Engine) copyLegacyChainDisk(ctx context.Context, client *ovirt.Client, 
 	if err != nil {
 		return nil, 0, 0, err
 	}
-	e.event(ctx, run, model.RunEventLegacyAssembly, 0, fmt.Sprintf(
-		"диск %s: тома скачиваются целиком в %s и собираются в образ — пока идёт скачивание, растёт только "+
-			"«прочитано»; в хранилище данные пишутся после сборки", disk.AliasOrName(), base))
+	intro := fmt.Sprintf("диск %s: тома скачиваются целиком в %s и собираются в образ — пока идёт скачивание, "+
+		"растёт только «прочитано»; в хранилище данные пишутся после сборки", disk.AliasOrName(), base)
+	if layers > 1 {
+		intro += fmt.Sprintf(". Слоёв в цепочке: %d — вместе они бывают больше самого диска", layers)
+	}
+	e.event(ctx, run, model.RunEventLegacyAssembly, 0, intro)
 	defer os.RemoveAll(workDir)
 
-	total := disk.ProvisionedSize.Int64()
+	// Процент запуска складывается из трёх этапов, иначе он упирался в 99 %
+	// задолго до конца: слои вместе больше диска, а после скачивания ещё идут
+	// сборка и запись. Рядом с процентом пишется сам этап: без него не видно,
+	// от чего он считается.
+	// Диски копируются параллельно, а этап у запуска один: его пишет тот диск,
+	// что отчитался последним, и называет себя.
+	progress := func(stage string, steps []model.RunStep, pct int, read, stored int64) {
+		if run.DiskCount > 1 {
+			stage = "Диск " + disk.AliasOrName() + ". " + stage
+			for i := range steps {
+				steps[i].Title = disk.AliasOrName() + " · " + steps[i].Title
+			}
+		}
+		_ = e.store.SetRunStage(ctx, run.ID, stage, steps, minInt(pct, 99), run.ReadBytes+read, run.StoredBytes+stored)
+	}
+	defer func() { _ = e.store.ClearRunStage(context.WithoutCancel(ctx), run.ID) }()
 	// Тома скачиваются передачами этого диска: по нему служба спрашивает
 	// движок, что держит диск, если он отвечает 409.
 	ctx = withVolumeDisk(withTransferOwner(ctx, run), vm, disk)
-	rawPath, downloaded, err := e.materializeLegacyChain(ctx, client, top, formats, workDir, func(done int64) {
-		pct := 0
-		if total > 0 {
-			pct = int(done * 100 / total)
-		}
-		_ = e.store.SetRunProgress(ctx, run.ID, minInt(pct, 99), run.ReadBytes+done, run.StoredBytes)
+	diskSize := disk.ProvisionedSize.Int64()
+	var chain chainProgress
+	rawPath, downloaded, err := e.materializeLegacyChain(ctx, client, top, formats, layers, workDir, func(p chainProgress) {
+		chain = p
+		progress(p.stage(diskSize), p.runSteps(diskSize, -1), legacyStagePercent(p.Download, p.Assembly, 0), p.Downloaded, 0)
 	})
 	if err != nil {
 		if lockErr, ok := asDiskLocked(err); ok {
@@ -529,7 +718,20 @@ func (e *Engine) copyLegacyChainDisk(ctx context.Context, client *ovirt.Client, 
 		}
 		return nil, downloaded, 0, fmt.Errorf("диск %s: сборка образа из томов снапшота: %w", disk.AliasOrName(), err)
 	}
-	manifest, stored, err := e.writeLegacyDelta(ctx, backend, srv, vm, run, req, disk, index, chunkSize, rawPath, parent)
+	writing := time.Now()
+	e.event(ctx, run, model.RunEventLegacyAssembly, 0, fmt.Sprintf(
+		"диск %s: образ записывается в хранилище", disk.AliasOrName()))
+	manifest, stored, err := e.writeLegacyDelta(ctx, backend, srv, vm, run, req, disk, index, chunkSize, rawPath, parent,
+		func(done, total, stored int64) {
+			if total > 0 {
+				progress(legacyWriteStage(done, total), chain.runSteps(diskSize, done),
+					legacyStagePercent(1, 1, float64(done)/float64(total)), downloaded, stored)
+			}
+		})
+	if err == nil {
+		e.event(ctx, run, model.RunEventLegacyAssembly, time.Since(writing), fmt.Sprintf(
+			"диск %s: образ записан в хранилище, %s", disk.AliasOrName(), humanBytes(stored)))
+	}
 	if err != nil {
 		return nil, downloaded, 0, fmt.Errorf("диск %s: %w", disk.AliasOrName(), err)
 	}

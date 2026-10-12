@@ -244,6 +244,13 @@ func (c *Client) ReadRange(ctx context.Context, offset, length int64, w io.Write
 // length rather than the virtual disk size and therefore cannot be inferred by
 // the caller before the request.
 func (c *Client) Download(ctx context.Context, w io.Writer) (int64, error) {
+	return c.DownloadSized(ctx, w, nil)
+}
+
+// DownloadSized — Download, который перед чтением тела сообщает его длину из
+// Content-Length: по ней виден ход скачивания тома. Длина −1 значит, что демон
+// её не назвал.
+func (c *Client) DownloadSized(ctx context.Context, w io.Writer, onSize func(int64)) (int64, error) {
 	requestCtx := ctx
 	cancel := func() {}
 	var timer *time.Timer
@@ -276,6 +283,9 @@ func (c *Client) Download(ctx context.Context, w io.Writer) (int64, error) {
 	defer drain(resp)
 	if resp.StatusCode != http.StatusOK {
 		return 0, errorFrom(resp, "GET", c.base)
+	}
+	if onSize != nil {
+		onSize(resp.ContentLength)
 	}
 	reader := io.Reader(resp.Body)
 	if timer != nil {

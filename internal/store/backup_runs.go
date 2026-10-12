@@ -21,13 +21,14 @@ const runColumns = `id, job_run_id, job_id, job_name, server_id, vm_id, vm_name,
 	deleted, created_at, skipped_disks, manifest_sha256, imported, consistency, consistency_note,
 	manual_steps, legacy_incremental_mode`
 
-// runSelectColumns — то же плюс срок карантина.
+// runSelectColumns — то же плюс срок карантина, этап идущего запуска и причина
+// удаления.
 //
 // Отдельно от runColumns намеренно: тот идёт в INSERT со списком подстановок, и
 // добавленная в него колонка обязана получить там значение — иначе запрос
-// ломается на числе аргументов, чего компилятор не увидит. Срок карантина
-// проставляется своим запросом, а читается со всем остальным.
-const runSelectColumns = runColumns + `, purge_after`
+// ломается на числе аргументов, чего компилятор не увидит. Срок карантина и
+// этап проставляются своими запросами, а читаются со всем остальным.
+const runSelectColumns = runColumns + `, purge_after, stage, stage_steps, delete_reason, deleted_at`
 
 // CreateBackupRun records a new run in the pending state.
 func (s *Store) CreateBackupRun(ctx context.Context, r *model.BackupRun) error {
@@ -120,6 +121,45 @@ func (s *Store) SetRunProgress(ctx context.Context, runID string, progress int, 
 	_, err := s.db.Exec(ctx, `UPDATE backup_runs SET progress=?, read_bytes=?, stored_bytes=? WHERE id=?`,
 		progress, read, stored, runID)
 	return err
+}
+
+// SetRunStage — SetRunProgress вместе с этапом: что запуск делает сейчас, от
+// чего считается ход этапа и из каких частей состоит работа.
+func (s *Store) SetRunStage(ctx context.Context, runID, stage string, steps []model.RunStep,
+	progress int, read, stored int64) error {
+	_, err := s.db.Exec(ctx, `UPDATE backup_runs SET stage=?, stage_steps=?, progress=?, read_bytes=?, stored_bytes=?
+		WHERE id=?`, stage, encodeRunSteps(steps), progress, read, stored, runID)
+	return err
+}
+
+// ClearRunStage стирает этап: его работа закончена, а запуск ещё идёт.
+func (s *Store) ClearRunStage(ctx context.Context, runID string) error {
+	_, err := s.db.Exec(ctx, `UPDATE backup_runs SET stage='', stage_steps='' WHERE id=?`, runID)
+	return err
+}
+
+func encodeRunSteps(steps []model.RunStep) string {
+	if len(steps) == 0 {
+		return ""
+	}
+	raw, err := json.Marshal(steps)
+	if err != nil {
+		return ""
+	}
+	return string(raw)
+}
+
+// decodeRunSteps терпит пустую и испорченную запись: ход запуска — не то, из-за
+// чего стоит ронять чтение запуска.
+func decodeRunSteps(raw string) []model.RunStep {
+	if raw == "" {
+		return nil
+	}
+	var steps []model.RunStep
+	if err := json.Unmarshal([]byte(raw), &steps); err != nil {
+		return nil
+	}
+	return steps
 }
 
 // SetRunSnapshot сразу записывает временный снапшот запуска: если служба
@@ -370,9 +410,12 @@ func (s *Store) MarkRunDeleted(ctx context.Context, id string) error {
 // и существует — удаление копий делают перед тем, как зашифровать
 // инфраструктуру, и секунды между командой и потерей истории слишком мало,
 // чтобы кто-то успел вмешаться.
-func (s *Store) QuarantineRun(ctx context.Context, id string, purgeAfter time.Time) error {
+//
+// reason — почему копия удалена; он показывается рядом со сроком карантина.
+func (s *Store) QuarantineRun(ctx context.Context, id string, purgeAfter time.Time, reason string) error {
 	res, err := s.db.Exec(ctx,
-		`UPDATE backup_runs SET deleted=?, purge_after=? WHERE id=?`, true, purgeAfter.UTC(), id)
+		`UPDATE backup_runs SET deleted=?, purge_after=?, delete_reason=?, deleted_at=? WHERE id=?`,
+		true, purgeAfter.UTC(), reason, time.Now().UTC(), id)
 	if err != nil {
 		return fmt.Errorf("карантин копии: %w", err)
 	}
@@ -388,7 +431,7 @@ func (s *Store) QuarantineRun(ctx context.Context, id string, purgeAfter time.Ti
 // оставляет deleted, так что вернуть уже нечего.
 func (s *Store) RestoreRunFromQuarantine(ctx context.Context, id string) error {
 	res, err := s.db.Exec(ctx,
-		`UPDATE backup_runs SET deleted=?, purge_after=NULL
+		`UPDATE backup_runs SET deleted=?, purge_after=NULL, delete_reason='', deleted_at=NULL
 		 WHERE id=? AND purge_after IS NOT NULL`, false, id)
 	if err != nil {
 		return fmt.Errorf("возврат копии из карантина: %w", err)
@@ -397,6 +440,16 @@ func (s *Store) RestoreRunFromQuarantine(ctx context.Context, id string) error {
 		return ErrNotFound
 	}
 	return nil
+}
+
+// NoteRunErased записывает, что данные копии стёрты: снимает срок карантина и
+// сохраняет причину. Время удаления остаётся прежним, если копия уже лежала в
+// карантине.
+func (s *Store) NoteRunErased(ctx context.Context, id, reason string, at time.Time) error {
+	_, err := s.db.Exec(ctx,
+		`UPDATE backup_runs SET purge_after=NULL, delete_reason=?, deleted_at=COALESCE(deleted_at, ?) WHERE id=?`,
+		reason, at.UTC(), id)
+	return err
 }
 
 // ClearRunPurge снимает срок карантина, не трогая признак удаления.
@@ -478,9 +531,10 @@ func scanRun(row rowScanner) (*model.BackupRun, error) {
 		r                                             model.BackupRun
 		typ, status, verifyStatus                     string
 		verifiedAt, startedAt, endedAt, expiresAt     sql.NullTime
-		purgeAfter                                    sql.NullTime
+		purgeAfter, deletedAt                         sql.NullTime
 		createdAt                                     time.Time
 		skipped, consistency, manualSteps, legacyMode string
+		stageSteps                                    string
 	)
 	var jobRunID sql.NullString
 	err := row.Scan(&r.ID, &jobRunID, &r.JobID, &r.JobName, &r.ServerID, &r.VMID, &r.VMName, &typ, &status,
@@ -488,7 +542,8 @@ func scanRun(row rowScanner) (*model.BackupRun, error) {
 		&r.EngineBackupID, &r.FromCheckpointID, &r.ToCheckpointID, &r.SnapshotID, &r.DiskCount,
 		&r.LogicalBytes, &r.ReadBytes, &r.StoredBytes, &r.Progress, &r.Encrypted, &r.Compression,
 		&verifyStatus, &verifiedAt, &r.Error, &startedAt, &endedAt, &expiresAt, &r.Deleted, &createdAt,
-		&skipped, &r.ManifestSHA256, &r.Imported, &consistency, &r.ConsistencyNote, &manualSteps, &legacyMode, &purgeAfter)
+		&skipped, &r.ManifestSHA256, &r.Imported, &consistency, &r.ConsistencyNote, &manualSteps, &legacyMode, &purgeAfter,
+		&r.Stage, &stageSteps, &r.DeleteReason, &deletedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -499,12 +554,20 @@ func scanRun(row rowScanner) (*model.BackupRun, error) {
 	r.Type = model.BackupType(typ)
 	r.JobRunID = jobRunID.String
 	r.Status = model.RunStatus(status)
+	// Этап описывает то, что идёт сейчас: у оборванного запуска он остался бы
+	// в базе навсегда.
+	if r.Status == model.RunRunning {
+		r.Steps = decodeRunSteps(stageSteps)
+	} else {
+		r.Stage = ""
+	}
 	r.VerifyStatus = model.RunStatus(verifyStatus)
 	r.VerifiedAt = nullTime(verifiedAt)
 	r.StartedAt = nullTime(startedAt)
 	r.EndedAt = nullTime(endedAt)
 	r.ExpiresAt = nullTime(expiresAt)
 	r.PurgeAfter = nullTime(purgeAfter)
+	r.DeletedAt = nullTime(deletedAt)
 	r.CreatedAt = utc(createdAt)
 	r.SkippedDisks = decodeSkipped(skipped)
 	r.Consistency = model.Consistency(consistency)

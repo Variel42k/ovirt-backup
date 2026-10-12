@@ -180,3 +180,35 @@ func TestAliveAsksDaemonWithoutTicket(t *testing.T) {
 		t.Fatalf("молчащий демон — состояние сети, а не ответ демона: %v", err)
 	}
 }
+
+// Длина тома известна из Content-Length ещё до чтения тела: по ней считается
+// ход скачивания. Демон, не назвавший длину, даёт −1.
+func TestDownloadSizedReportsContentLength(t *testing.T) {
+	body := bytes.Repeat([]byte("x"), 8192)
+	sized := true
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if sized {
+			w.Header().Set("Content-Length", fmt.Sprint(len(body)))
+			_, _ = w.Write(body)
+			return
+		}
+		_, _ = w.Write(body[:4096])
+		w.(http.Flusher).Flush()
+		_, _ = w.Write(body[4096:])
+	}))
+	defer srv.Close()
+
+	for _, want := range []int64{int64(len(body)), -1} {
+		sized = want >= 0
+		got := int64(-2)
+		var out bytes.Buffer
+		n, err := New(srv.URL+"/images/ticket", srv.Client()).DownloadSized(context.Background(), &out,
+			func(size int64) { got = size })
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n != int64(len(body)) || got != want {
+			t.Fatalf("скачано %d, длина от демона %d — ждали %d и %d", n, got, len(body), want)
+		}
+	}
+}

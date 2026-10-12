@@ -79,7 +79,7 @@ func TestDeleteQuarantinesInsteadOfErasing(t *testing.T) {
 	ctx := context.Background()
 	st, engine, run, backend := quarantineFixture(t, 72*time.Hour)
 
-	if err := engine.DeleteRunData(ctx, run.ID); err != nil {
+	if err := engine.DeleteRunData(ctx, run.ID, DeleteReasonManual+": tester"); err != nil {
 		t.Fatalf("удаление: %v", err)
 	}
 
@@ -93,6 +93,9 @@ func TestDeleteQuarantinesInsteadOfErasing(t *testing.T) {
 	if stored.PurgeAfter == nil {
 		t.Fatal("срок карантина не назначен")
 	}
+	if stored.DeleteReason != DeleteReasonManual+": tester" || stored.DeletedAt == nil {
+		t.Fatalf("у копии в карантине нет причины и времени удаления: %q, %v", stored.DeleteReason, stored.DeletedAt)
+	}
 	if !dataPresent(t, backend, run.RepoPath+"disk.data") {
 		t.Fatal("данные стёрты, хотя карантин ещё не истёк")
 	}
@@ -103,7 +106,7 @@ func TestRestoreFromQuarantine(t *testing.T) {
 	ctx := context.Background()
 	st, engine, run, backend := quarantineFixture(t, 72*time.Hour)
 
-	if err := engine.DeleteRunData(ctx, run.ID); err != nil {
+	if err := engine.DeleteRunData(ctx, run.ID, DeleteReasonManual+": tester"); err != nil {
 		t.Fatalf("удаление: %v", err)
 	}
 	if err := st.RestoreRunFromQuarantine(ctx, run.ID); err != nil {
@@ -130,11 +133,11 @@ func TestPurgeExpiredErasesData(t *testing.T) {
 	ctx := context.Background()
 	st, engine, run, backend := quarantineFixture(t, 72*time.Hour)
 
-	if err := engine.DeleteRunData(ctx, run.ID); err != nil {
+	if err := engine.DeleteRunData(ctx, run.ID, DeleteReasonManual+": tester"); err != nil {
 		t.Fatalf("удаление: %v", err)
 	}
 	// Сдвигаем срок в прошлое вместо ожидания трёх суток.
-	if err := st.QuarantineRun(ctx, run.ID, time.Now().UTC().Add(-time.Minute)); err != nil {
+	if err := st.QuarantineRun(ctx, run.ID, time.Now().UTC().Add(-time.Minute), "тест"); err != nil {
 		t.Fatalf("сдвиг срока: %v", err)
 	}
 
@@ -160,10 +163,10 @@ func TestRestoreAfterPurgeRefused(t *testing.T) {
 	ctx := context.Background()
 	st, engine, run, _ := quarantineFixture(t, 72*time.Hour)
 
-	if err := engine.DeleteRunData(ctx, run.ID); err != nil {
+	if err := engine.DeleteRunData(ctx, run.ID, DeleteReasonManual+": tester"); err != nil {
 		t.Fatalf("удаление: %v", err)
 	}
-	if err := st.QuarantineRun(ctx, run.ID, time.Now().UTC().Add(-time.Minute)); err != nil {
+	if err := st.QuarantineRun(ctx, run.ID, time.Now().UTC().Add(-time.Minute), "тест"); err != nil {
 		t.Fatalf("сдвиг срока: %v", err)
 	}
 	engine.PurgeExpired(ctx)
@@ -179,7 +182,7 @@ func TestZeroDelayErasesImmediately(t *testing.T) {
 	ctx := context.Background()
 	st, engine, run, backend := quarantineFixture(t, 0)
 
-	if err := engine.DeleteRunData(ctx, run.ID); err != nil {
+	if err := engine.DeleteRunData(ctx, run.ID, DeleteReasonManual+": tester"); err != nil {
 		t.Fatalf("удаление: %v", err)
 	}
 
@@ -201,10 +204,63 @@ func TestPurgeBypassesQuarantine(t *testing.T) {
 	ctx := context.Background()
 	_, engine, run, backend := quarantineFixture(t, 72*time.Hour)
 
-	if err := engine.PurgeRunData(ctx, run.ID); err != nil {
+	if err := engine.PurgeRunData(ctx, run.ID, DeleteReasonErased+": tester"); err != nil {
 		t.Fatalf("немедленное стирание: %v", err)
 	}
 	if dataPresent(t, backend, run.RepoPath+"disk.data") {
 		t.Fatal("данные целы после запроса на немедленное стирание")
+	}
+}
+
+// Стирание копии, которая уже лежит в карантине, снимает срок: иначе она так и
+// числилась бы в карантине, хотя возвращать нечего. Прежняя причина остаётся,
+// досрочное стирание дописывается к ней.
+func TestPurgeResetsQuarantine(t *testing.T) {
+	ctx := context.Background()
+	st, engine, run, backend := quarantineFixture(t, 72*time.Hour)
+
+	if err := engine.DeleteRunData(ctx, run.ID, retentionDeleteReason("сверх 7 копий")); err != nil {
+		t.Fatalf("удаление: %v", err)
+	}
+	if err := engine.PurgeRunData(ctx, run.ID, DeleteReasonErased+": tester"); err != nil {
+		t.Fatalf("стирание из карантина: %v", err)
+	}
+
+	stored, err := st.GetBackupRun(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("чтение копии: %v", err)
+	}
+	if !stored.Deleted || stored.PurgeAfter != nil {
+		t.Fatalf("после стирания копия должна быть удалена без срока: deleted=%v purge_after=%v",
+			stored.Deleted, stored.PurgeAfter)
+	}
+	if want := "политика хранения: сверх 7 копий; " + DeleteReasonErased + ": tester"; stored.DeleteReason != want {
+		t.Fatalf("причина %q — ждали %q", stored.DeleteReason, want)
+	}
+	if dataPresent(t, backend, run.RepoPath+"disk.data") {
+		t.Fatal("данные целы после стирания из карантина")
+	}
+	if err := st.RestoreRunFromQuarantine(ctx, run.ID); err == nil {
+		t.Fatal("стёртую копию удалось вернуть из карантина")
+	}
+}
+
+// Возврат из карантина стирает причину удаления: копия снова живая.
+func TestRestoreFromQuarantineClearsReason(t *testing.T) {
+	ctx := context.Background()
+	st, engine, run, _ := quarantineFixture(t, 72*time.Hour)
+
+	if err := engine.DeleteRunData(ctx, run.ID, DeleteReasonManual+": tester"); err != nil {
+		t.Fatalf("удаление: %v", err)
+	}
+	if err := st.RestoreRunFromQuarantine(ctx, run.ID); err != nil {
+		t.Fatalf("возврат: %v", err)
+	}
+	stored, err := st.GetBackupRun(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("чтение копии: %v", err)
+	}
+	if stored.Deleted || stored.DeleteReason != "" || stored.DeletedAt != nil {
+		t.Fatalf("у возвращённой копии остались следы удаления: %+v", stored)
 	}
 }

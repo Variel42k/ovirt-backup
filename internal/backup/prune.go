@@ -74,7 +74,7 @@ func (e *Engine) applyRetention(ctx context.Context, serverID, vmID, targetID st
 	deleted := 0
 	var firstDeleteErr error
 	for _, note := range plan.Delete {
-		if err := e.DeleteRunData(ctx, note.RunID); err != nil {
+		if err := e.DeleteRunData(ctx, note.RunID, retentionDeleteReason(note.Reason)); err != nil {
 			// Keep going: one unreachable object should not stop the whole
 			// retention pass, and the failure is reported per run.
 			e.log.Error().Err(err).Str("run", note.RunID).Msg("не удалось удалить бэкап по политике хранения")
@@ -92,13 +92,31 @@ func (e *Engine) applyRetention(ctx context.Context, serverID, vmID, targetID st
 	return plan, nil
 }
 
+// Причины удаления копии. Они показываются рядом со сроком карантина: по ним
+// видно, человек убрал копию или правило хранения.
+const (
+	DeleteReasonManual  = "удалена вручную"
+	DeleteReasonErased  = "стёрта без карантина"
+	deleteReasonExpired = "истёк срок хранения точки"
+)
+
+// retentionDeleteReason — причина удаления по политике хранения; why — что
+// решило правило о самой копии.
+func retentionDeleteReason(why string) string {
+	if why == "" {
+		return "политика хранения"
+	}
+	return "политика хранения: " + why
+}
+
 // DeleteRunData removes a backup's objects from its repository and flags the
-// record as deleted, keeping the history row for the audit trail.
+// record as deleted, keeping the history row for the audit trail. reason says
+// why the copy goes away; it is stored with the run.
 //
 // It refuses to delete a backup another live backup still depends on: an
 // incremental without its base is unrestorable, and discovering that during a
 // real incident is the worst possible time.
-func (e *Engine) DeleteRunData(ctx context.Context, runID string) error {
+func (e *Engine) DeleteRunData(ctx context.Context, runID, reason string) error {
 	run, err := e.store.GetBackupRun(ctx, runID)
 	if err != nil {
 		return err
@@ -122,15 +140,18 @@ func (e *Engine) DeleteRunData(ctx context.Context, runID string) error {
 				runID, len(dependents), dependents[0])
 		}
 		purgeAt := time.Now().UTC().Add(e.cfg.PurgeDelay)
-		if err := e.store.QuarantineRun(ctx, runID, purgeAt); err != nil {
+		if err := e.store.QuarantineRun(ctx, runID, purgeAt, reason); err != nil {
 			return err
 		}
-		e.log.Info().Str("run", runID).Time("будет стёрт", purgeAt).
+		e.log.Info().Str("run", runID).Time("будет стёрт", purgeAt).Str("причина", reason).
 			Msg("копия помещена в карантин: данные пока целы и её можно вернуть")
 		return nil
 	}
 
-	return e.purgeRunData(ctx, run)
+	if err := e.purgeRunData(ctx, run); err != nil {
+		return err
+	}
+	return e.store.NoteRunErased(ctx, runID, reason, time.Now().UTC())
 }
 
 // RunPurgeCollector стирает данные копий, чей карантин истёк, пока жив контекст.
@@ -182,17 +203,29 @@ func (e *Engine) PurgeExpired(ctx context.Context) {
 	}
 }
 
-// PurgeRunData стирает данные копии немедленно, минуя карантин.
+// PurgeRunData стирает данные копии немедленно, минуя карантин: и у живой
+// копии, и у той, что уже лежит в карантине.
 //
-// Нужна двум вызывающим: сборщику, у которого срок уже вышел, и оператору,
-// которому место нужно прямо сейчас. Проверка зависимостей внутри остаётся —
-// истёкший срок не делает удаление опорной точки безопасным.
-func (e *Engine) PurgeRunData(ctx context.Context, runID string) error {
+// Нужна оператору, которому место требуется прямо сейчас. Проверка
+// зависимостей внутри остаётся — спешка не делает удаление опорной точки
+// безопасным. Срок карантина снимается вместе с данными: иначе копия так и
+// числилась бы в карантине, хотя возвращать уже нечего. Прежняя причина
+// удаления сохраняется, новая дописывается к ней.
+func (e *Engine) PurgeRunData(ctx context.Context, runID, reason string) error {
 	run, err := e.store.GetBackupRun(ctx, runID)
 	if err != nil {
 		return err
 	}
-	return e.purgeRunData(ctx, run)
+	if err := e.purgeRunData(ctx, run); err != nil {
+		return err
+	}
+	switch {
+	case reason == "":
+		reason = run.DeleteReason
+	case run.DeleteReason != "":
+		reason = run.DeleteReason + "; " + reason
+	}
+	return e.store.NoteRunErased(ctx, runID, reason, time.Now().UTC())
 }
 
 // purgeRunData — собственно удаление объектов из хранилищ.
@@ -326,7 +359,7 @@ func (e *Engine) PruneExpired(ctx context.Context) (int, error) {
 		if run.ExpiresAt == nil || run.ExpiresAt.After(now) {
 			continue
 		}
-		if err := e.DeleteRunData(ctx, run.ID); err != nil {
+		if err := e.DeleteRunData(ctx, run.ID, deleteReasonExpired); err != nil {
 			e.log.Warn().Err(err).Str("run", run.ID).Msg("просроченный бэкап не удалён")
 			continue
 		}

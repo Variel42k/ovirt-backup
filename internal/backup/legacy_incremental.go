@@ -161,14 +161,14 @@ func (e *Engine) runLegacyQcow2(ctx context.Context, client *ovirt.Client, backe
 				}
 			}
 			if err == nil {
-				err = ConvertQcow2ToRaw(copyCtx, e.cfg.QemuImgPath, overlay, currentRaw)
+				err = ConvertQcow2ToRaw(copyCtx, e.cfg.QemuImgPath, overlay, currentRaw, nil)
 			}
 			if err != nil {
 				parentReader.Close()
 				return nil, fmt.Errorf("обработка слоя %s: %w", disk.AliasOrName(), err)
 			}
 			manifest, stored, err := e.writeLegacyDelta(copyCtx, backend, srv, vm, run, req,
-				disk, index, p.ChunkSize, currentRaw, parentReader)
+				disk, index, p.ChunkSize, currentRaw, parentReader, nil)
 			parentReader.Close()
 			_ = os.Remove(parentRaw)
 			_ = os.Remove(overlay)
@@ -208,7 +208,8 @@ func (e *Engine) downloadQcowLayer(ctx context.Context, client *ovirt.Client, im
 
 func (e *Engine) writeLegacyDelta(ctx context.Context, backend repo.Backend, srv *model.Server,
 	vm *model.VM, run *model.BackupRun, req RunRequest, disk ovirt.Disk, index int,
-	chunkSize int64, currentPath string, parent *ChainReader) (*DiskManifest, int64, error) {
+	chunkSize int64, currentPath string, parent *ChainReader,
+	onProgress func(done, total, stored int64)) (*DiskManifest, int64, error) {
 	if chunkSize <= 0 {
 		chunkSize = DefaultChunkSize
 	}
@@ -247,7 +248,12 @@ func (e *Engine) writeLegacyDelta(ctx context.Context, backend repo.Backend, srv
 	}
 	buf := make([]byte, chunkSize)
 	grid := (manifest.VirtualSize + chunkSize - 1) / chunkSize
+	var reported time.Time
 	for chunkIndex := int64(0); chunkIndex < grid; chunkIndex++ {
+		if onProgress != nil && time.Since(reported) > 2*time.Second {
+			reported = time.Now()
+			onProgress(chunkIndex*chunkSize, manifest.VirtualSize, writer.StoredBytes())
+		}
 		length := min(chunkSize, manifest.VirtualSize-chunkIndex*chunkSize)
 		currentChunk := buf[:length]
 		clear(currentChunk)

@@ -1,10 +1,13 @@
 package backup
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -164,15 +167,47 @@ func RebaseQcow2Onto(ctx context.Context, configured, overlay, parent, parentFor
 }
 
 // ConvertQcow2ToRaw materialises an overlay and its local backing image.
-func ConvertQcow2ToRaw(ctx context.Context, configured, src, dst string) error {
+// onProgress, если задан, получает долю выполненного от 0 до 1: её qemu-img
+// печатает по ключу -p.
+func ConvertQcow2ToRaw(ctx context.Context, configured, src, dst string, onProgress func(float64)) error {
 	bin, err := FindQemuImg(configured)
 	if err != nil {
 		return err
 	}
 	cmd := exec.CommandContext(ctx, bin, "convert", "-p", "-f", "qcow2", "-O", "raw", "-S", "4k", src, dst)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("qemu-img convert qcow2->raw: %w: %s", err, strings.TrimSpace(string(out)))
+	var stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &qemuProgress{report: onProgress}, &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("qemu-img convert qcow2->raw: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
 	return nil
+}
+
+// qemuProgress разбирает вывод qemu-img -p: «    (12.34/100%)», записи
+// разделены возвратом каретки.
+type qemuProgress struct {
+	report func(float64)
+	tail   []byte
+}
+
+var qemuProgressRE = regexp.MustCompile(`\((\d+(?:\.\d+)?)/100%\)`)
+
+// qemuProgressTail — сколько байт вывода помнить между записями: запись
+// может оборваться посреди «(12.34/100%)».
+const qemuProgressTail = 32
+
+func (p *qemuProgress) Write(b []byte) (int, error) {
+	if p.report == nil {
+		return len(b), nil
+	}
+	p.tail = append(p.tail, b...)
+	if m := qemuProgressRE.FindAllSubmatch(p.tail, -1); len(m) > 0 {
+		if v, err := strconv.ParseFloat(string(m[len(m)-1][1]), 64); err == nil {
+			p.report(min(v/100, 1))
+		}
+	}
+	if len(p.tail) > qemuProgressTail {
+		p.tail = append(p.tail[:0], p.tail[len(p.tail)-qemuProgressTail:]...)
+	}
+	return len(b), nil
 }

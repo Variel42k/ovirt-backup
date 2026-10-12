@@ -16,7 +16,7 @@ import IOChart from '@/components/IOChart.vue'
 import type { IOPoint, TimeBand, TimeMarker } from '@/components/IOChart.vue'
 import PageLoadError from '@/components/PageLoadError.vue'
 import { useUnsavedChanges } from '@/composables/unsavedChanges'
-import type { BackupCopy, BackupDisk, BackupRun, BackupTelemetry, BootReport, Cluster, DBStatsSample, Host, IOImpact, LatencyStats, ReplicationDetail, RepositoryArtifact, RestoreNetworkTarget, RestoreRun, RestoreVMPlan, StorageDomain, VerifyRun } from '@/api/types'
+import type { BackupCopy, BackupDisk, BackupRun, BackupTelemetry, BootReport, Cluster, DBStatsSample, Host, IOImpact, LatencyStats, ReplicationDetail, RepositoryArtifact, RestoreNetworkTarget, RestoreRun, RestoreVMPlan, RunStep, StorageDomain, VerifyRun } from '@/api/types'
 
 const $q = useQuasar()
 const route = useRoute()
@@ -412,6 +412,25 @@ const runMarkerKinds: Record<string, string> = {
   transfer_finished: '#21ba45',
   run_finished: '#21ba45',
   run_failed: '#c10015',
+}
+
+// Часть работы, которая идёт сейчас: её ход показывает вторая полоска в списке.
+function runningStep(run: BackupRun): RunStep | undefined {
+  return run.steps?.find((step) => step.state === 'running')
+}
+
+// Доля части работы для полоски, от 0 до 1.
+function stepValue(step: RunStep): number {
+  if (step.state === 'done') return 1
+  if (step.state !== 'running' || !step.total) return 0
+  return Math.min(step.done / step.total, 1)
+}
+
+// Ход части работы словами: сколько сделано и из скольких.
+function stepAmount(step: RunStep): string {
+  if (step.state === 'pending') return step.total ? `ждёт · ${bytes(step.total)}` : 'ждёт'
+  if (step.state === 'done') return `${bytes(step.done)} · готово`
+  return step.total ? `${bytes(step.done)} из ${bytes(step.total)}` : bytes(step.done)
 }
 
 // Средняя скорость чтения самой службы. На графике её нет: служба читает
@@ -1239,15 +1258,23 @@ function confirmDelete(run: BackupRun) {
   $q.dialog({
     title: 'Удалить данные бэкапа',
     message:
-      `Объекты бэкапа ВМ «${run.vm_name}» от ${dateTime(run.created_at)} будут удалены из хранилища. ` +
+      `Бэкап ВМ «${run.vm_name}» от ${dateTime(run.created_at)} будет помещён в карантин: данные останутся ` +
+      'в хранилище и будут занимать место, пока срок не выйдет; до тех пор копию можно вернуть. ' +
       'Если от этой точки зависят более поздние инкременты, удаление будет отклонено.',
+    // Обход карантина — отдельная галочка, а не кнопка: стирание необратимо,
+    // и выбрать его случайно нельзя.
+    options: {
+      type: 'checkbox',
+      model: [],
+      items: [{ label: 'Стереть данные сразу, без карантина — вернуть копию будет нельзя', value: 'purge', color: 'negative' }],
+    },
     cancel: { label: 'Отмена', flat: true },
     ok: { label: 'Удалить', color: 'negative' },
-  }).onOk(async () => {
+  }).onOk(async (chosen: string[]) => {
     if (busyRuns.value.includes(run.id)) return
     setRunBusy(run.id, true)
     try {
-      const result = await api.deleteRun(run.id)
+      const result = await api.deleteRun(run.id, chosen.includes('purge'))
       // Карантин и стирание — разные исходы, и путать их нельзя: «данные
       // удалены» там, где они целы, заставит думать, что место освободилось.
       if (result.status === 'quarantined') {
@@ -1265,6 +1292,31 @@ function confirmDelete(run: BackupRun) {
       await load()
     } catch (err) {
       notifyError(err, 'Не удалось удалить')
+    } finally {
+      setRunBusy(run.id, false)
+    }
+  })
+}
+
+/** Стирает данные копии из карантина, не дожидаясь срока. */
+function eraseNow(run: BackupRun) {
+  $q.dialog({
+    title: 'Стереть данные сейчас',
+    message:
+      `Бэкап ВМ «${run.vm_name}» от ${dateTime(run.created_at)} лежит в карантине` +
+      `${run.purge_after ? ' до ' + dateTime(run.purge_after) : ''} и занимает ${bytes(run.stored_bytes)}. ` +
+      'Данные будут стёрты из хранилища сейчас, вернуть копию после этого нельзя.',
+    cancel: { label: 'Отмена', flat: true },
+    ok: { label: 'Стереть', color: 'negative' },
+  }).onOk(async () => {
+    if (busyRuns.value.includes(run.id)) return
+    setRunBusy(run.id, true)
+    try {
+      await api.deleteRun(run.id, true)
+      notifyOk('Данные стёрты')
+      await load()
+    } catch (err) {
+      notifyError(err, 'Не удалось стереть данные')
     } finally {
       setRunBusy(run.id, false)
     }
@@ -1709,9 +1761,13 @@ const replicationColumns = [
                  целы и копию можно вернуть, во втором возвращать нечего. -->
             <q-badge v-if="props.row.purge_after" color="warning" class="q-ml-xs">
               в карантине до {{ dateTime(props.row.purge_after) }}
-              <q-tooltip>Данные пока целы — копию можно вернуть</q-tooltip>
+              <q-tooltip>Данные пока целы и занимают место — копию можно вернуть или стереть сейчас</q-tooltip>
             </q-badge>
             <q-badge v-else-if="props.row.deleted" color="grey-6" class="q-ml-xs">данные удалены</q-badge>
+            <!-- Как копия оказалась удалённой: человек убрал или правило хранения. -->
+            <div v-if="props.row.deleted && props.row.delete_reason" class="jhv-wrap" style="max-width: 320px" data-testid="run-delete-reason">
+              {{ props.row.delete_reason }}<template v-if="props.row.deleted_at"> · {{ dateTime(props.row.deleted_at) }}</template>
+            </div>
             <q-badge v-if="props.row.skipped_disks?.length" color="warning" class="q-ml-xs">
               не всё: пропущено {{ props.row.skipped_disks.length }}
             </q-badge>
@@ -1738,13 +1794,29 @@ const replicationColumns = [
           <q-chip dense :color="statusColor(props.row.status)" text-color="white">
             {{ runStatus(props.row.status) }}
           </q-chip>
-          <q-linear-progress
-            v-if="props.row.status === 'running'"
-            :value="props.row.progress / 100"
-            size="6px"
-            rounded
-            class="q-mt-xs"
-          />
+          <template v-if="props.row.status === 'running'">
+            <!-- Первая полоска — весь запуск, вторая — часть работы, которая
+                 идёт сейчас: слой цепочки, сборка образа или запись. -->
+            <div class="text-caption text-grey-7 q-mt-xs">Всего: {{ props.row.progress }}%</div>
+            <q-linear-progress :value="props.row.progress / 100" size="6px" rounded />
+            <div
+              v-if="props.row.stage"
+              class="text-caption text-grey-7 jhv-wrap q-mt-xs"
+              style="max-width: 320px"
+              data-testid="run-stage"
+            >
+              {{ props.row.stage }}
+            </div>
+            <q-linear-progress
+              v-if="runningStep(props.row)"
+              :value="stepValue(runningStep(props.row)!)"
+              size="4px"
+              rounded
+              color="secondary"
+              style="max-width: 320px"
+              data-testid="run-stage-bar"
+            />
+          </template>
           <div v-if="props.row.error" class="jhv-reason text-negative jhv-wrap" style="max-width: 320px">
             {{ props.row.error }}
           </div>
@@ -1817,6 +1889,18 @@ const replicationColumns = [
           >
             <q-tooltip>Вернуть копию из карантина</q-tooltip>
           </q-btn>
+          <!-- Сброс карантина: место нужно сейчас, а не через трое суток. -->
+          <q-btn
+            v-if="auth.can('backups.write') && props.row.purge_after"
+            flat dense round icon="delete_forever" color="negative"
+            aria-label="Стереть данные сейчас"
+            :loading="busyRuns.includes(props.row.id)"
+            :disable="busyRuns.includes(props.row.id)"
+            data-testid="run-erase-now"
+            @click="eraseNow(props.row)"
+          >
+            <q-tooltip>Стереть данные сейчас, не дожидаясь конца карантина</q-tooltip>
+          </q-btn>
           <q-btn
             v-if="auth.can('backups.write') && !props.row.deleted && !['pending', 'running'].includes(props.row.status)"
             flat
@@ -1871,6 +1955,34 @@ const replicationColumns = [
           </q-banner>
 
           <div v-show="detailTab === 'overview'" data-testid="run-detail-overview">
+          <div v-if="detail?.status === 'running'" class="q-mb-md" data-testid="run-detail-stage">
+            <div class="row items-center q-mb-xs">
+              <div class="col text-body2 jhv-wrap">{{ detail.stage || 'Выполняется' }}</div>
+              <div class="col-auto text-caption text-grey-7 q-pl-sm">всего {{ detail.progress }}%</div>
+            </div>
+            <q-linear-progress :value="detail.progress / 100" size="6px" rounded />
+            <!-- Каждая часть работы — своей полоской: видно, что тома
+                 читаются слой за слоем и сколько в каждом. -->
+            <div v-if="detail.steps?.length" class="q-mt-md" data-testid="run-detail-steps">
+              <div v-for="(step, index) in detail.steps" :key="index" class="q-mb-sm">
+                <div class="row items-center text-caption">
+                  <div class="col jhv-wrap" :class="step.state === 'pending' ? 'text-grey-6' : 'text-weight-medium'">
+                    {{ step.title }}
+                  </div>
+                  <div class="col-auto q-pl-sm" :class="step.state === 'running' ? '' : 'text-grey-7'">
+                    {{ stepAmount(step) }}
+                  </div>
+                </div>
+                <q-linear-progress
+                  :value="stepValue(step)"
+                  :color="step.state === 'done' ? 'positive' : 'secondary'"
+                  :indeterminate="step.state === 'running' && !step.total"
+                  size="5px"
+                  rounded
+                />
+              </div>
+            </div>
+          </div>
           <div class="row q-col-gutter-md q-mb-md">
             <div class="col-6 col-sm-3">
               <div class="jhv-metric__label">Прочитано</div>
@@ -1890,6 +2002,22 @@ const replicationColumns = [
             </div>
           </div>
 
+          <q-banner v-if="detail?.purge_after" dense class="bg-orange-1 q-mb-md" data-testid="run-detail-quarantine">
+            <template #avatar><q-icon name="hourglass_top" color="warning" /></template>
+            <div class="jhv-wrap">
+              Копия в карантине до {{ dateTime(detail.purge_after) }}: данные целы и занимают
+              {{ bytes(detail.stored_bytes) }}. Её можно вернуть или стереть сейчас — кнопки в строке списка.
+            </div>
+            <div v-if="detail.delete_reason" class="text-caption jhv-wrap">
+              Причина: {{ detail.delete_reason }}<template v-if="detail.deleted_at"> · {{ dateTime(detail.deleted_at) }}</template>
+            </div>
+          </q-banner>
+          <q-banner v-else-if="detail?.deleted" dense class="bg-grey-3 q-mb-md">
+            <template #avatar><q-icon name="delete" color="grey-7" /></template>
+            <div class="jhv-wrap">
+              Данные копии стёрты<template v-if="detail.delete_reason">. Причина: {{ detail.delete_reason }}</template><template v-if="detail.deleted_at"> · {{ dateTime(detail.deleted_at) }}</template>
+            </div>
+          </q-banner>
           <q-banner v-if="detail?.error" dense class="bg-red-1 q-mb-md">
             <template #avatar><q-icon name="error" color="negative" /></template>
             <div class="jhv-wrap">{{ detail.error }}</div>

@@ -75,6 +75,8 @@ func (s *Server) writeError(w http.ResponseWriter, r *http.Request, err error) {
 		status, code = http.StatusConflict, "job_busy"
 	case errors.Is(err, backup.ErrRetentionPlanChanged):
 		status, code = http.StatusConflict, "retention_plan_changed"
+	case errors.Is(err, repo.ErrReadOnly):
+		status, code = http.StatusForbidden, "storage_read_only"
 	case errors.Is(err, errBadRequest):
 		status, code = http.StatusBadRequest, "bad_request"
 	case errors.Is(err, errForbidden):

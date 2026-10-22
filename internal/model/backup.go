@@ -120,17 +120,18 @@ func (s RunStatus) Terminal() bool {
 type StorageKind string
 
 const (
-	StorageLocal  StorageKind = "local"
-	StorageS3     StorageKind = "s3"
-	StorageSFTP   StorageKind = "sftp"
-	StorageSMB    StorageKind = "smb"
-	StorageWebDAV StorageKind = "webdav"
+	StorageLocal            StorageKind = "local"
+	StorageS3               StorageKind = "s3"
+	StorageSFTP             StorageKind = "sftp"
+	StorageSMB              StorageKind = "smb"
+	StorageWebDAV           StorageKind = "webdav"
+	StorageDomainRepository StorageKind = "storage_domain"
 )
 
 // AllStorageKinds перечисляет типы хранилищ в порядке от самого простого к
 // самому специфичному.
 func AllStorageKinds() []StorageKind {
-	return []StorageKind{StorageLocal, StorageS3, StorageSMB, StorageWebDAV, StorageSFTP}
+	return []StorageKind{StorageLocal, StorageDomainRepository, StorageS3, StorageSMB, StorageWebDAV, StorageSFTP}
 }
 
 // KnownStorageKind сообщает, поддерживается ли тип хранилища.
@@ -156,6 +157,9 @@ type StorageTarget struct {
 
 	// Local
 	BasePath string `json:"base_path,omitempty"`
+	// Existing engine connection and data domain; credentials stay in servers.
+	ServerID        string `json:"server_id,omitempty"`
+	StorageDomainID string `json:"storage_domain_id,omitempty"`
 
 	// S3
 	Endpoint     string `json:"endpoint,omitempty"`
@@ -256,6 +260,8 @@ type StorageTarget struct {
 func (t *StorageTarget) Retargeted(other *StorageTarget) bool {
 	switch {
 	case t.Kind != other.Kind,
+		t.ServerID != other.ServerID,
+		t.StorageDomainID != other.StorageDomainID,
 		t.BasePath != other.BasePath,
 		t.Endpoint != other.Endpoint,
 		t.Region != other.Region,

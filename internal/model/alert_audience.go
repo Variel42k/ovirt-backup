@@ -89,6 +89,7 @@ var alertAudienceByKind = map[string]AlertAudience{
 	AlertStorageCapacityLow:   AudienceService,
 	AlertStorageCapacityTrend: AudienceService,
 	AlertDRNotReady:           AudienceService,
+	AlertBackupPurgeBlocked:   AudienceService,
 
 	AlertInsecureTLSExpired: AudienceSecurity,
 

@@ -2,6 +2,7 @@ package retention
 
 import (
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -9,6 +10,41 @@ import (
 )
 
 var base = time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
+
+func TestExpiredLastIncrementalKeepsItsWholeChain(t *testing.T) {
+	runs := []*model.BackupRun{
+		run("full", 10, model.BackupFull, ""),
+		run("inc-1", 9, model.BackupIncremental, "full"),
+		run("inc-2", 8, model.BackupIncremental, "inc-1"),
+		run("unrelated", 20, model.BackupFull, ""),
+	}
+	decision := Apply(model.RetentionPolicy{MaxAge: 24 * time.Hour}, runs, base)
+	for _, id := range []string{"full", "inc-1", "inc-2"} {
+		if !slices.Contains(decision.Keep, id) || slices.Contains(decision.Delete, id) {
+			t.Fatalf("last recovery point lost ancestor %s: %+v", id, decision)
+		}
+	}
+	if !slices.Contains(decision.Delete, "unrelated") {
+		t.Fatal("unrelated expired full backup was unnecessarily retained")
+	}
+}
+
+func TestDeletionConditionsWarnAndInvalidateReviewedPlan(t *testing.T) {
+	items := []*model.BackupRun{run("new", 0, model.BackupFull, ""), run("old", 8, model.BackupFull, "")}
+	plan := BuildPlan("server", "vm", "vm", "target", items, Apply(model.RetentionPolicy{KeepLast: 1}, items, base))
+	plain := WithDeletionConditions(plan, 0, &model.StorageTarget{})
+	locked := WithDeletionConditions(plan, 72*time.Hour, &model.StorageTarget{ObjectLockEnabled: true, ObjectLockDays: 30})
+	if locked.PurgeDelaySeconds != 259200 || len(locked.Warnings) != 2 || locked.FreedBytes != plan.FreedBytes {
+		t.Fatalf("conditions were not explained: %+v", locked)
+	}
+	if plain.Token == locked.Token {
+		t.Fatal("changed storage/quarantine conditions kept the reviewed token")
+	}
+	protected := WithDeletionConditions(plan, 0, &model.StorageTarget{ReadOnly: true, ImmutabilityState: "protected"})
+	if len(protected.Warnings) != 2 || !strings.Contains(protected.Warnings[1], "неизвестен") {
+		t.Fatalf("unknown ACL expiry must not promise reclaimed space: %+v", protected)
+	}
+}
 
 // run builds a successful backup created daysAgo days before the reference
 // point. parent links it into a chain.

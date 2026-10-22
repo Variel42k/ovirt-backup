@@ -646,6 +646,11 @@ func capacityFor(target *model.StorageTarget, samples []*model.StorageUsageSampl
 	}
 	days := map[time.Time]*daily{}
 	for _, sample := range samples {
+		// Failed probes carry zero counters, not a real drop in usage.
+		// Treating them as observations distorts the growth trend.
+		if !sample.CheckOK {
+			continue
+		}
 		day := time.Date(sample.At.Year(), sample.At.Month(), sample.At.Day(), 0, 0, 0, 0, time.UTC)
 		d := days[day]
 		if d == nil {

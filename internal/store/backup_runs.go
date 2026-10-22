@@ -439,7 +439,7 @@ func (s *Store) RestoreRunFromQuarantine(ctx context.Context, id string) error {
 	if n, _ := res.RowsAffected(); n == 0 {
 		return ErrNotFound
 	}
-	return nil
+	return s.ResolveAlert(ctx, "", model.ScopeBackup, id, model.AlertBackupPurgeBlocked)
 }
 
 // NoteRunErased записывает, что данные копии стёрты: снимает срок карантина и

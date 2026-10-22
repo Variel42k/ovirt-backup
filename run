@@ -112,7 +112,7 @@ cmd_fmt() {
 }
 
 cmd_vet() {
-    need go "нужен Go 1.26+ (https://go.dev/dl/)"
+    need go "нужен Go 1.27+ (https://go.dev/dl/)"
     step "go vet"
     go vet ./...
     say "замечаний нет"
@@ -153,7 +153,7 @@ start_test_pg() {
 }
 
 cmd_test() {
-    need go "нужен Go 1.26+"
+    need go "нужен Go 1.27+"
 
     # Тестам хранилища нужна настоящая PostgreSQL: подменять её на что-то
     # попроще значит проверять не то, что работает в бою.
@@ -266,28 +266,25 @@ cmd_race() {
 }
 
 cmd_check() {
+    need npm "нужен Node.js и npm для проверки типов интерфейса"
+    web_deps
     cmd_fmt
     cmd_vet
     cmd_test
-    if [ -d web/node_modules ]; then
-        step "проверка типов интерфейса"
-        (cd web && npm run typecheck)
-    else
-        say ""
-        say "проверка типов пропущена: web/node_modules не установлены (npm --prefix web ci)"
-    fi
+    step "проверка типов интерфейса"
+    (cd web && npm run typecheck)
     say ""
     say "всё чисто"
 }
 
 cmd_dev() {
-    need go "нужен Go 1.26+"
+    need go "нужен Go 1.27+"
     step "сервер на :8080 (Ctrl+C — остановить)"
     go run ./cmd/ovirt-backup-server -config config/ovirt-backup.yaml
 }
 
 cmd_web() {
-    need npm "нужен Node 20+"
+    need npm "нужен Node.js 24+"
     web_deps
     step "интерфейс на :9000, /api проксируется на :8080"
     (cd web && npm run dev)
@@ -370,7 +367,7 @@ built_image() {
 }
 
 cmd_sbom() {
-    need go "нужен Go 1.26+"
+    need go "нужен Go 1.27+"
     V="$(version)"
     mkdir -p "$SBOM_DIR"
 
@@ -416,7 +413,7 @@ cmd_sbom() {
 }
 
 cmd_vuln() {
-    need go "нужен Go 1.26+"
+    need go "нужен Go 1.27+"
     failed=""
 
     # govulncheck идёт первым и стоит особняком: он единственный смотрит не на
@@ -528,9 +525,9 @@ cmd_build() {
 
     # Проверяем окружение до начала работы: узнать об отсутствии Node после
     # четырёх минут компиляции Go — потерянные четыре минуты.
-    need go "нужен Go 1.26+ (https://go.dev/dl/)"
+    need go "нужен Go 1.27+ (https://go.dev/dl/)"
     [ "$SKIP_WEB" -eq 1 ] || need npm \
-        "нужен Node 20+, либо соберите с --skip-web, если web/dist уже готов"
+        "нужен Node.js 24+, либо соберите с --skip-web, если web/dist уже готов"
     if [ -n "$SIGN_KEY" ]; then
         [ "$NO_ARCHIVE" -eq 0 ] || die "--sign-key нельзя использовать вместе с --no-archive"
         need gpg "для --sign-key нужен GnuPG"

@@ -269,7 +269,8 @@ func repoOpen(ctx context.Context, target *model.StorageTarget) (Backend, error)
 func TestOpenSupportsEveryStorageKind(t *testing.T) {
 	ctx := context.Background()
 	targets := map[model.StorageKind]*model.StorageTarget{
-		model.StorageLocal: {BasePath: t.TempDir()},
+		model.StorageDomainRepository: {ServerID: "engine-1", StorageDomainID: "domain-1", Prefix: "backups"},
+		model.StorageLocal:            {BasePath: t.TempDir()},
 		model.StorageS3: {Endpoint: "https://s3.example.org", Bucket: "backups",
 			AccessKey: "key", SecretKey: "secret"},
 		model.StorageSMB: {Host: "nas.example.org", Share: "backups",

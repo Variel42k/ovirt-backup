@@ -3,6 +3,7 @@ package backup
 import (
 	"bytes"
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -14,6 +15,135 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/store"
 	"github.com/Variel42k/ovirt-backup/internal/store/storetest"
 )
+
+func TestReadOnlyCopyCannotBeQuarantined(t *testing.T) {
+	for _, replica := range []bool{false, true} {
+		t.Run(fmtReadOnlyCase(replica), func(t *testing.T) {
+			ctx := context.Background()
+			st, engine, run, backend := quarantineFixture(t, 72*time.Hour)
+			target, err := st.GetStorageTarget(ctx, run.StorageTargetID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if replica {
+				target.ID, target.Name = "replica", "read-only replica"
+				if err := st.CreateStorageTarget(ctx, target); err != nil {
+					t.Fatal(err)
+				}
+				if err := st.CreateBackupCopy(ctx, &model.BackupCopy{RunID: run.ID, StorageTargetID: target.ID, Role: model.CopyReplica, Status: model.CopySucceeded, RepoPath: run.RepoPath}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			target.ReadOnly = true
+			if err := st.UpdateStorageTarget(ctx, target); err != nil {
+				t.Fatal(err)
+			}
+			if err := engine.DeleteRunData(ctx, run.ID, DeleteReasonManual); !errors.Is(err, repo.ErrReadOnly) {
+				t.Fatalf("read-only deletion: %v", err)
+			}
+			stored, err := st.GetBackupRun(ctx, run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stored.Deleted || stored.PurgeAfter != nil || !dataPresent(t, backend, run.RepoPath+"disk.data") {
+				t.Fatal("read-only copy or its catalog was mutated")
+			}
+		})
+	}
+}
+
+func fmtReadOnlyCase(replica bool) string {
+	if replica {
+		return "replica"
+	}
+	return "primary"
+}
+
+func TestRetentionPreviewReadOnlyAndChangedQuarantine(t *testing.T) {
+	ctx := context.Background()
+	st, engine, run, _ := quarantineFixture(t, 72*time.Hour)
+	policy := model.RetentionPolicy{KeepLast: 1}
+	plan, err := engine.ApplyRetention(ctx, run.ServerID, run.VMID, run.StorageTargetID, policy, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine.cfg.PurgeDelay = 24 * time.Hour
+	if _, err := engine.ApplyRetentionConfirmed(ctx, run.ServerID, run.VMID, run.StorageTargetID, policy, plan.Token); !errors.Is(err, ErrRetentionPlanChanged) {
+		t.Fatalf("changed quarantine accepted the old preview: %v", err)
+	}
+	target, err := st.GetStorageTarget(ctx, run.StorageTargetID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target.ReadOnly = true
+	if err := st.UpdateStorageTarget(ctx, target); err != nil {
+		t.Fatal(err)
+	}
+	plan, err = engine.ApplyRetention(ctx, run.ServerID, run.VMID, run.StorageTargetID, policy, true)
+	if err != nil || len(plan.Warnings) == 0 {
+		t.Fatalf("read-only preview: %+v %v", plan, err)
+	}
+	if _, err := engine.ApplyRetentionConfirmed(ctx, run.ServerID, run.VMID, run.StorageTargetID, policy, plan.Token); !errors.Is(err, repo.ErrReadOnly) {
+		t.Fatalf("retention mutated a read-only target: %v", err)
+	}
+}
+
+func TestBlockedPurgeAlertsAndResolvesAfterRetry(t *testing.T) {
+	for _, restore := range []bool{false, true} {
+		name := "retry"
+		if restore {
+			name = "restore"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			st, engine, run, backend := quarantineFixture(t, 72*time.Hour)
+			if err := st.QuarantineRun(ctx, run.ID, time.Now().Add(-time.Hour), "test"); err != nil {
+				t.Fatal(err)
+			}
+			target, err := st.GetStorageTarget(ctx, run.StorageTargetID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			target.ReadOnly = true
+			if err := st.UpdateStorageTarget(ctx, target); err != nil {
+				t.Fatal(err)
+			}
+			engine.PurgeExpired(ctx)
+			engine.PurgeExpired(ctx)
+			alerts, err := st.ListAlerts(ctx, store.AlertFilter{Scope: model.ScopeBackup})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(alerts) != 1 || alerts[0].Kind != model.AlertBackupPurgeBlocked || alerts[0].Count != 2 || alerts[0].State != model.AlertFiring {
+				t.Fatalf("blocked purge should be deduplicated and visible: %+v", alerts)
+			}
+			if !dataPresent(t, backend, run.RepoPath+"disk.data") {
+				t.Fatal("blocked purge erased data")
+			}
+			if restore {
+				if err := st.RestoreRunFromQuarantine(ctx, run.ID); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				target.ReadOnly = false
+				if err := st.UpdateStorageTarget(ctx, target); err != nil {
+					t.Fatal(err)
+				}
+				engine.PurgeExpired(ctx)
+				if dataPresent(t, backend, run.RepoPath+"disk.data") {
+					t.Fatal("retry did not erase data")
+				}
+			}
+			alerts, err = st.ListAlerts(ctx, store.AlertFilter{Scope: model.ScopeBackup})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(alerts) != 1 || alerts[0].State != model.AlertResolved {
+				t.Fatalf("alert was not resolved: %+v", alerts)
+			}
+		})
+	}
+}
 
 // quarantineFixture готовит хранилище с одной копией и лежащим в нём объектом.
 func quarantineFixture(t *testing.T, purgeDelay time.Duration) (*store.Store, *Engine, *model.BackupRun, repo.Backend) {

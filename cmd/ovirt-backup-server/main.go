@@ -40,6 +40,7 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/proxmox"
 	"github.com/Variel42k/ovirt-backup/internal/quality"
 	"github.com/Variel42k/ovirt-backup/internal/replication"
+	"github.com/Variel42k/ovirt-backup/internal/repo"
 	"github.com/Variel42k/ovirt-backup/internal/scheduler"
 	"github.com/Variel42k/ovirt-backup/internal/secret"
 	"github.com/Variel42k/ovirt-backup/internal/setup"
@@ -312,6 +313,7 @@ func run() error {
 
 	pool := ovirt.NewPool(loadServer, cfg.Monitor.Timeout, log)
 	defer pool.Close()
+	repo.ConfigureStorageDomains(pool.Get, cfg.Backup.TempDir, cfg.Backup.Transfer.PreferProxy)
 
 	// Bare libvirt hosts are reached over SSH; the pool keeps one session per
 	// hypervisor and redials when it dies.

@@ -17,7 +17,7 @@ var knownNotificationKinds = []string{
 	model.AlertBackupUnprotected, model.AlertBackupStale, model.AlertBackupReplicaFailed,
 	model.AlertBackupVerifyStale, model.AlertBackupPerformance, model.AlertBackupScheduleMissed, model.AlertBackupConsistency,
 	model.AlertStorageCapacityLow, model.AlertStorageCapacityTrend, model.AlertVerifyFailed,
-	model.AlertStorageTargetDown, model.AlertCBTUnavailable, model.AlertDRNotReady,
+	model.AlertStorageTargetDown, model.AlertCBTUnavailable, model.AlertDRNotReady, model.AlertBackupPurgeBlocked,
 	model.AlertStoragePathDegraded, model.AlertDiskIOErrors,
 }
 

@@ -191,6 +191,18 @@ func TestCapacityForecastAndUnknownObjectStorageQuota(t *testing.T) {
 	if capacity.ForecastDays == nil || capacity.GrowthBytesDay != 10 || capacity.State != "critical" {
 		t.Fatalf("unexpected forecast: %+v", capacity)
 	}
+	// Several failed checks on every day must not dilute real measurements.
+	var withFailures []*model.StorageUsageSample
+	for _, sample := range samples {
+		withFailures = append(withFailures, sample)
+		for i := 0; i < 3; i++ {
+			withFailures = append(withFailures, &model.StorageUsageSample{StorageTargetID: local.ID, At: sample.At})
+		}
+	}
+	afterOutage := capacityFor(local, withFailures, settings)
+	if afterOutage.ForecastDays == nil || *afterOutage.ForecastDays != *capacity.ForecastDays || afterOutage.GrowthBytesDay != capacity.GrowthBytesDay {
+		t.Fatalf("failed probes changed the capacity forecast: %+v", afterOutage)
+	}
 
 	// Причина называет и число, и порог, который оно перешло.
 	if !strings.Contains(capacity.Reason, "места хватит на 3 дн.") || !strings.Contains(capacity.Reason, "заполнено на 70.0%") {

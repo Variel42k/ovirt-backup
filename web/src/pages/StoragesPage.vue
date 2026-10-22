@@ -8,7 +8,7 @@ import { useAuthStore } from '@/stores/auth'
 import DirectoryPicker from '@/components/DirectoryPicker.vue'
 import PageLoadError from '@/components/PageLoadError.vue'
 import { useUnsavedChanges } from '@/composables/unsavedChanges'
-import type { CatalogScanDetail, StorageKind, StorageTarget } from '@/api/types'
+import type { CatalogScanDetail, StorageDomain, StorageKind, StorageTarget } from '@/api/types'
 
 const $q = useQuasar()
 const app = useAppStore()
@@ -37,6 +37,8 @@ const emptyForm = () => ({
   enabled: true,
   read_only: false,
   base_path: '',
+  server_id: '',
+  storage_domain_id: '',
   endpoint: '',
   region: '',
   bucket: '',
@@ -65,6 +67,38 @@ const emptyForm = () => ({
 })
 
 const form = ref(emptyForm())
+const repositoryDomains = ref<StorageDomain[]>([])
+const domainsLoading = ref(false)
+const domainsError = ref('')
+const domainNames = ref<Record<string, string>>({})
+let domainsSequence = 0
+const domainEngines = computed(() => app.servers.filter((s) => s.enabled && ['ovirt', 'redvirt', 'rhv', 'olvm'].includes(s.kind)))
+const domainOptions = computed(() => repositoryDomains.value.map((d) => ({
+  value: d.id,
+  label: `${d.name} · ${d.storage} · свободно ${bytes(d.available_size)}`,
+  disable: d.type !== 'data' || d.status !== 'active',
+})))
+async function loadRepositoryDomains(serverId: string) {
+  const sequence = ++domainsSequence
+  repositoryDomains.value = []
+  domainsError.value = ''
+  domainsLoading.value = Boolean(serverId)
+  if (!serverId) return
+  try {
+    const items = await api.listStorageDomains(serverId)
+    if (sequence !== domainsSequence || serverId !== form.value.server_id || !dialog.value) return
+    repositoryDomains.value = items
+    for (const d of items) domainNames.value[`${serverId}/${d.id}`] = d.name
+  } catch (err) {
+    if (sequence === domainsSequence) domainsError.value = errorMessage(err)
+  } finally {
+    if (sequence === domainsSequence) domainsLoading.value = false
+  }
+}
+function onDomainServerChange(serverId: string) {
+  form.value.storage_domain_id = ''
+  void loadRepositoryDomains(serverId)
+}
 const storageFormBaseline = ref('')
 const storageFormSignature = computed(() => JSON.stringify(form.value))
 const { confirmDiscard: confirmStorageDiscard } = useUnsavedChanges(
@@ -91,6 +125,8 @@ watch(form, () => {
 
 watch(dialog, (open) => {
   if (open) return
+  domainsSequence += 1
+  domainsLoading.value = false
   storageDialogGeneration += 1
   hostKeyScanRequest += 1
   form.value.secret_key = ''
@@ -117,6 +153,18 @@ watch(catalogOpen, (open) => {
 const defaultPorts: Partial<Record<StorageKind, number>> = { sftp: 22, smb: 445 }
 
 function onKindChange(kind: StorageKind) {
+  if (kind === 'storage_domain') {
+    if (!form.value.prefix) form.value.prefix = 'backups'
+    if (!form.value.server_id && domainEngines.value.length === 1) {
+      form.value.server_id = domainEngines.value[0]!.id
+      onDomainServerChange(form.value.server_id)
+    }
+  } else {
+    domainsSequence += 1
+    domainsLoading.value = false
+    form.value.server_id = ''
+    form.value.storage_domain_id = ''
+  }
   // Секреты от скрытых полей другого протокола не должны случайно попасть в
   // запрос после переключения типа нового хранилища.
   if (!editing.value) {
@@ -166,6 +214,8 @@ function openCreate() {
   storageDialogGeneration += 1
   editing.value = null
   form.value = emptyForm()
+  repositoryDomains.value = []
+  domainsError.value = ''
   formError.value = ''
   scannedHostFingerprint.value = ''
   storageFormBaseline.value = storageFormSignature.value
@@ -190,6 +240,7 @@ function openEdit(target: StorageTarget) {
   scannedHostFingerprint.value = ''
   storageFormBaseline.value = storageFormSignature.value
   dialog.value = true
+  if (target.kind === 'storage_domain') void loadRepositoryDomains(form.value.server_id)
 }
 
 async function closeStorageDialog() {
@@ -290,7 +341,15 @@ function validateStorageForm(): string {
     return 'Ограничение скорости не может быть отрицательным'
   }
 
-  if (form.value.kind === 'local') {
+  if (form.value.kind === 'storage_domain') {
+    if (!form.value.server_id) return 'Выберите подключение движка'
+    if (!form.value.storage_domain_id) return 'Выберите активный домен данных'
+    if (domainsLoading.value) return 'Дождитесь загрузки доменов'
+    if (domainsError.value) return 'Не удалось загрузить домены. Повторите загрузку'
+    const selected = repositoryDomains.value.find((d) => d.id === form.value.storage_domain_id)
+    if (!selected || selected.type !== 'data' || selected.status !== 'active') return 'Выберите активный домен данных'
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$/.test(form.value.prefix)) return 'Пространство имён: 1–64 латинских букв, цифр, точек, дефисов или подчёркиваний'
+  } else if (form.value.kind === 'local') {
     if (!form.value.base_path.trim()) return 'Выберите каталог для локального хранилища'
   } else if (form.value.kind === 's3') {
     if (!form.value.endpoint.trim()) return 'Укажите endpoint S3'
@@ -345,6 +404,8 @@ async function save() {
       enabled: form.value.enabled,
       read_only: form.value.read_only,
       base_path: form.value.base_path,
+      server_id: form.value.server_id,
+      storage_domain_id: form.value.storage_domain_id,
       endpoint: form.value.endpoint,
       region: form.value.region,
       bucket: form.value.bucket,
@@ -615,7 +676,14 @@ function confirmDelete(target: StorageTarget) {
 
 onMounted(async () => {
   await app.loadMeta()
+  if (auth.can('servers.read')) await app.loadServers()
   await load()
+  if (auth.can('servers.read')) {
+    const ids = [...new Set(app.storages.filter((s) => s.kind === 'storage_domain').map((s) => s.server_id).filter((id): id is string => Boolean(id)))]
+    await Promise.allSettled(ids.map(async (id) => {
+      for (const d of await api.listStorageDomains(id)) domainNames.value[`${id}/${d.id}`] = d.name
+    }))
+  }
 })
 
 const columns = [
@@ -634,6 +702,8 @@ function kindTitle(kind: string): string {
 
 function location(target: StorageTarget): string {
   switch (target.kind) {
+    case 'storage_domain':
+      return `${app.serverName(target.server_id)} / ${domainNames.value[`${target.server_id}/${target.storage_domain_id}`] ?? target.storage_domain_id} / ${target.prefix}`
     case 'local':
       return target.base_path ?? ''
     case 's3':
@@ -836,6 +906,44 @@ function location(target: StorageTarget): string {
               {{ (app.meta?.storage_kinds ?? []).find((k) => k.value === form.kind)?.description }}
             </div>
           </div>
+
+          <template v-if="form.kind === 'storage_domain'">
+            <div class="col-12">
+              <q-select v-model="form.server_id" :options="domainEngines.map((s) => ({ label: s.name, value: s.id }))"
+                label="Подключение движка" emit-value map-options outlined dense @update:model-value="onDomainServerChange" />
+              <div v-if="!domainEngines.length" class="jhv-reason">Добавьте включённое подключение oVirt, РЕД Виртуализация, RHV или OLVM в разделе «Серверы».</div>
+            </div>
+            <div class="col-12">
+              <q-select v-model="form.storage_domain_id" :options="domainOptions" label="Дисковый домен для бэкапов"
+                emit-value map-options outlined dense :loading="domainsLoading" :disable="!form.server_id || domainsLoading"
+                hint="Выберите активный домен данных. Неактивные, ISO и export-домены недоступны для записи." />
+              <q-banner v-if="domainsError" class="bg-negative text-white q-mt-sm" rounded>
+                {{ domainsError }}
+                <template #action><q-btn flat label="Повторить" @click="loadRepositoryDomains(form.server_id)" /></template>
+              </q-banner>
+              <div v-else-if="form.server_id && !domainsLoading && !domainOptions.some((d) => !d.disable)" class="jhv-reason">
+                На этом подключении нет активных доменов данных. Проверьте их состояние в движке и обновите список.
+                <q-btn flat dense label="Обновить домены" @click="loadRepositoryDomains(form.server_id)" />
+              </div>
+            </div>
+            <div class="col-12">
+              <q-input v-model="form.prefix" label="Пространство имён" outlined dense
+                hint="Например backups. Одинаковое имя на одном домене открывает один и тот же репозиторий." />
+            </div>
+            <div class="col-12">
+              <q-banner class="bg-blue-1 text-dark" rounded data-testid="domain-repository-help">
+                Бэкапы сохраняются как отдельные служебные диски jhvirt-repo-* на выбранном домене; каждый объект имеет диск данных и диск метаданных.
+                Работают NFS, iSCSI и FC; монтировать домен на сервере бэкапов не нужно.
+                Для чтения и восстановления нужны доступные движок и хост передачи.
+                Не подключайте служебные диски к ВМ и не удаляйте их вручную.
+              </q-banner>
+              <div class="jhv-reason">
+                Потоки неизвестного размера сначала собираются во временном каталоге службы: в нём нужно место под один объект каждого параллельного потока.
+                На блочных доменах движок может округлять объём каждого служебного диска вверх.
+                Копия на том же домене, что и исходная ВМ, не защитит от потери этого домена; добавьте второе хранилище для независимой копии.
+              </div>
+            </div>
+          </template>
 
           <div v-if="form.kind === 'local'" class="col-12">
             <q-input

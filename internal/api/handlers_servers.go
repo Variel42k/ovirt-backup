@@ -245,6 +245,17 @@ func (s *Server) handleUpdateServer(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDeleteServer(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	storages, err := s.store.ListStorageTargets(r.Context())
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	for _, target := range storages {
+		if target.Kind == model.StorageDomainRepository && target.ServerID == id {
+			s.writeError(w, r, badRequest("подключение используется хранилищем «%s» на дисковом домене; сначала удалите или перенастройте хранилище", target.Name))
+			return
+		}
+	}
 	if err := s.store.DeleteServer(r.Context(), id); err != nil {
 		s.writeError(w, r, err)
 		return

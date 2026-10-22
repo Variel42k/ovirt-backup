@@ -57,6 +57,7 @@ const (
 	AlertBackupConsistency    = "backup_consistency_degraded"
 	AlertStorageCapacityLow   = "storage_capacity_low"
 	AlertStorageCapacityTrend = "storage_capacity_forecast"
+	AlertBackupPurgeBlocked   = "backup_purge_blocked"
 	AlertVerifyFailed         = "verify_failed"
 	AlertStorageTargetDown    = "storage_target_unreachable"
 	AlertCBTUnavailable       = "cbt_unavailable"

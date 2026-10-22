@@ -39,7 +39,8 @@ func TestEveryStorageKindIsDescribed(t *testing.T) {
 // открывать, нельзя было бы сохранить.
 func TestStorageValidationCoversEveryKind(t *testing.T) {
 	filled := map[model.StorageKind]storagePayload{
-		model.StorageLocal: {BasePath: "/backups"},
+		model.StorageDomainRepository: {ServerID: "engine-1", StorageDomainID: "domain-1", Prefix: "backups"},
+		model.StorageLocal:            {BasePath: "/backups"},
 		model.StorageS3: {Endpoint: "https://s3.example.org", Bucket: "backups",
 			AccessKey: "key", SecretKey: "secret"},
 		model.StorageSMB: {Host: "nas.example.org", Share: "backups",
@@ -76,6 +77,9 @@ func TestStorageValidationExplainsMissingFields(t *testing.T) {
 		payload storagePayload
 		want    string
 	}{
+		{"домен без движка", storagePayload{Kind: "storage_domain", StorageDomainID: "data", Prefix: "backup"}, "подключение движка"},
+		{"домен с выходом из пути", storagePayload{Kind: "storage_domain", ServerID: "engine", StorageDomainID: "../disks", Prefix: "backup"}, "подключение движка"},
+		{"домен без пространства имён", storagePayload{Kind: "storage_domain", ServerID: "engine", StorageDomainID: "data"}, "пространство имён"},
 		{"SMB без папки",
 			storagePayload{Kind: "smb", Host: "nas", Username: "svc", Password: "p"},
 			"имя сетевой папки"},

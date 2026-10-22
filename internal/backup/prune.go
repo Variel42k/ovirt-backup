@@ -45,6 +45,13 @@ func (e *Engine) applyRetention(ctx context.Context, serverID, vmID, targetID st
 	if err := policy.Validate(); err != nil {
 		return retention.Plan{}, err
 	}
+	target, err := e.store.GetStorageTarget(ctx, targetID)
+	if err != nil {
+		return retention.Plan{}, err
+	}
+	if target.ReadOnly && !dryRun {
+		return retention.Plan{}, repo.ErrReadOnly
+	}
 
 	runs, err := e.store.ListBackupRuns(ctx, store.RunFilter{
 		ServerID: serverID,
@@ -63,7 +70,7 @@ func (e *Engine) applyRetention(ctx context.Context, serverID, vmID, targetID st
 	}
 
 	decision := retention.Apply(policy, runs, time.Now().UTC())
-	plan := retention.BuildPlan(serverID, vmID, vmName, targetID, runs, decision)
+	plan := retention.WithDeletionConditions(retention.BuildPlan(serverID, vmID, vmName, targetID, runs, decision), e.cfg.PurgeDelay, target)
 	if expectedToken != "" && plan.Token != expectedToken {
 		return plan, ErrRetentionPlanChanged
 	}
@@ -123,6 +130,9 @@ func (e *Engine) DeleteRunData(ctx context.Context, runID, reason string) error 
 	}
 	if run.Deleted {
 		return nil
+	}
+	if err := e.checkRunDeletionAccess(ctx, run); err != nil {
+		return err
 	}
 
 	// Карантин: копия помечается удалённой, данные остаются на месте до срока.
@@ -228,8 +238,59 @@ func (e *Engine) PurgeRunData(ctx context.Context, runID, reason string) error {
 	return e.store.NoteRunErased(ctx, runID, reason, time.Now().UTC())
 }
 
-// purgeRunData — собственно удаление объектов из хранилищ.
+// checkRunDeletionAccess also runs before quarantine: read-only repositories
+// must not lose catalog entries simply because no object is erased yet.
+func (e *Engine) checkRunDeletionAccess(ctx context.Context, run *model.BackupRun) error {
+	if run.RepoPath == "" || run.Type == model.BackupOVA {
+		return nil
+	}
+	target, err := e.store.GetStorageTarget(ctx, run.StorageTargetID)
+	if err != nil {
+		return err
+	}
+	if target.ReadOnly {
+		return fmt.Errorf("%s: %w", target.Name, repo.ErrReadOnly)
+	}
+	copies, err := e.store.ListBackupCopies(ctx, run.ID)
+	if err != nil {
+		return err
+	}
+	for _, copy := range copies {
+		if copy.Status == model.CopyDeleted || copy.StorageTargetID == run.StorageTargetID {
+			continue
+		}
+		target, err := e.store.GetStorageTarget(ctx, copy.StorageTargetID)
+		if err != nil {
+			return err
+		}
+		if target.ReadOnly {
+			return fmt.Errorf("%s: %w", target.Name, repo.ErrReadOnly)
+		}
+	}
+	return nil
+}
+
+// purgeRunData keeps failed physical deletion visible outside the server log.
 func (e *Engine) purgeRunData(ctx context.Context, run *model.BackupRun) error {
+	err := e.checkRunDeletionAccess(ctx, run)
+	if err == nil {
+		err = e.purgeRunObjects(ctx, run)
+	}
+	if err == nil {
+		_ = e.store.ResolveAlert(ctx, "", model.ScopeBackup, run.ID, model.AlertBackupPurgeBlocked)
+	} else if ctx.Err() == nil {
+		_ = e.store.RaiseAlert(ctx, &model.Alert{
+			Scope: model.ScopeBackup, ObjectID: run.ID, ObjectName: run.VMName,
+			Kind: model.AlertBackupPurgeBlocked, Severity: model.SeverityWarning,
+			Message: fmt.Sprintf("данные копии %s (%s) не удалены; место не освобождено", run.ID, run.VMName),
+			Details: err.Error(),
+		})
+	}
+	return err
+}
+
+// purgeRunObjects — собственно удаление объектов из хранилищ.
+func (e *Engine) purgeRunObjects(ctx context.Context, run *model.BackupRun) error {
 	runID := run.ID
 
 	dependents, err := e.dependents(ctx, run)

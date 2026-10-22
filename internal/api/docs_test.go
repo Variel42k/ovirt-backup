@@ -2,15 +2,99 @@ package api
 
 import (
 	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/fstest"
 
 	"github.com/Variel42k/ovirt-backup/docs"
 )
+
+// The API reference must mention every explicitly registered route. This
+// catches new endpoints omitted from the shipped documentation without a
+// second handwritten route inventory.
+func TestAPIReferenceListsRegisteredRoutes(t *testing.T) {
+	source, err := parser.ParseFile(token.NewFileSet(), "server.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reference, err := docs.Files.ReadFile("API.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	ast.Inspect(source, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok || len(call.Args) == 0 {
+			return true
+		}
+		selector, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || (selector.Sel.Name != "HandleFunc" && selector.Sel.Name != "Handle") {
+			return true
+		}
+		literal, ok := call.Args[0].(*ast.BasicLit)
+		if !ok || literal.Kind != token.STRING {
+			return true
+		}
+		pattern, err := strconv.Unquote(literal.Value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, route, ok := strings.Cut(pattern, " ")
+		if !ok || !strings.HasPrefix(route, "/") {
+			return true
+		}
+		count++
+		if !strings.Contains(string(reference), route) {
+			// Public authentication routes carry /api/v1 in the root mux.
+			if !strings.Contains(string(reference), strings.TrimPrefix(route, "/api/v1")) {
+				t.Errorf("%s is missing from docs/API.md", pattern)
+			}
+		}
+		return true
+	})
+	if count == 0 {
+		t.Fatal("no routes found; the documentation check did not run")
+	}
+}
+
+func TestGuideRelativeLinksExist(t *testing.T) {
+	codeFence := regexp.MustCompile("(?s)```.*?```")
+	links := regexp.MustCompile(`!?\[[^\]]*\]\(([^\s)]+)(?:\s+"[^"]*")?\)`)
+	names, err := fs.Glob(docs.Files, "*.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range names {
+		raw, err := docs.Files.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, match := range links.FindAllStringSubmatch(codeFence.ReplaceAllString(string(raw), ""), -1) {
+			href, err := url.Parse(strings.Trim(match[1], "<>"))
+			if err != nil {
+				t.Errorf("%s: invalid link %q: %v", name, match[1], err)
+				continue
+			}
+			if href.IsAbs() || href.Host != "" || href.Path == "" || strings.HasPrefix(href.Path, "/") {
+				continue
+			}
+			if _, err := os.Stat(filepath.Join("..", "..", "docs", filepath.FromSlash(href.Path))); err != nil {
+				t.Errorf("%s: broken link %q: %v", name, match[1], err)
+			}
+		}
+	}
+}
 
 // Новое руководство без места в оглавлении всё равно появится — в «Прочем».
 // Но оказаться там оно должно по решению, а не по забывчивости, поэтому тест

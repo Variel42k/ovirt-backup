@@ -1245,7 +1245,8 @@ func (s *Scheduler) runRetention(ctx context.Context) {
 				}
 				if len(plan.Delete) > 0 {
 					s.log.Info().Str("вм", vm.Name).Int("удалено", len(plan.Delete)).
-						Int64("освобождено", plan.FreedBytes).Msg("ретенция выполнена")
+						Int64("объём выбранных копий", plan.FreedBytes).
+						Int64("карантин секунд", plan.PurgeDelaySeconds).Msg("ретенция выполнена; освобождение места зависит от физического удаления")
 				}
 			}
 		}

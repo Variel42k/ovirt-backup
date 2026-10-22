@@ -314,6 +314,7 @@ export function percent(part: number, total: number): number {
 }
 
 const STORAGE_KIND_ICON: Record<string, string> = {
+  storage_domain: 'storage',
   local: 'folder',
   s3: 'cloud',
   smb: 'folder_shared',

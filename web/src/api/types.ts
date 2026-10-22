@@ -249,7 +249,7 @@ export interface HostStorageTargets {
   domains: StorageDomain[]
 }
 
-export type StorageKind = 'local' | 's3' | 'smb' | 'webdav' | 'sftp'
+export type StorageKind = 'local' | 'storage_domain' | 's3' | 'smb' | 'webdav' | 'sftp'
 
 export interface StorageTarget {
   id: string
@@ -258,6 +258,8 @@ export interface StorageTarget {
   enabled: boolean
   read_only: boolean
   base_path?: string
+  server_id?: string
+  storage_domain_id?: string
   endpoint?: string
   region?: string
   bucket?: string
@@ -1702,6 +1704,8 @@ export interface RetentionPlan {
   keep: RetentionNote[]
   delete: RetentionNote[]
   freed_bytes: number
+  purge_delay_seconds: number
+  warnings?: string[]
   /** Отпечаток состава плана; обязателен при применении. */
   token: string
 }

@@ -539,6 +539,7 @@ const NOTIFICATION_KIND_RU: Record<string, string> = {
   backup_consistency_degraded: 'Копия ниже заявленной согласованности',
   storage_capacity_low: 'Мало места в репозитории',
   storage_capacity_forecast: 'Репозиторий скоро заполнится',
+  backup_purge_blocked: 'Данные копии не удалось удалить',
   verify_failed: 'Ошибка проверки',
   storage_target_unreachable: 'Хранилище недоступно',
   cbt_unavailable: 'CBT недоступен',

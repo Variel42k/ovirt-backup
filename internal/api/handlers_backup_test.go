@@ -39,7 +39,7 @@ func TestValidateBootJobRequiresAndPersistsKVMHost(t *testing.T) {
 		Type: model.BackupFull, StorageTargetIDs: []string{target.ID},
 		VerifyAfter: model.VerifyBoot,
 	}
-	if err := api.validateJob(ctx, job); err == nil || !strings.Contains(err.Error(), "указать KVM-хост") {
+	if err := api.validateJob(ctx, job); err == nil || !strings.Contains(err.Error(), "укажите KVM-хост") {
 		t.Fatalf("boot-проверка oVirt без KVM-хоста принята: %v", err)
 	}
 

@@ -16,9 +16,13 @@ test('replication, catalog, Object Lock and DR controls are usable', async ({ pa
   })
 
   await page.goto('/documentation')
+  await page.getByRole('tab', { name: 'Справочник', exact: true }).click()
   await expect(page.getByRole('heading', { name: 'Основная копия и реплики' })).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Каталог хранилища и аварийное восстановление сервиса' })).toBeVisible()
   await page.screenshot({ path: testInfo.outputPath('documentation.png'), fullPage: true })
+
+  await page.goto('/documentation/api')
+  await expect(page.getByRole('heading', { name: /^Площадки и расписания проверки загрузкой/ })).toBeVisible()
 
 	await page.goto('/backups')
 	await page.getByRole('tab', { name: 'Репликация' }).click()
@@ -30,7 +34,7 @@ test('replication, catalog, Object Lock and DR controls are usable', async ({ pa
 	const storageDialog = page.getByRole('dialog')
 	await expect(storageDialog.getByText('Новое хранилище')).toBeVisible()
 	await expect(storageDialog.getByLabel('Ограничение записи, МиБ/с')).toBeVisible()
-  await page.getByLabel('Тип').click()
+  await storageDialog.getByLabel('Тип', { exact: true }).click()
   await page.getByRole('option', { name: 'S3' }).click()
   await expect(page.getByText('S3 Object Lock (Governance)')).toBeVisible()
   await page.getByText('S3 Object Lock (Governance)').click()

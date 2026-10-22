@@ -20,7 +20,9 @@ type storagePayload struct {
 	Enabled  *bool  `json:"enabled"`
 	ReadOnly *bool  `json:"read_only"`
 
-	BasePath string `json:"base_path"`
+	BasePath        string `json:"base_path"`
+	ServerID        string `json:"server_id"`
+	StorageDomainID string `json:"storage_domain_id"`
 
 	Endpoint          string `json:"endpoint"`
 	Region            string `json:"region"`
@@ -65,6 +67,8 @@ func (p storagePayload) apply(dst *model.StorageTarget) {
 		dst.ReadOnly = *p.ReadOnly
 	}
 	dst.BasePath = p.BasePath
+	dst.ServerID = p.ServerID
+	dst.StorageDomainID = p.StorageDomainID
 	dst.Endpoint = p.Endpoint
 	dst.Region = p.Region
 	dst.Bucket = p.Bucket
@@ -127,6 +131,13 @@ func (p storagePayload) validate(isNew bool) error {
 		return badRequest("ограничение скорости не может быть отрицательным")
 	}
 	switch model.StorageKind(p.Kind) {
+	case model.StorageDomainRepository:
+		if !storageDomainIdentifier.MatchString(p.ServerID) || !storageDomainIdentifier.MatchString(p.StorageDomainID) {
+			return badRequest("для домена хранения выберите подключение движка и домен данных")
+		}
+		if !storageDomainNamespace.MatchString(p.Prefix) {
+			return badRequest("пространство имён: от 1 до 64 латинских букв, цифр, точек, дефисов или подчёркиваний")
+		}
 	case model.StorageLocal:
 		if p.BasePath == "" {
 			return badRequest("для локального хранилища нужен путь")
@@ -196,6 +207,9 @@ func (p storagePayload) validate(isNew bool) error {
 	default:
 		return badRequest("неизвестный тип хранилища: %q", p.Kind)
 	}
+	if model.StorageKind(p.Kind) != model.StorageDomainRepository && (p.ServerID != "" || p.StorageDomainID != "") {
+		return badRequest("подключение движка и домен задаются только для хранилища на дисковом домене")
+	}
 	if p.ReadOnly != nil && *p.ReadOnly && model.StorageKind(p.Kind) != model.StorageSMB {
 		return badRequest("режим только чтения пока поддерживается только для SMB/CIFS")
 	}
@@ -242,6 +256,10 @@ func (s *Server) handleCreateStorage(w http.ResponseWriter, r *http.Request) {
 
 	target := &model.StorageTarget{Enabled: true, UseSSL: true}
 	payload.apply(target)
+	if err := s.validateStorageDomain(r.Context(), target); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
 
 	// Путь нового локального хранилища обязан лежать там, куда служба может
 	// писать, — в том же списке, который показывает выбиралка каталога.
@@ -316,6 +334,13 @@ func (s *Server) handleUpdateStorage(w http.ResponseWriter, r *http.Request) {
 	// копии и под какими учётными данными.
 	before := *existing
 	payload.apply(existing)
+	if before.ServerID != existing.ServerID || before.StorageDomainID != existing.StorageDomainID ||
+		before.Prefix != existing.Prefix || (!before.Enabled && existing.Enabled) {
+		if err := s.validateStorageDomain(r.Context(), existing); err != nil {
+			s.writeError(w, r, err)
+			return
+		}
+	}
 	if existing.Kind == model.StorageLocal &&
 		(before.Kind != model.StorageLocal || filepath.Clean(before.BasePath) != filepath.Clean(existing.BasePath)) {
 		resolved, err := s.resolveBrowsable(r, scopeStorage, existing.BasePath)
@@ -392,6 +417,8 @@ func retargetTarget(before, after *model.StorageTarget) guardedTarget {
 		}
 	}
 	add("тип", string(before.Kind), string(after.Kind))
+	add("подключение движка", before.ServerID, after.ServerID)
+	add("дисковый домен", before.StorageDomainID, after.StorageDomainID)
 	add("каталог", before.BasePath, after.BasePath)
 	add("адрес", before.Endpoint, after.Endpoint)
 	add("регион", before.Region, after.Region)
@@ -530,7 +557,7 @@ func (s *Server) handleCheckImmutability(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), storageCheckTimeout(target))
 	defer cancel()
 
 	backend, err := repo.Open(ctx, target)
@@ -562,7 +589,7 @@ func (s *Server) handleCheckStorage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), storageCheckTimeout(target))
 	defer cancel()
 
 	started := time.Now()
@@ -599,13 +626,12 @@ func (s *Server) handleCheckStorage(w http.ResponseWriter, r *http.Request) {
 
 // checkStorage runs a repository check in the background.
 func (s *Server) checkStorage(ctx context.Context, id string) {
-	checkCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
-	defer cancel()
-
-	target, err := s.store.GetStorageTarget(checkCtx, id)
+	target, err := s.store.GetStorageTarget(ctx, id)
 	if err != nil {
 		return
 	}
+	checkCtx, cancel := context.WithTimeout(ctx, storageCheckTimeout(target))
+	defer cancel()
 	s.checkStorageInsecureTLS(checkCtx, target)
 
 	backend, err := repo.Open(checkCtx, target)
@@ -621,6 +647,13 @@ func (s *Server) checkStorage(ctx context.Context, id string) {
 	}
 	free, used, _ := backend.Usage(checkCtx)
 	_ = s.store.UpdateStorageTargetHealth(checkCtx, id, true, "", free, used)
+}
+
+func storageCheckTimeout(target *model.StorageTarget) time.Duration {
+	if target.Kind == model.StorageDomainRepository {
+		return 10 * time.Minute
+	}
+	return 60 * time.Second
 }
 
 // checkStorageInsecureTLS напоминает о временном режиме, ставшем постоянным.

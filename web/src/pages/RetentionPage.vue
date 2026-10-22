@@ -62,6 +62,7 @@ const ready = computed(
   () => !!selection.value.server_id && !!selection.value.vm_id &&
     !!selection.value.storage_target_id && !policyError.value && !serverLoading.value,
 )
+const selectedReadOnly = computed(() => app.storages.find((storage) => storage.id === selection.value.storage_target_id)?.read_only === true)
 /** Задания, которые покрывают выбранную ВМ: их правила можно взять как есть. */
 const matchingJobs = computed(() =>
   jobs.value.filter((j) => j.vm_ids?.includes(selection.value.vm_id)),
@@ -148,6 +149,10 @@ async function preview() {
 }
 
 function confirmApply() {
+  if (selectedReadOnly.value) {
+    formError.value = 'Хранилище подключено только для чтения: применять правила нельзя'
+    return
+  }
   const reviewed = plan.value
   const doomed = reviewed?.delete ?? []
   if (!doomed.length) {
@@ -157,10 +162,11 @@ function confirmApply() {
   $q.dialog({
     title: 'Применить правила хранения',
     message:
-      `Из хранилища будут удалены данные ${doomed.length} ` +
+      `Правила выберут для удаления ${doomed.length} ` +
       `${doomed.length === 1 ? 'бэкапа' : 'бэкапов'} ВМ «${reviewed?.vm_name}» ` +
-      `общим объёмом ${bytes(reviewed?.freed_bytes)}. При включённом карантине копии ` +
-      'можно вернуть до окончания его срока. Укажите причину для журнала и возможного согласования.',
+      `общим объёмом ${bytes(reviewed?.freed_bytes)}. Место освободится после физического удаления. ` +
+      ((reviewed?.warnings ?? []).join(' ') || 'При включённом карантине копии можно вернуть до окончания его срока.') +
+      ' Укажите причину для журнала и возможного согласования.',
     prompt: {
       model: '',
       type: 'text',
@@ -382,7 +388,7 @@ const noteColumns = [
           icon="delete_sweep"
           label="Применить"
           :loading="applying"
-          :disable="previewing || !plan || !plan.delete?.length"
+          :disable="previewing || !plan || !plan.delete?.length || selectedReadOnly"
           @click="confirmApply"
         />
       </q-card-actions>
@@ -400,6 +406,11 @@ const noteColumns = [
         <template v-else>
           Удалять нечего: все {{ plan.keep?.length ?? 0 }} копий подходят под правила.
         </template>
+      </q-banner>
+
+      <q-banner v-for="warning in plan.warnings ?? []" :key="warning" dense class="q-mb-md bg-orange-1">
+        <template #avatar><q-icon name="warning" color="warning" /></template>
+        {{ warning }}
       </q-banner>
 
       <div class="row q-col-gutter-md">

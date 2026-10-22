@@ -15,6 +15,8 @@ func TestStorageTargetRoundTripKeepsEveryField(t *testing.T) {
 	st := newTestStore(t)
 
 	targets := []*model.StorageTarget{
+		{ID: "domain-1", Name: "Домен", Kind: model.StorageDomainRepository, Enabled: true,
+			ServerID: "engine-1", StorageDomainID: "data-1", Prefix: "backups"},
 		{
 			ID: "smb-1", Name: "шара NAS", Kind: model.StorageSMB, Enabled: true,
 			Host: "nas.example.org", Port: 445, Share: "backups", Domain: "EXAMPLE",
@@ -40,15 +42,18 @@ func TestStorageTargetRoundTripKeepsEveryField(t *testing.T) {
 			t.Fatalf("чтение хранилища %s: %v", want.ID, err)
 		}
 		for field, pair := range map[string][2]string{
-			"Name":     {got.Name, want.Name},
-			"Kind":     {string(got.Kind), string(want.Kind)},
-			"Host":     {got.Host, want.Host},
-			"Share":    {got.Share, want.Share},
-			"Domain":   {got.Domain, want.Domain},
-			"Endpoint": {got.Endpoint, want.Endpoint},
-			"Username": {got.Username, want.Username},
-			"Password": {got.Password, want.Password},
-			"BasePath": {got.BasePath, want.BasePath},
+			"ServerID":        {got.ServerID, want.ServerID},
+			"StorageDomainID": {got.StorageDomainID, want.StorageDomainID},
+			"Prefix":          {got.Prefix, want.Prefix},
+			"Name":            {got.Name, want.Name},
+			"Kind":            {string(got.Kind), string(want.Kind)},
+			"Host":            {got.Host, want.Host},
+			"Share":           {got.Share, want.Share},
+			"Domain":          {got.Domain, want.Domain},
+			"Endpoint":        {got.Endpoint, want.Endpoint},
+			"Username":        {got.Username, want.Username},
+			"Password":        {got.Password, want.Password},
+			"BasePath":        {got.BasePath, want.BasePath},
 		} {
 			if pair[0] != pair[1] {
 				t.Errorf("хранилище %s, поле %s: получено %q, ожидалось %q",
@@ -69,6 +74,19 @@ func TestStorageTargetRoundTripKeepsEveryField(t *testing.T) {
 	}
 
 	// Пароль в базе лежит зашифрованным: в открытом виде его там быть не должно.
+	domain := *targets[0]
+	domain.ServerID, domain.StorageDomainID, domain.Prefix = "engine-2", "data-2", "archive"
+	if err := st.UpdateStorageTarget(ctx, &domain); err != nil {
+		t.Fatal(err)
+	}
+	gotDomain, err := st.GetStorageTarget(ctx, domain.ID)
+	if err != nil || gotDomain.ServerID != domain.ServerID || gotDomain.StorageDomainID != domain.StorageDomainID || gotDomain.Prefix != domain.Prefix {
+		t.Fatalf("domain update: %+v %v", gotDomain, err)
+	}
+	if !targets[0].Retargeted(gotDomain) {
+		t.Fatal("domain change must require retarget approval")
+	}
+
 	var stored string
 	if err := st.db.QueryRow(ctx,
 		`SELECT password_enc FROM storage_targets WHERE id=?`, "smb-1").Scan(&stored); err != nil {
@@ -80,7 +98,7 @@ func TestStorageTargetRoundTripKeepsEveryField(t *testing.T) {
 
 	// Пустой пароль при правке означает «оставить прежний»: иначе смена любого
 	// другого поля требовала бы вводить пароль заново.
-	updated := *targets[0]
+	updated := *targets[1]
 	updated.Password, updated.Share, updated.Domain = "", "archive", ""
 	if err := st.UpdateStorageTarget(ctx, &updated); err != nil {
 		t.Fatalf("правка хранилища: %v", err)

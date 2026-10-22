@@ -112,6 +112,8 @@ func Open(ctx context.Context, target *model.StorageTarget) (Backend, error) {
 	switch target.Kind {
 	case model.StorageLocal:
 		backend, err = newLocal(target)
+	case model.StorageDomainRepository:
+		backend, err = newDomainRepository(target)
 	case model.StorageS3:
 		backend, err = newS3(ctx, target)
 	case model.StorageSFTP:
@@ -126,7 +128,7 @@ func Open(ctx context.Context, target *model.StorageTarget) (Backend, error) {
 	if err != nil {
 		return nil, err
 	}
-	if target.RateLimit > 0 {
+	if target.RateLimit > 0 && target.Kind != model.StorageDomainRepository {
 		backend = newRateLimitedBackend(backend, target.RateLimit)
 	}
 	return backend, nil

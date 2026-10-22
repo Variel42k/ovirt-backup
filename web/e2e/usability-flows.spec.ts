@@ -32,8 +32,11 @@ test('deep links restore administration, backup and job wizard state', async ({ 
   await login(page)
 
   await page.goto('/administration/access')
-  await expect(page.getByRole('tab', { name: 'Keycloak и домен' })).toHaveAttribute('aria-selected', 'true')
-  await expect(page.getByText('Подключение Keycloak', { exact: true })).toBeVisible()
+  await expect(page.getByRole('tab', { name: /^Роли \(\d+\)$/ })).toHaveAttribute('aria-selected', 'true')
+
+  await page.goto('/administration/identity')
+  await expect(page.getByText('Домен и единый вход', { exact: true }).last()).toBeVisible()
+  await expect(page.getByText('1. Keycloak и локальный вход', { exact: true })).toBeVisible()
 
   await page.goto('/operations/approvals')
   await expect(page.getByRole('tab', { name: 'Согласования' })).toHaveAttribute('aria-selected', 'true')

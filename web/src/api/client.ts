@@ -485,13 +485,13 @@ export const api = {
       .delete(`/storages/${id}${query ? '?' + query : ''}`)
       .then((r) => ({ status: r.status, data: r.data }))
   },
-  checkStorage: (id: string) => http.post(`/storages/${id}/check`, {}, { timeout: 90_000 }).then((r) => r.data),
+  checkStorage: (id: string) => http.post(`/storages/${id}/check`, {}, { timeout: 12 * 60_000 }).then((r) => r.data),
   // Отдельно от checkStorage: эта проверка пишет пробный объект, который на
   // защищённом хранилище останется до конца срока удержания.
   checkImmutability: (id: string) =>
     http
       .post<{ state: string; detail: string; leftover?: string }>(
-        `/storages/${id}/immutability-check`, {}, { timeout: 120_000 },
+        `/storages/${id}/immutability-check`, {}, { timeout: 12 * 60_000 },
       )
       .then((r) => r.data),
   startCatalogScan: (id: string) => http.post<CatalogScan>(`/storages/${id}/catalog-scans`, {}).then((r) => r.data),

@@ -124,6 +124,8 @@ func virtualizationKindOptions() []virtualizationKindDescriptor {
 // отличается от соседних.
 func storageKindOptions() []optionDescriptor {
 	descriptions := map[model.StorageKind]optionDescriptor{
+		model.StorageDomainRepository: {Title: "Дисковый домен виртуализации",
+			Description: "Служебные диски на подключённом домене oVirt / РЕД Виртуализация / RHV / OLVM, включая NFS, iSCSI и FC. Доступ через движок."},
 		model.StorageLocal: {Title: "Локальный каталог",
 			Description: "Локальный диск или примонтированная NFS/CIFS-шара."},
 		model.StorageS3: {Title: "S3-совместимое",

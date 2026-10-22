@@ -71,7 +71,8 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
 
-      # Без node_modules `./run check` молча пропускает проверку типов.
+      # Явная установка использует npm cache; ./run check также проверяет
+      # зависимости и никогда не пропускает typecheck.
       - name: Зависимости интерфейса
         working-directory: web
         run: npm ci --no-audit --no-fund

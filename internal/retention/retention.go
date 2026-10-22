@@ -102,6 +102,13 @@ func Apply(policy model.RetentionPolicy, runs []*model.BackupRun, now time.Time)
 		}
 	}
 
+	// Choose the final surviving point before protecting its ancestors. If
+	// MaxAge expired every run, the newest point may still be incremental.
+	if len(keep) == 0 {
+		newest := candidates[0]
+		markKeep(keep, newest.ID, "последняя оставшаяся копия — удаление запрещено")
+	}
+
 	// Chain safety: restoring an incremental needs every ancestor up to the
 	// full backup, so keeping a link implicitly keeps its whole history. This
 	// runs after MaxAge on purpose — an ancestor that is technically expired
@@ -125,12 +132,6 @@ func Apply(policy model.RetentionPolicy, runs []*model.BackupRun, now time.Time)
 			}
 			cur = parent
 		}
-	}
-
-	// Last line of defence: never leave a VM with no backups at all.
-	if len(keep) == 0 {
-		newest := candidates[0]
-		markKeep(keep, newest.ID, "последняя оставшаяся копия — удаление запрещено")
 	}
 
 	for _, r := range candidates {
@@ -183,13 +184,16 @@ func shortLabel(r *model.BackupRun) string {
 // Plan is a per-VM retention result, which is what the API returns for a dry
 // run so the operator can see what a policy would do before enabling it.
 type Plan struct {
-	ServerID   string    `json:"server_id"`
-	VMID       string    `json:"vm_id"`
-	VMName     string    `json:"vm_name"`
-	TargetID   string    `json:"storage_target_id"`
-	Keep       []RunNote `json:"keep"`
-	Delete     []RunNote `json:"delete"`
-	FreedBytes int64     `json:"freed_bytes"`
+	ServerID string    `json:"server_id"`
+	VMID     string    `json:"vm_id"`
+	VMName   string    `json:"vm_name"`
+	TargetID string    `json:"storage_target_id"`
+	Keep     []RunNote `json:"keep"`
+	Delete   []RunNote `json:"delete"`
+	// FreedBytes is selected payload size, not space already reclaimed.
+	FreedBytes        int64    `json:"freed_bytes"`
+	PurgeDelaySeconds int64    `json:"purge_delay_seconds"`
+	Warnings          []string `json:"warnings,omitempty"`
 	// Token привязывает подтверждение оператора к конкретному составу плана.
 	// Это не секрет и не право на удаление: API всё равно проверяет сессию и
 	// разрешения. Если между просмотром и применением появился новый бэкап или
@@ -240,12 +244,35 @@ func BuildPlan(serverID, vmID, vmName, targetID string, runs []*model.BackupRun,
 // даже если набор удаляемых ID случайно остался прежним.
 func planToken(plan Plan) string {
 	payload, _ := json.Marshal(struct {
-		ServerID string    `json:"server_id"`
-		VMID     string    `json:"vm_id"`
-		TargetID string    `json:"storage_target_id"`
-		Keep     []RunNote `json:"keep"`
-		Delete   []RunNote `json:"delete"`
-	}{plan.ServerID, plan.VMID, plan.TargetID, plan.Keep, plan.Delete})
+		ServerID          string    `json:"server_id"`
+		VMID              string    `json:"vm_id"`
+		TargetID          string    `json:"storage_target_id"`
+		Keep              []RunNote `json:"keep"`
+		Delete            []RunNote `json:"delete"`
+		PurgeDelaySeconds int64     `json:"purge_delay_seconds"`
+		Warnings          []string  `json:"warnings,omitempty"`
+	}{plan.ServerID, plan.VMID, plan.TargetID, plan.Keep, plan.Delete, plan.PurgeDelaySeconds, plan.Warnings})
 	sum := sha256.Sum256(payload)
 	return hex.EncodeToString(sum[:])
+}
+
+// WithDeletionConditions binds the preview to quarantine and storage protection
+// settings as well as selected runs. Changed conditions need a new preview.
+func WithDeletionConditions(plan Plan, delay time.Duration, target *model.StorageTarget) Plan {
+	plan.PurgeDelaySeconds = int64(delay / time.Second)
+	if target.ReadOnly {
+		plan.Warnings = append(plan.Warnings, "хранилище подключено только для чтения: применение правил запрещено")
+	}
+	if len(plan.Delete) > 0 {
+		if delay > 0 {
+			plan.Warnings = append(plan.Warnings, fmt.Sprintf("копии попадут в карантин на %s; место освободится только после физического удаления", delay))
+		}
+		if target.ObjectLockEnabled {
+			plan.Warnings = append(plan.Warnings, fmt.Sprintf("Object Lock удерживает новые объекты %d сут.; физическое удаление возможно только после окончания удержания всех объектов", target.ObjectLockDays))
+		} else if target.ImmutabilityState == "protected" {
+			plan.Warnings = append(plan.Warnings, "хранилище защищено от удаления; срок снятия ACL/удержания неизвестен службе, освобождение места не гарантировано")
+		}
+	}
+	plan.Token = planToken(plan)
+	return plan
 }

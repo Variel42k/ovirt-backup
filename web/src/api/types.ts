@@ -155,6 +155,7 @@ export interface Host {
   name: string
   address: string
   cluster_name?: string
+  cluster_id?: string
   status: string
   spm: boolean
   active_vms: number
@@ -256,6 +257,7 @@ export interface StorageTarget {
   name: string
   kind: StorageKind
   enabled: boolean
+  automatic?: boolean
   read_only: boolean
   base_path?: string
   server_id?: string

@@ -216,6 +216,39 @@ func (s *Store) JobsOnTarget(ctx context.Context, targetID string) ([]string, er
 			}
 		}
 	}
+	fileJobs, err := s.ListFileBackupJobs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, job := range fileJobs {
+		for _, id := range job.StorageTargetIDs {
+			if id == targetID {
+				names = append(names, "файлы: "+job.Name)
+				break
+			}
+		}
+	}
+	dbJobs, err := s.ListDBDumpJobs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, job := range dbJobs {
+		for _, id := range job.StorageTargetIDs {
+			if id == targetID {
+				names = append(names, "СУБД: "+job.Name)
+				break
+			}
+		}
+	}
+	engineJobs, err := s.ListEngineConfigJobs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, job := range engineJobs {
+		if job.StorageTargetID == targetID {
+			names = append(names, "конфигурация движка: "+job.Name)
+		}
+	}
 	return names, nil
 }
 
@@ -276,6 +309,7 @@ func (s *Store) scanStorageTarget(row rowScanner) (*model.StorageTarget, error) 
 	t.HostKeyStored = strings.TrimSpace(t.HostKey) != ""
 	t.InsecureTLSSince = nullTime(insecureSince)
 	t.Kind = model.StorageKind(kind)
+	t.Automatic = t.IsAutomaticDomainStorage()
 	t.LastCheckAt = nullTime(lastCheck)
 	t.ImmutabilityCheckedAt = nullTime(immutabilityChecked)
 	t.CreatedAt = utc(createdAt)

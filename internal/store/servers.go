@@ -134,6 +134,9 @@ func (s *Store) UpdateServer(ctx context.Context, srv *model.Server) error {
 	srv.SSHKeyStored = strings.TrimSpace(srv.SSHPrivateKey) != ""
 	srv.ClearSSHPrivateKey = false
 	srv.ClearPassword = false
+	if srv.Enabled != existing.Enabled || srv.Name != existing.Name || srv.Kind != existing.Kind {
+		return s.SyncDomainRepositories(ctx, srv.ID)
+	}
 	return nil
 }
 
@@ -155,14 +158,42 @@ func (s *Store) UpdateServerState(ctx context.Context, srv *model.Server) error 
 // inventory. Backup runs are deliberately kept: the backups themselves still
 // exist in the repositories and must remain restorable.
 func (s *Store) DeleteServer(ctx context.Context, id string) error {
-	res, err := s.db.Exec(ctx, `DELETE FROM servers WHERE id=?`, id)
-	if err != nil {
-		return fmt.Errorf("delete server: %w", err)
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return ErrNotFound
-	}
-	return nil
+	return s.db.InTx(ctx, func(tx *sql.Tx) error {
+		var serverID string
+		if err := tx.QueryRowContext(ctx, s.db.Rebind(`SELECT id FROM servers WHERE id=? FOR UPDATE`), id).Scan(&serverID); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrNotFound
+			}
+			return err
+		}
+		rows, err := tx.QueryContext(ctx, s.db.Rebind(`SELECT id,storage_domain_id FROM storage_targets WHERE server_id=? AND kind=?`), id, string(model.StorageDomainRepository))
+		if err != nil {
+			return err
+		}
+		var automaticIDs []string
+		for rows.Next() {
+			var targetID, domainID string
+			if err = rows.Scan(&targetID, &domainID); err != nil {
+				rows.Close()
+				return err
+			}
+			if targetID == model.AutomaticDomainStorageID(id, domainID) {
+				automaticIDs = append(automaticIDs, targetID)
+			}
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return err
+		}
+		for _, targetID := range automaticIDs {
+			if _, err = tx.ExecContext(ctx, s.db.Rebind(`DELETE FROM storage_targets WHERE id=?`), targetID); err != nil {
+				return fmt.Errorf("%w: автоматический домен используется другими копиями или заданиями", ErrConflict)
+			}
+		}
+		_, err = tx.ExecContext(ctx, s.db.Rebind(`DELETE FROM servers WHERE id=?`), id)
+		return err
+	})
 }
 
 // GetServer loads one connection with its decrypted password.

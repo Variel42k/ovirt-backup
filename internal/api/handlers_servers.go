@@ -252,6 +252,23 @@ func (s *Server) handleDeleteServer(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, target := range storages {
 		if target.Kind == model.StorageDomainRepository && target.ServerID == id {
+			if target.Automatic {
+				count, countErr := s.store.CountRunsOnTarget(r.Context(), target.ID)
+				if countErr != nil {
+					s.writeError(w, r, countErr)
+					return
+				}
+				jobs, jobErr := s.store.JobsOnTarget(r.Context(), target.ID)
+				if jobErr != nil {
+					s.writeError(w, r, jobErr)
+					return
+				}
+				if count == 0 && len(jobs) == 0 {
+					continue
+				}
+				s.writeError(w, r, badRequest("домен «%s» используется бэкапами или заданиями; перенесите копии и измените назначения перед удалением подключения", target.Name))
+				return
+			}
 			s.writeError(w, r, badRequest("подключение используется хранилищем «%s» на дисковом домене; сначала удалите или перенастройте хранилище", target.Name))
 			return
 		}

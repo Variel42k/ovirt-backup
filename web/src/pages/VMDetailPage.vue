@@ -123,7 +123,7 @@ async function load() {
   loading.value = true
   pageError.value = ''
   try {
-    if (auth.can('storages.read') && !app.storages.length) await app.loadStorages()
+    if (auth.can('storages.read')) await app.loadStorages()
     if (!selectedStorage.value) {
       selectedStorage.value = app.enabledStorages[0]?.id ?? null
     }

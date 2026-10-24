@@ -314,6 +314,9 @@ func run() error {
 	pool := ovirt.NewPool(loadServer, cfg.Monitor.Timeout, log)
 	defer pool.Close()
 	repo.ConfigureStorageDomains(pool.Get, cfg.Backup.TempDir, cfg.Backup.Transfer.PreferProxy)
+	if err := st.SyncKnownDomainRepositories(ctx); err != nil {
+		log.Warn().Err(err).Msg("не удалось обновить назначения бэкапа из сохранённого инвентаря доменов")
+	}
 
 	// Bare libvirt hosts are reached over SSH; the pool keeps one session per
 	// hypervisor and redials when it dies.

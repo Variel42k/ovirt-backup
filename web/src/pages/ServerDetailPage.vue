@@ -45,6 +45,8 @@ const canManage = computed(
 // canDisrupt — отдельное право на действия, обрывающие работу без остановки
 // гостевой ОС: аппаратный сброс ВМ и перезагрузка хоста по питанию.
 const canDisrupt = computed(() => canManage.value && auth.can('servers.disruptive'))
+const canMigrate = computed(() => canManage.value && Boolean(server.value &&
+  ['ovirt', 'redvirt', 'rhv', 'olvm', 'proxmox'].includes(server.value.kind)))
 
 const knownTabs = new Set([
   'vms', 'hosts', 'disks', 'domains',
@@ -256,14 +258,15 @@ async function vmAction(vm: VM, action: string) {
     }
   }
   if (action === 'migrate') {
-    const targets = hosts.value.filter((host) => host.id !== vm.host_id && host.status === 'up')
+    const targets = hosts.value.filter((host) => host.id !== vm.host_id && host.status === 'up' &&
+      (server.value?.kind === 'proxmox' || !vm.cluster_id || host.cluster_id === vm.cluster_id))
     if (!targets.length) {
       notifyError('Нет другого доступного узла для миграции')
       return
     }
     $q.dialog({
       title: `Миграция «${vm.name}»`,
-      message: 'Выберите целевой узел',
+      message: 'Выберите узел в этом подключении. Перенос в другое подключение выполняется через бэкап и восстановление.',
       options: { type: 'radio', model: targets[0].id, items: targets.map((host) => ({ label: host.name, value: host.id })) },
       cancel: { label: 'Отмена', flat: true },
       ok: { label: 'Перенести', color: 'primary' },
@@ -584,7 +587,7 @@ const domainColumns = [
                       <q-item-section avatar><q-icon name="pause" /></q-item-section>
                       <q-item-section>Приостановить</q-item-section>
                     </q-item>
-                    <q-item v-if="canManage" clickable v-close-popup @click="vmAction(props.row, 'migrate')">
+                    <q-item v-if="canMigrate" clickable v-close-popup @click="vmAction(props.row, 'migrate')">
                       <q-item-section avatar><q-icon name="swap_horiz" /></q-item-section>
                       <q-item-section>Мигрировать</q-item-section>
                     </q-item>

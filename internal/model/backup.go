@@ -151,6 +151,8 @@ type StorageTarget struct {
 	Name    string      `json:"name"`
 	Kind    StorageKind `json:"kind"`
 	Enabled bool        `json:"enabled"`
+	// Derived from the stable inventory identity, never accepted from API writes.
+	Automatic bool `json:"automatic"`
 	// ReadOnly подключает существующий репозиторий только для просмотра,
 	// проверки и восстановления. Новые копии и retention в него не пишут.
 	ReadOnly bool `json:"read_only"`

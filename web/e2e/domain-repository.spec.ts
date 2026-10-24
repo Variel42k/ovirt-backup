@@ -1,10 +1,13 @@
 import { expect, test } from '@playwright/test'
 
-test('хранилище выбирается из дисковых доменов движка', async ({ page }, testInfo) => {
+test('домен доступен из подключения без ручного добавления хранилища', async ({ page }, testInfo) => {
   let saved: Record<string, unknown> | undefined
+  let created = false
   const errors: string[] = []
   page.on('pageerror', (e) => errors.push(e.message))
   const list = (items: unknown[]) => ({ items, total: items.length })
+  const target = { id: 'auto-domain', name: 'dengine / dengine-add1', kind: 'storage_domain', enabled: true,
+    automatic: true, server_id: 'engine', storage_domain_id: 'iscsi', prefix: 'backups', rate_limit: 0 }
   await page.route('**/api/v1/**', async (route) => {
     const path = new URL(route.request().url()).pathname.replace('/api/v1', '')
     let body: unknown = list([])
@@ -13,34 +16,39 @@ test('хранилище выбирается из дисковых домено
     if (path === '/meta') body = { capabilities: { timezone: 'UTC' }, virtualization_kinds: [], backup_types: [], verify_modes: [], remediation_actions: [],
       storage_kinds: [{ value: 'local', title: 'Локальный каталог' }, { value: 'storage_domain', title: 'Дисковый домен виртуализации' }] }
     if (path === '/help') body = { articles: [], backup_types: [] }
-    if (path === '/servers') body = list([
-      { id: 'engine', name: 'dengine', kind: 'redvirt', enabled: true },
-      { id: 'kvm', name: 'KVM', kind: 'kvm', enabled: true },
-    ])
+    if (path === '/servers') body = list([{ id: 'engine', name: 'dengine', kind: 'redvirt', enabled: true }])
     if (path === '/servers/engine/storage-domains') body = list([
       { id: 'iscsi', name: 'dengine-add1', type: 'data', storage: 'iscsi', status: 'active', available_size: 700 * 1024 ** 3 },
-      { id: 'inactive', name: 'maintenance-domain', type: 'data', storage: 'nfs', status: 'maintenance' },
-      { id: 'iso', name: 'iso-images', type: 'iso', storage: 'nfs', status: 'active' },
     ])
-    if (path === '/storages' && route.request().method() === 'POST') { saved = route.request().postDataJSON(); body = { id: 'repo', ...saved } }
+    if (path === '/storages') {
+      if (route.request().method() === 'POST') created = true
+      body = list([target])
+    }
+    if (path === '/storages/auto-domain' && route.request().method() === 'PUT') {
+      saved = route.request().postDataJSON()
+      body = { ...target, ...saved }
+    }
     await route.fulfill({ json: body })
   })
   await page.goto('/storages')
+  await expect(page.getByTestId('automatic-domains-help')).toContainText('Отдельно добавлять каждый домен не нужно')
+  const row = page.getByRole('row').filter({ hasText: 'dengine / dengine-add1' })
+  await expect(row.getByText('из подключения', { exact: true })).toBeVisible()
+  await expect(row.locator('button').filter({ has: page.locator('i').filter({ hasText: /^delete$/ }) })).toHaveCount(0)
   await page.getByRole('button', { name: 'Добавить хранилище' }).click()
-  const dialog = page.getByRole('dialog')
-  await dialog.getByLabel('Имя', { exact: true }).fill('Копии на домене')
+  let dialog = page.getByRole('dialog')
   await dialog.getByLabel('Тип', { exact: true }).click()
-  await page.getByRole('option', { name: 'Дисковый домен виртуализации' }).click()
-  await expect(dialog.getByLabel('Подключение движка')).toHaveValue('dengine')
-  await expect(dialog.getByTestId('domain-repository-help')).toContainText('служебные диски')
-  await dialog.getByLabel('Дисковый домен для бэкапов').click()
-  await expect(page.getByRole('option', { name: /maintenance-domain/ })).toHaveAttribute('aria-disabled', 'true')
-  await expect(page.getByRole('option', { name: /iso-images/ })).toHaveAttribute('aria-disabled', 'true')
-  await page.getByRole('option', { name: /dengine-add1/ }).click()
-  await expect(dialog.getByLabel('Пространство имён')).toHaveValue('backups')
-  await page.screenshot({ path: testInfo.outputPath('domain-repository.png'), fullPage: true })
+  await expect(page.getByRole('option', { name: 'Дисковый домен виртуализации' })).toHaveCount(0)
+  await page.keyboard.press('Escape')
+  await dialog.getByRole('button', { name: 'Отмена' }).click()
+  await row.getByRole('button', { name: 'Настроить хранилище' }).click()
+  dialog = page.getByRole('dialog')
+  await expect(dialog.getByLabel('Пространство имён')).not.toBeEditable()
+  await expect(dialog.getByLabel('Имя', { exact: true })).not.toBeEditable()
+  await page.screenshot({ path: testInfo.outputPath('automatic-domain.png'), fullPage: true })
   await dialog.getByRole('button', { name: 'Сохранить' }).click()
-  await expect.poll(() => saved?.kind).toBe('storage_domain')
-  expect(saved).toMatchObject({ server_id: 'engine', storage_domain_id: 'iscsi', prefix: 'backups', name: 'Копии на домене' })
+  await expect.poll(() => saved?.storage_domain_id).toBe('iscsi')
+  expect(created).toBe(false)
+  expect(saved).toMatchObject({ server_id: 'engine', prefix: 'backups', enabled: true })
   expect(errors).toEqual([])
 })

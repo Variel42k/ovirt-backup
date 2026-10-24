@@ -190,7 +190,7 @@ func (s *Store) SyncStorageDomains(ctx context.Context, serverID string, items [
 	if err != nil {
 		return fmt.Errorf("sync storage domains: %w", err)
 	}
-	return nil
+	return s.SyncDomainRepositories(ctx, serverID)
 }
 
 // SetVMDesiredState records what the operator wants the VM to be doing. This is

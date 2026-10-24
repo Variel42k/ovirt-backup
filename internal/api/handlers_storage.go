@@ -325,6 +325,12 @@ func (s *Server) handleUpdateStorage(w http.ResponseWriter, r *http.Request) {
 	// редактирования означают «оставить прежние» и должны быть восстановлены до
 	// валидации, иначе безопасное SFTP-хранилище нельзя было бы переименовать.
 	payload.inheritWriteOnly(existing)
+	if existing.Automatic && (payload.Name != existing.Name || payload.ServerID != existing.ServerID ||
+		payload.StorageDomainID != existing.StorageDomainID || payload.Prefix != existing.Prefix ||
+		(payload.Enabled != nil && *payload.Enabled != existing.Enabled)) {
+		s.writeError(w, r, badRequest("домен доступен автоматически: имя, подключение и доступность управляются инвентарём; обновите список доменов в подключении"))
+		return
+	}
 	if err := payload.validate(false); err != nil {
 		s.writeError(w, r, err)
 		return
@@ -489,6 +495,15 @@ func ensureObjectLockUsable(ctx context.Context, target *model.StorageTarget) er
 
 func (s *Server) handleDeleteStorage(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	target, err := s.store.GetStorageTarget(r.Context(), id)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	if target.Automatic {
+		s.writeError(w, r, badRequest("этот домен появился из подключения автоматически; он управляется в разделе «Серверы»"))
+		return
+	}
 
 	force := queryBool(r, "force")
 

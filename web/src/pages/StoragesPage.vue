@@ -340,6 +340,7 @@ function validateStorageForm(): string {
   if (!Number.isFinite(form.value.rate_limit) || form.value.rate_limit < 0) {
     return 'Ограничение скорости не может быть отрицательным'
   }
+	if (editing.value?.automatic) return ''
 
   if (form.value.kind === 'storage_domain') {
     if (!form.value.server_id) return 'Выберите подключение движка'
@@ -737,6 +738,10 @@ function location(target: StorageTarget): string {
         @click="openCreate"
       />
     </div>
+	<q-banner class="bg-blue-1 text-dark q-mb-md" rounded data-testid="automatic-domains-help">
+	  Домены oVirt, РЕД Виртуализация, RHV и OLVM появляются здесь автоматически после добавления подключения и опроса инвентаря.
+	  Активные домены данных сразу доступны в назначениях бэкапа. Отдельно добавлять каждый домен не нужно.
+	</q-banner>
 
     <PageLoadError :message="pageError" title="Не удалось загрузить хранилища" :loading="loading" @retry="load" />
 
@@ -753,6 +758,7 @@ function location(target: StorageTarget): string {
       <template #body-cell-name="props">
         <q-td :props="props">
           {{ props.row.name }}
+		  <q-badge v-if="props.row.automatic" color="blue-grey" class="q-ml-sm">из подключения</q-badge>
           <q-badge v-if="!props.row.enabled" color="grey-7" class="q-ml-sm">выключено</q-badge>
           <q-badge v-if="props.row.read_only" color="blue-grey-7" class="q-ml-sm">только чтение</q-badge>
           <q-badge
@@ -868,8 +874,8 @@ function location(target: StorageTarget): string {
 			<q-btn v-if="auth.can('storages.admin')" flat dense round icon="manage_search" @click="scanCatalog(props.row)">
 				<q-tooltip>Просмотреть каталог и импортировать найденные точки</q-tooltip>
 			</q-btn>
-          <q-btn v-if="auth.can('storages.admin')" flat dense round icon="edit" @click="openEdit(props.row)" />
-          <q-btn v-if="auth.can('storages.admin')" flat dense round icon="delete" color="negative" @click="confirmDelete(props.row)" />
+          <q-btn v-if="auth.can('storages.admin')" flat dense round icon="edit" aria-label="Настроить хранилище" @click="openEdit(props.row)" />
+          <q-btn v-if="auth.can('storages.admin') && !props.row.automatic" flat dense round icon="delete" color="negative" @click="confirmDelete(props.row)" />
         </q-td>
       </template>
     </q-table>
@@ -888,12 +894,12 @@ function location(target: StorageTarget): string {
         <!-- Одна сетка на всю форму; почему не .row внутри .q-gutter-* — см. ServersPage.vue. -->
         <q-card-section style="max-height: 70vh" class="scroll row q-col-gutter-md">
           <div class="col-12 col-sm-7">
-            <q-input v-model="form.name" label="Имя" outlined dense />
+            <q-input v-model="form.name" label="Имя" outlined dense :readonly="!!editing?.automatic" />
           </div>
           <div class="col-12 col-sm-5">
             <q-select
               v-model="form.kind"
-              :options="(app.meta?.storage_kinds ?? []).map((k) => ({ label: k.title, value: k.value }))"
+              :options="(app.meta?.storage_kinds ?? []).filter((k) => k.value !== 'storage_domain' || editing?.kind === 'storage_domain').map((k) => ({ label: k.title, value: k.value }))"
               emit-value
               map-options
               label="Тип"
@@ -910,12 +916,12 @@ function location(target: StorageTarget): string {
           <template v-if="form.kind === 'storage_domain'">
             <div class="col-12">
               <q-select v-model="form.server_id" :options="domainEngines.map((s) => ({ label: s.name, value: s.id }))"
-                label="Подключение движка" emit-value map-options outlined dense @update:model-value="onDomainServerChange" />
+                label="Подключение движка" emit-value map-options outlined dense :readonly="!!editing?.automatic" @update:model-value="onDomainServerChange" />
               <div v-if="!domainEngines.length" class="jhv-reason">Добавьте включённое подключение oVirt, РЕД Виртуализация, RHV или OLVM в разделе «Серверы».</div>
             </div>
             <div class="col-12">
               <q-select v-model="form.storage_domain_id" :options="domainOptions" label="Дисковый домен для бэкапов"
-                emit-value map-options outlined dense :loading="domainsLoading" :disable="!form.server_id || domainsLoading"
+                emit-value map-options outlined dense :loading="domainsLoading" :disable="!form.server_id || domainsLoading" :readonly="!!editing?.automatic"
                 hint="Выберите активный домен данных. Неактивные, ISO и export-домены недоступны для записи." />
               <q-banner v-if="domainsError" class="bg-negative text-white q-mt-sm" rounded>
                 {{ domainsError }}
@@ -927,7 +933,7 @@ function location(target: StorageTarget): string {
               </div>
             </div>
             <div class="col-12">
-              <q-input v-model="form.prefix" label="Пространство имён" outlined dense
+              <q-input v-model="form.prefix" label="Пространство имён" outlined dense :readonly="!!editing?.automatic"
                 hint="Например backups. Одинаковое имя на одном домене открывает один и тот же репозиторий." />
             </div>
             <div class="col-12">
@@ -1258,6 +1264,7 @@ function location(target: StorageTarget): string {
           <div class="col-12">
             <q-toggle
               v-model="form.enabled"
+              :disable="!!editing?.automatic"
               :label="form.read_only ? 'Хранилище доступно для чтения и восстановления' : 'Хранилище доступно для заданий'"
             />
           </div>

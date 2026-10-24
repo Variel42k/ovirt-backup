@@ -8,6 +8,7 @@ import {
 } from '@/api/format'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
+import VMTransferDialog from '@/components/VMTransferDialog.vue'
 import BackupOptionsPicker from '@/components/BackupOptionsPicker.vue'
 import EngineLeftovers from '@/components/EngineLeftovers.vue'
 import BackupTypeHelpCard from '@/components/BackupTypeHelpCard.vue'
@@ -25,6 +26,7 @@ const route = useRoute()
 const app = useAppStore()
 const auth = useAuthStore()
 
+const transferOpen = ref(false)
 const loading = ref(false)
 const pageError = ref('')
 const vm = ref<VM | null>(null)
@@ -321,7 +323,7 @@ onMounted(load)
       </div>
       <q-space />
       <q-btn v-if="auth.can('servers.write') && auth.can('backups.write') && app.meta?.capabilities.management_enabled !== false && ['ovirt','redvirt','rhv','olvm'].includes(app.servers.find(s => s.id === serverId)?.kind || '')"
-        flat color="primary" icon="move_up" label="Миграция виртуальных машин" :to="{ name: 'vm-transfers', query: { create: '1', server: serverId, vm: vmId } }" />
+        flat color="primary" icon="move_up" label="Миграция виртуальных машин" @click="transferOpen = true" />
       <q-btn flat dense round icon="refresh" :loading="loading" @click="load" />
     </div>
 
@@ -786,5 +788,6 @@ onMounted(load)
         />
       </div>
     </div>
+    <VMTransferDialog v-if="transferOpen" v-model="transferOpen" :server-id="serverId" :vm-ids="[vmId]" />
   </q-page>
 </template>

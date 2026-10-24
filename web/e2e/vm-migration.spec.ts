@@ -63,7 +63,7 @@ test('кнопка миграции остаётся в видимой част�
   await page.setViewportSize({ width: 1100, height: 900 })
   await mockInventory(page)
   await page.goto('/servers/engine')
-  const button = page.getByRole('button', { name: 'Миграция ВМ', exact: true })
+  const button = page.getByRole('button', { name: 'Миграция виртуальных машин', exact: true })
   await expect(button).toBeInViewport({ ratio: 1 })
   const table = page.locator('.jhv-vm-table .q-table__middle')
   await expect(table).toHaveJSProperty('scrollLeft', 0)

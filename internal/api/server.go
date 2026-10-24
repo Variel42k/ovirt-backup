@@ -220,6 +220,9 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /vm-transfers/plan", s.perm(model.PermServersWrite, s.perm(model.PermBackupsWrite, s.management(s.handlePlanVMTransfer))))
 	mux.HandleFunc("POST /vm-transfers", s.perm(model.PermServersWrite, s.perm(model.PermBackupsWrite, s.management(s.handleCreateVMTransfer))))
 	mux.HandleFunc("POST /vm-transfers/{id}/action", s.perm(model.PermServersWrite, s.perm(model.PermBackupsWrite, s.management(s.handleVMTransferAction))))
+	mux.HandleFunc("POST /vm-transfers/batches", s.perm(model.PermServersWrite, s.perm(model.PermBackupsWrite, s.management(s.handleVMTransferBatch))))
+	mux.HandleFunc("POST /vm-transfers/batches/plan", s.perm(model.PermServersWrite, s.perm(model.PermBackupsWrite, s.management(s.handlePlanVMTransferBatch))))
+	mux.HandleFunc("POST /vm-transfers/batches/{id}/action", s.perm(model.PermServersWrite, s.perm(model.PermBackupsWrite, s.management(s.handleVMTransferBatchAction))))
 
 	// Кто вошёл, что умеет эта сборка и справка. Без права: интерфейсу нужно
 	// это, чтобы вообще отрисоваться, а роль с пустым набором прав всё равно

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/Variel42k/ovirt-backup/internal/model"
@@ -47,26 +48,49 @@ func (s *Store) ListVMTransfers(ctx context.Context) ([]*model.VMTransfer, error
 }
 
 func (s *Store) CreateVMTransfer(ctx context.Context, t *model.VMTransfer) error {
+	return s.CreateVMTransfers(ctx, []*model.VMTransfer{t})
+}
+
+// CreateVMTransfers reserves every source atomically before any worker starts.
+func (s *Store) CreateVMTransfers(ctx context.Context, items []*model.VMTransfer) error {
+	ordered := append([]*model.VMTransfer(nil), items...)
+	sort.Slice(ordered, func(i, j int) bool {
+		a, b := ordered[i].Request, ordered[j].Request
+		return a.SourceServerID+":"+a.SourceVMID < b.SourceServerID+":"+b.SourceVMID
+	})
 	return s.db.InTx(ctx, func(tx *sql.Tx) error {
-		// Backup creation takes the same row lock, closing the check/start race.
-		if _, err := tx.ExecContext(ctx, s.db.Rebind(`SELECT pg_advisory_xact_lock(hashtextextended(?,0))`), t.Request.SourceServerID+":"+t.Request.SourceVMID); err != nil {
-			return err
+		for _, t := range ordered {
+			key := t.Request.SourceServerID + ":" + t.Request.SourceVMID
+			if _, err := tx.ExecContext(ctx, s.db.Rebind(`SELECT pg_advisory_xact_lock(hashtextextended(?,0))`), key); err != nil {
+				return err
+			}
 		}
-		var n int
-		if err := tx.QueryRowContext(ctx, s.db.Rebind(`SELECT count(*) FROM backup_runs WHERE server_id=? AND vm_id=? AND status IN ('pending','running')`), t.Request.SourceServerID, t.Request.SourceVMID).Scan(&n); err != nil {
-			return err
+		now := time.Now().UTC()
+		for _, t := range items {
+			var n int
+			if err := tx.QueryRowContext(ctx, s.db.Rebind(`SELECT count(*) FROM backup_runs WHERE server_id=? AND vm_id=? AND status IN ('pending','running')`), t.Request.SourceServerID, t.Request.SourceVMID).Scan(&n); err != nil {
+				return err
+			}
+			if n > 0 {
+				return fmt.Errorf("ВМ занята резервным копированием")
+			}
+			if err := tx.QueryRowContext(ctx, s.db.Rebind(`SELECT count(*) FROM vm_transfers WHERE ((source_server_id=? AND source_vm_id=? AND status NOT IN ('canceled','rolled_back')) OR (target_server_id=? AND target_vm_id=? AND status NOT IN ('canceled','rolled_back','completed')))`), t.Request.SourceServerID, t.Request.SourceVMID, t.Request.SourceServerID, t.Request.SourceVMID).Scan(&n); err != nil {
+				return err
+			}
+			if n > 0 {
+				return fmt.Errorf("ВМ уже участвует в миграции")
+			}
+			t.CreatedAt = now
+			t.UpdatedAt = now
+			raw, err := json.Marshal(t)
+			if err != nil {
+				return err
+			}
+			if _, err = tx.ExecContext(ctx, s.db.Rebind(`INSERT INTO vm_transfers(id,source_server_id,source_vm_id,target_server_id,storage_target_id,status,payload) VALUES(?,?,?,?,?,?,?)`), t.ID, t.Request.SourceServerID, t.Request.SourceVMID, t.Request.TargetServerID, t.Request.StorageTargetID, t.Status, string(raw)); err != nil {
+				return err
+			}
 		}
-		if n > 0 {
-			return fmt.Errorf("ВМ занята резервным копированием")
-		}
-		t.CreatedAt = time.Now().UTC()
-		t.UpdatedAt = t.CreatedAt
-		raw, err := json.Marshal(t)
-		if err != nil {
-			return err
-		}
-		_, err = tx.ExecContext(ctx, s.db.Rebind(`INSERT INTO vm_transfers(id,source_server_id,source_vm_id,target_server_id,storage_target_id,status,payload) VALUES(?,?,?,?,?,?,?)`), t.ID, t.Request.SourceServerID, t.Request.SourceVMID, t.Request.TargetServerID, t.Request.StorageTargetID, t.Status, string(raw))
-		return err
+		return nil
 	})
 }
 

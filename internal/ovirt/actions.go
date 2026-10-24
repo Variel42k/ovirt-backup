@@ -23,6 +23,17 @@ func (c *Client) StartVM(ctx context.Context, vmID string) error {
 	return c.post(ctx, "/vms/"+vmID+"/start", struct{}{}, nil)
 }
 
+// StartVMOnHost asks the engine to run on the operator's selected host.
+// An empty host leaves placement to the engine scheduler.
+func (c *Client) StartVMOnHost(ctx context.Context, vmID, hostID string) error {
+	if hostID == "" {
+		return c.StartVM(ctx, vmID)
+	}
+	return c.post(ctx, "/vms/"+vmID+"/start", map[string]any{"vm": map[string]any{
+		"placement_policy": map[string]any{"affinity": "pinned", "hosts": map[string]any{"host": []map[string]string{{"id": hostID}}}},
+	}}, nil)
+}
+
 // ShutdownVM asks the guest to power off cleanly. Requires a guest agent or
 // ACPI support; if neither answers the VM simply stays up.
 func (c *Client) ShutdownVM(ctx context.Context, vmID string) error {

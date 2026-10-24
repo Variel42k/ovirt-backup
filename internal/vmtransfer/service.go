@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Variel42k/ovirt-backup/internal/backup"
 	"github.com/Variel42k/ovirt-backup/internal/model"
@@ -197,13 +198,13 @@ func (s *Service) plan(ctx context.Context, r model.VMTransferRequest, ownID str
 	}
 	targetHost := ""
 	for _, h := range hosts {
-		if h.ClusterID == r.ClusterID && h.Status == "up" {
+		if h.ClusterID == r.ClusterID && h.Status == "up" && (r.HostID == "" || r.HostID == h.ID) {
 			targetHost = h.ID
 			break
 		}
 	}
 	if targetHost == "" {
-		p.Blockers = append(p.Blockers, "В целевом кластере нет работающего хоста")
+		p.Blockers = append(p.Blockers, "Целевой хост должен работать и принадлежать выбранному кластеру")
 	} else {
 		storage, err := dst.HostStorageDomains(ctx, target.ID, targetHost)
 		if err != nil {
@@ -217,7 +218,7 @@ func (s *Service) plan(ctx context.Context, r model.VMTransferRequest, ownID str
 			}
 		}
 		if !attached {
-			p.Blockers = append(p.Blockers, "Домен недоступен выбранному целевому кластеру")
+			p.Blockers = append(p.Blockers, "Домен недоступен выбранному целевому хосту")
 		}
 	}
 	disks, err := src.ListVMDisks(ctx, vm.ID)
@@ -244,6 +245,7 @@ func (s *Service) plan(ctx context.Context, r model.VMTransferRequest, ownID str
 	if free < p.TotalBytes {
 		p.Blockers = append(p.Blockers, "В целевом домене недостаточно места под виртуальный размер дисков")
 	}
+	p.AvailableBytes = free
 	nics, err := src.TransferNICs(ctx, vm.ID)
 	if err != nil {
 		return nil, err
@@ -339,7 +341,9 @@ func (s *Service) launch(t *model.VMTransfer, action string) error {
 
 func (s *Service) startLocked(t *model.VMTransfer, action string) error {
 	expected := t.Status
-	t.Status = "running"
+	t.Status = "queued"
+	t.Phase = "queued"
+	t.PendingAction = action
 	t.Error = ""
 	if err := s.st.ClaimVMTransfer(s.ctx, t, expected); err != nil {
 		return err
@@ -348,20 +352,13 @@ func (s *Service) startLocked(t *model.VMTransfer, action string) error {
 	s.active[t.ID] = cancel
 	go func() {
 		defer func() { cancel(); s.mu.Lock(); delete(s.active, t.ID); s.mu.Unlock() }()
-		select {
-		case s.slots <- struct{}{}:
-			defer func() { <-s.slots }()
-		case <-ctx.Done():
+		if err := s.acquireSlot(ctx, t); err != nil {
 			t.Status = "interrupted"
-			t.Error = ctx.Err().Error()
+			t.Error = err.Error()
 			_ = s.save(t)
 			return
 		}
-		t.Status = "running"
-		t.Error = ""
-		if err := s.save(t); err != nil {
-			return
-		}
+		defer func() { <-s.slots }()
 		var err error
 		switch action {
 		case "prepare":
@@ -387,6 +384,64 @@ func (s *Service) startLocked(t *model.VMTransfer, action string) error {
 	return nil
 }
 
+// Queue admission is serialized with action requests. Waiting tasks do not
+// occupy backup/transfer workers; batch order and limits live in the database.
+func (s *Service) acquireSlot(ctx context.Context, t *model.VMTransfer) error {
+	tick := time.NewTicker(500 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		s.mu.Lock()
+		items, err := s.st.ListVMTransfers(ctx)
+		admit := err == nil && len(s.slots) < cap(s.slots)
+		if admit && t.BatchID != "" {
+			running := 0
+			limit := t.BatchParallelism
+			if limit < 1 {
+				limit = 1
+			}
+			for _, other := range items {
+				if other.BatchID != t.BatchID || other.ID == t.ID {
+					continue
+				}
+				if other.Status == "running" {
+					running++
+				}
+				if limit == 1 && other.BatchIndex < t.BatchIndex && t.PendingAction != "rollback" && t.PendingAction != "cancel" {
+					switch other.Status {
+					case "ready", "awaiting_confirmation", "completed", "canceled", "rolled_back":
+					default:
+						admit = false
+					}
+				}
+			}
+			admit = admit && running < limit
+		}
+		if admit {
+			t.Status = "running"
+			t.PendingAction = ""
+			err = s.st.ClaimVMTransfer(ctx, t, "queued")
+			if err == nil {
+				s.slots <- struct{}{}
+			}
+		}
+		s.mu.Unlock()
+		if err != nil {
+			return err
+		}
+		if admit {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-tick.C:
+		}
+	}
+}
+
 func (s *Service) Action(ctx context.Context, id, action string, confirm bool) (*model.VMTransfer, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -403,6 +458,12 @@ func (s *Service) Action(ctx context.Context, id, action string, confirm bool) (
 	}
 	allowed := false
 	switch action {
+	case "resume":
+		if t.Status != "interrupted" || t.PendingAction == "" {
+			return nil, fmt.Errorf("возобновить можно приостановленную задачу очереди")
+		}
+		action = t.PendingAction
+		allowed = true
 	case "forget":
 		if !confirm {
 			return nil, fmt.Errorf("подтвердите удаление записи")

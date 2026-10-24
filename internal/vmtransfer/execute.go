@@ -30,6 +30,20 @@ func (s *Service) Run(ctx context.Context) {
 			}
 			for _, t := range items {
 				if t.Status == "ready" && t.Request.Mode == "warm" {
+					// Preparing the rest of a group has priority over periodic
+					// re-syncs, otherwise a long sequential group can starve.
+					waiting := false
+					if t.BatchID != "" {
+						for _, other := range items {
+							if other.BatchID == t.BatchID && (other.Status == "queued" || other.Status == "running") {
+								waiting = true
+								break
+							}
+						}
+					}
+					if waiting {
+						continue
+					}
 					_, _ = s.Action(ctx, t.ID, "sync", true)
 				}
 			}
@@ -336,7 +350,22 @@ func (s *Service) startTarget(ctx context.Context, t *model.VMTransfer) error {
 			return err
 		}
 	}
-	if err = dst.StartVM(ctx, t.TargetVMID); err != nil {
+	if t.Request.HostID != "" {
+		hosts, e := dst.ListHosts(ctx, t.Request.TargetServerID)
+		if e != nil {
+			return e
+		}
+		available := false
+		for _, h := range hosts {
+			if h.ID == t.Request.HostID && h.ClusterID == t.Request.ClusterID && h.Status == "up" {
+				available = true
+			}
+		}
+		if !available {
+			return fmt.Errorf("выбранный целевой хост недоступен; запуск цели остановлен")
+		}
+	}
+	if err = dst.StartVMOnHost(ctx, t.TargetVMID, t.Request.HostID); err != nil {
 		return err
 	}
 	t.TargetStarted = true

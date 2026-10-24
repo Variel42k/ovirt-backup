@@ -3,6 +3,7 @@ package vmtransfer
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -120,6 +121,14 @@ func TestColdAndWarmWorkflowAcrossIndependentEngines(t *testing.T) {
 						eng.sourceState = "up"
 						fmt.Fprint(w, `{}`)
 					case path == "/vms/target-vm/start":
+						var action map[string]any
+						if err := json.NewDecoder(r.Body).Decode(&action); err != nil {
+							t.Error(err)
+						}
+						if _, ok := action["vm"]; !ok {
+							t.Error("selected host placement missing")
+						}
+
 						if eng.sourceState != "down" {
 							t.Error("target started with live source")
 						}
@@ -196,7 +205,16 @@ func TestColdAndWarmWorkflowAcrossIndependentEngines(t *testing.T) {
 			pool := ovirt.NewPool(st.GetServer, time.Second, zerolog.Nop())
 			defer pool.Close()
 			s := New(ctx, st, pool, eng, 1, zerolog.Nop())
-			req := model.VMTransferRequest{SourceServerID: "source", SourceVMID: "vm", TargetServerID: "target", ClusterID: "cluster", StorageDomainID: "domain", StorageTargetID: "repo", Name: "Moved VM", Mode: mode, Confirm: true}
+			req := model.VMTransferRequest{SourceServerID: "source", SourceVMID: "vm", TargetServerID: "target", ClusterID: "cluster", HostID: "host", StorageDomainID: "domain", StorageTargetID: "repo", Name: "Moved VM", Mode: mode, Confirm: true}
+			bad := req
+			bad.HostID = "different-cluster-or-down"
+			blocked, err := s.Plan(ctx, bad)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(blocked.Blockers) == 0 {
+				t.Fatal("unavailable host accepted")
+			}
 			tr := &model.VMTransfer{ID: "move", Request: req, Status: "queued", OriginalDesired: model.DesiredUp, DiskMap: map[string]string{}}
 			if err = st.CreateVMTransfer(ctx, tr); err != nil {
 				t.Fatal(err)

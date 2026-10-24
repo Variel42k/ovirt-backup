@@ -2,8 +2,9 @@ package api
 
 import (
 	"context"
-	"github.com/Variel42k/ovirt-backup/internal/model"
 	"net/http"
+
+	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
 func (s *Server) handleVMTransferSource(w http.ResponseWriter, r *http.Request) {
@@ -43,6 +44,69 @@ func (s *Server) handleVMTransferSource(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"nics": items, "warm_available": warm, "warm_reason": "Нужны Backup API и включённый incremental на всех дисках"})
+}
+
+func (s *Server) handlePlanVMTransferBatch(w http.ResponseWriter, r *http.Request) {
+	r.SetPathValue("operation", "plan")
+	s.handleVMTransferBatch(w, r)
+}
+
+func (s *Server) handleVMTransferBatch(w http.ResponseWriter, r *http.Request) {
+	var req model.VMTransferBatchRequest
+	if err := decodeJSON(r, &req); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	if s.vmTransfers == nil {
+		s.writeError(w, r, badRequest("служба миграции не инициализирована"))
+		return
+	}
+	if operation := r.PathValue("operation"); operation != "" && operation != "plan" {
+		s.writeError(w, r, badRequest("неизвестная операция группы"))
+		return
+	}
+	if r.PathValue("operation") == "plan" {
+		p, err := s.vmTransfers.PlanBatch(r.Context(), req)
+		if err != nil {
+			s.writeError(w, r, badRequest("%v", err))
+			return
+		}
+		writeJSON(w, http.StatusOK, p)
+		return
+	}
+	actor := "api"
+	if p := principalFrom(r.Context()); p != nil {
+		actor = p.Username
+	}
+	result, err := s.vmTransfers.CreateBatch(r.Context(), req, actor)
+	if err != nil {
+		s.writeError(w, r, badRequest("%v", err))
+		return
+	}
+	s.audit(r, "vm_transfer.batch.create", model.ScopeVM, result.ID, true, "")
+	writeJSON(w, http.StatusAccepted, result)
+}
+
+func (s *Server) handleVMTransferBatchAction(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Action  string `json:"action"`
+		Confirm bool   `json:"confirm"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	if s.vmTransfers == nil {
+		s.writeError(w, r, badRequest("служба миграции не инициализирована"))
+		return
+	}
+	result, err := s.vmTransfers.BatchAction(context.WithoutCancel(r.Context()), r.PathValue("id"), req.Action, req.Confirm)
+	if err != nil {
+		s.writeError(w, r, badRequest("%v", err))
+		return
+	}
+	s.audit(r, "vm_transfer.batch."+req.Action, model.ScopeVM, result.ID, len(result.Errors) == 0, "")
+	writeJSON(w, http.StatusAccepted, result)
 }
 
 func (s *Server) handleListVMTransfers(w http.ResponseWriter, r *http.Request) {

@@ -281,6 +281,9 @@ const unwrap = <T>(data: ListResponse<T>): T[] => data.items ?? []
 export const api = {
   listVMTransfers: () => http.get<ListResponse<import('./types').VMTransfer>>('/vm-transfers').then(r => unwrap(r.data)),
   vmTransferSource: (server_id: string, vm_id: string) => http.get<{ nics: import('./types').VMTransferNIC[]; warm_available: boolean; warm_reason: string }>('/vm-transfers/source', { params: { server_id, vm_id } }).then(r => r.data),
+  planVMTransferBatch: (request: import('./types').VMTransferBatchRequest) => http.post<import('./types').VMTransferBatchPlan>('/vm-transfers/batches/plan', request).then(r => r.data),
+  createVMTransferBatch: (request: import('./types').VMTransferBatchRequest) => http.post<import('./types').VMTransferBatchResult>('/vm-transfers/batches', request).then(r => r.data),
+  vmTransferBatchAction: (id: string, action: string) => http.post<import('./types').VMTransferBatchResult>(`/vm-transfers/batches/${id}/action`, { action, confirm: true }).then(r => r.data),
   planVMTransfer: (request: import('./types').VMTransferRequest) => http.post<import('./types').VMTransferPlan>('/vm-transfers/plan', request).then(r => r.data),
   createVMTransfer: (request: import('./types').VMTransferRequest) => http.post<import('./types').VMTransfer>('/vm-transfers', request).then(r => r.data),
   vmTransferAction: (id: string, action: string) => http.post<import('./types').VMTransfer>(`/vm-transfers/${id}/action`, { action, confirm: true }).then(r => r.data),

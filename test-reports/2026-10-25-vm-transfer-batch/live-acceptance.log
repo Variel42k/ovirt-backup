@@ -1,0 +1,75 @@
+cold/sequential cutover [('running', 'queued'), ('queued', 'queued')]
+cold/sequential cutover [('running', 'backup'), ('queued', 'queued')]
+cold/sequential cutover [('running', 'restoring_target'), ('queued', 'queued')]
+cold/sequential cutover [('running', 'starting_target'), ('queued', 'queued')]
+cold/sequential cutover [('awaiting_confirmation', 'verify_application'), ('running', 'backup')]
+cold/sequential cutover [('awaiting_confirmation', 'verify_application'), ('running', 'restoring_target')]
+cold/sequential cutover [('awaiting_confirmation', 'verify_application'), ('running', 'starting_target')]
+cold/sequential cutover [('awaiting_confirmation', 'verify_application'), ('awaiting_confirmation', 'verify_application')]
+Engine verification cutover passed for 02cc2785-7795-4a82-95df-18cc536161ad
+cold/sequential rollback [('running', 'rolling_back'), ('queued', 'queued')]
+cold/sequential rollback [('rolled_back', 'rolled_back'), ('running', 'rolling_back')]
+cold/sequential rollback [('rolled_back', 'rolled_back'), ('rolled_back', 'rolled_back')]
+Engine verification rollback passed for 02cc2785-7795-4a82-95df-18cc536161ad
+PASS cold/sequential
+cold/parallel cutover [('running', 'queued'), ('running', 'queued')]
+cold/parallel cutover [('running', 'backup'), ('running', 'backup')]
+cold/parallel cutover [('running', 'restoring_target'), ('running', 'restoring_target')]
+cold/parallel cutover [('running', 'starting_target'), ('running', 'starting_target')]
+cold/parallel cutover [('awaiting_confirmation', 'verify_application'), ('awaiting_confirmation', 'verify_application')]
+Engine verification cutover passed for 2ef5b66f-9d7d-4d05-8b3f-e9d432891333
+cold/parallel rollback [('running', 'rolling_back'), ('running', 'queued')]
+cold/parallel rollback [('running', 'rolling_back'), ('running', 'rolling_back')]
+cold/parallel rollback [('rolled_back', 'rolled_back'), ('rolled_back', 'rolled_back')]
+Engine verification rollback passed for 2ef5b66f-9d7d-4d05-8b3f-e9d432891333
+PASS cold/parallel
+warm/sequential prepare [('running', 'queued'), ('queued', 'queued')]
+warm/sequential prepare [('running', 'backup'), ('queued', 'queued')]
+warm/sequential prepare [('running', 'restoring_target'), ('queued', 'queued')]
+warm/sequential prepare [('running', 'copying_changes'), ('queued', 'queued')]
+warm/sequential prepare [('ready', 'ready'), ('running', 'backup')]
+warm/sequential prepare [('ready', 'ready'), ('running', 'restoring_target')]
+warm/sequential prepare [('ready', 'ready'), ('running', 'copying_changes')]
+warm/sequential prepare [('ready', 'ready'), ('ready', 'ready')]
+Engine verification ready passed for b2039ba3-4ac2-4c00-b645-5f1430ad78ce
+warm/sequential manual_sync [('running', 'queued'), ('queued', 'queued')]
+warm/sequential manual_sync [('running', 'copying_changes'), ('queued', 'queued')]
+warm/sequential manual_sync [('ready', 'ready'), ('running', 'copying_changes')]
+warm/sequential manual_sync [('ready', 'ready'), ('ready', 'ready')]
+warm/sequential cutover [('running', 'stopping_source'), ('queued', 'queued')]
+warm/sequential cutover [('running', 'copying_changes'), ('queued', 'queued')]
+warm/sequential cutover [('running', 'starting_target'), ('queued', 'queued')]
+warm/sequential cutover [('awaiting_confirmation', 'verify_application'), ('queued', 'queued')]
+warm/sequential cutover [('awaiting_confirmation', 'verify_application'), ('running', 'stopping_source')]
+warm/sequential cutover [('awaiting_confirmation', 'verify_application'), ('running', 'copying_changes')]
+warm/sequential cutover [('awaiting_confirmation', 'verify_application'), ('running', 'starting_target')]
+warm/sequential cutover [('awaiting_confirmation', 'verify_application'), ('awaiting_confirmation', 'verify_application')]
+Engine verification cutover passed for b2039ba3-4ac2-4c00-b645-5f1430ad78ce
+warm/sequential rollback [('running', 'rolling_back'), ('queued', 'queued')]
+warm/sequential rollback [('rolled_back', 'rolled_back'), ('running', 'rolling_back')]
+warm/sequential rollback [('rolled_back', 'rolled_back'), ('rolled_back', 'rolled_back')]
+Engine verification rollback passed for b2039ba3-4ac2-4c00-b645-5f1430ad78ce
+PASS warm/sequential
+warm/parallel prepare [('running', 'queued'), ('running', 'queued')]
+warm/parallel prepare [('running', 'backup'), ('running', 'backup')]
+warm/parallel prepare [('running', 'restoring_target'), ('running', 'backup')]
+warm/parallel prepare [('running', 'restoring_target'), ('running', 'restoring_target')]
+warm/parallel prepare [('running', 'restoring_target'), ('running', 'copying_changes')]
+warm/parallel prepare [('running', 'copying_changes'), ('running', 'copying_changes')]
+warm/parallel prepare [('running', 'copying_changes'), ('ready', 'ready')]
+warm/parallel prepare [('ready', 'ready'), ('ready', 'ready')]
+Engine verification ready passed for 237c2502-2efe-4be2-8ba7-32f4e0f8db0f
+warm/parallel cutover [('running', 'stopping_source'), ('running', 'stopping_source')]
+warm/parallel cutover [('running', 'copying_changes'), ('running', 'stopping_source')]
+warm/parallel cutover [('running', 'copying_changes'), ('running', 'copying_changes')]
+warm/parallel cutover [('running', 'starting_target'), ('running', 'copying_changes')]
+warm/parallel cutover [('running', 'starting_target'), ('running', 'starting_target')]
+warm/parallel cutover [('awaiting_confirmation', 'verify_application'), ('awaiting_confirmation', 'verify_application')]
+Engine verification cutover passed for 237c2502-2efe-4be2-8ba7-32f4e0f8db0f
+warm/parallel rollback [('running', 'rolling_back'), ('running', 'rolling_back')]
+warm/parallel rollback [('rolled_back', 'rolled_back'), ('running', 'rolling_back')]
+warm/parallel rollback [('rolled_back', 'rolled_back'), ('rolled_back', 'rolled_back')]
+Engine verification rollback passed for 237c2502-2efe-4be2-8ba7-32f4e0f8db0f
+PASS warm/parallel
+All four real two-VM batch cases passed
+Temporary test credential removed

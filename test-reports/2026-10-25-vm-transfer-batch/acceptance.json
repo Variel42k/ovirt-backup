@@ -1,0 +1,1561 @@
+{
+  "fixture": {
+    "marker": "jhvirt-batch-test-e0d3c313",
+    "repository_id": "4d994350-747c-4318-84ec-c94e7056276b",
+    "source_id": "f352f923-e2e3-49b3-8e66-96d0a509620a",
+    "source_host": "eb4aa84e-35ac-49a3-9ab9-2a36033bfbcb",
+    "source_cluster": "5a1991ee-c5dd-11ee-b337-00163e07dce0",
+    "source_domain": "151c893d-8313-483f-bfa1-3f26fb293fc7",
+    "target_id": "8e0bfd82-09a4-45fc-9e5e-ad1b0ff134ce",
+    "target_host": "296118e4-4d38-48b8-9982-5b3cb0275138",
+    "target_cluster": "fcc67946-f423-11ef-af8b-00163e36a0f3",
+    "target_domain": "51276875-4db8-479e-96ad-d77b628a98bd",
+    "vms": [
+      {
+        "name": "jhvirt-batch-test-e0d3c313-1",
+        "id": "6bb08ae4-0ef8-4821-95af-061cc6e11311",
+        "disk_id": "53eaab62-6bb0-4610-a83d-69a111783b62",
+        "import_id": "36603c0f-98b3-4313-9d62-f189fda39d4c"
+      },
+      {
+        "name": "jhvirt-batch-test-e0d3c313-2",
+        "id": "ea919d79-f0d4-495b-b3df-ef50f2406bc4",
+        "disk_id": "0656c74e-fb84-430e-b48c-3490461a3107",
+        "import_id": "298db10d-2042-4d7e-90a1-5da416566a41"
+      }
+    ],
+    "binary_sha256": "f91c02d0a295d6624f7fd08e14e767a5a43684bd7f1301d775fbc9314ce9cd91"
+  },
+  "version": "ovirt-backup-server dev-vm-transfer-batch-20261025-c51720239398",
+  "started_at": 1792879471.7211447,
+  "cases": [
+    {
+      "mode": "cold",
+      "execution": "sequential",
+      "observations": [
+        {
+          "time": 1792879473.2740784,
+          "stage": "cutover",
+          "states": [
+            [
+              "running",
+              "queued"
+            ],
+            [
+              "queued",
+              "queued"
+            ]
+          ],
+          "running": 1
+        },
+        {
+          "time": 1792879475.2810638,
+          "stage": "cutover",
+          "states": [
+            [
+              "running",
+              "backup"
+            ],
+            [
+              "queued",
+              "queued"
+            ]
+          ],
+          "running": 1
+        },
+        {
+          "time": 1792879503.3755448,
+          "stage": "cutover",
+          "states": [
+            [
+              "running",
+              "restoring_target"
+            ],
+            [
+              "queued",
+              "queued"
+            ]
+          ],
+          "running": 1
+        },
+        {
+          "time": 1792879559.56862,
+          "stage": "cutover",
+          "states": [
+            [
+              "running",
+              "starting_target"
+            ],
+            [
+              "queued",
+              "queued"
+            ]
+          ],
+          "running": 1
+        },
+        {
+          "time": 1792879629.8039005,
+          "stage": "cutover",
+          "states": [
+            [
+              "awaiting_confirmation",
+              "verify_application"
+            ],
+            [
+              "running",
+              "backup"
+            ]
+          ],
+          "running": 1
+        },
+        {
+          "time": 1792879669.9408715,
+          "stage": "cutover",
+          "states": [
+            [
+              "awaiting_confirmation",
+              "verify_application"
+            ],
+            [
+              "running",
+              "restoring_target"
+            ]
+          ],
+          "running": 1
+        },
+        {
+          "time": 1792879712.0817375,
+          "stage": "cutover",
+          "states": [
+            [
+              "awaiting_confirmation",
+              "verify_application"
+            ],
+            [
+              "running",
+              "starting_target"
+            ]
+          ],
+          "running": 1
+        },
+        {
+          "time": 1792879780.3137083,
+          "stage": "cutover",
+          "states": [
+            [
+              "awaiting_confirmation",
+              "verify_application"
+            ],
+            [
+              "awaiting_confirmation",
+              "verify_application"
+            ]
+          ],
+          "running": 0
+        },
+        {
+          "time": 1792879780.8842032,
+          "stage": "rollback",
+          "states": [
+            [
+              "running",
+              "rolling_back"
+            ],
+            [
+              "queued",
+              "queued"
+            ]
+          ],
+          "running": 1
+        },
+        {
+          "time": 1792879788.911335,
+          "stage": "rollback",
+          "states": [
+            [
+              "rolled_back",
+              "rolled_back"
+            ],
+            [
+              "running",
+              "rolling_back"
+            ]
+          ],
+          "running": 1
+        },
+        {
+          "time": 1792879941.4254732,
+          "stage": "rollback",
+          "states": [
+            [
+              "rolled_back",
+              "rolled_back"
+            ],
+            [
+              "rolled_back",
+              "rolled_back"
+            ]
+          ],
+          "running": 0
+        }
+      ],
+      "max_running": 1,
+      "passed": true,
+      "id": "02cc2785-7795-4a82-95df-18cc536161ad",
+      "queued_pause_resume_passed": true,
+      "cutover_inspection": [
+        {
+          "bios": "q35_sea_bios",
+          "disk_count": 1,
+          "domain": "51276875-4db8-479e-96ad-d77b628a98bd",
+          "id": "fb3e3487-b8a4-49cf-8eed-b39eb2d6606f",
+          "memory_mib": 256,
+          "nics": 0,
+          "source_status": "down",
+          "target_host": "296118e4-4d38-48b8-9982-5b3cb0275138",
+          "target_status": "up",
+          "vcpus": 1
+        },
+        {
+          "bios": "q35_sea_bios",
+          "disk_count": 1,
+          "domain": "51276875-4db8-479e-96ad-d77b628a98bd",
+          "id": "866d23d3-bca6-4a30-9750-32493ba86e0e",
+          "memory_mib": 256,
+          "nics": 0,
+          "source_status": "down",
+          "target_host": "296118e4-4d38-48b8-9982-5b3cb0275138",
+          "target_status": "up",
+          "vcpus": 1
+        }
+      ],
+      "results": [
+        {
+          "batch_id": "02cc2785-7795-4a82-95df-18cc536161ad",
+          "batch_parallelism": 1,
+          "source_shape": "4abf98ab46773ecead91ca27b04af3cb92cbf86101bae10c2ff6a45c2226c101",
+          "last_sync_seconds": 0,
+          "id": "866d23d3-bca6-4a30-9750-32493ba86e0e",
+          "request": {
+            "source_server_id": "f352f923-e2e3-49b3-8e66-96d0a509620a",
+            "source_vm_id": "6bb08ae4-0ef8-4821-95af-061cc6e11311",
+            "target_server_id": "8e0bfd82-09a4-45fc-9e5e-ad1b0ff134ce",
+            "cluster_id": "fcc67946-f423-11ef-af8b-00163e36a0f3",
+            "host_id": "296118e4-4d38-48b8-9982-5b3cb0275138",
+            "storage_domain_id": "51276875-4db8-479e-96ad-d77b628a98bd",
+            "storage_target_id": "4d994350-747c-4318-84ec-c94e7056276b",
+            "name": "jhvirt-batch-test-e0d3c313-1-cs",
+            "mode": "cold",
+            "network_mappings": [],
+            "preserve_mac": false,
+            "confirm": true
+          },
+          "source_name": "jhvirt-batch-test-e0d3c313-1",
+          "status": "awaiting_confirmation",
+          "phase": "verify_application",
+          "error": "",
+          "progress": 95,
+          "target_vm_id": "386fb5c1-b93c-42ea-91ca-c48a0a6dcfe8",
+          "restore_id": "89b2d0de-f70b-4c4f-accf-bdbd9be91236",
+          "run_ids": [
+            "2b02c497-cdb4-4ef8-ac88-e1f7f140f5eb"
+          ],
+          "applied_run_id": "2b02c497-cdb4-4ef8-ac88-e1f7f140f5eb",
+          "disk_map": {
+            "53eaab62-6bb0-4610-a83d-69a111783b62": "0dd62575-f03f-411b-b699-12bf6d86c89e"
+          },
+          "original_desired": "as_is",
+          "original_opt_out": true,
+          "was_running": false,
+          "source_stopped": true,
+          "target_started": true,
+          "transferred_bytes": 0,
+          "total_bytes": 1073741824,
+          "bytes_per_second": 0,
+          "created_by": "токен:batch-live-acceptance-3289107c-366d-4081-ba5b-90f791a3bff8",
+          "created_at": "2026-10-24T22:04:33.237790322Z",
+          "updated_at": "2026-10-24T22:07:08.950907992Z"
+        },
+        {
+          "batch_id": "02cc2785-7795-4a82-95df-18cc536161ad",
+          "batch_index": 1,
+          "batch_parallelism": 1,
+          "source_shape": "ac0d09e26ef63418c1c528246f71058f0a25a71039e9372e0ccb074c31a8d60b",
+          "last_sync_seconds": 0,
+          "id": "fb3e3487-b8a4-49cf-8eed-b39eb2d6606f",
+          "request": {
+            "source_server_id": "f352f923-e2e3-49b3-8e66-96d0a509620a",
+            "source_vm_id": "ea919d79-f0d4-495b-b3df-ef50f2406bc4",
+            "target_server_id": "8e0bfd82-09a4-45fc-9e5e-ad1b0ff134ce",
+            "cluster_id": "fcc67946-f423-11ef-af8b-00163e36a0f3",
+            "host_id": "296118e4-4d38-48b8-9982-5b3cb0275138",
+            "storage_domain_id": "51276875-4db8-479e-96ad-d77b628a98bd",
+            "storage_target_id": "4d994350-747c-4318-84ec-c94e7056276b",
+            "name": "jhvirt-batch-test-e0d3c313-2-cs",
+            "mode": "cold",
+            "network_mappings": [],
+            "preserve_mac": false,
+            "confirm": true
+          },
+          "source_name": "jhvirt-batch-test-e0d3c313-2",
+          "status": "awaiting_confirmation",
+          "phase": "verify_application",
+          "error": "",
+          "progress": 95,
+          "target_vm_id": "4c86a2b2-607a-4504-b93f-074fd681cad1",
+          "restore_id": "811b33c7-8172-4a8e-8f48-3c17e4fa5439",
+          "run_ids": [
+            "611db03e-d695-40b8-8c78-4b1500da2fc7"
+          ],
+          "applied_run_id": "611db03e-d695-40b8-8c78-4b1500da2fc7",
+          "disk_map": {
+            "0656c74e-fb84-430e-b48c-3490461a3107": "50ad40dd-411a-469e-ba6f-eecd40a803d2"
+          },
+          "original_desired": "as_is",
+          "original_opt_out": true,
+          "was_running": false,
+          "source_stopped": true,
+          "target_started": true,
+          "transferred_bytes": 0,
+          "total_bytes": 1073741824,
+          "bytes_per_second": 0,
+          "created_by": "токен:batch-live-acceptance-3289107c-366d-4081-ba5b-90f791a3bff8",
+          "created_at": "2026-10-24T22:04:33.237790322Z",
+          "updated_at": "2026-10-24T22:09:39.399007541Z"
+        }
+      ],
+      "transfer_passed": true,
+      "rollback_inspection": [
+        {
+          "id": "fb3e3487-b8a4-49cf-8eed-b39eb2d6606f",
+          "source_status": "down",
+          "target_absent": true
+        },
+        {
+          "id": "866d23d3-bca6-4a30-9750-32493ba86e0e",
+          "source_status": "down",
+          "target_absent": true
+        }
+      ]
+    },
+    {
+      "mode": "cold",
+      "execution": "parallel",
+      "observations": [
+        {
+          "time": 1792879942.3291857,
+          "stage": "cutover",
+          "states": [
+            [
+              "running",
+              "queued"
+            ],
+            [
+              "running",
+              "queued"
+            ]
+          ],
+          "running": 2
+        },
+        {
+          "time": 1792879944.336595,
+          "stage": "cutover",
+          "states": [
+            [
+              "running",
+              "backup"
+            ],
+            [
+              "running",
+              "backup"
+            ]
+          ],
+          "running": 2
+        },
+        {
+          "time": 1792879986.4854875,
+          "stage": "cutover",
+          "states": [
+            [
+              "running",
+              "restoring_target"
+            ],
+            [
+              "running",
+              "restoring_target"
+            ]
+          ],
+          "running": 2
+        },
+        {
+          "time": 1792880032.6452281,
+          "stage": "cutover",
+          "states": [
+            [
+              "running",
+              "starting_target"
+            ],
+            [
+              "running",
+              "starting_target"
+            ]
+          ],
+          "running": 2
+        },
+        {
+          "time": 1792880096.864441,
+          "stage": "cutover",
+          "states": [
+            [
+              "awaiting_confirmation",
+              "verify_application"
+            ],
+            [
+              "awaiting_confirmation",
+              "verify_application"
+            ]
+          ],
+          "running": 0
+        },
+        {
+          "time": 1792880097.437825,
+          "stage": "rollback",
+          "states": [
+            [
+              "running",
+              "rolling_back"
+            ],
+            [
+              "running",
+              "queued"
+            ]
+          ],
+          "running": 2
+        },
+        {
+          "time": 1792880099.4455824,
+          "stage": "rollback",
+          "states": [
+            [
+              "running",
+              "rolling_back"
+            ],
+            [
+              "running",
+              "rolling_back"
+            ]
+          ],
+          "running": 2
+        },
+        {
+          "time": 1792880262.0032866,
+          "stage": "rollback",
+          "states": [
+            [
+              "rolled_back",
+              "rolled_back"
+            ],
+            [
+              "rolled_back",
+              "rolled_back"
+            ]
+          ],
+          "running": 0
+        }
+      ],
+      "max_running": 2,
+      "passed": true,
+      "id": "2ef5b66f-9d7d-4d05-8b3f-e9d432891333",
+      "cutover_inspection": [
+        {
+          "bios": "q35_sea_bios",
+          "disk_count": 1,
+          "domain": "51276875-4db8-479e-96ad-d77b628a98bd",
+          "id": "464cfccf-8d58-4483-9e44-9c2039455a87",
+          "memory_mib": 256,
+          "nics": 0,
+          "source_status": "down",
+          "target_host": "296118e4-4d38-48b8-9982-5b3cb0275138",
+          "target_status": "up",
+          "vcpus": 1
+        },
+        {
+          "bios": "q35_sea_bios",
+          "disk_count": 1,
+          "domain": "51276875-4db8-479e-96ad-d77b628a98bd",
+          "id": "95de527b-018e-4338-b6cd-5a6354aabb70",
+          "memory_mib": 256,
+          "nics": 0,
+          "source_status": "down",
+          "target_host": "296118e4-4d38-48b8-9982-5b3cb0275138",
+          "target_status": "up",
+          "vcpus": 1
+        }
+      ],
+      "results": [
+        {
+          "batch_id": "2ef5b66f-9d7d-4d05-8b3f-e9d432891333",
+          "batch_parallelism": 2,
+          "source_shape": "4abf98ab46773ecead91ca27b04af3cb92cbf86101bae10c2ff6a45c2226c101",
+          "last_sync_seconds": 0,
+          "id": "464cfccf-8d58-4483-9e44-9c2039455a87",
+          "request": {
+            "source_server_id": "f352f923-e2e3-49b3-8e66-96d0a509620a",
+            "source_vm_id": "6bb08ae4-0ef8-4821-95af-061cc6e11311",
+            "target_server_id": "8e0bfd82-09a4-45fc-9e5e-ad1b0ff134ce",
+            "cluster_id": "fcc67946-f423-11ef-af8b-00163e36a0f3",
+            "host_id": "296118e4-4d38-48b8-9982-5b3cb0275138",
+            "storage_domain_id": "51276875-4db8-479e-96ad-d77b628a98bd",
+            "storage_target_id": "4d994350-747c-4318-84ec-c94e7056276b",
+            "name": "jhvirt-batch-test-e0d3c313-1-cp",
+            "mode": "cold",
+            "network_mappings": [],
+            "preserve_mac": false,
+            "confirm": true
+          },
+          "source_name": "jhvirt-batch-test-e0d3c313-1",
+          "status": "awaiting_confirmation",
+          "phase": "verify_application",
+          "error": "",
+          "progress": 95,
+          "target_vm_id": "62adb096-39d2-4128-9773-df553704697c",
+          "restore_id": "2343c77a-bd9f-48c1-85ea-e286489502ba",
+          "run_ids": [
+            "6d8789bf-92fe-460c-b452-c80b086b03d9"
+          ],
+          "applied_run_id": "6d8789bf-92fe-460c-b452-c80b086b03d9",
+          "disk_map": {
+            "53eaab62-6bb0-4610-a83d-69a111783b62": "345fcfcf-a9e3-4040-b62e-e194f970c8b7"
+          },
+          "original_desired": "as_is",
+          "original_opt_out": true,
+          "was_running": false,
+          "source_stopped": true,
+          "target_started": true,
+          "transferred_bytes": 0,
+          "total_bytes": 1073741824,
+          "bytes_per_second": 0,
+          "created_by": "токен:batch-live-acceptance-3289107c-366d-4081-ba5b-90f791a3bff8",
+          "created_at": "2026-10-24T22:12:22.315410761Z",
+          "updated_at": "2026-10-24T22:14:56.072777485Z"
+        },
+        {
+          "batch_id": "2ef5b66f-9d7d-4d05-8b3f-e9d432891333",
+          "batch_index": 1,
+          "batch_parallelism": 2,
+          "source_shape": "ac0d09e26ef63418c1c528246f71058f0a25a71039e9372e0ccb074c31a8d60b",
+          "last_sync_seconds": 0,
+          "id": "95de527b-018e-4338-b6cd-5a6354aabb70",
+          "request": {
+            "source_server_id": "f352f923-e2e3-49b3-8e66-96d0a509620a",
+            "source_vm_id": "ea919d79-f0d4-495b-b3df-ef50f2406bc4",
+            "target_server_id": "8e0bfd82-09a4-45fc-9e5e-ad1b0ff134ce",
+            "cluster_id": "fcc67946-f423-11ef-af8b-00163e36a0f3",
+            "host_id": "296118e4-4d38-48b8-9982-5b3cb0275138",
+            "storage_domain_id": "51276875-4db8-479e-96ad-d77b628a98bd",
+            "storage_target_id": "4d994350-747c-4318-84ec-c94e7056276b",
+            "name": "jhvirt-batch-test-e0d3c313-2-cp",
+            "mode": "cold",
+            "network_mappings": [],
+            "preserve_mac": false,
+            "confirm": true
+          },
+          "source_name": "jhvirt-batch-test-e0d3c313-2",
+          "status": "awaiting_confirmation",
+          "phase": "verify_application",
+          "error": "",
+          "progress": 95,
+          "target_vm_id": "03d8ec55-07f0-4f4d-b421-6372e38ae03a",
+          "restore_id": "a0ef9de7-def1-41dd-addc-66bae81ad416",
+          "run_ids": [
+            "584701a8-c57e-4107-8f71-c98e684210d9"
+          ],
+          "applied_run_id": "584701a8-c57e-4107-8f71-c98e684210d9",
+          "disk_map": {
+            "0656c74e-fb84-430e-b48c-3490461a3107": "9139d168-832f-4fa5-bf2d-c10186fa6afc"
+          },
+          "original_desired": "as_is",
+          "original_opt_out": true,
+          "was_running": false,
+          "source_stopped": true,
+          "target_started": true,
+          "transferred_bytes": 0,
+          "total_bytes": 1073741824,
+          "bytes_per_second": 0,
+          "created_by": "токен:batch-live-acceptance-3289107c-366d-4081-ba5b-90f791a3bff8",
+          "created_at": "2026-10-24T22:12:22.315410761Z",
+          "updated_at": "2026-10-24T22:14:56.038426597Z"
+        }
+      ],
+      "transfer_passed": true,
+      "rollback_inspection": [
+        {
+          "id": "464cfccf-8d58-4483-9e44-9c2039455a87",
+          "source_status": "down",
+          "target_absent": true
+        },
+        {
+          "id": "95de527b-018e-4338-b6cd-5a6354aabb70",
+          "source_status": "down",
+          "target_absent": true
+        }
+      ]
+    },
+    {
+      "mode": "warm",
+      "execution": "sequential",
+      "observations": [
+        {
+          "time": 1792880335.8983045,
+          "stage": "prepare",
+          "states": [
+            [
+              "running",
+              "queued"
+            ],
+            [
+              "queued",
+              "queued"
+            ]
+          ],
+          "running": 1
+        },
+        {
+          "time": 1792880337.9057977,
+          "stage": "prepare",
+          "states": [
+            [
+              "running",
+              "backup"
+            ],
+            [
+              "queued",
+              "queued"
+            ]
+          ],
+          "running": 1
+        },
+        {
+          "time": 1792880394.1002626,
+          "stage": "prepare",
+          "states": [
+            [
+              "running",
+              "restoring_target"
+            ],
+            [
+              "queued",
+              "queued"
+            ]
+          ],
+          "running": 1
+        },
+        {
+          "time": 1792880446.2832901,
+          "stage": "prepare",
+          "states": [
+            [
+              "running",
+              "copying_changes"
+            ],
+            [
+              "queued",
+              "queued"
+            ]
+          ],
+          "running": 1
+        },
+        {
+          "time": 1792880542.6161017,
+          "stage": "prepare",
+          "states": [
+            [
+              "ready",
+              "ready"
+            ],
+            [
+              "running",
+              "backup"
+            ]
+          ],
+          "running": 1
+        },
+        {
+          "time": 1792880582.757487,
+          "stage": "prepare",
+          "states": [
+            [
+              "ready",
+              "ready"
+            ],
+            [
+              "running",
+              "restoring_target"
+            ]
+          ],
+          "running": 1
+        },
+        {
+          "time": 1792880642.9738374,
+          "stage": "prepare",
+          "states": [
+            [
+              "ready",
+              "ready"
+            ],
+            [
+              "running",
+              "copying_changes"
+            ]
+          ],
+          "running": 1
+        },
+        {
+          "time": 1792880729.2766538,
+          "stage": "prepare",
+          "states": [
+            [
+              "ready",
+              "ready"
+            ],
+            [
+              "ready",
+              "ready"
+            ]
+          ],
+          "running": 0
+        },
+        {
+          "time": 1792880729.7165852,
+          "stage": "manual_sync",
+          "states": [
+            [
+              "running",
+              "queued"
+            ],
+            [
+              "queued",
+              "queued"
+            ]
+          ],
+          "running": 1
+        },
+        {
+          "time": 1792880731.7242465,
+          "stage": "manual_sync",
+          "states": [
+            [
+              "running",
+              "copying_changes"
+            ],
+            [
+              "queued",
+              "queued"
+            ]
+          ],
+          "running": 1
+        },
+        {
+          "time": 1792880816.0177393,
+          "stage": "manual_sync",
+          "states": [
+            [
+              "ready",
+              "ready"
+            ],
+            [
+              "running",
+              "copying_changes"
+            ]
+          ],
+          "running": 1
+        },
+        {
+          "time": 1792880908.3393815,
+          "stage": "manual_sync",
+          "states": [
+            [
+              "ready",
+              "ready"
+            ],
+            [
+              "ready",
+              "ready"
+            ]
+          ],
+          "running": 0
+        },
+        {
+          "time": 1792880908.35741,
+          "stage": "cutover",
+          "states": [
+            [
+              "running",
+              "stopping_source"
+            ],
+            [
+              "queued",
+              "queued"
+            ]
+          ],
+          "running": 1
+        },
+        {
+          "time": 1792880914.3788052,
+          "stage": "cutover",
+          "states": [
+            [
+              "running",
+              "copying_changes"
+            ],
+            [
+              "queued",
+              "queued"
+            ]
+          ],
+          "running": 1
+        },
+        {
+          "time": 1792880980.6124983,
+          "stage": "cutover",
+          "states": [
+            [
+              "running",
+              "starting_target"
+            ],
+            [
+              "queued",
+              "queued"
+            ]
+          ],
+          "running": 1
+        },
+        {
+          "time": 1792881042.8334746,
+          "stage": "cutover",
+          "states": [
+            [
+              "awaiting_confirmation",
+              "verify_application"
+            ],
+            [
+              "queued",
+              "queued"
+            ]
+          ],
+          "running": 0
+        },
+        {
+          "time": 1792881044.8413432,
+          "stage": "cutover",
+          "states": [
+            [
+              "awaiting_confirmation",
+              "verify_application"
+            ],
+            [
+              "running",
+              "stopping_source"
+            ]
+          ],
+          "running": 1
+        },
+        {
+          "time": 1792881048.8561153,
+          "stage": "cutover",
+          "states": [
+            [
+              "awaiting_confirmation",
+              "verify_application"
+            ],
+            [
+              "running",
+              "copying_changes"
+            ]
+          ],
+          "running": 1
+        },
+        {
+          "time": 1792881125.1301153,
+          "stage": "cutover",
+          "states": [
+            [
+              "awaiting_confirmation",
+              "verify_application"
+            ],
+            [
+              "running",
+              "starting_target"
+            ]
+          ],
+          "running": 1
+        },
+        {
+          "time": 1792881193.3678546,
+          "stage": "cutover",
+          "states": [
+            [
+              "awaiting_confirmation",
+              "verify_application"
+            ],
+            [
+              "awaiting_confirmation",
+              "verify_application"
+            ]
+          ],
+          "running": 0
+        },
+        {
+          "time": 1792881193.988456,
+          "stage": "rollback",
+          "states": [
+            [
+              "running",
+              "rolling_back"
+            ],
+            [
+              "queued",
+              "queued"
+            ]
+          ],
+          "running": 1
+        },
+        {
+          "time": 1792881284.303048,
+          "stage": "rollback",
+          "states": [
+            [
+              "rolled_back",
+              "rolled_back"
+            ],
+            [
+              "running",
+              "rolling_back"
+            ]
+          ],
+          "running": 1
+        },
+        {
+          "time": 1792881424.7968817,
+          "stage": "rollback",
+          "states": [
+            [
+              "rolled_back",
+              "rolled_back"
+            ],
+            [
+              "rolled_back",
+              "rolled_back"
+            ]
+          ],
+          "running": 0
+        }
+      ],
+      "max_running": 1,
+      "passed": true,
+      "id": "b2039ba3-4ac2-4c00-b645-5f1430ad78ce",
+      "ready_inspection": [
+        {
+          "bios": "q35_sea_bios",
+          "disk_count": 1,
+          "domain": "51276875-4db8-479e-96ad-d77b628a98bd",
+          "id": "0a8512ee-2d01-4bc3-97e2-a6b8dcd2974d",
+          "memory_mib": 256,
+          "nics": 0,
+          "source_status": "up",
+          "target_host": "",
+          "target_status": "down",
+          "vcpus": 1
+        },
+        {
+          "bios": "q35_sea_bios",
+          "disk_count": 1,
+          "domain": "51276875-4db8-479e-96ad-d77b628a98bd",
+          "id": "9c42597c-b777-4900-b5af-9e3971f2d6e1",
+          "memory_mib": 256,
+          "nics": 0,
+          "source_status": "up",
+          "target_host": "",
+          "target_status": "down",
+          "vcpus": 1
+        }
+      ],
+      "manual_sync_passed": true,
+      "cutover_inspection": [
+        {
+          "bios": "q35_sea_bios",
+          "disk_count": 1,
+          "domain": "51276875-4db8-479e-96ad-d77b628a98bd",
+          "id": "0a8512ee-2d01-4bc3-97e2-a6b8dcd2974d",
+          "memory_mib": 256,
+          "nics": 0,
+          "source_status": "down",
+          "target_host": "296118e4-4d38-48b8-9982-5b3cb0275138",
+          "target_status": "up",
+          "vcpus": 1
+        },
+        {
+          "bios": "q35_sea_bios",
+          "disk_count": 1,
+          "domain": "51276875-4db8-479e-96ad-d77b628a98bd",
+          "id": "9c42597c-b777-4900-b5af-9e3971f2d6e1",
+          "memory_mib": 256,
+          "nics": 0,
+          "source_status": "down",
+          "target_host": "296118e4-4d38-48b8-9982-5b3cb0275138",
+          "target_status": "up",
+          "vcpus": 1
+        }
+      ],
+      "results": [
+        {
+          "batch_id": "b2039ba3-4ac2-4c00-b645-5f1430ad78ce",
+          "batch_parallelism": 1,
+          "source_shape": "4abf98ab46773ecead91ca27b04af3cb92cbf86101bae10c2ff6a45c2226c101",
+          "last_sync_seconds": 67,
+          "id": "9c42597c-b777-4900-b5af-9e3971f2d6e1",
+          "request": {
+            "source_server_id": "f352f923-e2e3-49b3-8e66-96d0a509620a",
+            "source_vm_id": "6bb08ae4-0ef8-4821-95af-061cc6e11311",
+            "target_server_id": "8e0bfd82-09a4-45fc-9e5e-ad1b0ff134ce",
+            "cluster_id": "fcc67946-f423-11ef-af8b-00163e36a0f3",
+            "host_id": "296118e4-4d38-48b8-9982-5b3cb0275138",
+            "storage_domain_id": "51276875-4db8-479e-96ad-d77b628a98bd",
+            "storage_target_id": "4d994350-747c-4318-84ec-c94e7056276b",
+            "name": "jhvirt-batch-test-e0d3c313-1-ws",
+            "mode": "warm",
+            "network_mappings": [],
+            "preserve_mac": false,
+            "confirm": true
+          },
+          "source_name": "jhvirt-batch-test-e0d3c313-1",
+          "status": "awaiting_confirmation",
+          "phase": "verify_application",
+          "error": "",
+          "progress": 95,
+          "target_vm_id": "29a26a5e-00c2-458e-8bad-624646444979",
+          "restore_id": "16236aa1-e07f-4f9e-8879-3ea03bee8a8c",
+          "run_ids": [
+            "9aaeec84-dcd2-4632-8cd0-2c7eda30c8bf",
+            "dfd64244-288f-4d34-bc0d-021d8b436268",
+            "dfbcdb93-5508-4bd8-8bdc-4e62b2339ca5",
+            "d433cb92-c3eb-438e-8c5e-ef86d4a5f6ee"
+          ],
+          "applied_run_id": "d433cb92-c3eb-438e-8c5e-ef86d4a5f6ee",
+          "disk_map": {
+            "53eaab62-6bb0-4610-a83d-69a111783b62": "61846e58-a1e9-4fa9-bad3-9168e2d4063b"
+          },
+          "original_desired": "as_is",
+          "original_opt_out": true,
+          "was_running": true,
+          "source_stopped": true,
+          "target_started": true,
+          "transferred_bytes": 1073741824,
+          "total_bytes": 1073741824,
+          "bytes_per_second": 0,
+          "created_by": "токен:batch-live-acceptance-3289107c-366d-4081-ba5b-90f791a3bff8",
+          "created_at": "2026-10-24T22:18:55.885712549Z",
+          "updated_at": "2026-10-24T22:30:42.62311457Z"
+        },
+        {
+          "batch_id": "b2039ba3-4ac2-4c00-b645-5f1430ad78ce",
+          "batch_index": 1,
+          "batch_parallelism": 1,
+          "source_shape": "ac0d09e26ef63418c1c528246f71058f0a25a71039e9372e0ccb074c31a8d60b",
+          "last_sync_seconds": 76,
+          "id": "0a8512ee-2d01-4bc3-97e2-a6b8dcd2974d",
+          "request": {
+            "source_server_id": "f352f923-e2e3-49b3-8e66-96d0a509620a",
+            "source_vm_id": "ea919d79-f0d4-495b-b3df-ef50f2406bc4",
+            "target_server_id": "8e0bfd82-09a4-45fc-9e5e-ad1b0ff134ce",
+            "cluster_id": "fcc67946-f423-11ef-af8b-00163e36a0f3",
+            "host_id": "296118e4-4d38-48b8-9982-5b3cb0275138",
+            "storage_domain_id": "51276875-4db8-479e-96ad-d77b628a98bd",
+            "storage_target_id": "4d994350-747c-4318-84ec-c94e7056276b",
+            "name": "jhvirt-batch-test-e0d3c313-2-ws",
+            "mode": "warm",
+            "network_mappings": [],
+            "preserve_mac": false,
+            "confirm": true
+          },
+          "source_name": "jhvirt-batch-test-e0d3c313-2",
+          "status": "awaiting_confirmation",
+          "phase": "verify_application",
+          "error": "",
+          "progress": 95,
+          "target_vm_id": "aa8fefa8-d821-4295-be19-27f9866d9cc2",
+          "restore_id": "23584c05-9217-42ae-971d-6d8390218a19",
+          "run_ids": [
+            "f71a157e-d171-48c9-9ddd-666c8fcd6bbc",
+            "7b18d00d-177c-4091-aea8-51fb8737f87b",
+            "cafc8440-7750-485a-aec2-65111eded860",
+            "11396499-6412-459b-bd99-8eeca7535aa4"
+          ],
+          "applied_run_id": "11396499-6412-459b-bd99-8eeca7535aa4",
+          "disk_map": {
+            "0656c74e-fb84-430e-b48c-3490461a3107": "3f91ea29-b86d-4bb0-8cb5-71c4d17209dd"
+          },
+          "original_desired": "as_is",
+          "original_opt_out": true,
+          "was_running": true,
+          "source_stopped": true,
+          "target_started": true,
+          "transferred_bytes": 1073741824,
+          "total_bytes": 1073741824,
+          "bytes_per_second": 0,
+          "created_by": "токен:batch-live-acceptance-3289107c-366d-4081-ba5b-90f791a3bff8",
+          "created_at": "2026-10-24T22:18:55.885712549Z",
+          "updated_at": "2026-10-24T22:33:12.235789925Z"
+        }
+      ],
+      "transfer_passed": true,
+      "rollback_inspection": [
+        {
+          "id": "0a8512ee-2d01-4bc3-97e2-a6b8dcd2974d",
+          "source_status": "up",
+          "target_absent": true
+        },
+        {
+          "id": "9c42597c-b777-4900-b5af-9e3971f2d6e1",
+          "source_status": "up",
+          "target_absent": true
+        }
+      ]
+    },
+    {
+      "mode": "warm",
+      "execution": "parallel",
+      "observations": [
+        {
+          "time": 1792881426.0479662,
+          "stage": "prepare",
+          "states": [
+            [
+              "running",
+              "queued"
+            ],
+            [
+              "running",
+              "queued"
+            ]
+          ],
+          "running": 2
+        },
+        {
+          "time": 1792881428.0561461,
+          "stage": "prepare",
+          "states": [
+            [
+              "running",
+              "backup"
+            ],
+            [
+              "running",
+              "backup"
+            ]
+          ],
+          "running": 2
+        },
+        {
+          "time": 1792881484.259064,
+          "stage": "prepare",
+          "states": [
+            [
+              "running",
+              "restoring_target"
+            ],
+            [
+              "running",
+              "backup"
+            ]
+          ],
+          "running": 2
+        },
+        {
+          "time": 1792881486.2672663,
+          "stage": "prepare",
+          "states": [
+            [
+              "running",
+              "restoring_target"
+            ],
+            [
+              "running",
+              "restoring_target"
+            ]
+          ],
+          "running": 2
+        },
+        {
+          "time": 1792881532.4350595,
+          "stage": "prepare",
+          "states": [
+            [
+              "running",
+              "restoring_target"
+            ],
+            [
+              "running",
+              "copying_changes"
+            ]
+          ],
+          "running": 2
+        },
+        {
+          "time": 1792881540.4642572,
+          "stage": "prepare",
+          "states": [
+            [
+              "running",
+              "copying_changes"
+            ],
+            [
+              "running",
+              "copying_changes"
+            ]
+          ],
+          "running": 2
+        },
+        {
+          "time": 1792881626.7696397,
+          "stage": "prepare",
+          "states": [
+            [
+              "running",
+              "copying_changes"
+            ],
+            [
+              "ready",
+              "ready"
+            ]
+          ],
+          "running": 1
+        },
+        {
+          "time": 1792881634.7997196,
+          "stage": "prepare",
+          "states": [
+            [
+              "ready",
+              "ready"
+            ],
+            [
+              "ready",
+              "ready"
+            ]
+          ],
+          "running": 0
+        },
+        {
+          "time": 1792881635.30101,
+          "stage": "cutover",
+          "states": [
+            [
+              "running",
+              "stopping_source"
+            ],
+            [
+              "running",
+              "stopping_source"
+            ]
+          ],
+          "running": 2
+        },
+        {
+          "time": 1792881641.3231978,
+          "stage": "cutover",
+          "states": [
+            [
+              "running",
+              "copying_changes"
+            ],
+            [
+              "running",
+              "stopping_source"
+            ]
+          ],
+          "running": 2
+        },
+        {
+          "time": 1792881643.3313673,
+          "stage": "cutover",
+          "states": [
+            [
+              "running",
+              "copying_changes"
+            ],
+            [
+              "running",
+              "copying_changes"
+            ]
+          ],
+          "running": 2
+        },
+        {
+          "time": 1792881711.5826755,
+          "stage": "cutover",
+          "states": [
+            [
+              "running",
+              "starting_target"
+            ],
+            [
+              "running",
+              "copying_changes"
+            ]
+          ],
+          "running": 2
+        },
+        {
+          "time": 1792881715.597986,
+          "stage": "cutover",
+          "states": [
+            [
+              "running",
+              "starting_target"
+            ],
+            [
+              "running",
+              "starting_target"
+            ]
+          ],
+          "running": 2
+        },
+        {
+          "time": 1792881779.8256183,
+          "stage": "cutover",
+          "states": [
+            [
+              "awaiting_confirmation",
+              "verify_application"
+            ],
+            [
+              "awaiting_confirmation",
+              "verify_application"
+            ]
+          ],
+          "running": 0
+        },
+        {
+          "time": 1792881780.346353,
+          "stage": "rollback",
+          "states": [
+            [
+              "running",
+              "rolling_back"
+            ],
+            [
+              "running",
+              "rolling_back"
+            ]
+          ],
+          "running": 2
+        },
+        {
+          "time": 1792882003.1254022,
+          "stage": "rollback",
+          "states": [
+            [
+              "rolled_back",
+              "rolled_back"
+            ],
+            [
+              "running",
+              "rolling_back"
+            ]
+          ],
+          "running": 1
+        },
+        {
+          "time": 1792882019.1859794,
+          "stage": "rollback",
+          "states": [
+            [
+              "rolled_back",
+              "rolled_back"
+            ],
+            [
+              "rolled_back",
+              "rolled_back"
+            ]
+          ],
+          "running": 0
+        }
+      ],
+      "max_running": 2,
+      "passed": true,
+      "id": "237c2502-2efe-4be2-8ba7-32f4e0f8db0f",
+      "ready_inspection": [
+        {
+          "bios": "q35_sea_bios",
+          "disk_count": 1,
+          "domain": "51276875-4db8-479e-96ad-d77b628a98bd",
+          "id": "5250be0c-f808-4563-a484-878158a8bc15",
+          "memory_mib": 256,
+          "nics": 0,
+          "source_status": "up",
+          "target_host": "",
+          "target_status": "down",
+          "vcpus": 1
+        },
+        {
+          "bios": "q35_sea_bios",
+          "disk_count": 1,
+          "domain": "51276875-4db8-479e-96ad-d77b628a98bd",
+          "id": "a82d6180-ed11-4303-baca-51108f910184",
+          "memory_mib": 256,
+          "nics": 0,
+          "source_status": "up",
+          "target_host": "",
+          "target_status": "down",
+          "vcpus": 1
+        }
+      ],
+      "cutover_inspection": [
+        {
+          "bios": "q35_sea_bios",
+          "disk_count": 1,
+          "domain": "51276875-4db8-479e-96ad-d77b628a98bd",
+          "id": "a82d6180-ed11-4303-baca-51108f910184",
+          "memory_mib": 256,
+          "nics": 0,
+          "source_status": "down",
+          "target_host": "296118e4-4d38-48b8-9982-5b3cb0275138",
+          "target_status": "up",
+          "vcpus": 1
+        },
+        {
+          "bios": "q35_sea_bios",
+          "disk_count": 1,
+          "domain": "51276875-4db8-479e-96ad-d77b628a98bd",
+          "id": "5250be0c-f808-4563-a484-878158a8bc15",
+          "memory_mib": 256,
+          "nics": 0,
+          "source_status": "down",
+          "target_host": "296118e4-4d38-48b8-9982-5b3cb0275138",
+          "target_status": "up",
+          "vcpus": 1
+        }
+      ],
+      "results": [
+        {
+          "batch_id": "237c2502-2efe-4be2-8ba7-32f4e0f8db0f",
+          "batch_parallelism": 2,
+          "source_shape": "4abf98ab46773ecead91ca27b04af3cb92cbf86101bae10c2ff6a45c2226c101",
+          "last_sync_seconds": 70,
+          "id": "5250be0c-f808-4563-a484-878158a8bc15",
+          "request": {
+            "source_server_id": "f352f923-e2e3-49b3-8e66-96d0a509620a",
+            "source_vm_id": "6bb08ae4-0ef8-4821-95af-061cc6e11311",
+            "target_server_id": "8e0bfd82-09a4-45fc-9e5e-ad1b0ff134ce",
+            "cluster_id": "fcc67946-f423-11ef-af8b-00163e36a0f3",
+            "host_id": "296118e4-4d38-48b8-9982-5b3cb0275138",
+            "storage_domain_id": "51276875-4db8-479e-96ad-d77b628a98bd",
+            "storage_target_id": "4d994350-747c-4318-84ec-c94e7056276b",
+            "name": "jhvirt-batch-test-e0d3c313-1-wp",
+            "mode": "warm",
+            "network_mappings": [],
+            "preserve_mac": false,
+            "confirm": true
+          },
+          "source_name": "jhvirt-batch-test-e0d3c313-1",
+          "status": "awaiting_confirmation",
+          "phase": "verify_application",
+          "error": "",
+          "progress": 95,
+          "target_vm_id": "37e5ced8-6c08-4c9c-a272-834f18ba6dc2",
+          "restore_id": "54488ae0-cb90-4f89-9f62-d9289cedcdf3",
+          "run_ids": [
+            "071d70a5-8b14-4d02-8621-8da2ebc1eb45",
+            "9f7a0792-255d-4c1d-a1ba-9fe4302c3a8d",
+            "df68d915-ba92-4d0f-86eb-3756f6ff3179"
+          ],
+          "applied_run_id": "df68d915-ba92-4d0f-86eb-3756f6ff3179",
+          "disk_map": {
+            "53eaab62-6bb0-4610-a83d-69a111783b62": "ac6fc8e5-7569-4d25-86be-b2efb7f9d341"
+          },
+          "original_desired": "as_is",
+          "original_opt_out": true,
+          "was_running": true,
+          "source_stopped": true,
+          "target_started": true,
+          "transferred_bytes": 1073741824,
+          "total_bytes": 1073741824,
+          "bytes_per_second": 0,
+          "created_by": "токен:batch-live-acceptance-3289107c-366d-4081-ba5b-90f791a3bff8",
+          "created_at": "2026-10-24T22:37:06.03510486Z",
+          "updated_at": "2026-10-24T22:42:58.579661941Z"
+        },
+        {
+          "batch_id": "237c2502-2efe-4be2-8ba7-32f4e0f8db0f",
+          "batch_index": 1,
+          "batch_parallelism": 2,
+          "source_shape": "ac0d09e26ef63418c1c528246f71058f0a25a71039e9372e0ccb074c31a8d60b",
+          "last_sync_seconds": 72,
+          "id": "a82d6180-ed11-4303-baca-51108f910184",
+          "request": {
+            "source_server_id": "f352f923-e2e3-49b3-8e66-96d0a509620a",
+            "source_vm_id": "ea919d79-f0d4-495b-b3df-ef50f2406bc4",
+            "target_server_id": "8e0bfd82-09a4-45fc-9e5e-ad1b0ff134ce",
+            "cluster_id": "fcc67946-f423-11ef-af8b-00163e36a0f3",
+            "host_id": "296118e4-4d38-48b8-9982-5b3cb0275138",
+            "storage_domain_id": "51276875-4db8-479e-96ad-d77b628a98bd",
+            "storage_target_id": "4d994350-747c-4318-84ec-c94e7056276b",
+            "name": "jhvirt-batch-test-e0d3c313-2-wp",
+            "mode": "warm",
+            "network_mappings": [],
+            "preserve_mac": false,
+            "confirm": true
+          },
+          "source_name": "jhvirt-batch-test-e0d3c313-2",
+          "status": "awaiting_confirmation",
+          "phase": "verify_application",
+          "error": "",
+          "progress": 95,
+          "target_vm_id": "840eedf3-7345-4ad3-ad76-a0c90cfe82c3",
+          "restore_id": "9ca5bc2c-d27f-4961-aed0-28d6bb2d1fa8",
+          "run_ids": [
+            "1d8d6248-554f-4823-9e60-db9e17f4e620",
+            "2846e2ce-3028-480a-9aa2-033b96f16407",
+            "aebc0350-2ab0-4723-884c-e41dd7c26fd9"
+          ],
+          "applied_run_id": "aebc0350-2ab0-4723-884c-e41dd7c26fd9",
+          "disk_map": {
+            "0656c74e-fb84-430e-b48c-3490461a3107": "e3fede5d-7490-4225-b138-bd06c841f4cd"
+          },
+          "original_desired": "as_is",
+          "original_opt_out": true,
+          "was_running": true,
+          "source_stopped": true,
+          "target_started": true,
+          "transferred_bytes": 1073741824,
+          "total_bytes": 1073741824,
+          "bytes_per_second": 0,
+          "created_by": "токен:batch-live-acceptance-3289107c-366d-4081-ba5b-90f791a3bff8",
+          "created_at": "2026-10-24T22:37:06.03510486Z",
+          "updated_at": "2026-10-24T22:42:58.615595999Z"
+        }
+      ],
+      "transfer_passed": true,
+      "rollback_inspection": [
+        {
+          "id": "a82d6180-ed11-4303-baca-51108f910184",
+          "source_status": "up",
+          "target_absent": true
+        },
+        {
+          "id": "5250be0c-f808-4563-a484-878158a8bc15",
+          "source_status": "up",
+          "target_absent": true
+        }
+      ]
+    }
+  ],
+  "preflight": {
+    "invalid_host_blocked": true,
+    "duplicate_vm_rejected": true,
+    "sources_unchanged": true
+  },
+  "complete": true,
+  "finished_at": 1792882019.4346094
+}

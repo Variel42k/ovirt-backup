@@ -1660,14 +1660,17 @@ source.addEventListener('alert', (e) => console.log(JSON.parse(e.data)))
 | `GET /vm-transfers/{id}` | Состояние, этап, созданные ресурсы и ошибка |
 | `POST /vm-transfers/plan` | Предварительная проверка без остановки и создания ресурсов |
 | `POST /vm-transfers` | Создание и запуск подтверждённой миграции |
-| `POST /vm-transfers/{id}/action` | `sync`, `cutover`, `pause`, `complete`, `cancel`, `rollback`, `forget` |
+| `POST /vm-transfers/{id}/action` | `sync`, `cutover`, `pause`, `resume`, `complete`, `cancel`, `rollback`, `forget` |
+| `POST /vm-transfers/batches/plan` | Проверить все ВМ группы и суммарное место в домене |
+| `POST /vm-transfers/batches` | Атомарно поставить подтверждённую группу в очередь |
+| `POST /vm-transfers/batches/{id}/action` | Групповые `sync`, `cutover`, `pause`, `resume`, `rollback`, `complete` |
 
 Чтение истории требует `servers.read` и `backups.read`. Планирование и изменения
 требуют `servers.write`, `backups.write` и `management.enabled=true`.
 Чтение исходных интерфейсов требует `servers.read`.
 
 Запрос плана/создания содержит `source_server_id`, `source_vm_id`,
-`target_server_id`, `cluster_id`, `storage_domain_id` (диски цели),
+`target_server_id`, `cluster_id`, необязательный `host_id`, `storage_domain_id` (диски цели),
 `storage_target_id` (промежуточная копия), `name`, `mode` (`cold` или `warm`),
 `network_mappings`, `preserve_mac`. Каждый mapping задаёт `nic_id`,
 `target_id`, `target_kind=vnic_profile`, `connected`, `exclude`.
@@ -1686,3 +1689,13 @@ source.addEventListener('alert', (e) => console.log(JSON.parse(e.data)))
 Полный сценарий и ограничения: [VM-MIGRATION.md](VM-MIGRATION.md).
 
 `forget` удаляет только запись отменённой или откаченной миграции. Пока запись существует, связанные подключения и репозиторий защищены от удаления.
+
+Группа принимает `items` (массив запросов отдельных миграций), `execution`
+(`sequential` или `parallel`), `parallelism` (2–8 для параллельного режима)
+и `confirm=true` для создания. Предварительный план возвращает `items`,
+`blockers` и `total_bytes`; создание — `id`, `items` и `errors`.
+Операции содержат `batch_id`, `batch_index`, `batch_parallelism` и
+`pending_action`. Групповое действие принимает `{"action":"cutover","confirm":true}`;
+ошибки отдельных ВМ возвращаются в `errors`, уже выполненные действия не отменяются.
+Пустой `host_id` оставляет размещение Engine; конкретный хост должен быть
+доступен в выбранном кластере. Источники всех ВМ резервируются одной транзакцией.

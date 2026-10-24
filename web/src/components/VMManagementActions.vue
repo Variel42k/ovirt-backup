@@ -33,8 +33,8 @@ const emit = defineEmits<{
     >
       <q-tooltip>Запустить / снять с паузы</q-tooltip>
     </q-btn>
-    <q-btn v-if="canTransfer" flat dense no-caps color="primary" icon="move_up"
-      label="Миграция ВМ" :disable="busy" @click="emit('transfer')"><q-tooltip>Миграция виртуальных машин в другой Engine</q-tooltip></q-btn>
+    <q-btn v-if="canTransfer" flat dense round color="primary" icon="move_up"
+      aria-label="Миграция виртуальных машин" :disable="busy" @click="emit('transfer')"><q-tooltip>Миграция виртуальных машин в другой Engine</q-tooltip></q-btn>
     <q-btn-dropdown v-if="canWrite" flat dense round dropdown-icon="more_vert" aria-label="Действия с ВМ" :loading="busy" :disable="busy">
       <q-list dense style="min-width: 220px">
         <q-item v-if="canManage" clickable v-close-popup @click="emit('action', 'shutdown')">

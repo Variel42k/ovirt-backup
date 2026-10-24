@@ -1,0 +1,11 @@
+{
+  "inventory_refreshed": true,
+  "source_vms_absent": 2,
+  "target_vms_absent": 8,
+  "test_migration_records_remaining": 0,
+  "test_repository_absent": true,
+  "installed_binary_sha256": "f91c02d0a295d6624f7fd08e14e767a5a43684bd7f1301d775fbc9314ce9cd91",
+  "temporary_test_credentials_remaining": 0,
+  "temporary_fixture_files_removed": true,
+  "verified": true
+}

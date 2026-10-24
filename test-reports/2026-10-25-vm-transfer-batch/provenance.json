@@ -1,0 +1,12 @@
+{
+  "stand": "https://10.249.251.36:8080",
+  "version": "dev-vm-transfer-batch-20261025-c51720239398",
+  "source_archive_sha256": "c517202393981fc22dd539b74e7cf845fedfbd106d9f654a89a7127d86ce6609",
+  "installed_binary_sha256": "f91c02d0a295d6624f7fd08e14e767a5a43684bd7f1301d775fbc9314ce9cd91",
+  "current_source_files_checked": 667,
+  "source_mismatch": [],
+  "source_missing": [],
+  "tested_source_archive_differences": [],
+  "installed_web_assets_checked": 84,
+  "installed_web_asset_mismatch": []
+}

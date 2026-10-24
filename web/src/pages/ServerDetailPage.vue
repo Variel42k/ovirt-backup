@@ -9,6 +9,7 @@ import { useAppStore } from '@/stores/app'
 import HealthChart from '@/components/HealthChart.vue'
 import IOChart, { type IOPoint } from '@/components/IOChart.vue'
 import PageLoadError from '@/components/PageLoadError.vue'
+import VMTransferDialog from '@/components/VMTransferDialog.vue'
 import VMManagementActions from '@/components/VMManagementActions.vue'
 import type { Disk, DiskSample, HealthSample, Host, MountSample, Server, StorageDomain, VM } from '@/api/types'
 
@@ -50,7 +51,8 @@ const canMigrate = computed(() => canManage.value && Boolean(server.value &&
   ['ovirt', 'redvirt', 'rhv', 'olvm', 'proxmox'].includes(server.value.kind)))
 
 const canTransfer = computed(() => canManage.value && auth.can('backups.write') && !!server.value && ['ovirt', 'redvirt', 'rhv', 'olvm'].includes(server.value.kind))
-function openTransfer(vm: VM) { void router.push({ name: 'vm-transfers', query: { create: '1', server: props.serverId, vm: vm.id } }) }
+const transferOpen = ref(false), transferVMIDs = ref<string[]>([])
+function openTransfer(vm?: VM) { transferVMIDs.value = vm ? [vm.id] : selectedVMs.value.map(v => v.id); transferOpen.value = true }
 
 const migrationUnavailableReason = computed(() => {
   if (!server.value) return ''
@@ -471,6 +473,7 @@ const domainColumns = [
               <div>Выбрано ВМ: {{ selectedVMs.length }}</div>
               <q-space />
               <q-btn v-if="auth.can('jobs.write')" color="primary" unelevated icon="add_task" label="Создать задание бэкапа" @click="createPolicyForSelected" />
+              <q-btn v-if="canTransfer" color="primary" unelevated icon="move_up" label="Мигрировать выбранные" @click="openTransfer()" />
               <q-btn flat label="Снять выбор" @click="selectedVMs = []" />
             </div>
           </q-banner>
@@ -481,7 +484,7 @@ const domainColumns = [
             :rows="vms"
             :columns="vmColumns"
             row-key="id"
-            :selection="auth.can('jobs.write') ? 'multiple' : 'none'"
+            :selection="auth.can('jobs.write') || canTransfer ? 'multiple' : 'none'"
             v-model:selected="selectedVMs"
             :grid="$q.screen.lt.md"
             flat
@@ -502,7 +505,7 @@ const domainColumns = [
                 <q-card flat bordered :class="{ 'bg-blue-1': props.selected }">
                   <q-card-section class="q-pa-sm">
                     <div class="row items-center no-wrap">
-                      <q-checkbox v-if="auth.can('jobs.write')" v-model="props.selected" dense class="q-mr-sm" :aria-label="`Выбрать ВМ ${props.row.name}`" />
+                      <q-checkbox v-if="auth.can('jobs.write') || canTransfer" v-model="props.selected" dense class="q-mr-sm" :aria-label="`Выбрать ВМ ${props.row.name}`" />
                       <router-link :to="{ name: 'vm', params: { serverId, vmId: props.row.id } }" class="text-primary text-weight-medium" style="overflow-wrap: anywhere">
                         {{ props.row.name }}
                       </router-link>
@@ -910,5 +913,6 @@ const domainColumns = [
     <div class="text-caption text-grey-6 q-mt-sm">
       Данные из кэша инвентаря, обновлён {{ ago(server?.last_seen_at) }}.
     </div>
+    <VMTransferDialog v-if="transferOpen" v-model="transferOpen" :server-id="serverId" :vm-ids="transferVMIDs" @created="selectedVMs = []" />
   </q-page>
 </template>

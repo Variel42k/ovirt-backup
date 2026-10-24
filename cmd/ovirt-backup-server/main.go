@@ -46,6 +46,7 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/setup"
 	"github.com/Variel42k/ovirt-backup/internal/sshpool"
 	"github.com/Variel42k/ovirt-backup/internal/store"
+	"github.com/Variel42k/ovirt-backup/internal/vmtransfer"
 )
 
 // version is stamped at build time with -ldflags "-X main.version=...".
@@ -458,8 +459,17 @@ func run() error {
 		log.Info().Str("файл", cfg.Audit.File).Msg("журнал аудита дублируется наружу")
 	}
 
+	transfers := vmtransfer.New(ctx, st, pool, dispatcher, cfg.Backup.Workers, log)
+	transfers.BackupRunner = sched.ExecuteControlled
+	if err := transfers.Recover(ctx); err != nil {
+		return fmt.Errorf("восстановление состояния миграций: %w", err)
+	}
+	if cfg.Management.Enabled {
+		go transfers.Run(ctx)
+	}
 	apiServer := api.New(api.Deps{
-		Config: *cfg, BaseConfig: baseCfg, Store: st, Pool: pool, LibvirtPool: libvirtPool,
+		VMTransfers: transfers,
+		Config:      *cfg, BaseConfig: baseCfg, Store: st, Pool: pool, LibvirtPool: libvirtPool,
 		ProxmoxPool: proxmoxPool, Engine: dispatcher,
 		Scheduler: sched, Monitor: mon, Remediator: remediator, Bus: bus, Logger: log,
 		Logs: logs, Quality: qualityService, Replicator: replicator, Notifier: notifier,

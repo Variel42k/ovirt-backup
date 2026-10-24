@@ -1649,3 +1649,40 @@ source.addEventListener('alert', (e) => console.log(JSON.parse(e.data)))
 | `POST` | `/disaster-recovery/check` | выполнить проверку сейчас |
 
 Оба маршрута административные. Секреты и содержимое дампа в ответ не входят.
+
+
+## Миграция виртуальных машин между oVirt Engine
+
+| Метод и путь | Назначение |
+|---|---|
+| `GET /vm-transfers` | История операций |
+| `GET /vm-transfers/source?server_id=…&vm_id=…` | Исходные NIC и доступность предварительного копирования |
+| `GET /vm-transfers/{id}` | Состояние, этап, созданные ресурсы и ошибка |
+| `POST /vm-transfers/plan` | Предварительная проверка без остановки и создания ресурсов |
+| `POST /vm-transfers` | Создание и запуск подтверждённой миграции |
+| `POST /vm-transfers/{id}/action` | `sync`, `cutover`, `pause`, `complete`, `cancel`, `rollback`, `forget` |
+
+Чтение истории требует `servers.read` и `backups.read`. Планирование и изменения
+требуют `servers.write`, `backups.write` и `management.enabled=true`.
+Чтение исходных интерфейсов требует `servers.read`.
+
+Запрос плана/создания содержит `source_server_id`, `source_vm_id`,
+`target_server_id`, `cluster_id`, `storage_domain_id` (диски цели),
+`storage_target_id` (промежуточная копия), `name`, `mode` (`cold` или `warm`),
+`network_mappings`, `preserve_mac`. Каждый mapping задаёт `nic_id`,
+`target_id`, `target_kind=vnic_profile`, `connected`, `exclude`.
+Для запуска нужен `confirm=true`: оператор принимает остановку и изменение UUID.
+План возвращает `blockers`, `warnings`, `nics`, `total_bytes`, `warm_available`,
+`warm_reason`. Ошибки условий не скрываются за автоматической сменой режима.
+
+Тело действия: `{"action":"cutover","confirm":true}`. Подтверждение обязательно
+для переключения и отката; `complete` фиксирует проверенную оператором работу
+приложения. `pause` прерывает текущую задачу без автоматического запуска источника.
+Откат после запуска цели удаляет созданную целевую ВМ и её диски: данные, записанные
+только на цели, будут потеряны. После перезапуска незавершённые задачи получают
+`interrupted`; сохранённые идентификаторы используются для безопасной очистки,
+а подготовленная warm-цель допускает повторную синхронизацию.
+
+Полный сценарий и ограничения: [VM-MIGRATION.md](VM-MIGRATION.md).
+
+`forget` удаляет только запись отменённой или откаченной миграции. Пока запись существует, связанные подключения и репозиторий защищены от удаления.

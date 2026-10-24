@@ -35,6 +35,10 @@ type fakeHost struct {
 // statVFSCmder добавляет обработчику SFTP ответ на statvfs.
 type statVFSCmder struct{ sftp.FileCmder }
 
+// InMemHandler now implements StatVFS itself. Hide that optional method in the
+// unsupported-extension fixture, or this test reads the runner's real disk.
+type noStatVFSCmder struct{ sftp.FileCmder }
+
 func (statVFSCmder) StatVFS(*sftp.Request) (*sftp.StatVFS, error) {
 	return &sftp.StatVFS{Bsize: 4096, Frsize: 1 << 20, Blocks: 100, Bfree: 60, Bavail: 50}, nil
 }
@@ -108,6 +112,8 @@ func (h *fakeHost) session(ch ssh.Channel, requests <-chan *ssh.Request) {
 			handlers := sftp.InMemHandler()
 			if h.mode == sftpStatVFS {
 				handlers.FileCmd = statVFSCmder{handlers.FileCmd}
+			} else {
+				handlers.FileCmd = noStatVFSCmder{handlers.FileCmd}
 			}
 			go func() {
 				_ = sftp.NewRequestServer(ch, handlers).Serve()

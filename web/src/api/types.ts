@@ -1980,3 +1980,21 @@ export interface DiscoverySettingsResponse {
   expanded_targets: number
   expanded_addresses: number
 }
+
+export interface VMTransferRequest {
+  source_server_id: string; source_vm_id: string; target_server_id: string
+  cluster_id: string; storage_domain_id: string; storage_target_id: string
+  name: string; mode: 'cold' | 'warm'; preserve_mac: boolean; confirm: boolean
+  network_mappings: { nic_id: string; target_id: string; target_kind: string; exclude: boolean; connected: boolean }[]
+}
+export interface VMTransferNIC { id: string; name: string; mac: string }
+export interface VMTransferPlan {
+  request: VMTransferRequest; source_name: string; total_bytes: number
+  nics: VMTransferNIC[]; blockers: string[]; warnings: string[]; warm_available: boolean; warm_reason: string
+}
+export interface VMTransfer {
+  id: string; request: VMTransferRequest; source_name: string; status: string; phase: string
+  error: string; progress: number; target_vm_id: string; restore_id: string; run_ids: string[]
+  applied_run_id: string; last_sync_seconds: number; source_stopped: boolean; target_started: boolean
+  transferred_bytes: number; total_bytes: number; bytes_per_second: number; created_at: string; updated_at: string
+}

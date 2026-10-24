@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/Variel42k/ovirt-backup/internal/model"
+	"github.com/Variel42k/ovirt-backup/internal/ovirt"
 )
 
 const VMProfileVersion = 2
@@ -88,13 +89,13 @@ func PortableMachine(arch, machine string) string {
 // ignored, so this stays compatible with oVirt forks that extend the VM JSON.
 func ProfileFromOVirtConfig(raw []byte, vm *model.VM, manifests []*DiskManifest) *VMProfile {
 	type configDocument struct {
-		Memory int64 `json:"memory"`
+		Memory ovirt.Num `json:"memory"`
 		CPU    struct {
 			Architecture string `json:"architecture"`
 			Topology     struct {
-				Cores   int `json:"cores"`
-				Sockets int `json:"sockets"`
-				Threads int `json:"threads"`
+				Cores   ovirt.Num `json:"cores"`
+				Sockets ovirt.Num `json:"sockets"`
+				Threads ovirt.Num `json:"threads"`
 			} `json:"topology"`
 		} `json:"cpu"`
 		BIOS struct {
@@ -137,8 +138,8 @@ func ProfileFromOVirtConfig(raw []byte, vm *model.VM, manifests []*DiskManifest)
 		firmware = "efi"
 	}
 
-	memoryMiB := int(doc.Memory / (1 << 20))
-	vcpus := doc.CPU.Topology.Cores * doc.CPU.Topology.Sockets * doc.CPU.Topology.Threads
+	memoryMiB := int(doc.Memory.Int64() / (1 << 20))
+	vcpus := int(doc.CPU.Topology.Cores.Int64() * doc.CPU.Topology.Sockets.Int64() * doc.CPU.Topology.Threads.Int64())
 	clock := "utc"
 	if vm != nil {
 		if memoryMiB == 0 {
@@ -155,6 +156,7 @@ func ProfileFromOVirtConfig(raw []byte, vm *model.VM, manifests []*DiskManifest)
 
 	profile := &VMProfile{
 		Version: VMProfileVersion, Source: "ovirt", Architecture: arch,
+		BIOSType: doc.BIOS.Type, OSType: doc.OS.Type, CPUCores: int(doc.CPU.Topology.Cores.Int64()), CPUSockets: int(doc.CPU.Topology.Sockets.Int64()), CPUThreads: int(doc.CPU.Topology.Threads.Int64()),
 		Machine: machine, Firmware: firmware,
 		SecureBoot: strings.Contains(biosType, "secure"), ClockOffset: clock,
 		MemoryMiB: memoryMiB, VCPUs: vcpus,

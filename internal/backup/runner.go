@@ -119,9 +119,10 @@ func (e *Engine) releaseHeavy() { <-e.heavy }
 
 // RunRequest describes one backup to execute.
 type RunRequest struct {
-	ServerID string
-	VMID     string
-	Type     model.BackupType
+	TransferID string `json:"-"`
+	ServerID   string
+	VMID       string
+	Type       model.BackupType
 
 	JobRunID string
 	JobID    string
@@ -286,7 +287,7 @@ func (e *Engine) Execute(ctx context.Context, req RunRequest) (*model.BackupRun,
 		log.Info().Str("тип", string(plan.Type)).Msg(plan.Note)
 	}
 
-	if err := e.store.CreateBackupRun(ctx, run); err != nil {
+	if err := e.store.CreateTransferBackupRun(ctx, run, req.TransferID); err != nil {
 		return nil, fmt.Errorf("сохранение записи о бэкапе: %w", err)
 	}
 	// После запуска — однократная уборка брошенных снапшотов ВМ. Отложенный
@@ -480,7 +481,7 @@ func (e *Engine) executeOVA(ctx context.Context, client *ovirt.Client, srv *mode
 		ServerID: srv.ID, VMID: vm.ID, VMName: vm.Name, Type: model.BackupOVA,
 		Status: model.RunPending, CreatedAt: time.Now().UTC(),
 	}
-	if err := e.store.CreateBackupRun(ctx, run); err != nil {
+	if err := e.store.CreateTransferBackupRun(ctx, run, req.TransferID); err != nil {
 		return nil, fmt.Errorf("сохранение записи об OVA: %w", err)
 	}
 	if req.OnRunCreated != nil {

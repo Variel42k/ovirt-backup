@@ -13,6 +13,7 @@ const routes = [
     component: () => import('@/layouts/MainLayout.vue'),
     children: [
       { path: '', name: 'dashboard', component: () => import('@/pages/DashboardPage.vue'), meta: { perm: 'monitoring.read' } },
+      { path: 'vm-transfers', name: 'vm-transfers', component: () => import('@/pages/VMTransfersPage.vue'), meta: { perm: 'servers.read' } },
       { path: 'servers', name: 'servers', component: () => import('@/pages/ServersPage.vue'), meta: { perm: 'servers.read' } },
       {
         path: 'servers/:serverId',

@@ -241,6 +241,9 @@ func (e *Engine) PurgeRunData(ctx context.Context, runID, reason string) error {
 // checkRunDeletionAccess also runs before quarantine: read-only repositories
 // must not lose catalog entries simply because no object is erased yet.
 func (e *Engine) checkRunDeletionAccess(ctx context.Context, run *model.BackupRun) error {
+	if err := e.store.VMTransferProtectsRun(ctx, run); err != nil {
+		return err
+	}
 	if run.RepoPath == "" || run.Type == model.BackupOVA {
 		return nil
 	}

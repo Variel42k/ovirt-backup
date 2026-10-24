@@ -49,6 +49,9 @@ const canDisrupt = computed(() => canManage.value && auth.can('servers.disruptiv
 const canMigrate = computed(() => canManage.value && Boolean(server.value &&
   ['ovirt', 'redvirt', 'rhv', 'olvm', 'proxmox'].includes(server.value.kind)))
 
+const canTransfer = computed(() => canManage.value && auth.can('backups.write') && !!server.value && ['ovirt', 'redvirt', 'rhv', 'olvm'].includes(server.value.kind))
+function openTransfer(vm: VM) { void router.push({ name: 'vm-transfers', query: { create: '1', server: props.serverId, vm: vm.id } }) }
+
 const migrationUnavailableReason = computed(() => {
   if (!server.value) return ''
   if (server.value.kind === 'kvm') return 'Для отдельных KVM-хостов миграция пока не поддерживается.'
@@ -270,7 +273,13 @@ async function vmAction(vm: VM, action: string) {
     const targets = hosts.value.filter((host) => host.id !== vm.host_id && host.status === 'up' &&
       (server.value?.kind === 'proxmox' || !vm.cluster_id || host.cluster_id === vm.cluster_id))
     if (!targets.length) {
-      notifyError('Нет другого доступного узла для миграции')
+      $q.dialog({
+        title: `Миграция «${vm.name}» недоступна`,
+        message: 'В инвентаре этого подключения нет другого работающего хоста того же кластера. ' +
+          'Проверьте список хостов и обновите инвентарь кнопкой «Опросить». ' +
+          'Для переноса в другое подключение используйте бэкап и восстановление с выбором целевого подключения.',
+        ok: { label: 'Понятно', color: 'primary' },
+      })
       return
     }
     $q.dialog({
@@ -389,7 +398,7 @@ const vmColumns = [
   { name: 'host', label: 'Хост', field: 'host_name', align: 'left' as const, sortable: true },
   { name: 'resources', label: 'Ресурсы', field: 'memory_bytes', align: 'left' as const },
   { name: 'desired', label: 'Должна', field: 'desired_state', align: 'left' as const, sortable: true },
-  { name: 'actions', label: '', field: 'id', align: 'right' as const },
+  { name: 'actions', label: 'Действия', field: 'id', align: 'right' as const },
 ]
 
 const hostColumns = [
@@ -478,7 +487,7 @@ const domainColumns = [
             flat
             :loading="loading"
             :filter="search"
-            class="jhv-table"
+            class="jhv-table jhv-vm-table"
             :pagination="{ rowsPerPage: 50 }"
             no-data-label="Виртуальные машины не найдены"
           >
@@ -508,7 +517,7 @@ const domainColumns = [
                   <q-separator v-if="auth.can('servers.write')" />
                   <q-card-actions v-if="auth.can('servers.write')" align="right">
                     <VMManagementActions :vm="props.row" :can-write="auth.can('servers.write')"
-                      :can-manage="canManage" :can-migrate="canMigrate" :can-disrupt="canDisrupt"
+                      :can-manage="canManage" :can-migrate="canMigrate" :can-transfer="canTransfer" @transfer="openTransfer(props.row)" :can-disrupt="canDisrupt"
                       :busy="resourceBusy('vm', props.row.id)" @action="vmAction(props.row, $event)"
                       @toggle-opt-out="toggleOptOut(props.row)" />
                   </q-card-actions>
@@ -601,7 +610,7 @@ const domainColumns = [
             <template #body-cell-actions="props">
               <q-td :props="props">
                 <VMManagementActions :vm="props.row" :can-write="auth.can('servers.write')"
-                  :can-manage="canManage" :can-migrate="canMigrate" :can-disrupt="canDisrupt"
+                  :can-manage="canManage" :can-migrate="canMigrate" :can-transfer="canTransfer" @transfer="openTransfer(props.row)" :can-disrupt="canDisrupt"
                   :busy="resourceBusy('vm', props.row.id)" @action="vmAction(props.row, $event)"
                   @toggle-opt-out="toggleOptOut(props.row)" />
               </q-td>

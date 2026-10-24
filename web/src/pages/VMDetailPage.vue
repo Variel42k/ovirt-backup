@@ -320,6 +320,8 @@ onMounted(load)
         </div>
       </div>
       <q-space />
+      <q-btn v-if="auth.can('servers.write') && auth.can('backups.write') && app.meta?.capabilities.management_enabled !== false && ['ovirt','redvirt','rhv','olvm'].includes(app.servers.find(s => s.id === serverId)?.kind || '')"
+        flat color="primary" icon="move_up" label="Миграция виртуальных машин" :to="{ name: 'vm-transfers', query: { create: '1', server: serverId, vm: vmId } }" />
       <q-btn flat dense round icon="refresh" :loading="loading" @click="load" />
     </div>
 

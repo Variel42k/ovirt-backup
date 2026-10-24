@@ -72,8 +72,12 @@ func withinRoot(path, root string) bool {
 
 // RestoreRequest describes what to restore and where.
 type RestoreRequest struct {
-	RunID  string
-	CopyID string
+	TransferID string
+	// Internal incremental replay into an existing, stopped migration target.
+	DeltaAfterRunID string
+	OnDiskRestored  func(sourceID, targetID string) error
+	RunID           string
+	CopyID          string
 	// DiskIDs пуст — восстанавливать все диски точки.
 	DiskIDs []string
 	Target  model.RestoreTarget
@@ -405,6 +409,33 @@ func (e *Engine) restoreToEngine(ctx context.Context, set *ChainSet, reader *Cha
 		return err
 	}
 
+	if busy, err := e.store.VMTransferServerBusy(ctx, serverID); err != nil {
+		return err
+	} else if busy {
+		vmIDs := []string{}
+		if req.AttachToVMID != "" {
+			vmIDs = append(vmIDs, req.AttachToVMID)
+		}
+		if req.TargetDiskID != "" {
+			refs, err := client.DiskVMs(ctx, req.TargetDiskID)
+			if err != nil {
+				return err
+			}
+			for _, ref := range refs {
+				vmIDs = append(vmIDs, ref.ID)
+			}
+		}
+		for _, id := range vmIDs {
+			owner, err := e.store.VMTransferOwner(ctx, serverID, id)
+			if err != nil {
+				return err
+			}
+			if owner != "" && owner != req.TransferID {
+				return fmt.Errorf("ВМ занята миграцией %s", owner)
+			}
+		}
+	}
+
 	chain := set.Manifests[diskID]
 	leaf := chain[len(chain)-1]
 
@@ -541,7 +572,16 @@ func (e *Engine) restoreToEngine(ctx context.Context, set *ChainSet, reader *Cha
 
 	lastKeepalive := time.Now()
 	var transferred int64
-	err = reader.StreamObserved(ctx, func(ctx context.Context, offset int64, data []byte, zeroLength int64) error {
+	stream := reader.StreamObserved
+	if req.DeltaAfterRunID != "" {
+		if _, err := reader.ChangedSince(req.DeltaAfterRunID); err != nil {
+			return err
+		}
+		stream = func(ctx context.Context, sink ImageSink, _ func(int64), observe StreamObserver) error {
+			return reader.streamChanged(ctx, req.DeltaAfterRunID, sink, observe)
+		}
+	}
+	err = stream(ctx, func(ctx context.Context, offset int64, data []byte, zeroLength int64) error {
 		if time.Since(lastKeepalive) > 20*time.Second {
 			_ = client.ExtendTransfer(ctx, transfer.ID)
 			lastKeepalive = time.Now()
@@ -636,6 +676,11 @@ func (e *Engine) restoreToEngine(ctx context.Context, set *ChainSet, reader *Cha
 		e.log.Info().Str("restore", record.ID).Str("диск", record.TargetDiskName).
 			Str("диск-id", targetDiskID).Str("вм", req.AttachToVMName).
 			Str("вм-id", req.AttachToVMID).Str("интерфейс", iface).Msg("диск подключён к ВМ")
+	}
+	if req.OnDiskRestored != nil {
+		if err := req.OnDiskRestored(diskID, targetDiskID); err != nil {
+			return err
+		}
 	}
 	return nil
 }

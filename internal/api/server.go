@@ -38,10 +38,12 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/repo"
 	"github.com/Variel42k/ovirt-backup/internal/scheduler"
 	"github.com/Variel42k/ovirt-backup/internal/store"
+	"github.com/Variel42k/ovirt-backup/internal/vmtransfer"
 )
 
 // Server holds the API dependencies.
 type Server struct {
+	vmTransfers   *vmtransfer.Service
 	cfg           config.Config
 	baseCfg       config.Config
 	store         *store.Store
@@ -94,7 +96,8 @@ type Server struct {
 // Deps bundles what the API needs, so adding a dependency does not change
 // every call site.
 type Deps struct {
-	Config config.Config
+	VMTransfers *vmtransfer.Service
+	Config      config.Config
 	// BaseConfig is the YAML/environment value before database overrides. It
 	// is the target of the runtime-settings reset endpoints.
 	BaseConfig    config.Config
@@ -143,7 +146,8 @@ func New(d Deps) *Server {
 		metricsToken = bytes.TrimSpace(body)
 	}
 	srv := &Server{
-		cfg: d.Config, baseCfg: base, store: d.Store, pool: d.Pool, libvirt: d.LibvirtPool,
+		vmTransfers: d.VMTransfers,
+		cfg:         d.Config, baseCfg: base, store: d.Store, pool: d.Pool, libvirt: d.LibvirtPool,
 		proxmox: d.ProxmoxPool, engine: d.Engine,
 		scheduler: d.Scheduler, monitor: d.Monitor, remediator: d.Remediator,
 		bus: d.Bus, log: d.Logger, logs: d.Logs, quality: d.Quality, replicator: d.Replicator, notifier: d.Notifier,
@@ -210,6 +214,13 @@ func (s *Server) Handler() http.Handler {
 
 // routes registers the API surface. Paths here are relative to /api/v1.
 func (s *Server) routes(mux *http.ServeMux) {
+	mux.HandleFunc("GET /vm-transfers", s.perm(model.PermServersRead, s.perm(model.PermBackupsRead, s.handleListVMTransfers)))
+	mux.HandleFunc("GET /vm-transfers/source", s.perm(model.PermServersRead, s.handleVMTransferSource))
+	mux.HandleFunc("GET /vm-transfers/{id}", s.perm(model.PermServersRead, s.perm(model.PermBackupsRead, s.handleGetVMTransfer)))
+	mux.HandleFunc("POST /vm-transfers/plan", s.perm(model.PermServersWrite, s.perm(model.PermBackupsWrite, s.management(s.handlePlanVMTransfer))))
+	mux.HandleFunc("POST /vm-transfers", s.perm(model.PermServersWrite, s.perm(model.PermBackupsWrite, s.management(s.handleCreateVMTransfer))))
+	mux.HandleFunc("POST /vm-transfers/{id}/action", s.perm(model.PermServersWrite, s.perm(model.PermBackupsWrite, s.management(s.handleVMTransferAction))))
+
 	// Кто вошёл, что умеет эта сборка и справка. Без права: интерфейсу нужно
 	// это, чтобы вообще отрисоваться, а роль с пустым набором прав всё равно
 	// не увидит ни одного раздела.

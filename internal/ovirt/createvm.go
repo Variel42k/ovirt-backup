@@ -15,9 +15,11 @@ import (
 
 // CreateVMRequest describes the VM to create.
 type CreateVMRequest struct {
-	Name        string
-	Description string
-	ClusterID   string
+	BIOSType                string
+	Cores, Sockets, Threads int
+	Name                    string
+	Description             string
+	ClusterID               string
 	// MemoryBytes и VCPUs берутся из сохранённого профиля исходной машины.
 	// Ноль означает «оставить умолчание шаблона»: занижать память молча нельзя,
 	// а угадывать её неоткуда.
@@ -35,6 +37,7 @@ type CreateVMRequest struct {
 }
 
 type CreateNICRequest struct {
+	MAC           string
 	Name          string
 	Interface     string
 	VNICProfileID string
@@ -63,6 +66,9 @@ func (c *Client) CreateNIC(ctx context.Context, vmID string, req CreateNICReques
 		"name": name, "interface": model,
 		"vnic_profile": map[string]string{"id": req.VNICProfileID},
 		"linked":       req.Connected, "on_boot": req.Connected,
+	}
+	if req.MAC != "" {
+		body["mac"] = map[string]string{"address": req.MAC}
 	}
 	return c.post(ctx, fmt.Sprintf("/vms/%s/nics", vmID), body, nil)
 }
@@ -106,6 +112,9 @@ func (c *Client) CreateVM(ctx context.Context, req CreateVMRequest) (*VM, error)
 			"topology": map[string]any{"cores": 1, "sockets": req.VCPUs, "threads": 1},
 		}
 	}
+	if req.Cores > 0 && req.Sockets > 0 && req.Threads > 0 {
+		body["cpu"] = map[string]any{"topology": map[string]int{"cores": req.Cores, "sockets": req.Sockets, "threads": req.Threads}}
+	}
 	if req.OSType != "" || req.Firmware != "" {
 		os := map[string]any{}
 		if req.OSType != "" {
@@ -120,6 +129,9 @@ func (c *Client) CreateVM(ctx context.Context, req CreateVMRequest) (*VM, error)
 		}
 	}
 
+	if req.BIOSType != "" {
+		body["bios"] = map[string]string{"type": req.BIOSType}
+	}
 	var vm VM
 	if err := c.post(ctx, "/vms", body, &vm); err != nil {
 		return nil, fmt.Errorf("создание ВМ %s: %w", req.Name, err)

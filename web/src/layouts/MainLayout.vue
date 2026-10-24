@@ -46,6 +46,7 @@ const themeOptions: { value: ThemeMode; label: string; icon: string }[] = [
 const allLinks = [
   { name: 'dashboard', label: 'Обзор', icon: 'dashboard', perm: 'monitoring.read', group: '' },
   { name: 'servers', label: 'Виртуализация', icon: 'dns', perm: 'servers.read', group: 'Инфраструктура' },
+  { name: 'vm-transfers', label: 'Миграция виртуальных машин', icon: 'move_up', perm: 'servers.read', group: 'Инфраструктура' },
   { name: 'storages', label: 'Хранилища', icon: 'inventory_2', perm: 'storages.read', group: 'Инфраструктура' },
   { name: 'discovery', label: 'Поиск сервисов', icon: 'travel_explore', perm: 'monitoring.read', group: 'Инфраструктура' },
   { name: 'jobs', label: 'Задания ВМ', icon: 'event_repeat', perm: 'jobs.read', group: 'Защита данных' },
@@ -67,7 +68,7 @@ const allLinks = [
   { name: 'documentation', label: 'Документация', icon: 'menu_book', perm: '', group: 'Справка' },
 ]
 
-const links = computed(() => allLinks.filter((l) => !l.perm || auth.can(l.perm)))
+const links = computed(() => allLinks.filter((l) => (!l.perm || auth.can(l.perm)) && (l.name !== 'vm-transfers' || auth.can('backups.read'))))
 const linkGroups = computed(() => {
   const groups: { title: string; links: typeof allLinks }[] = []
   for (const link of links.value) {

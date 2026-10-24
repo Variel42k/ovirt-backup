@@ -10,6 +10,23 @@
   }
 }
 
+// Keep VM actions in view when inventory columns need horizontal scrolling.
+.jhv-vm-table .q-table {
+  th:last-child,
+  td:last-child {
+    position: sticky;
+    right: 0;
+    z-index: 1;
+    min-width: 240px;
+    background: var(--jhv-action-background, #fff);
+    box-shadow: -4px 0 6px -5px rgba(0, 0, 0, 0.4);
+  }
+}
+
+.body--dark .jhv-vm-table {
+  --jhv-action-background: var(--q-dark);
+}
+
 .jhv-mono {
   font-family: ui-monospace, 'JetBrains Mono', 'Cascadia Code', Consolas, monospace;
   font-size: 12px;

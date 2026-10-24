@@ -9,6 +9,21 @@ import (
 	"testing"
 )
 
+func TestCreateVMPreservesExplicitCPUTopology(t *testing.T) {
+	var body map[string]any
+	client := createVMStub(t, &body)
+	if _, err := client.CreateVM(context.Background(), CreateVMRequest{Name: "moved", ClusterID: "cluster", VCPUs: 12, Cores: 2, Sockets: 3, Threads: 2, OSType: "windows_2019x64", Firmware: "uefi"}); err != nil {
+		t.Fatal(err)
+	}
+	topology := body["cpu"].(map[string]any)["topology"].(map[string]any)
+	if topology["cores"] != float64(2) || topology["sockets"] != float64(3) || topology["threads"] != float64(2) {
+		t.Fatal(topology)
+	}
+	if body["os"].(map[string]any)["type"] != "windows_2019x64" {
+		t.Fatal(body)
+	}
+}
+
 // createVMStub ловит тело запроса на создание ВМ: проверять надо не то, что
 // клиент не упал, а что именно он отправил движку.
 func createVMStub(t *testing.T, captured *map[string]any) *Client {
@@ -124,5 +139,16 @@ func TestDiskInterfaceMapping(t *testing.T) {
 		if got := DiskInterfaceForBus(bus); got != want {
 			t.Errorf("шина %q дала %q, ожидалось %q", bus, got, want)
 		}
+	}
+}
+
+func TestCreateVMPreservesSourceBIOSType(t *testing.T) {
+	var sent map[string]any
+	client := createVMStub(t, &sent)
+	if _, err := client.CreateVM(context.Background(), CreateVMRequest{Name: "moved", ClusterID: "cluster", Firmware: "bios", BIOSType: "q35_sea_bios"}); err != nil {
+		t.Fatal(err)
+	}
+	if sent["bios"].(map[string]any)["type"] != "q35_sea_bios" {
+		t.Fatal(sent)
 	}
 }

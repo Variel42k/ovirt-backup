@@ -78,6 +78,15 @@ func (s *Store) UpdateServer(ctx context.Context, srv *model.Server) error {
 	if err != nil {
 		return err
 	}
+	if srv.EngineURL != existing.EngineURL || srv.Kind != existing.Kind {
+		var refs int
+		if err := s.db.QueryRow(ctx, `SELECT count(*) FROM vm_transfers WHERE source_server_id=? OR target_server_id=?`, srv.ID, srv.ID).Scan(&refs); err != nil {
+			return err
+		}
+		if refs > 0 {
+			return fmt.Errorf("подключение связано с миграцией: нельзя менять адрес или тип")
+		}
+	}
 	if srv.Password == "" && !srv.ClearPassword {
 		srv.Password = existing.Password
 	}
@@ -158,6 +167,14 @@ func (s *Store) UpdateServerState(ctx context.Context, srv *model.Server) error 
 // inventory. Backup runs are deliberately kept: the backups themselves still
 // exist in the repositories and must remain restorable.
 func (s *Store) DeleteServer(ctx context.Context, id string) error {
+	var refs int
+	if err := s.db.QueryRow(ctx, `SELECT count(*) FROM vm_transfers WHERE source_server_id=? OR target_server_id=?`, id, id).Scan(&refs); err != nil {
+		return err
+	}
+	if refs > 0 {
+		return fmt.Errorf("%w: подключение связано с миграцией; сначала выполните откат и удалите запись миграции", ErrConflict)
+	}
+
 	return s.db.InTx(ctx, func(tx *sql.Tx) error {
 		var serverID string
 		if err := tx.QueryRowContext(ctx, s.db.Rebind(`SELECT id FROM servers WHERE id=? FOR UPDATE`), id).Scan(&serverID); err != nil {

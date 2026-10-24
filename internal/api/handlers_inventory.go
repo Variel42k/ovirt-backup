@@ -279,6 +279,13 @@ type vmActionRequest struct {
 
 func (s *Server) handleVMAction(w http.ResponseWriter, r *http.Request) {
 	serverID, vmID := r.PathValue("id"), r.PathValue("vmID")
+	if owner, err := s.store.VMTransferOwner(r.Context(), serverID, vmID); err != nil {
+		s.writeError(w, r, err)
+		return
+	} else if owner != "" {
+		s.writeError(w, r, badRequest("ВМ занята миграцией %s; используйте управление миграцией", owner))
+		return
+	}
 
 	var req vmActionRequest
 	if err := decodeJSON(r, &req); err != nil {

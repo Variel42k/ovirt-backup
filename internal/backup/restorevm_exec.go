@@ -212,7 +212,17 @@ func (e *Engine) RestoreVM(ctx context.Context, req *model.RestoreVMRequest) (*R
 		return fail(err)
 	}
 
+	osType, biosType := "", ""
+	cores, sockets, threads := 0, 0, 0
+	if profile != nil && profile.Source == "ovirt" {
+		osType = profile.OSType
+		biosType = profile.BIOSType
+		if req.VCPUs == 0 {
+			cores, sockets, threads = profile.CPUCores, profile.CPUSockets, profile.CPUThreads
+		}
+	}
 	vm, err := client.CreateVM(ctx, ovirt.CreateVMRequest{
+		BIOSType: biosType, OSType: osType, Cores: cores, Sockets: sockets, Threads: threads,
 		Name: plan.NewName,
 		Description: firstNonEmpty(req.Description,
 			fmt.Sprintf("Восстановлена из копии %s от %s", plan.RunID, plan.Created.Format(time.RFC3339))),
@@ -226,6 +236,11 @@ func (e *Engine) RestoreVM(ctx context.Context, req *model.RestoreVMRequest) (*R
 	}
 
 	result.VMID = vm.ID
+	if req.OnVMCreated != nil {
+		if err := req.OnVMCreated(vm.ID); err != nil {
+			return fail(err)
+		}
+	}
 	record.TargetVMID, record.TargetVMName, record.Phase, record.Progress = vm.ID, plan.NewName, "restoring_disks", 10
 	_ = e.store.UpdateRestoreRun(ctx, record)
 	log := e.log.With().Str("восстановление-вм", vm.ID).Str("копия", plan.RunID).
@@ -242,6 +257,8 @@ func (e *Engine) RestoreVM(ctx context.Context, req *model.RestoreVMRequest) (*R
 	if len(plan.Disks) > 0 {
 		restore, err = e.Restore(ctx, RestoreRequest{
 			RunID:           req.RunID,
+			OnDiskRestored:  req.OnDiskRestored,
+			TransferID:      req.TransferID,
 			CopyID:          req.CopyID,
 			Target:          model.RestoreToNewDisk,
 			TargetServerID:  plan.ServerID,
@@ -294,8 +311,12 @@ func (e *Engine) RestoreVM(ctx context.Context, req *model.RestoreVMRequest) (*R
 			err = fmt.Errorf("сетевая цель %s не поддерживается oVirt", nic.TargetKind)
 			break
 		}
+		mac := ""
+		if req.PreserveMAC {
+			mac = nic.SourceMAC
+		}
 		err = client.CreateNIC(ctx, vm.ID, ovirt.CreateNICRequest{
-			Name: nic.Name, Interface: nic.Model, VNICProfileID: nic.TargetID, Connected: nic.Connected,
+			Name: nic.Name, Interface: nic.Model, VNICProfileID: nic.TargetID, Connected: nic.Connected, MAC: mac,
 		})
 		if err != nil {
 			err = fmt.Errorf("создание NIC %s: %w", nic.Name, err)
@@ -426,6 +447,9 @@ func overrideVCPUs(n, profile int) int {
 func profileFirmware(p *VMProfile) string {
 	if p == nil {
 		return ""
+	}
+	if p.Firmware == "efi" {
+		return "uefi"
 	}
 	return p.Firmware
 }

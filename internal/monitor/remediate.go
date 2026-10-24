@@ -292,6 +292,13 @@ func (r *Remediator) gate(ctx context.Context, sit Situation) (string, error) {
 	}
 
 	if sit.Scope == model.ScopeVM {
+		owner, err := r.store.VMTransferOwner(ctx, sit.ServerID, sit.ObjectID)
+		if err != nil {
+			return "", err
+		}
+		if owner != "" {
+			return "ВМ участвует в миграции " + owner, nil
+		}
 		vm, err := r.store.GetVM(ctx, sit.ServerID, sit.ObjectID)
 		if err == nil && vm.RemediationOptOut {
 			return "для этой ВМ автоматические действия отключены вручную", nil

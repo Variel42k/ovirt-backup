@@ -796,6 +796,28 @@ func (s *Scheduler) RunOnce(ctx context.Context, req backup.RunRequest) {
 	go s.executeOne(ctx, req, nil)
 }
 
+// ExecuteControlled lets a durable coordinator wait for a backup while using
+// the same worker limits, cancellation registry and events as scheduled jobs.
+func (s *Scheduler) ExecuteControlled(ctx context.Context, req backup.RunRequest) (*model.BackupRun, error) {
+	var id string
+	created := req.OnRunCreated
+	req.OnRunCreated = func(run *model.BackupRun) {
+		id = run.ID
+		if created != nil {
+			created(run)
+		}
+	}
+	err := s.executeOne(ctx, req, nil)
+	if id == "" {
+		return nil, err
+	}
+	run, readErr := s.store.GetBackupRunFull(context.WithoutCancel(ctx), id)
+	if err != nil {
+		return run, err
+	}
+	return run, readErr
+}
+
 const backupTaskLease = 2 * time.Minute
 
 func (s *Scheduler) taskWorker(ctx context.Context, owner string) {
@@ -990,11 +1012,15 @@ func (s *Scheduler) executeOne(ctx context.Context, req backup.RunRequest, job *
 	// Идентификатор запоминаем, чтобы снять регистрацию даже если Execute
 	// вернёт ошибку и никакой записи.
 	var runID string
+	created := req.OnRunCreated
 	req.OnRunCreated = func(r *model.BackupRun) {
 		runID = r.ID
 		s.mu.Lock()
 		s.running[r.ID] = cancel
 		s.mu.Unlock()
+		if created != nil {
+			created(r)
+		}
 	}
 	defer func() {
 		if runID == "" {

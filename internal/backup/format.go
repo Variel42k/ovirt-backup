@@ -280,6 +280,11 @@ type RunManifestArtifact struct {
 // explicitly and generate new MAC addresses; isolated verification ignores
 // NICs completely.
 type VMProfile struct {
+	BIOSType     string          `json:"bios_type,omitempty"`
+	OSType       string          `json:"os_type,omitempty"`
+	CPUCores     int             `json:"cpu_cores,omitempty"`
+	CPUSockets   int             `json:"cpu_sockets,omitempty"`
+	CPUThreads   int             `json:"cpu_threads,omitempty"`
 	Version      int             `json:"version"`
 	Source       string          `json:"source"`
 	Architecture string          `json:"architecture"`

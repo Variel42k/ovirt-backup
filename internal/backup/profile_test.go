@@ -6,6 +6,13 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
+func TestOVirtProfileReadsNumericStringsForMigration(t *testing.T) {
+	p := ProfileFromOVirtConfig([]byte(`{"memory":"4294967296","cpu":{"architecture":"x86_64","topology":{"cores":"2","sockets":"3","threads":"2"}},"os":{"type":"windows_2019x64"}}`), nil, nil)
+	if p.MemoryMiB != 4096 || p.VCPUs != 12 || p.CPUCores != 2 || p.CPUSockets != 3 || p.CPUThreads != 2 || p.OSType != "windows_2019x64" {
+		t.Fatalf("lost hardware: %+v", p)
+	}
+}
+
 func TestProfileFromOVirtConfigPreservesBootHardware(t *testing.T) {
 	raw := []byte(`{
 		"memory": 6442450944,

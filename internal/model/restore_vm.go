@@ -38,6 +38,10 @@ const (
 
 // RestoreVMRequest describes a full VM restore.
 type RestoreVMRequest struct {
+	TransferID     string                     `json:"-"`
+	PreserveMAC    bool                       `json:"-"`
+	OnVMCreated    func(string) error         `json:"-"`
+	OnDiskRestored func(string, string) error `json:"-"`
 	// RestoreID is assigned by the API before background execution so clients
 	// can subscribe to progress immediately. It is not part of the wire input.
 	RestoreID string `json:"-"`

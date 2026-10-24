@@ -32,6 +32,10 @@ const runSelectColumns = runColumns + `, purge_after, stage, stage_steps, delete
 
 // CreateBackupRun records a new run in the pending state.
 func (s *Store) CreateBackupRun(ctx context.Context, r *model.BackupRun) error {
+	return s.CreateTransferBackupRun(ctx, r, "")
+}
+
+func (s *Store) CreateTransferBackupRun(ctx context.Context, r *model.BackupRun, transferID string) error {
 	if r.ID == "" {
 		r.ID = uuid.NewString()
 	}
@@ -46,15 +50,29 @@ func (s *Store) CreateBackupRun(ctx context.Context, r *model.BackupRun) error {
 		r.ChainID = r.ID
 	}
 
-	_, err := s.db.Exec(ctx, `INSERT INTO backup_runs (`+runColumns+`)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		r.ID, nullString(r.JobRunID), r.JobID, r.JobName, r.ServerID, r.VMID, r.VMName, string(r.Type), string(r.Status),
-		r.ParentRunID, r.ChainID, r.ChainIndex, r.StorageTargetID, r.RepoPath, r.EngineBackupID,
-		r.FromCheckpointID, r.ToCheckpointID, r.SnapshotID, r.DiskCount, r.LogicalBytes,
-		r.ReadBytes, r.StoredBytes, r.Progress, r.Encrypted, r.Compression, string(r.VerifyStatus),
-		r.VerifiedAt, r.Error, r.StartedAt, r.EndedAt,
-		r.ExpiresAt, r.Deleted, r.CreatedAt, encodeSkipped(r.SkippedDisks), r.ManifestSHA256, r.Imported,
-		string(r.Consistency), r.ConsistencyNote, encodeManualSteps(r.ManualSteps), string(r.LegacyIncrementalMode))
+	err := s.db.InTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, s.db.Rebind(`SELECT pg_advisory_xact_lock(hashtextextended(?,0))`), r.ServerID+":"+r.VMID); err != nil {
+			return err
+		}
+		var owner string
+		err := tx.QueryRowContext(ctx, s.db.Rebind(`SELECT id FROM vm_transfers WHERE (source_server_id=? AND source_vm_id=? AND status NOT IN ('canceled','rolled_back')) OR (target_server_id=? AND target_vm_id=? AND status NOT IN ('canceled','rolled_back','completed')) LIMIT 1`), r.ServerID, r.VMID, r.ServerID, r.VMID).Scan(&owner)
+		if err != nil && err != sql.ErrNoRows {
+			return err
+		}
+		if owner != "" && owner != transferID {
+			return fmt.Errorf("ВМ занята миграцией %s", owner)
+		}
+		_, err = tx.ExecContext(ctx, s.db.Rebind(`INSERT INTO backup_runs (`+runColumns+`)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`),
+			r.ID, nullString(r.JobRunID), r.JobID, r.JobName, r.ServerID, r.VMID, r.VMName, string(r.Type), string(r.Status),
+			r.ParentRunID, r.ChainID, r.ChainIndex, r.StorageTargetID, r.RepoPath, r.EngineBackupID,
+			r.FromCheckpointID, r.ToCheckpointID, r.SnapshotID, r.DiskCount, r.LogicalBytes,
+			r.ReadBytes, r.StoredBytes, r.Progress, r.Encrypted, r.Compression, string(r.VerifyStatus),
+			r.VerifiedAt, r.Error, r.StartedAt, r.EndedAt,
+			r.ExpiresAt, r.Deleted, r.CreatedAt, encodeSkipped(r.SkippedDisks), r.ManifestSHA256, r.Imported,
+			string(r.Consistency), r.ConsistencyNote, encodeManualSteps(r.ManualSteps), string(r.LegacyIncrementalMode))
+		return err
+	})
 	if err != nil {
 		return fmt.Errorf("insert backup run: %w", err)
 	}

@@ -403,6 +403,15 @@ func (s *Server) handleUpdateStorage(w http.ResponseWriter, r *http.Request) {
 	// старые делает недоступными. Переименование — нет, и требовать за него
 	// кворум значило бы сделать согласование помехой вместо защиты.
 	if before.Retargeted(existing) {
+		if busy, err := s.store.VMTransferRepositoryReferenced(r.Context(), id, true); err != nil {
+			s.writeError(w, r, err)
+			return
+		} else if busy {
+			s.writeError(w, r, badRequest("репозиторий используется незавершённой миграцией"))
+			return
+		}
+	}
+	if before.Retargeted(existing) {
 		s.guardAction(w, r, model.GuardStorageRetarget, retargetTarget(&before, existing), save)
 		return
 	}
@@ -505,6 +514,13 @@ func (s *Server) handleDeleteStorage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if used, err := s.store.VMTransferRepositoryReferenced(r.Context(), id, false); err != nil {
+		s.writeError(w, r, err)
+		return
+	} else if used {
+		s.writeError(w, r, badRequest("репозиторий связан с миграцией; выполните отмену/откат и удалите её запись"))
+		return
+	}
 	force := queryBool(r, "force")
 
 	// Deleting the definition would orphan the data: the backups stay in the

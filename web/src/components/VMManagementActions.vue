@@ -6,11 +6,13 @@ defineProps<{
   canWrite: boolean
   canManage: boolean
   canMigrate: boolean
+  canTransfer: boolean
   canDisrupt: boolean
   busy: boolean
 }>()
 const emit = defineEmits<{
   action: [action: string]
+  transfer: []
   'toggle-opt-out': []
 }>()
 </script>
@@ -31,8 +33,8 @@ const emit = defineEmits<{
     >
       <q-tooltip>Запустить / снять с паузы</q-tooltip>
     </q-btn>
-    <q-btn v-if="canMigrate" flat dense no-caps color="primary" icon="swap_horiz"
-      label="Мигрировать" :disable="busy" @click="emit('action', 'migrate')" />
+    <q-btn v-if="canTransfer" flat dense no-caps color="primary" icon="move_up"
+      label="Миграция ВМ" :disable="busy" @click="emit('transfer')"><q-tooltip>Миграция виртуальных машин в другой Engine</q-tooltip></q-btn>
     <q-btn-dropdown v-if="canWrite" flat dense round dropdown-icon="more_vert" aria-label="Действия с ВМ" :loading="busy" :disable="busy">
       <q-list dense style="min-width: 220px">
         <q-item v-if="canManage" clickable v-close-popup @click="emit('action', 'shutdown')">
@@ -49,7 +51,7 @@ const emit = defineEmits<{
         </q-item>
         <q-item v-if="canMigrate" clickable v-close-popup @click="emit('action', 'migrate')">
           <q-item-section avatar><q-icon name="swap_horiz" /></q-item-section>
-          <q-item-section>Мигрировать</q-item-section>
+          <q-item-section>Миграция между хостами</q-item-section>
         </q-item>
         <q-separator v-if="canManage" />
         <q-item v-if="canManage" clickable v-close-popup @click="emit('action', 'stop')">

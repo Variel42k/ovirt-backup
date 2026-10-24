@@ -9,6 +9,7 @@ import { useAppStore } from '@/stores/app'
 import HealthChart from '@/components/HealthChart.vue'
 import IOChart, { type IOPoint } from '@/components/IOChart.vue'
 import PageLoadError from '@/components/PageLoadError.vue'
+import VMManagementActions from '@/components/VMManagementActions.vue'
 import type { Disk, DiskSample, HealthSample, Host, MountSample, Server, StorageDomain, VM } from '@/api/types'
 
 const props = defineProps<{ serverId: string }>()
@@ -47,6 +48,14 @@ const canManage = computed(
 const canDisrupt = computed(() => canManage.value && auth.can('servers.disruptive'))
 const canMigrate = computed(() => canManage.value && Boolean(server.value &&
   ['ovirt', 'redvirt', 'rhv', 'olvm', 'proxmox'].includes(server.value.kind)))
+
+const migrationUnavailableReason = computed(() => {
+  if (!server.value) return ''
+  if (server.value.kind === 'kvm') return 'Для отдельных KVM-хостов миграция пока не поддерживается.'
+  if (!auth.can('servers.write')) return 'Миграция недоступна: нет права servers.write. Обратитесь к администратору.'
+  if (app.meta?.capabilities.management_enabled === false) return 'Управление виртуализацией отключено в настройках службы, поэтому миграция недоступна.'
+  return ''
+})
 
 const knownTabs = new Set([
   'vms', 'hosts', 'disks', 'domains',
@@ -456,6 +465,9 @@ const domainColumns = [
               <q-btn flat label="Снять выбор" @click="selectedVMs = []" />
             </div>
           </q-banner>
+          <div v-if="migrationUnavailableReason" class="text-caption text-grey-7 q-pa-sm" data-testid="migration-unavailable">
+            {{ migrationUnavailableReason }}
+          </div>
           <q-table
             :rows="vms"
             :columns="vmColumns"
@@ -474,6 +486,34 @@ const domainColumns = [
               <q-input v-model="search" dense outlined debounce="300" placeholder="Поиск по имени">
                 <template #append><q-icon name="search" /></template>
               </q-input>
+            </template>
+
+            <template #item="props">
+              <div class="q-pa-xs col-12 col-sm-6">
+                <q-card flat bordered :class="{ 'bg-blue-1': props.selected }">
+                  <q-card-section class="q-pa-sm">
+                    <div class="row items-center no-wrap">
+                      <q-checkbox v-if="auth.can('jobs.write')" v-model="props.selected" dense class="q-mr-sm" :aria-label="`Выбрать ВМ ${props.row.name}`" />
+                      <router-link :to="{ name: 'vm', params: { serverId, vmId: props.row.id } }" class="text-primary text-weight-medium" style="overflow-wrap: anywhere">
+                        {{ props.row.name }}
+                      </router-link>
+                      <q-space />
+                      <q-chip dense :color="statusColor(props.row.status)" text-color="white">{{ vmStatus(props.row.status) }}</q-chip>
+                    </div>
+                    <div class="text-caption text-grey-7 q-mt-sm">Хост: {{ props.row.host_name || '—' }}</div>
+                    <div class="text-caption">{{ props.row.cpu_cores }} vCPU · {{ bytes(props.row.memory_bytes) }}</div>
+                    <div v-if="props.row.pause_status" class="jhv-reason text-negative">Причина: {{ props.row.pause_status }}</div>
+                    <div v-if="props.row.remediation_opt_out" class="jhv-reason">Автодействия отключены</div>
+                  </q-card-section>
+                  <q-separator v-if="auth.can('servers.write')" />
+                  <q-card-actions v-if="auth.can('servers.write')" align="right">
+                    <VMManagementActions :vm="props.row" :can-write="auth.can('servers.write')"
+                      :can-manage="canManage" :can-migrate="canMigrate" :can-disrupt="canDisrupt"
+                      :busy="resourceBusy('vm', props.row.id)" @action="vmAction(props.row, $event)"
+                      @toggle-opt-out="toggleOptOut(props.row)" />
+                  </q-card-actions>
+                </q-card>
+              </div>
             </template>
 
             <template #body-cell-name="props">
@@ -560,57 +600,10 @@ const domainColumns = [
 
             <template #body-cell-actions="props">
               <q-td :props="props">
-                <q-btn
-                  v-if="canManage"
-                  flat
-                  dense
-                  round
-                  icon="play_arrow"
-                  color="positive"
-                  :loading="resourceBusy('vm', props.row.id)"
-                  :disable="props.row.status === 'up' || resourceBusy('vm', props.row.id)"
-                  @click="vmAction(props.row, 'start')"
-                >
-                  <q-tooltip>Запустить / снять с паузы</q-tooltip>
-                </q-btn>
-                <q-btn-dropdown v-if="auth.can('servers.write')" flat dense round dropdown-icon="more_vert" :loading="resourceBusy('vm', props.row.id)" :disable="resourceBusy('vm', props.row.id)">
-                  <q-list dense style="min-width: 220px">
-                    <q-item v-if="canManage" clickable v-close-popup @click="vmAction(props.row, 'shutdown')">
-                      <q-item-section avatar><q-icon name="power_settings_new" /></q-item-section>
-                      <q-item-section>Штатное выключение</q-item-section>
-                    </q-item>
-                    <q-item v-if="canManage" clickable v-close-popup @click="vmAction(props.row, 'reboot')">
-                      <q-item-section avatar><q-icon name="restart_alt" /></q-item-section>
-                      <q-item-section>Перезагрузка</q-item-section>
-                    </q-item>
-                    <q-item v-if="canManage" clickable v-close-popup @click="vmAction(props.row, 'suspend')">
-                      <q-item-section avatar><q-icon name="pause" /></q-item-section>
-                      <q-item-section>Приостановить</q-item-section>
-                    </q-item>
-                    <q-item v-if="canMigrate" clickable v-close-popup @click="vmAction(props.row, 'migrate')">
-                      <q-item-section avatar><q-icon name="swap_horiz" /></q-item-section>
-                      <q-item-section>Мигрировать</q-item-section>
-                    </q-item>
-                    <q-separator v-if="canManage" />
-                    <q-item v-if="canManage" clickable v-close-popup @click="vmAction(props.row, 'stop')">
-                      <q-item-section avatar><q-icon name="power_off" color="negative" /></q-item-section>
-                      <q-item-section class="text-negative">Выключить питание</q-item-section>
-                    </q-item>
-                    <q-item v-if="canDisrupt" clickable v-close-popup @click="vmAction(props.row, 'reset')">
-                      <q-item-section avatar><q-icon name="restart_alt" color="negative" /></q-item-section>
-                      <q-item-section class="text-negative">Аппаратный сброс</q-item-section>
-                    </q-item>
-                    <q-separator v-if="canManage || canDisrupt" />
-                    <q-item clickable v-close-popup @click="toggleOptOut(props.row)">
-                      <q-item-section avatar>
-                        <q-icon :name="props.row.remediation_opt_out ? 'smart_toy' : 'block'" />
-                      </q-item-section>
-                      <q-item-section>
-                        {{ props.row.remediation_opt_out ? 'Разрешить автодействия' : 'Запретить автодействия' }}
-                      </q-item-section>
-                    </q-item>
-                  </q-list>
-                </q-btn-dropdown>
+                <VMManagementActions :vm="props.row" :can-write="auth.can('servers.write')"
+                  :can-manage="canManage" :can-migrate="canMigrate" :can-disrupt="canDisrupt"
+                  :busy="resourceBusy('vm', props.row.id)" @action="vmAction(props.row, $event)"
+                  @toggle-opt-out="toggleOptOut(props.row)" />
               </q-td>
             </template>
           </q-table>

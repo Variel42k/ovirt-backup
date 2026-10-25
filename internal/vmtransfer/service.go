@@ -3,7 +3,6 @@ package vmtransfer
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -37,13 +36,16 @@ type Service struct {
 	mu           sync.Mutex
 	active       map[string]context.CancelFunc
 	slots        chan struct{}
+	leases       map[string]*store.VMTransferLock
+	healthMu     sync.Mutex
+	stalled      map[string]stalledWorker
 }
 
 func New(ctx context.Context, st *store.Store, pool *ovirt.Pool, engine Engine, workers int, log zerolog.Logger) *Service {
 	if workers < 1 {
 		workers = 1
 	}
-	return &Service{st: st, pool: pool, engine: engine, ctx: ctx, log: log, active: map[string]context.CancelFunc{}, slots: make(chan struct{}, workers)}
+	return &Service{st: st, pool: pool, engine: engine, ctx: ctx, log: log, active: map[string]context.CancelFunc{}, slots: make(chan struct{}, workers), leases: map[string]*store.VMTransferLock{}, stalled: map[string]stalledWorker{}}
 }
 
 func (s *Service) Recover(ctx context.Context) error {
@@ -53,11 +55,20 @@ func (s *Service) Recover(ctx context.Context) error {
 	}
 	for _, t := range items {
 		if t.Status == "running" || t.Status == "queued" {
+			lock, e := s.st.TryVMTransferLock(ctx, t.ID)
+			if e != nil {
+				return e
+			}
+			if lock == nil {
+				continue
+			}
 			t.Status = "interrupted"
 			t.Error = "Служба перезапущена. Проверьте состояние источника и цели; продолжите подготовленную миграцию или выполните откат."
 			if err = s.st.UpdateVMTransfer(ctx, t); err != nil {
+				lock.Release()
 				return err
 			}
+			lock.Release()
 		}
 	}
 	return nil
@@ -107,6 +118,21 @@ func (s *Service) plan(ctx context.Context, r model.VMTransferRequest, ownID str
 		return nil, err
 	}
 	p.SourceName = vm.Name
+	p.SourceClusterID = vm.ClusterID
+	policy, err := s.st.GetClusterRecoveryPolicy(ctx, source.ID, vm.ClusterID)
+	if err != nil {
+		return nil, err
+	}
+	p.RecoveryPolicy = &policy.Migration
+	if policy.Migration.Enabled {
+		p.Warnings = append(p.Warnings, "Автовосстановление настроено в исходном кластере; его политика сохраняется на момент создания миграции")
+		if policy.Migration.AllowForceStopSource {
+			p.Warnings = append(p.Warnings, "Политика разрешает выключение зависшего источника по питанию с потерей несохранённых данных")
+		}
+		if policy.Migration.RollbackAfterTargetStart {
+			p.Warnings = append(p.Warnings, "Политика разрешает автоматический откат после запуска цели; новые данные цели будут потеряны")
+		}
+	}
 	if strings.TrimSpace(r.Name) == "" {
 		p.Request.Name = vm.Name
 	}
@@ -312,7 +338,7 @@ func (s *Service) Create(ctx context.Context, r model.VMTransferRequest, actor s
 	if err != nil {
 		return nil, err
 	}
-	t := &model.VMTransfer{ID: uuid.NewString(), Request: plan.Request, SourceName: vm.Name, Status: "queued", Phase: "queued", DiskMap: map[string]string{}, RunIDs: []string{}, TotalBytes: plan.TotalBytes, OriginalDesired: vm.DesiredState, OriginalOptOut: vm.RemediationOptOut, WasRunning: vm.Status != "down", CreatedBy: actor}
+	t := &model.VMTransfer{SourceClusterID: plan.SourceClusterID, RecoveryPolicy: plan.RecoveryPolicy, ID: uuid.NewString(), Request: plan.Request, SourceName: vm.Name, Status: "queued", Phase: "queued", DiskMap: map[string]string{}, RunIDs: []string{}, TotalBytes: plan.TotalBytes, OriginalDesired: vm.DesiredState, OriginalOptOut: vm.RemediationOptOut, WasRunning: vm.Status != "down", CreatedBy: actor}
 	if err = s.st.CreateVMTransfer(ctx, t); err != nil {
 		return nil, err
 	}
@@ -325,9 +351,15 @@ func (s *Service) Create(ctx context.Context, r model.VMTransferRequest, actor s
 }
 
 func (s *Service) save(t *model.VMTransfer) error {
-	return s.st.UpdateVMTransfer(context.WithoutCancel(s.ctx), t)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(s.ctx), 5*time.Second)
+	defer cancel()
+	return s.st.UpdateVMTransfer(ctx, t)
 }
 func (s *Service) phase(t *model.VMTransfer, phase string, progress int) error {
+	if t.Phase != phase {
+		t.PhaseStartedAt = time.Now().UTC()
+		t.LastProgressAt = t.PhaseStartedAt
+	}
 	t.Phase = phase
 	t.Progress = progress
 	return s.save(t)
@@ -340,46 +372,66 @@ func (s *Service) launch(t *model.VMTransfer, action string) error {
 }
 
 func (s *Service) startLocked(t *model.VMTransfer, action string) error {
+	lockCtx, lockCancel := context.WithTimeout(s.ctx, 3*time.Second)
+	lock, err := s.st.TryVMTransferLock(lockCtx, t.ID)
+	lockCancel()
+	if err != nil {
+		return err
+	}
+	if lock == nil {
+		return fmt.Errorf("операция выполняется другим экземпляром службы")
+	}
+	defer lock.Release()
 	expected := t.Status
 	t.Status = "queued"
 	t.Phase = "queued"
 	t.PendingAction = action
+	t.ActiveAction = action
+	if t.OperationStartedAt.IsZero() {
+		t.OperationStartedAt = time.Now().UTC()
+	}
 	t.Error = ""
 	if err := s.st.ClaimVMTransfer(s.ctx, t, expected); err != nil {
 		return err
 	}
-	ctx, cancel := context.WithCancel(s.ctx)
-	s.active[t.ID] = cancel
+	ctx, cancel := context.WithCancelCause(s.ctx)
+	var cancellationTimeout time.Duration
+	if recoveryEnabled(t) {
+		cancellationTimeout = time.Duration(t.RecoveryPolicy.CancellationTimeoutSeconds) * time.Second
+	}
+	cancelAction := func(reason error) {
+		if cancellationTimeout > 0 {
+			s.markUnacknowledged(t.ID, cancellationTimeout)
+		}
+		cancel(reason)
+	}
+	s.active[t.ID] = func() { cancelAction(errManualPause) }
 	go func() {
-		defer func() { cancel(); s.mu.Lock(); delete(s.active, t.ID); s.mu.Unlock() }()
+		defer func() {
+			cancel(nil)
+			s.healthMu.Lock()
+			delete(s.stalled, t.ID)
+			s.healthMu.Unlock()
+			s.mu.Lock()
+			delete(s.active, t.ID)
+			s.mu.Unlock()
+		}()
 		if err := s.acquireSlot(ctx, t); err != nil {
-			t.Status = "interrupted"
-			t.Error = err.Error()
-			_ = s.save(t)
+			s.actionFailed(t, action, err, context.Cause(ctx))
 			return
 		}
-		defer func() { <-s.slots }()
-		var err error
-		switch action {
-		case "prepare":
-			err = s.prepare(ctx, t)
-		case "sync":
-			err = s.synchronize(ctx, t, false)
-		case "cutover":
-			err = s.cutover(ctx, t)
-		case "cancel", "rollback":
-			err = s.rollback(ctx, t, action)
-		}
+		defer s.releaseSlot(t.ID)
+		stopWatch := s.watchAction(ctx, cancelAction, t)
+		err := s.performAction(ctx, t, action)
+		stopWatch()
 		if err != nil {
-			t.Status = "failed"
-			if errors.Is(err, context.Canceled) {
-				t.Status = "interrupted"
-			}
-			t.Error = err.Error()
-			if saveErr := s.save(t); saveErr != nil {
-				s.log.Error().Err(saveErr).Str("migration", t.ID).Msg("сохранение ошибки миграции")
-			}
+			s.actionFailed(t, action, err, context.Cause(ctx))
+		} else {
+			_ = s.st.ResolveAlert(context.WithoutCancel(s.ctx), t.Request.SourceServerID, model.ScopeVM, t.Request.SourceVMID, model.AlertMigrationRecovery)
 		}
+		metricCtx, stop := context.WithTimeout(context.WithoutCancel(s.ctx), 5*time.Second)
+		_ = s.st.RecordVMTransferSample(metricCtx, t)
+		stop()
 	}()
 	return nil
 }
@@ -394,7 +446,34 @@ func (s *Service) acquireSlot(ctx context.Context, t *model.VMTransfer) error {
 			return err
 		}
 		s.mu.Lock()
+		var queueLock *store.VMTransferLock
+		if t.BatchID != "" && len(s.slots) < cap(s.slots) {
+			var lockErr error
+			queueLock, lockErr = s.st.TryVMTransferQueueLock(ctx, t.BatchID)
+			if lockErr != nil {
+				s.mu.Unlock()
+				return lockErr
+			}
+			if queueLock == nil {
+				s.mu.Unlock()
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-tick.C:
+				}
+				continue
+			}
+		}
 		items, err := s.st.ListVMTransfers(ctx)
+		for _, item := range items {
+			if item.ID == t.ID {
+				if item.CancelRequested {
+					err = errManualPause
+				} else if item.Revision != t.Revision || item.Status != "queued" {
+					err = store.ErrVMTransferChanged
+				}
+			}
+		}
 		admit := err == nil && len(s.slots) < cap(s.slots)
 		if admit && t.BatchID != "" {
 			running := 0
@@ -409,9 +488,10 @@ func (s *Service) acquireSlot(ctx context.Context, t *model.VMTransfer) error {
 				if other.Status == "running" {
 					running++
 				}
-				if limit == 1 && other.BatchIndex < t.BatchIndex && t.PendingAction != "rollback" && t.PendingAction != "cancel" {
+				cleanup := t.PendingAction == "rollback" || t.PendingAction == "cancel" || t.PendingAction == "rollback_keep" || t.PendingAction == "hold"
+				if limit == 1 && other.BatchIndex < t.BatchIndex && !cleanup {
 					switch other.Status {
-					case "ready", "awaiting_confirmation", "completed", "canceled", "rolled_back":
+					case "ready", "awaiting_confirmation", "completed", "canceled", "rolled_back", "rolled_back_retained":
 					default:
 						admit = false
 					}
@@ -420,12 +500,34 @@ func (s *Service) acquireSlot(ctx context.Context, t *model.VMTransfer) error {
 			admit = admit && running < limit
 		}
 		if admit {
+			lockCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+			lock, e := s.st.TryVMTransferLock(lockCtx, t.ID)
+			cancel()
+			if e != nil {
+				err = e
+				admit = false
+			} else if lock == nil {
+				admit = false
+			} else {
+				s.leases[t.ID] = lock
+			}
+		}
+		if admit {
 			t.Status = "running"
 			t.PendingAction = ""
+			t.ActionStartedAt = time.Now().UTC()
+			t.PhaseStartedAt = t.ActionStartedAt
+			t.LastProgressAt = t.ActionStartedAt
 			err = s.st.ClaimVMTransfer(ctx, t, "queued")
 			if err == nil {
 				s.slots <- struct{}{}
+			} else {
+				s.leases[t.ID].Release()
+				delete(s.leases, t.ID)
 			}
+		}
+		if queueLock != nil {
+			queueLock.Release()
 		}
 		s.mu.Unlock()
 		if err != nil {
@@ -451,27 +553,62 @@ func (s *Service) Action(ctx context.Context, id, action string, confirm bool) (
 	}
 	if cancel, ok := s.active[id]; ok {
 		if action == "pause" {
+			if err := s.st.RequestVMTransferPause(ctx, id); err != nil {
+				return nil, err
+			}
 			cancel()
 			return t, nil
 		}
 		return nil, fmt.Errorf("операция ещё выполняется; дождитесь завершения или приостановите её")
 	}
+	if action == "pause" && (t.Status == "running" || t.Status == "queued" || t.Status == "recovering") {
+		if err := s.st.RequestVMTransferPause(ctx, id); err != nil {
+			return nil, err
+		}
+		if t.Status == "running" {
+			return t, nil
+		}
+		t.ManualPause = true
+		t.Status = "interrupted"
+		t.RecoveryAction = ""
+		t.NextRecoveryAt = nil
+		return t, s.save(t)
+	}
+	// A warm standby has no foreground worker, but pausing must also stop its
+	// periodic synchronization without deleting or powering either VM.
+	if action == "pause" && t.Status == "ready" {
+		if !confirm {
+			return nil, fmt.Errorf("подтвердите паузу")
+		}
+		t.Status, t.ManualPause = "interrupted", true
+		t.Error = "Перенос приостановлен. Автоматическая синхронизация остановлена; ВМ и диски сохранены."
+		return t, s.save(t)
+	}
 	allowed := false
 	switch action {
 	case "resume":
-		if t.Status != "interrupted" || t.PendingAction == "" {
-			return nil, fmt.Errorf("возобновить можно приостановленную задачу очереди")
+		if t.Status != "interrupted" && t.Status != "failed" && t.Status != "blocked" && t.Status != "held" {
+			return nil, fmt.Errorf("перенос не приостановлен: текущее состояние %s. Для подготовленной ВМ используйте переключение, для работающей цели — проверку результата", t.Status)
 		}
-		action = t.PendingAction
+		action = resumeAction(t)
+		t.ManualPause = false
 		allowed = true
+	case "recover":
+		allowed = recoveryEnabled(t) && (t.Status == "blocked" || t.Status == "failed" || t.Status == "interrupted")
+		action = t.ActiveAction
+		if t.TargetStarted || t.TargetStartRequested {
+			action = "recover_target"
+		} else if action == "" || action == "prepare" || action == "retry_prepare" {
+			action = "retry_prepare"
+		}
 	case "forget":
 		if !confirm {
 			return nil, fmt.Errorf("подтвердите удаление записи")
 		}
 		return t, s.st.DeleteReleasedVMTransfer(ctx, id)
 	case "sync", "cutover":
-		allowed = t.Request.Mode == "warm" && t.TargetVMID != "" && t.AppliedRunID != "" && !t.TargetStarted && (t.Status == "ready" || t.Status == "interrupted" || t.Status == "failed")
-	case "cancel", "rollback":
+		allowed = t.Request.Mode == "warm" && t.TargetVMID != "" && t.AppliedRunID != "" && !t.TargetStarted && !t.TargetStartRequested && (t.Status == "ready" || t.Status == "interrupted" || t.Status == "failed")
+	case "cancel", "rollback", "rollback_keep", "hold":
 		allowed = t.Status != "canceled" && t.Status != "rolled_back"
 	case "complete":
 		if t.Status != "awaiting_confirmation" {
@@ -511,9 +648,38 @@ func (s *Service) Action(ctx context.Context, id, action string, confirm bool) (
 	if !confirm {
 		return nil, fmt.Errorf("подтвердите действие")
 	}
+	t.ManualPause = false
+	t.OperationStartedAt = time.Now().UTC()
+	t.RecoveryAttempts = 0
+	t.RollbackAttempts = 0
+	t.RecoveryAction = ""
+	t.NextRecoveryAt = nil
 	result := *t
 	if err := s.startLocked(t, action); err != nil {
 		return nil, err
 	}
 	return &result, nil
+}
+
+// Resume from saved evidence, never apply disk changes after a possible start.
+func resumeAction(t *model.VMTransfer) string {
+	if t.PendingAction != "" {
+		return t.PendingAction
+	}
+	if t.ActiveAction == "rollback" || t.ActiveAction == "cancel" || t.ActiveAction == "rollback_keep" {
+		return t.ActiveAction
+	}
+	if t.TargetStarted || t.TargetStartRequested || t.Phase == "starting_target" || t.Phase == "checking_guest" || t.Phase == "verify_application" {
+		return "recover_target"
+	}
+	if t.Phase == "final_delta_applied" {
+		return "start_target"
+	}
+	if t.Request.Mode == "warm" && t.TargetVMID != "" && t.AppliedRunID != "" {
+		if t.ActiveAction == "cutover" || t.SourceStopped {
+			return "cutover"
+		}
+		return "sync"
+	}
+	return "retry_prepare"
 }

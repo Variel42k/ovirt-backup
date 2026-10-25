@@ -45,6 +45,8 @@ const (
 	AlertVMDown               = "vm_down_but_desired_up"
 	AlertVMPaused             = "vm_paused"
 	AlertVMUnknown            = "vm_unknown_state"
+	AlertVMRecovery           = "vm_recovery_unhealthy"
+	AlertMigrationRecovery    = "vm_migration_recovery"
 	AlertStorageDomainDown    = "storage_domain_inactive"
 	AlertStorageDomainFull    = "storage_domain_low_space"
 	AlertBackupFailed         = "backup_failed"
@@ -149,6 +151,7 @@ const (
 	ActionVMStart      RemediationAction = "vm_start"
 	ActionVMUnpause    RemediationAction = "vm_unpause"
 	ActionVMReset      RemediationAction = "vm_reset"
+	ActionVMReboot     RemediationAction = "vm_reboot"
 	ActionHostActivate RemediationAction = "host_activate"
 	ActionHostFence    RemediationAction = "host_fence"
 	ActionReconnect    RemediationAction = "engine_reconnect"
@@ -163,6 +166,8 @@ func (a RemediationAction) Title() string {
 		return "Снятие ВМ с паузы"
 	case ActionVMReset:
 		return "Сброс ВМ"
+	case ActionVMReboot:
+		return "Штатная перезагрузка ВМ"
 	case ActionHostActivate:
 		return "Активация хоста"
 	case ActionHostFence:
@@ -185,7 +190,7 @@ func (a RemediationAction) Disruptive() bool {
 // implementation from interpreting an object ID in the wrong namespace.
 func (a RemediationAction) ValidForScope(scope Scope) bool {
 	switch a {
-	case ActionVMStart, ActionVMUnpause, ActionVMReset:
+	case ActionVMStart, ActionVMUnpause, ActionVMReset, ActionVMReboot:
 		return scope == ScopeVM
 	case ActionHostActivate, ActionHostFence:
 		return scope == ScopeHost

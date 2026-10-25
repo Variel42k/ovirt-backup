@@ -10,6 +10,7 @@ import HealthChart from '@/components/HealthChart.vue'
 import IOChart, { type IOPoint } from '@/components/IOChart.vue'
 import PageLoadError from '@/components/PageLoadError.vue'
 import VMTransferDialog from '@/components/VMTransferDialog.vue'
+import ClusterRecoveryPanel from '@/components/ClusterRecoveryPanel.vue'
 import VMManagementActions from '@/components/VMManagementActions.vue'
 import type { Disk, DiskSample, HealthSample, Host, MountSample, Server, StorageDomain, VM } from '@/api/types'
 
@@ -63,7 +64,7 @@ const migrationUnavailableReason = computed(() => {
 })
 
 const knownTabs = new Set([
-  'vms', 'hosts', 'disks', 'domains',
+  'vms', 'hosts', 'disks', 'domains', 'recovery',
   ...(auth.can('monitoring.read') ? ['health', 'io'] : []),
 ])
 const tab = ref(knownTabs.has(String(route.query.tab)) ? String(route.query.tab) : 'vms')
@@ -461,12 +462,14 @@ const domainColumns = [
         <q-tab name="hosts" :label="`Хосты (${hosts.length})`" />
         <q-tab name="disks" :label="`Диски (${dataDisks.length})`" />
         <q-tab name="domains" :label="`Домены хранения (${domains.length})`" />
+        <q-tab v-if="server && ['ovirt','redvirt','rhv','olvm'].includes(server.kind)" name="recovery" label="Восстановление" />
         <q-tab v-if="auth.can('monitoring.read')" name="health" label="Доступность" />
         <q-tab v-if="auth.can('monitoring.read')" name="io" label="Ввод-вывод" />
       </q-tabs>
       <q-separator />
 
       <q-tab-panels v-model="tab" animated>
+        <q-tab-panel name="recovery" class="q-pa-none"><ClusterRecoveryPanel :server-id="serverId" /></q-tab-panel>
         <q-tab-panel name="vms" class="q-pa-none">
           <q-banner v-if="selectedVMs.length" dense class="bg-blue-1 q-ma-sm">
             <div class="row items-center q-gutter-sm">

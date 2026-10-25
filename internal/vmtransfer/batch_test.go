@@ -38,7 +38,7 @@ func TestBatchQueueOrderFailureAndParallelLimit(t *testing.T) {
 				wait, cancel := context.WithTimeout(ctx, 80*time.Millisecond)
 				defer cancel()
 				if err := s.acquireSlot(wait, item); err == nil {
-					<-s.slots
+					s.releaseSlot(item.ID)
 					t.Fatal("queue ran before its turn")
 				}
 			}
@@ -58,7 +58,7 @@ func TestBatchQueueOrderFailureAndParallelLimit(t *testing.T) {
 			if err := st.UpdateVMTransfer(ctx, items[0]); err != nil {
 				t.Fatal(err)
 			}
-			<-s.slots
+			s.releaseSlot(items[0].ID)
 			if parallelism == 1 {
 				assertWaiting(items[1])
 				items[0].Status = "rolled_back"
@@ -72,14 +72,14 @@ func TestBatchQueueOrderFailureAndParallelLimit(t *testing.T) {
 				if err := st.UpdateVMTransfer(ctx, items[1]); err != nil {
 					t.Fatal(err)
 				}
-				<-s.slots
+				s.releaseSlot(items[1].ID)
 			}
 			if err := s.acquireSlot(ctx, items[2]); err != nil {
 				t.Fatal(err)
 			}
-			<-s.slots
+			s.releaseSlot(items[2].ID)
 			if parallelism == 2 {
-				<-s.slots
+				s.releaseSlot(items[1].ID)
 			}
 		})
 	}

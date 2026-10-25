@@ -7,9 +7,13 @@ import (
 )
 
 type TransferNIC struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-	MAC  struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Linked      Bool   `json:"linked"`
+	VNICProfile struct {
+		ID string `json:"id"`
+	} `json:"vnic_profile"`
+	MAC struct {
 		Address string `json:"address"`
 	} `json:"mac"`
 }

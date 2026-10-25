@@ -48,6 +48,12 @@ func testRemediator(t *testing.T) (*Remediator, *store.Store, string) {
 func TestObserveModeRecordsRepeatedSituationOnce(t *testing.T) {
 	ctx := context.Background()
 	_, st, dir := testRemediator(t)
+	if err := st.CreateServer(ctx, &model.Server{ID: "srv-1", Name: "test", Kind: model.KindOVirt}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SyncVMs(ctx, "srv-1", []*model.VM{{ID: "vm-1", Name: "db-01", Status: "down", DesiredState: model.DesiredUp}}); err != nil {
+		t.Fatal(err)
+	}
 
 	cfg := config.RemediationConfig{
 		Enabled: true, DryRun: true, AllowVMStart: true,

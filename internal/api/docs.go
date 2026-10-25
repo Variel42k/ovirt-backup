@@ -69,6 +69,7 @@ var guidePlacements = map[string]guidePlacement{
 	"BACKUP-FORMAT.md":       {"Архитектура", 30, "inventory_2"},
 	"PLAN-OVIRT-TRANSFER.md": {"Архитектура", 45, "move_up"},
 	"VM-MIGRATION.md":        {"Эксплуатация", 15, "move_up"},
+	"CLUSTER-RECOVERY.md":    {"Эксплуатация", 16, "health_and_safety"},
 	"PLAN-RECOVERY.md":       {"Архитектура", 40, "timeline"},
 	"API.md":                 {"Справочник API", 10, "api"},
 }

@@ -34,16 +34,31 @@ func (s *Server) handleVMTransferSource(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	warm := server.SupportsCBT && len(disks) > 0
+	profiles, err := client.ListVNICProfiles(r.Context(), serverID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
 	items := []model.VMTransferNIC{}
 	for _, n := range nics {
-		items = append(items, model.VMTransferNIC{ID: n.ID, Name: n.Name, MAC: n.MAC.Address})
+		item := model.VMTransferNIC{ID: n.ID, Name: n.Name, MAC: n.MAC.Address, Connected: bool(n.Linked)}
+		for _, profile := range profiles {
+			if profile.ID == n.VNICProfile.ID {
+				item.ProfileName, item.NetworkName = profile.Name, profile.Network
+				break
+			}
+		}
+		items = append(items, item)
 	}
+	var total, allocated int64
 	for _, d := range disks {
+		total += d.ProvisionedSize.Int64()
+		allocated += d.ActualSize.Int64()
 		if d.Backup != "incremental" {
 			warm = false
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"nics": items, "warm_available": warm, "warm_reason": "Нужны Backup API и включённый incremental на всех дисках"})
+	writeJSON(w, http.StatusOK, map[string]any{"nics": items, "total_bytes": total, "allocated_bytes": allocated, "warm_available": warm, "warm_reason": "Нужны Backup API и включённый incremental на всех дисках"})
 }
 
 func (s *Server) handlePlanVMTransferBatch(w http.ResponseWriter, r *http.Request) {
@@ -124,6 +139,19 @@ func (s *Server) handleGetVMTransfer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, t)
+}
+
+func (s *Server) handleVMTransferSamples(w http.ResponseWriter, r *http.Request) {
+	if _, err := s.store.GetVMTransfer(r.Context(), r.PathValue("id")); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	items, err := s.store.VMTransferSamples(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": len(items)})
 }
 func (s *Server) handlePlanVMTransfer(w http.ResponseWriter, r *http.Request) {
 	var req model.VMTransferRequest

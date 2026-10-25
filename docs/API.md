@@ -1658,12 +1658,13 @@ source.addEventListener('alert', (e) => console.log(JSON.parse(e.data)))
 | `GET /vm-transfers` | История операций |
 | `GET /vm-transfers/source?server_id=…&vm_id=…` | Исходные NIC и доступность предварительного копирования |
 | `GET /vm-transfers/{id}` | Состояние, этап, созданные ресурсы и ошибка |
+| `GET /vm-transfers/{id}/samples` | До 600 сохранённых замеров передачи: этап, направление, байты, скорость |
 | `POST /vm-transfers/plan` | Предварительная проверка без остановки и создания ресурсов |
 | `POST /vm-transfers` | Создание и запуск подтверждённой миграции |
-| `POST /vm-transfers/{id}/action` | `sync`, `cutover`, `pause`, `resume`, `complete`, `cancel`, `rollback`, `forget` |
+| `POST /vm-transfers/{id}/action` | `sync`, `cutover`, `pause`, `resume`, `recover`, `hold`, `rollback_keep`, `complete`, `cancel`, `rollback`, `forget` |
 | `POST /vm-transfers/batches/plan` | Проверить все ВМ группы и суммарное место в домене |
 | `POST /vm-transfers/batches` | Атомарно поставить подтверждённую группу в очередь |
-| `POST /vm-transfers/batches/{id}/action` | Групповые `sync`, `cutover`, `pause`, `resume`, `rollback`, `complete` |
+| `POST /vm-transfers/batches/{id}/action` | Групповые `sync`, `cutover`, `pause`, `resume`, `hold`, `rollback_keep`, `rollback`, `complete`; неприменимые задачи возвращаются в `skipped` |
 
 Чтение истории требует `servers.read` и `backups.read`. Планирование и изменения
 требуют `servers.write`, `backups.write` и `management.enabled=true`.
@@ -1699,3 +1700,44 @@ source.addEventListener('alert', (e) => console.log(JSON.parse(e.data)))
 ошибки отдельных ВМ возвращаются в `errors`, уже выполненные действия не отменяются.
 Пустой `host_id` оставляет размещение Engine; конкретный хост должен быть
 доступен в выбранном кластере. Источники всех ВМ резервируются одной транзакцией.
+
+## Политики восстановления кластеров oVirt
+
+| Маршрут | Назначение |
+| --- | --- |
+| `GET /servers/{id}/clusters/{clusterID}/recovery` | Действующая политика или безопасные значения по умолчанию; право `servers.read` |
+| `PUT /servers/{id}/clusters/{clusterID}/recovery` | Сохранить полную политику; `servers.write`, включённое управление |
+| `DELETE /servers/{id}/clusters/{clusterID}/recovery` | Удалить свою политику и вернуть наследование общих настроек |
+
+Политика содержит `migration`, `vm`, `configured`, `updated_by`, `updated_at`.
+Идентификаторы берутся из пути; кластер проверяется в инвентаре указанного
+подключения. Опасные разрешения требуют `servers.disruptive`.
+
+`migration` содержит `enabled`, `no_progress_seconds`, `phase_timeout_seconds`,
+`operation_timeout_seconds`, `max_downtime_seconds`, `power_timeout_seconds`,
+`retry_delay_seconds`, `max_retries`, `max_rollback_attempts`,
+`cancellation_timeout_seconds`, `resume_after_restart`, `rollback_on_failure`,
+`rollback_after_target_start`, `allow_force_stop_source`, `allow_force_stop_target`,
+`allow_host_fallback`, `guest_probe_port`, `guest_ready_timeout_seconds`.
+Времена заданы целыми секундами, порт 0 отключает TCP-проверку. Значения вне
+допустимых диапазонов, включая нулевые бесконечные ожидания, отклоняются.
+
+`vm` содержит `override`, `enabled`, `required_tag`, `failure_threshold`,
+`unhealthy_seconds`, `startup_grace_seconds`, `cooldown_seconds`,
+`max_attempts_per_hour`, `allow_start`, `allow_unpause`, `allow_reboot`,
+`allow_reset`, `guest_probe_port`, `probe_timeout_seconds`.
+При `override=false` ВМ наследуют общие настройки; при `override=true` и
+`enabled=false` восстановление выбранных ВМ отключено. Непустой `required_tag`
+ограничивает политику ВМ с этой меткой; остальные сохраняют общую политику.
+Учитываются требуемое состояние `up`, исключение ВМ, общие выключатели
+управления/восстановления и режим проверки. Жёсткий сброс разрешается только
+после штатной перезагрузки. Общие разрешения на запуск/снятие паузы сохраняются.
+
+Миграция сохраняет `source_cluster_id` и снимок `recovery_policy` исходного
+кластера при создании. Новые состояния: `recovering` — отложенное автоматическое
+действие, `blocked` — безопасное продолжение невозможно или попытки исчерпаны.
+Возвращаются `recovery_attempts`, `rollback_attempts`, `next_recovery_at`,
+`recovery_history`, `recovery_notice`, `cancel_requested`.
+`action=recover` явно запускает новую серию восстановления после вмешательства
+оператора. Ручная пауза не возобновляется автоматически. Подробные сценарии:
+[CLUSTER-RECOVERY.md](CLUSTER-RECOVERY.md).

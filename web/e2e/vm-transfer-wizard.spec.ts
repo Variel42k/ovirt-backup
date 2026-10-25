@@ -14,11 +14,11 @@ async function mockTransfers(page: Page, warm = true) {
     if (path === '/servers/source') body = { id: 'source', name: 'Source Engine', kind: 'ovirt', enabled: true }
     if (path === '/storages') body = list([{ id: 'repo', name: 'Backup repository', kind: 'local', enabled: true }])
     if (path === '/servers/source/vms') body = list([{ id: 'vm', name: 'Migration VM', status: 'up' }, { id: 'vm2', name: 'Second VM', status: 'up' }])
-    if (path === '/vm-transfers/source') body = { nics: [{ id: 'nic', name: 'eth0', mac: url.searchParams.get('vm_id') === 'vm' ? '00:11:22:33:44:55' : '00:11:22:33:44:56' }], warm_available: warm, warm_reason: 'Нужен incremental' }
+    if (path === '/vm-transfers/source') body = { total_bytes: 1073741824, allocated_bytes: 536870912, nics: [{ id: 'nic', name: 'eth0', profile_name: 'Target network', network_name: 'VM LAN', connected: true, mac: url.searchParams.get('vm_id') === 'vm' ? '00:11:22:33:44:55' : '00:11:22:33:44:56' }], warm_available: warm, warm_reason: 'Нужен incremental' }
     if (path === '/servers/target/clusters') body = list([{ id: 'cluster', name: 'Target cluster' }])
     if (path === '/servers/target/hosts') body = list([{ id: 'hostA', name: 'Host A', status: 'up', cluster_id: 'cluster' }, { id: 'hostB', name: 'Host B', status: 'up', cluster_id: 'cluster' }, { id: 'down', name: 'Down host', status: 'down', cluster_id: 'cluster' }, { id: 'other', name: 'Other cluster host', status: 'up', cluster_id: 'elsewhere' }])
     if (path.includes('/hosts/') && path.endsWith('/storage-domains')) body = { domains: [{ id: path.includes('/hostB/') ? 'domainB' : 'domainA', name: path.includes('/hostB/') ? 'Host B domain' : 'Host A domain', type: 'data', status: 'active', available_size: 10000000000 }] }
-    if (path === '/servers/target/restore-networks') body = list([{ id: 'network', name: 'Target network', kind: 'vnic_profile' }])
+    if (path === '/servers/target/restore-networks') body = list([{ id: 'network', name: 'Target network', network: 'VM LAN', kind: 'vnic_profile' }])
     if (path === '/vm-transfers/batches/plan') {
       const req = route.request().postDataJSON()
       body = { items: req.items.map((request: unknown, i: number) => ({ request, source_name: i ? 'Second VM' : 'Migration VM', total_bytes: 1000000, nics: [], blockers: [], warnings: ['UUID целевой ВМ будет новым'], warm_available: warm })), total_bytes: req.items.length * 1000000, blockers: [] }
@@ -48,7 +48,8 @@ for (const [mode, execution, count] of [['cold','sequential',1],['warm','sequent
     await expect(page.getByRole('option', { name: 'Down host' })).toHaveCount(0)
     await expect(page.getByRole('option', { name: 'Other cluster host' })).toHaveCount(0)
     await page.getByRole('option', { name: 'Host B', exact: true }).click()
-    for (const [label, name] of [['Домен для дисков целевых ВМ', /Host B domain/], ['Репозиторий промежуточной копии', 'Backup repository'], ['Общая целевая сеть', 'Target network']] as const) {
+    await dialog.getByRole('radio', { name: 'Указать новые сети', exact: true }).click()
+    for (const [label, name] of [['Домен для дисков целевых ВМ', /Host B domain/], ['Хранилище временной копии', /Backup repository/], ['Общая целевая сеть', 'Target network']] as const) {
       await dialog.getByLabel(label, { exact: true }).click()
       if (label === 'Домен для дисков целевых ВМ') await expect(page.getByRole('option', { name: /Host A domain/ })).toHaveCount(0)
       await page.getByRole('option', { name }).click()
@@ -84,3 +85,45 @@ test('миграция открывается окном в списке ВМ и
   await expect(page.getByRole('dialog')).toContainText('выбрано ВМ: 2')
   await expect(page).toHaveURL(/\/servers\/source$/)
 })
+
+for (const theme of ['light', 'dark']) {
+  test(`проверка формы: контраст, сети конфигурации и объём ВМ — ${theme}`, async ({ page }, info) => {
+    const submitted = await mockTransfers(page)
+    await page.addInitScript(mode => localStorage.setItem('jhv-theme-mode', mode), theme)
+    await page.goto('/vm-transfers?create=1&server=source&vm=vm,vm2')
+    const dialog = page.getByRole('dialog')
+    await dialog.getByRole('button', { name: 'Далее', exact: true }).click()
+    await dialog.getByLabel('Целевое подключение oVirt').click()
+    await page.getByRole('option', { name: 'Target Engine', exact: true }).click()
+    await dialog.getByLabel('Целевой кластер', { exact: true }).click()
+    await page.getByRole('option', { name: 'Target cluster', exact: true }).click()
+    await expect(dialog).toContainText('виртуальный размер 2.0 ГБ')
+    await dialog.getByLabel('Домен для дисков целевых ВМ', { exact: true }).click()
+    await page.getByRole('option', { name: /Host A domain/ }).click()
+    await expect(dialog.getByRole('radio', { name: 'Использовать сети из конфигурации', exact: true })).toBeChecked()
+    await expect(dialog.getByLabel('Общая целевая сеть', { exact: true })).toHaveCount(0)
+    await dialog.getByRole('button', { name: 'Проверить план', exact: true }).click()
+    await expect(dialog).toContainText('UUID целевой ВМ будет новым')
+    const banners = dialog.locator('.q-banner')
+    for (const banner of await banners.all()) {
+      const ratio = await banner.evaluate(el => {
+        const style = getComputedStyle(el)
+        const lum = (value: string) => {
+          const rgb = value.match(/[\d.]+/g)!.slice(0,3).map(Number).map(v => { const c=v/255; return c<=0.04045 ? c/12.92 : ((c+0.055)/1.055)**2.4 })
+          return rgb[0]!*.2126+rgb[1]!*.7152+rgb[2]!*.0722
+        }
+        const a=lum(style.color), b=lum(style.backgroundColor)
+        return (Math.max(a,b)+.05)/(Math.min(a,b)+.05)
+      })
+      expect(ratio).toBeGreaterThanOrEqual(4.5)
+    }
+    const card=dialog.locator('.q-card').first(), bounds=await card.boundingBox()
+    expect(bounds!.x).toBeGreaterThanOrEqual(0)
+    expect(bounds!.x+bounds!.width).toBeLessThanOrEqual(page.viewportSize()!.width+1)
+    await page.screenshot({path:info.outputPath(`migration-${theme}.png`),animations:'disabled'})
+    await dialog.getByRole('checkbox', { name: /Подтверждаю план/ }).click()
+    await dialog.getByRole('button', { name: 'Начать миграцию' }).click()
+    await expect(dialog).toContainText('Группа создана')
+    expect(submitted()!.items[0].network_mappings).toMatchObject([{target_id:'network',connected:true}])
+  })
+}

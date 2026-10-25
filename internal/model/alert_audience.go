@@ -80,6 +80,8 @@ var alertAudienceByKind = map[string]AlertAudience{
 	AlertVMDown:              AudienceInfrastructure,
 	AlertVMPaused:            AudienceInfrastructure,
 	AlertVMUnknown:           AudienceInfrastructure,
+	AlertVMRecovery:          AudienceInfrastructure,
+	AlertMigrationRecovery:   AudienceInfrastructure,
 	AlertStorageDomainDown:   AudienceInfrastructure,
 	AlertStorageDomainFull:   AudienceInfrastructure,
 	AlertStoragePathDegraded: AudienceInfrastructure,

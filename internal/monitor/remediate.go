@@ -96,6 +96,18 @@ func (r *Remediator) Consider(ctx context.Context, sit Situation) (*model.Remedi
 	if sit.TriggeredBy == "" {
 		sit.TriggeredBy = "monitor"
 	}
+	if sit.TriggeredBy == "cluster-recovery" {
+		lockCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		lock, err := r.store.TryVMRecoveryLock(lockCtx, sit.ServerID, sit.ObjectID)
+		cancel()
+		if err != nil {
+			return nil, err
+		}
+		if lock == nil {
+			return nil, nil
+		}
+		defer lock.Release()
+	}
 
 	record := &model.RemediationRecord{
 		ID:          uuid.NewString(),
@@ -280,14 +292,12 @@ func (r *Remediator) describeEffect(sit Situation) string {
 
 // gate returns a non-empty reason when the action must not be performed.
 func (r *Remediator) gate(ctx context.Context, sit Situation) (string, error) {
-	if sit.TriggeredBy == "monitor" && !r.cfg.Enabled {
+	if (sit.TriggeredBy == "monitor" || sit.TriggeredBy == "cluster-recovery") && !r.cfg.Enabled {
 		return "автоматическое восстановление выключено в настройках", nil
 	}
 
-	// vm_reset никогда не запускается автоматикой и поэтому не имеет allow_*
-	// настройки. Оператору с отдельным disruptive-правом он доступен через
-	// ручной маршрут, где ещё требуется confirm=true.
-	if !r.actionAllowed(sit) {
+	// Cluster recovery has its own explicit, permission-checked reset opt-in.
+	if sit.TriggeredBy != "cluster-recovery" && !r.actionAllowed(sit) {
 		return fmt.Sprintf("действие «%s» не разрешено политикой", sit.Action.Title()), nil
 	}
 
@@ -300,8 +310,27 @@ func (r *Remediator) gate(ctx context.Context, sit Situation) (string, error) {
 			return "ВМ участвует в миграции " + owner, nil
 		}
 		vm, err := r.store.GetVM(ctx, sit.ServerID, sit.ObjectID)
+		if err != nil {
+			return "", err
+		}
 		if err == nil && vm.RemediationOptOut {
 			return "для этой ВМ автоматические действия отключены вручную", nil
+		}
+		p, err := r.store.GetClusterRecoveryPolicy(ctx, sit.ServerID, vm.ClusterID)
+		if err != nil {
+			return "", err
+		}
+		if sit.TriggeredBy == "cluster-recovery" {
+			if !p.Configured || !p.VM.AppliesTo(vm) {
+				return "нет политики восстановления кластера", nil
+			}
+			if reason, e := r.clusterRecoveryGate(ctx, sit, p.VM); reason != "" || e != nil {
+				return reason, e
+			}
+			return r.confirmClusterRecovery(ctx, sit)
+		}
+		if sit.TriggeredBy == "monitor" && p.Configured && p.VM.AppliesTo(vm) {
+			return "для ВМ действует отдельная политика восстановления кластера", nil
 		}
 	}
 
@@ -427,6 +456,8 @@ func (r *Remediator) execute(ctx context.Context, sit Situation) error {
 
 	case model.ActionVMReset:
 		return client.ResetVM(opCtx, sit.ObjectID)
+	case model.ActionVMReboot:
+		return client.RebootVM(opCtx, sit.ObjectID)
 
 	case model.ActionReconnect:
 		r.pool.Invalidate(sit.ServerID)

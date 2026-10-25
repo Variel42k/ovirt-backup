@@ -13,9 +13,10 @@ const step = ref(1), maxStep = ref(1), busy = ref(false), error = ref(''), loadi
 const sourceID = ref(props.serverId || ''), selectedIDs = ref<string[]>([...(props.vmIds || [])]), vms = ref<VM[]>([]), search = ref('')
 const targetID = ref(''), clusterID = ref(''), hostID = ref(''), domainID = ref(''), repositoryID = ref(''), sharedNetwork = ref('')
 const clusters = ref<Cluster[]>([]), hosts = ref<Host[]>([]), domains = ref<StorageDomain[]>([]), networks = ref<RestoreNetworkTarget[]>([])
+const networkMode = ref<'configuration' | 'custom'>('configuration')
 const mode = ref<'cold' | 'warm'>('cold'), execution = ref<'sequential' | 'parallel'>('sequential'), parallelism = ref(2), preserveMAC = ref(false), confirmed = ref(false)
 const plan = ref<VMTransferBatchPlan | null>(null), result = ref<VMTransferBatchResult | null>(null)
-type Facts = { nics: VMTransferNIC[]; warm_available: boolean; warm_reason: string }
+type Facts = { nics: VMTransferNIC[]; warm_available: boolean; warm_reason: string; total_bytes?: number; allocated_bytes?: number }
 type Draft = { name: string; network_mappings: VMTransferRequest['network_mappings'] }
 const facts = reactive<Record<string, Facts>>({}), drafts = reactive<Record<string, Draft>>({})
 let sourceSequence = 0, factsSequence = 0, targetSequence = 0, domainSequence = 0
@@ -26,6 +27,11 @@ const vmOptions = computed(() => vms.value.filter(v => v.name.toLocaleLowerCase(
 const eligibleHosts = computed(() => hosts.value.filter(h => h.cluster_id === clusterID.value && h.status === 'up'))
 const warmAvailable = computed(() => selectedIDs.value.length > 0 && selectedIDs.value.every(id => facts[id]?.warm_available))
 const blockedWarm = computed(() => selected.value.filter(vm => facts[vm.id] && !facts[vm.id].warm_available).map(vm => vm.name).join(', '))
+const totalSize = computed(() => selectedIDs.value.reduce((sum, id) => sum + (facts[id]?.total_bytes || 0), 0))
+const allocatedSize = computed(() => selectedIDs.value.reduce((sum, id) => sum + (facts[id]?.allocated_bytes || 0), 0))
+const repositories = computed(() => app.enabledStorages.filter(s => !s.read_only))
+const domainHint = computed(() => `Выбрано ${selectedIDs.value.length} ВМ · виртуальный размер ${bytes(totalSize.value)} · выделено активным томам ${bytes(allocatedSize.value)}`)
+const repositoryHint = computed(() => `Первая копия: до ${bytes(totalSize.value)} до сжатия; изменения и служебные данные требуют дополнительного места. Свободное место — по последней проверке хранилища.`)
 const hasNICs = computed(() => selectedIDs.value.some(id => !!facts[id]?.nics.length))
 function invalidate() { plan.value = null; confirmed.value = false; maxStep.value = Math.min(maxStep.value, 2) }
 function filterVMs(value: string, update: (fn: () => void) => void) { update(() => { search.value = value.toLocaleLowerCase() }) }
@@ -52,10 +58,10 @@ async function loadFacts() {
       const info = await api.vmTransferSource(sourceID.value, vm.id)
       if (seq !== factsSequence) return
       facts[vm.id] = info
-      drafts[vm.id] = { name: vm.name, network_mappings: info.nics.map(n => ({ nic_id: n.id, target_id: sharedNetwork.value, target_kind: 'vnic_profile', exclude: false, connected: true })) }
+      drafts[vm.id] = { name: vm.name, network_mappings: info.nics.map(n => ({ nic_id: n.id, target_id: sharedNetwork.value, target_kind: 'vnic_profile', exclude: false, connected: n.connected ?? true })) }
     }
   }
-  try { await Promise.all(Array.from({ length: Math.min(4, queue.length) }, worker)); if (seq === factsSequence && !warmAvailable.value) mode.value = 'cold' }
+  try { await Promise.all(Array.from({ length: Math.min(4, queue.length) }, worker)); if (seq === factsSequence) { if (!warmAvailable.value) mode.value = 'cold'; applyConfigurationNetworks() } }
   catch (err) { if (seq === factsSequence) error.value = errorMessage(err) }
   finally { if (seq === factsSequence) loadingFacts.value = false }
 }
@@ -67,7 +73,7 @@ async function loadTarget() {
     if (!targetID.value) return
     const [cs, hs, ns] = await Promise.all([api.listClusters(targetID.value), api.listHosts(targetID.value, true), api.listRestoreNetworks(targetID.value)])
     if (seq !== targetSequence) return
-    clusters.value = cs; hosts.value = hs; networks.value = ns
+    clusters.value = cs; hosts.value = hs; networks.value = ns.filter(n => n.kind === 'vnic_profile'); applyConfigurationNetworks()
   } catch (err) { if (seq === targetSequence) error.value = errorMessage(err) }
   finally { if (seq === targetSequence) loadingTarget.value = false }
 }
@@ -82,6 +88,26 @@ async function loadDomains(resetHost = false) {
   } catch (err) { if (seq === domainSequence) error.value = errorMessage(err) }
   finally { if (seq === domainSequence) loadingDomains.value = false }
 }
+function applyConfigurationNetworks() {
+  if (networkMode.value !== 'configuration') return
+  for (const id of selectedIDs.value) {
+    facts[id]?.nics.forEach((nic, i) => {
+      const matches = networks.value.filter(n => !!nic.profile_name && !!nic.network_name && n.name === nic.profile_name && n.network === nic.network_name)
+      const mapping = drafts[id]?.network_mappings[i]
+      if (mapping) { mapping.target_id = matches.length === 1 ? matches[0]!.id : ''; mapping.exclude = false; mapping.connected = nic.connected ?? true }
+    })
+  }
+  invalidate()
+}
+function changeNetworkMode() {
+  sharedNetwork.value = ''
+  for (const draft of Object.values(drafts)) for (const mapping of draft.network_mappings) { mapping.target_id = ''; mapping.exclude = false }
+  applyConfigurationNetworks(); invalidate()
+}
+function networkSummary(nic: VMTransferNIC, id: string, index: number) {
+  const matched = networks.value.find(n => n.id === drafts[id]?.network_mappings[index]?.target_id)
+  return matched ? `${nic.network_name} / ${nic.profile_name} → ${matched.network} / ${matched.name}` : `В целевом Engine нет единственного профиля «${nic.profile_name || 'неизвестен'}» сети «${nic.network_name || 'неизвестна'}». Выберите новую сеть.`
+}
 function applyNetwork() { Object.values(drafts).forEach(d => d.network_mappings.forEach(m => { m.target_id = sharedNetwork.value })); invalidate() }
 function next() {
   error.value = ''
@@ -94,7 +120,7 @@ function request(): VMTransferBatchRequest {
 }
 async function preview() {
   error.value = ''; confirmed.value = false
-  if (!selectedIDs.value.length || loadingFacts.value || !targetID.value || !clusterID.value || !domainID.value || !repositoryID.value || loadingTarget.value || loadingDomains.value || !eligibleHosts.value.length || selectedIDs.value.some(id => !drafts[id] || !drafts[id].name.trim() || drafts[id].network_mappings.some(m => !m.exclude && !m.target_id))) { error.value = 'Выберите целевое подключение, кластер, доступный хост/домен, репозиторий и сопоставьте сети каждой ВМ.'; return }
+  if (!selectedIDs.value.length || loadingFacts.value || !targetID.value || !clusterID.value || !domainID.value || !repositoryID.value || loadingTarget.value || loadingDomains.value || !eligibleHosts.value.length || selectedIDs.value.some(id => !drafts[id] || !drafts[id].name.trim() || drafts[id].network_mappings.some(m => !m.exclude && !m.target_id))) { error.value = 'Выберите целевое подключение, кластер, хост/домен и хранилище временной копии. Для каждого интерфейса нужен доступный профиль целевой сети; если сети конфигурации не найдены, выберите «Указать новые сети».'; return }
   busy.value = true
   try {
     const payload = request(), checked = await api.planVMTransferBatch(payload)
@@ -110,8 +136,9 @@ async function submit() {
   catch (err) { error.value = errorMessage(err) } finally { busy.value = false }
 }
 watch(selectedIDs, () => { if (!loadingSource.value) void loadFacts() })
+watch(repositories, options => { if (!options.some(s => s.id === repositoryID.value)) repositoryID.value = options.length === 1 ? options[0]!.id : '' }, { immediate: true })
 watch([sourceID, selectedIDs, targetID, clusterID, hostID, domainID, repositoryID, mode, execution, parallelism, preserveMAC, drafts], invalidate, { deep: true })
-onMounted(async () => { try { await Promise.all([app.loadMeta(), app.loadServers(), app.loadStorages()]); if (sourceID.value) await loadSource(false) } catch (err) { error.value = errorMessage(err) } })
+onMounted(async () => { try { await Promise.all([app.loadMeta(), app.loadServers(), app.loadStorages()]); if (repositories.value.length === 1) repositoryID.value = repositories.value[0]!.id; if (sourceID.value) await loadSource(false) } catch (err) { error.value = errorMessage(err) } })
 onUnmounted(() => { sourceSequence++; factsSequence++; targetSequence++; domainSequence++ })
 </script>
 
@@ -144,19 +171,23 @@ onUnmounted(() => { sourceSequence++; factsSequence++; targetSequence++; domainS
               <q-select v-model="clusterID" :options="clusters.map(c => ({ label: c.name, value: c.id }))" emit-value map-options label="Целевой кластер" outlined dense :loading="loadingTarget" @update:model-value="loadDomains(true)" />
               <q-select v-model="hostID" :options="eligibleHosts.map(h => ({ label: h.name, value: h.id }))" emit-value map-options clearable label="Целевой хост" outlined dense hint="Пусто — автоматический выбор Engine" :disable="!clusterID" @update:model-value="loadDomains(false)" />
             </div>
-            <q-select v-model="domainID" :options="domains.map(d => ({ label: `${d.name} · ${bytes(d.available_size)} свободно`, value: d.id }))" emit-value map-options label="Домен для дисков целевых ВМ" outlined dense :loading="loadingDomains" :disable="!clusterID || loadingDomains" />
-            <q-select v-model="repositoryID" :options="app.enabledStorages.map(s => ({ label: s.name, value: s.id }))" emit-value map-options label="Репозиторий промежуточной копии" outlined dense />
+            <q-select v-model="domainID" :options="domains.map(d => ({ label: `${d.name} · ${bytes(d.available_size)} свободно · требуется ${bytes(totalSize)}`, value: d.id, disable: d.available_size >= 0 && d.available_size < totalSize }))" emit-value map-options label="Домен для дисков целевых ВМ" :hint="domainHint" outlined dense :loading="loadingDomains" :disable="!clusterID || loadingDomains" />
+            <q-select v-model="repositoryID" :options="repositories.map(s => ({ label: `${s.name} · ${s.last_check_at && s.free_bytes >= 0 ? bytes(s.free_bytes) + ' свободно' : 'место не измерено'}`, value: s.id }))" emit-value map-options label="Хранилище временной копии" :hint="repositoryHint" outlined dense />
+            <q-banner dense class="bg-blue-1">Переносятся диски и конфигурация: CPU, память, BIOS, порядок загрузки и параметры интерфейсов. Временная копия используется для передачи между Engine; домен выше хранит диски целевой ВМ. UUID цели будет новым. Копии остаются в разделе «Бекапы» и автоматически после переноса не удаляются.</q-banner>
             <q-separator />
             <div class="text-subtitle2">Имена и сети</div>
-            <q-select v-if="hasNICs" v-model="sharedNetwork" :options="networks.map(n => ({ label: n.name, value: n.id }))" emit-value map-options label="Общая целевая сеть" outlined dense hint="Применяется ко всем интерфейсам; ниже можно изменить отдельно" @update:model-value="applyNetwork" />
-            <q-expansion-item v-for="vm in selected" :key="vm.id" :label="vm.name" :caption="`${facts[vm.id]?.nics.length || 0} сетевых интерфейсов`" group="transfer-vms" :default-opened="selected.length === 1" class="rounded-borders" header-class="bg-grey-2">
+            <q-option-group v-if="hasNICs" v-model="networkMode" :options="[{ label: 'Использовать сети из конфигурации', value: 'configuration' }, { label: 'Указать новые сети', value: 'custom' }]" @update:model-value="changeNetworkMode" />
+            <div v-if="hasNICs" class="text-caption text-grey-7">В режиме конфигурации выбираются целевые профили с теми же именами профиля и сети; неоднозначные совпадения требуют ручного выбора. IP-адреса внутри гостевой ОС сохраняются и автоматически не меняются.</div>
+            <q-select v-if="hasNICs && networkMode === 'custom'" v-model="sharedNetwork" :options="networks.map(n => ({ label: n.name, value: n.id }))" emit-value map-options label="Общая целевая сеть" outlined dense hint="Применяется ко всем интерфейсам; ниже можно изменить отдельно" @update:model-value="applyNetwork" />
+            <q-expansion-item v-for="vm in selected" :key="vm.id" :label="vm.name" :caption="`${bytes(facts[vm.id]?.total_bytes || 0)} · ${facts[vm.id]?.nics.length || 0} сетевых интерфейсов`" group="transfer-vms" :default-opened="selected.length === 1" class="rounded-borders" header-class="bg-grey-2">
               <div v-if="drafts[vm.id]" class="q-pa-md q-gutter-md">
                 <q-input v-model="drafts[vm.id].name" :label="selected.length === 1 ? 'Имя целевой ВМ' : `Имя целевой ВМ · ${vm.name}`" outlined dense @update:model-value="invalidate" />
                 <div v-for="(nic, i) in facts[vm.id]?.nics" :key="nic.id" class="q-gutter-sm">
                   <div class="text-caption">{{ nic.name }} · {{ nic.mac }}</div>
-                  <q-checkbox v-model="drafts[vm.id].network_mappings[i].exclude" dense label="Не переносить этот интерфейс" @update:model-value="invalidate" />
-                  <q-select v-if="!drafts[vm.id].network_mappings[i].exclude" v-model="drafts[vm.id].network_mappings[i].target_id" :options="networks.map(n => ({ label: n.name, value: n.id }))" emit-value map-options label="Целевая сеть" outlined dense @update:model-value="invalidate" />
-                  <q-checkbox v-if="!drafts[vm.id].network_mappings[i].exclude" v-model="drafts[vm.id].network_mappings[i].connected" dense label="Подключить сеть при переключении" @update:model-value="invalidate" />
+                  <div v-if="networkMode === 'configuration'" class="text-caption" :class="drafts[vm.id].network_mappings[i].target_id ? 'text-grey-7' : 'text-negative'">{{ networkSummary(nic, vm.id, i) }}</div>
+                  <q-checkbox v-if="networkMode === 'custom'" v-model="drafts[vm.id].network_mappings[i].exclude" dense label="Не переносить этот интерфейс" @update:model-value="invalidate" />
+                  <q-select v-if="networkMode === 'custom' && !drafts[vm.id].network_mappings[i].exclude" v-model="drafts[vm.id].network_mappings[i].target_id" :options="networks.map(n => ({ label: n.name, value: n.id }))" emit-value map-options label="Целевая сеть" outlined dense @update:model-value="invalidate" />
+                  <q-checkbox v-if="networkMode === 'custom' && !drafts[vm.id].network_mappings[i].exclude" v-model="drafts[vm.id].network_mappings[i].connected" dense label="Подключить сеть при переключении" @update:model-value="invalidate" />
                 </div>
               </div>
             </q-expansion-item>
@@ -171,10 +202,12 @@ onUnmounted(() => { sourceSequence++; factsSequence++; targetSequence++; domainS
           </template>
           <template v-if="step === 3 && plan">
             <div class="text-subtitle2">{{ selected.length }} ВМ → {{ app.serverName(targetID) }} · {{ bytes(plan.total_bytes) }}</div>
+            <div class="text-caption">Конфигурация ВМ переносится · {{ networkMode === 'configuration' ? 'Сети из конфигурации' : 'Новые сети' }}</div>
+            <div class="text-caption">Временная копия: {{ repositories.find(s => s.id === repositoryID)?.name }}</div>
             <div class="text-caption">{{ clusters.find(c => c.id === clusterID)?.name }} · {{ hosts.find(h => h.id === hostID)?.name || 'Хост автоматически' }} · {{ domains.find(d => d.id === domainID)?.name }}</div>
             <div>{{ mode === 'warm' ? 'Предварительное копирование' : 'С остановкой' }} · {{ execution === 'sequential' ? 'Последовательно' : `Параллельно, до ${parallelism} ВМ` }}</div>
             <q-banner v-for="text in plan.blockers" :key="text" dense class="bg-red-1">{{ text }}</q-banner>
-            <q-list bordered separator><q-item v-for="(p, index) in plan.items" :key="p.request.source_vm_id"><q-item-section><q-item-label>{{ index + 1 }}. {{ p.source_name }} → {{ p.request.name }}</q-item-label><q-item-label caption>{{ bytes(p.total_bytes) }}</q-item-label></q-item-section></q-item></q-list>
+            <q-list bordered separator><q-item v-for="(p, index) in plan.items" :key="p.request.source_vm_id"><q-item-section><q-item-label>{{ index + 1 }}. {{ p.source_name }} → {{ p.request.name }}</q-item-label><q-item-label caption>{{ bytes(p.total_bytes) }} · Автовосстановление: {{ p.recovery_policy?.enabled ? 'по политике исходного кластера' : 'выключено' }}</q-item-label></q-item-section></q-item></q-list>
             <q-banner v-for="text in [...new Set(plan.items.flatMap(p => p.warnings))]" :key="text" dense class="bg-amber-1">{{ text }}</q-banner>
             <q-checkbox v-model="confirmed" dense label="Подтверждаю план, изменения идентичности ВМ и остановку источников при переключении" />
           </template>

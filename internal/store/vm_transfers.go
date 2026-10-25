@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"time"
@@ -11,9 +12,14 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
+var ErrVMTransferChanged = errors.New("состояние миграции изменилось; устаревший обработчик остановлен")
+
 func (s *Store) GetVMTransfer(ctx context.Context, id string) (*model.VMTransfer, error) {
 	var raw []byte
-	if err := s.db.QueryRow(ctx, `SELECT payload FROM vm_transfers WHERE id=?`, id).Scan(&raw); err != nil {
+	var revision int64
+	var cancelRequested bool
+	var notice string
+	if err := s.db.QueryRow(ctx, `SELECT payload,revision,cancel_requested,recovery_notice FROM vm_transfers WHERE id=?`, id).Scan(&raw, &revision, &cancelRequested, &notice); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, ErrNotFound
 		}
@@ -23,11 +29,13 @@ func (s *Store) GetVMTransfer(ctx context.Context, id string) (*model.VMTransfer
 	if err := json.Unmarshal(raw, &t); err != nil {
 		return nil, err
 	}
+	t.Revision, t.CancelRequested = revision, cancelRequested
+	t.RecoveryNotice = notice
 	return &t, nil
 }
 
 func (s *Store) ListVMTransfers(ctx context.Context) ([]*model.VMTransfer, error) {
-	rows, err := s.db.Query(ctx, `SELECT payload FROM vm_transfers ORDER BY updated_at DESC`)
+	rows, err := s.db.Query(ctx, `SELECT payload,revision,cancel_requested,recovery_notice FROM vm_transfers ORDER BY updated_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -36,12 +44,17 @@ func (s *Store) ListVMTransfers(ctx context.Context) ([]*model.VMTransfer, error
 	for rows.Next() {
 		var raw []byte
 		var t model.VMTransfer
-		if err = rows.Scan(&raw); err != nil {
+		var revision int64
+		var cancelRequested bool
+		var notice string
+		if err = rows.Scan(&raw, &revision, &cancelRequested, &notice); err != nil {
 			return nil, err
 		}
 		if err = json.Unmarshal(raw, &t); err != nil {
 			return nil, err
 		}
+		t.Revision, t.CancelRequested = revision, cancelRequested
+		t.RecoveryNotice = notice
 		out = append(out, &t)
 	}
 	return out, rows.Err()
@@ -67,6 +80,7 @@ func (s *Store) CreateVMTransfers(ctx context.Context, items []*model.VMTransfer
 		}
 		now := time.Now().UTC()
 		for _, t := range items {
+			t.Revision = 0
 			var n int
 			if err := tx.QueryRowContext(ctx, s.db.Rebind(`SELECT count(*) FROM backup_runs WHERE server_id=? AND vm_id=? AND status IN ('pending','running')`), t.Request.SourceServerID, t.Request.SourceVMID).Scan(&n); err != nil {
 				return err
@@ -96,11 +110,24 @@ func (s *Store) CreateVMTransfers(ctx context.Context, items []*model.VMTransfer
 
 func (s *Store) UpdateVMTransfer(ctx context.Context, t *model.VMTransfer) error {
 	t.UpdatedAt = time.Now().UTC()
+	previous := t.Revision
+	t.Revision++
 	raw, err := json.Marshal(t)
 	if err != nil {
+		t.Revision = previous
 		return err
 	}
-	_, err = s.db.Exec(ctx, `UPDATE vm_transfers SET status=?,target_vm_id=?,payload=?,updated_at=? WHERE id=?`, t.Status, t.TargetVMID, string(raw), t.UpdatedAt, t.ID)
+	res, err := s.db.Exec(ctx, `UPDATE vm_transfers SET status=?,target_vm_id=?,payload=?,updated_at=?,revision=? WHERE id=? AND revision=?`, t.Status, t.TargetVMID, string(raw), t.UpdatedAt, t.Revision, t.ID, previous)
+	if err == nil {
+		var n int64
+		n, err = res.RowsAffected()
+		if err == nil && n != 1 {
+			err = ErrVMTransferChanged
+		}
+	}
+	if err != nil {
+		t.Revision = previous
+	}
 	return err
 }
 
@@ -108,12 +135,16 @@ func (s *Store) UpdateVMTransfer(ctx context.Context, t *model.VMTransfer) error
 // contacts a hypervisor, including requests handled by another API process.
 func (s *Store) ClaimVMTransfer(ctx context.Context, t *model.VMTransfer, expected string) error {
 	t.UpdatedAt = time.Now().UTC()
+	previous := t.Revision
+	t.Revision++
 	raw, err := json.Marshal(t)
 	if err != nil {
+		t.Revision = previous
 		return err
 	}
-	result, err := s.db.Exec(ctx, `UPDATE vm_transfers SET status=?,payload=?,updated_at=? WHERE id=? AND status=?`, t.Status, string(raw), t.UpdatedAt, t.ID, expected)
+	result, err := s.db.Exec(ctx, `UPDATE vm_transfers SET status=?,payload=?,updated_at=?,revision=?,cancel_requested=FALSE,recovery_notice='' WHERE id=? AND status=? AND revision=?`, t.Status, string(raw), t.UpdatedAt, t.Revision, t.ID, expected, previous)
 	if err != nil {
+		t.Revision = previous
 		return err
 	}
 	n, err := result.RowsAffected()
@@ -121,9 +152,20 @@ func (s *Store) ClaimVMTransfer(ctx context.Context, t *model.VMTransfer, expect
 		return err
 	}
 	if n != 1 {
-		return fmt.Errorf("состояние миграции изменилось; обновите страницу")
+		t.Revision = previous
+		return ErrVMTransferChanged
 	}
 	return nil
+}
+
+func (s *Store) RequestVMTransferPause(ctx context.Context, id string) error {
+	_, err := s.db.Exec(ctx, `UPDATE vm_transfers SET cancel_requested=TRUE WHERE id=?`, id)
+	return err
+}
+
+func (s *Store) SetVMTransferRecoveryNotice(ctx context.Context, id, notice string) error {
+	_, err := s.db.Exec(ctx, `UPDATE vm_transfers SET recovery_notice=? WHERE id=?`, notice, id)
+	return err
 }
 
 // VMTransferOwner locks source VMs until cancellation/rollback. Completed source

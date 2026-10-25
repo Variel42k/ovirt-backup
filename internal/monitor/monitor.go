@@ -383,6 +383,14 @@ func (m *Monitor) evaluateVMs(ctx context.Context, srv *model.Server, vms []*mod
 			continue
 		}
 		desired := stored.DesiredState
+		policy, policyErr := m.store.GetClusterRecoveryPolicy(ctx, srv.ID, vm.ClusterID)
+		if policyErr == nil && policy.Configured {
+			m.recoverClusterVM(ctx, srv, vm, stored, policy, now)
+		}
+		if policyErr == nil && !policy.Configured {
+			_ = m.store.ClearVMRecoveryObservation(ctx, srv.ID, vm.ID)
+			_ = m.store.ResolveAlert(ctx, srv.ID, model.ScopeVM, vm.ID, model.AlertVMRecovery)
+		}
 
 		problem, severity, kind, action := classifyVM(vm, desired)
 		if problem == "" {
@@ -406,7 +414,7 @@ func (m *Monitor) evaluateVMs(ctx context.Context, srv *model.Server, vms []*mod
 				vm.Status, orDash(vm.PauseStatus), desired),
 		})
 
-		if action == "" || failures < threshold {
+		if action == "" || failures < threshold || policyErr != nil || (policy.Configured && policy.VM.AppliesTo(stored)) {
 			continue
 		}
 		_, _ = m.remediator.Consider(ctx, Situation{

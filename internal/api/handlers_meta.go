@@ -184,7 +184,7 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 	resp.VirtualizationKinds = virtualizationKindOptions()
 
 	for _, a := range []model.RemediationAction{model.ActionVMStart, model.ActionVMUnpause,
-		model.ActionVMReset, model.ActionHostActivate, model.ActionHostFence, model.ActionReconnect} {
+		model.ActionVMReset, model.ActionVMReboot, model.ActionHostActivate, model.ActionHostFence, model.ActionReconnect} {
 		desc := ""
 		if a.Disruptive() {
 			desc = "Прерывает работу; требует явного подтверждения."

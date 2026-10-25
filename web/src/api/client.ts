@@ -280,7 +280,8 @@ const unwrap = <T>(data: ListResponse<T>): T[] => data.items ?? []
 
 export const api = {
   listVMTransfers: () => http.get<ListResponse<import('./types').VMTransfer>>('/vm-transfers').then(r => unwrap(r.data)),
-  vmTransferSource: (server_id: string, vm_id: string) => http.get<{ nics: import('./types').VMTransferNIC[]; warm_available: boolean; warm_reason: string }>('/vm-transfers/source', { params: { server_id, vm_id } }).then(r => r.data),
+  vmTransferSamples: (id: string) => http.get<ListResponse<import('./types').VMTransferSample>>(`/vm-transfers/${id}/samples`).then(r => unwrap(r.data)),
+  vmTransferSource: (server_id: string, vm_id: string) => http.get<{ nics: import('./types').VMTransferNIC[]; total_bytes: number; allocated_bytes: number; warm_available: boolean; warm_reason: string }>('/vm-transfers/source', { params: { server_id, vm_id } }).then(r => r.data),
   planVMTransferBatch: (request: import('./types').VMTransferBatchRequest) => http.post<import('./types').VMTransferBatchPlan>('/vm-transfers/batches/plan', request).then(r => r.data),
   createVMTransferBatch: (request: import('./types').VMTransferBatchRequest) => http.post<import('./types').VMTransferBatchResult>('/vm-transfers/batches', request).then(r => r.data),
   vmTransferBatchAction: (id: string, action: string) => http.post<import('./types').VMTransferBatchResult>(`/vm-transfers/batches/${id}/action`, { action, confirm: true }).then(r => r.data),
@@ -369,6 +370,9 @@ export const api = {
   listHostStorageDomains: (serverId: string, hostId: string) =>
     http.get<import('./types').HostStorageTargets>(`/servers/${serverId}/hosts/${hostId}/storage-domains`, { timeout: 50_000 }).then((r) => r.data),
   listClusters: (serverId: string) => http.get<ListResponse<Cluster>>(`/servers/${serverId}/clusters`).then((r) => unwrap(r.data)),
+  getClusterRecovery: (serverId: string, clusterId: string) => http.get<import('./types').ClusterRecoveryPolicy>(`/servers/${serverId}/clusters/${clusterId}/recovery`).then(r => r.data),
+  setClusterRecovery: (serverId: string, clusterId: string, policy: import('./types').ClusterRecoveryPolicy) => http.put<import('./types').ClusterRecoveryPolicy>(`/servers/${serverId}/clusters/${clusterId}/recovery`, policy).then(r => r.data),
+  resetClusterRecovery: (serverId: string, clusterId: string) => http.delete<import('./types').ClusterRecoveryPolicy>(`/servers/${serverId}/clusters/${clusterId}/recovery`).then(r => r.data),
   listVMs: (serverId: string, params?: Record<string, string>) =>
     http.get<ListResponse<VM>>(`/servers/${serverId}/vms`, { params }).then((r) => unwrap(r.data)),
   getVM: (serverId: string, vmId: string) => http.get<VM>(`/servers/${serverId}/vms/${vmId}`).then((r) => r.data),

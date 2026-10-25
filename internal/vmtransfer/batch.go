@@ -89,7 +89,7 @@ func (s *Service) CreateBatch(ctx context.Context, r model.VMTransferBatchReques
 			return nil, err
 		}
 		p.Request.Confirm = true
-		result.Items = append(result.Items, &model.VMTransfer{ID: uuid.NewString(), BatchID: result.ID, BatchIndex: i, BatchParallelism: parallelism, PendingAction: "prepare", Request: p.Request, SourceName: vm.Name, Status: "queued", Phase: "queued", DiskMap: map[string]string{}, RunIDs: []string{}, TotalBytes: p.TotalBytes, OriginalDesired: vm.DesiredState, OriginalOptOut: vm.RemediationOptOut, WasRunning: vm.Status != "down", CreatedBy: actor})
+		result.Items = append(result.Items, &model.VMTransfer{SourceClusterID: p.SourceClusterID, RecoveryPolicy: p.RecoveryPolicy, ID: uuid.NewString(), BatchID: result.ID, BatchIndex: i, BatchParallelism: parallelism, PendingAction: "prepare", Request: p.Request, SourceName: vm.Name, Status: "queued", Phase: "queued", DiskMap: map[string]string{}, RunIDs: []string{}, TotalBytes: p.TotalBytes, OriginalDesired: vm.DesiredState, OriginalOptOut: vm.RemediationOptOut, WasRunning: vm.Status != "down", CreatedBy: actor})
 	}
 	if err = s.st.CreateVMTransfers(ctx, result.Items); err != nil {
 		return nil, err
@@ -119,7 +119,7 @@ func (s *Service) BatchAction(ctx context.Context, id, action string, confirm bo
 		return nil, fmt.Errorf("подтвердите действие для группы")
 	}
 	switch action {
-	case "sync", "cutover", "pause", "resume", "rollback", "complete":
+	case "sync", "cutover", "pause", "resume", "rollback", "rollback_keep", "hold", "complete":
 	default:
 		return nil, fmt.Errorf("недопустимое действие для группы")
 	}
@@ -133,7 +133,8 @@ func (s *Service) BatchAction(ctx context.Context, id, action string, confirm bo
 		if t.BatchID != id {
 			continue
 		}
-		if action == "pause" && t.Status != "running" && t.Status != "queued" {
+		if !batchActionApplies(t, action) {
+			r.Skipped = append(r.Skipped, t.SourceName+": действие не требуется в текущем состоянии ("+t.Status+")")
 			continue
 		}
 		updated, e := s.Action(ctx, t.ID, action, true)
@@ -143,8 +144,25 @@ func (s *Service) BatchAction(ctx context.Context, id, action string, confirm bo
 			r.Items = append(r.Items, updated)
 		}
 	}
-	if len(r.Items) == 0 && len(r.Errors) == 0 {
+	if len(r.Items) == 0 && len(r.Errors) == 0 && len(r.Skipped) == 0 {
 		return nil, fmt.Errorf("в группе нет задач для этого действия")
 	}
 	return r, nil
+}
+
+func batchActionApplies(t *model.VMTransfer, action string) bool {
+	live := t.Status == "running" || t.Status == "queued" || t.Status == "recovering"
+	switch action {
+	case "pause":
+		return live || t.Status == "ready"
+	case "resume":
+		return t.Status == "interrupted" || t.Status == "failed" || t.Status == "blocked" || t.Status == "held"
+	case "sync", "cutover":
+		return t.Request.Mode == "warm" && t.TargetVMID != "" && t.AppliedRunID != "" && !t.TargetStarted && !t.TargetStartRequested && (t.Status == "ready" || t.Status == "interrupted" || t.Status == "failed")
+	case "complete":
+		return t.Status == "awaiting_confirmation"
+	case "hold", "rollback", "rollback_keep":
+		return !live && t.Status != "canceled" && t.Status != "rolled_back" && !(action == "rollback_keep" && t.Status == "rolled_back_retained")
+	}
+	return false
 }

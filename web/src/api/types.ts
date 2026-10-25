@@ -1987,12 +1987,18 @@ export interface VMTransferRequest {
   name: string; mode: 'cold' | 'warm'; preserve_mac: boolean; confirm: boolean
   network_mappings: { nic_id: string; target_id: string; target_kind: string; exclude: boolean; connected: boolean }[]
 }
-export interface VMTransferNIC { id: string; name: string; mac: string }
+export interface VMTransferNIC { id: string; name: string; mac: string; profile_name?: string; network_name?: string; connected?: boolean }
 export interface VMTransferPlan {
+	 recovery_policy?: MigrationRecoveryPolicy; source_cluster_id?: string
   request: VMTransferRequest; source_name: string; total_bytes: number
   nics: VMTransferNIC[]; blockers: string[]; warnings: string[]; warm_available: boolean; warm_reason: string
 }
 export interface VMTransfer {
+	active_action?: string
+	 recovery_policy?: MigrationRecoveryPolicy; source_cluster_id?: string; recovery_action?: string
+	 recovery_attempts?: number; rollback_attempts?: number; next_recovery_at?: string; manual_pause?: boolean
+	 recovery_notice?: string; cancel_requested?: boolean; target_start_requested?: boolean
+	 recovery_history?: { at: string; action: string; message: string }[]
   batch_id?: string; batch_index?: number; batch_parallelism?: number; pending_action?: string
   id: string; request: VMTransferRequest; source_name: string; status: string; phase: string
   error: string; progress: number; target_vm_id: string; restore_id: string; run_ids: string[]
@@ -2004,4 +2010,24 @@ export interface VMTransferBatchRequest {
   items: VMTransferRequest[]; execution: 'sequential' | 'parallel'; parallelism: number; confirm: boolean
 }
 export interface VMTransferBatchPlan { items: VMTransferPlan[]; blockers: string[]; total_bytes: number }
-export interface VMTransferBatchResult { id: string; items: VMTransfer[]; errors: string[] }
+export interface VMTransferBatchResult { id: string; items: VMTransfer[]; errors: string[]; skipped?: string[] }
+
+export interface MigrationRecoveryPolicy {
+  enabled: boolean; no_progress_seconds: number; phase_timeout_seconds: number; operation_timeout_seconds: number
+  max_downtime_seconds: number; power_timeout_seconds: number; retry_delay_seconds: number; max_retries: number
+  max_rollback_attempts: number; resume_after_restart: boolean; rollback_on_failure: boolean
+  rollback_after_target_start: boolean; allow_force_stop_target: boolean; allow_force_stop_source: boolean
+  allow_host_fallback: boolean; guest_probe_port: number; guest_ready_timeout_seconds: number
+  cancellation_timeout_seconds: number
+}
+export interface VMRecoveryPolicy {
+  override: boolean; required_tag: string; enabled: boolean; failure_threshold: number; unhealthy_seconds: number; startup_grace_seconds: number
+  cooldown_seconds: number; max_attempts_per_hour: number; allow_start: boolean; allow_unpause: boolean
+  allow_reboot: boolean; allow_reset: boolean; guest_probe_port: number; probe_timeout_seconds: number
+}
+export interface ClusterRecoveryPolicy {
+  server_id: string; cluster_id: string; configured: boolean; migration: MigrationRecoveryPolicy; vm: VMRecoveryPolicy
+  updated_by?: string; updated_at?: string
+}
+
+export interface VMTransferSample { at: string; phase: string; stage_id: string; direction: string; progress: number; bytes: number; total: number; speed: number }

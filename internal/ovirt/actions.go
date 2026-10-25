@@ -89,6 +89,14 @@ func (c *Client) GetVMState(ctx context.Context, vmID string) (*VM, error) {
 	return &vm, nil
 }
 
+func (c *Client) GetVMRecoveryState(ctx context.Context, vmID string) (*VM, error) {
+	var vm VM
+	if err := c.get(ctx, "/vms/"+vmID, &vm, withQuery(url.Values{"follow": {"reported_devices"}})); err != nil {
+		return nil, err
+	}
+	return &vm, nil
+}
+
 // SearchVMs ищет ВМ запросом поиска движка, например name=jhv-verify-*.
 func (c *Client) SearchVMs(ctx context.Context, query string) ([]VM, error) {
 	var list vmList

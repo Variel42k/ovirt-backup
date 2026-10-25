@@ -1,0 +1,10 @@
+{
+  "source_sha256": "60d89bbe25f22a060b986ce52b8879184b93d0f2919daaa56580e5b9e79d905f",
+  "source_files_verified": 769,
+  "web_files": 85,
+  "web_archive_sha256": "5a48ab2887eaf60944efffa2bd88570512b8cdd40d15c31957557053ac9f780f",
+  "binary_sha256": "7a53e24fcd5c59e510de770171e6dffc481e980bac4d7aa0f24e4b9baf0678d5",
+  "version": "dev-cluster-recovery-20261025-60d89bbe25f2",
+  "production_deployed": false,
+  "deployment_decision": "user_requested_project_changes_only"
+}

@@ -217,6 +217,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /vm-transfers", s.perm(model.PermServersRead, s.perm(model.PermBackupsRead, s.handleListVMTransfers)))
 	mux.HandleFunc("GET /vm-transfers/source", s.perm(model.PermServersRead, s.handleVMTransferSource))
 	mux.HandleFunc("GET /vm-transfers/{id}", s.perm(model.PermServersRead, s.perm(model.PermBackupsRead, s.handleGetVMTransfer)))
+	mux.HandleFunc("GET /vm-transfers/{id}/samples", s.perm(model.PermServersRead, s.perm(model.PermBackupsRead, s.handleVMTransferSamples)))
 	mux.HandleFunc("POST /vm-transfers/plan", s.perm(model.PermServersWrite, s.perm(model.PermBackupsWrite, s.management(s.handlePlanVMTransfer))))
 	mux.HandleFunc("POST /vm-transfers", s.perm(model.PermServersWrite, s.perm(model.PermBackupsWrite, s.management(s.handleCreateVMTransfer))))
 	mux.HandleFunc("POST /vm-transfers/{id}/action", s.perm(model.PermServersWrite, s.perm(model.PermBackupsWrite, s.management(s.handleVMTransferAction))))
@@ -260,6 +261,9 @@ func (s *Server) routes(mux *http.ServeMux) {
 
 	// Инвентарь.
 	mux.HandleFunc("GET /servers/{id}/clusters", s.perm(model.PermServersRead, s.handleListClusters))
+	mux.HandleFunc("GET /servers/{id}/clusters/{clusterID}/recovery", s.perm(model.PermServersRead, s.handleClusterRecoveryPolicy))
+	mux.HandleFunc("PUT /servers/{id}/clusters/{clusterID}/recovery", s.perm(model.PermServersWrite, s.management(s.handleClusterRecoveryPolicy)))
+	mux.HandleFunc("DELETE /servers/{id}/clusters/{clusterID}/recovery", s.perm(model.PermServersWrite, s.management(s.handleClusterRecoveryPolicy)))
 	mux.HandleFunc("GET /servers/{id}/hosts", s.perm(model.PermServersRead, s.handleListHosts))
 	mux.HandleFunc("GET /servers/{id}/vms", s.perm(model.PermServersRead, s.handleListVMs))
 	mux.HandleFunc("GET /servers/{id}/vms/{vmID}", s.perm(model.PermServersRead, s.handleGetVM))
@@ -727,6 +731,12 @@ func (r *statusRecorder) Flush() {
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	if s.vmTransfers != nil {
+		if reason := s.vmTransfers.UnhealthyReason(); reason != "" {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "stalled", "detail": reason})
+			return
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 

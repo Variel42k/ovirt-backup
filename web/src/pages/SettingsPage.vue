@@ -527,6 +527,8 @@ const NOTIFICATION_KIND_RU: Record<string, string> = {
   vm_down_but_desired_up: 'ВМ выключена вопреки политике',
   vm_paused: 'ВМ приостановлена',
   vm_unknown_state: 'Неизвестное состояние ВМ',
+  vm_recovery_unhealthy: 'Восстановление ВМ по политике кластера',
+  vm_migration_recovery: 'Восстановление миграции ВМ',
   storage_domain_inactive: 'Storage Domain неактивен',
   storage_domain_low_space: 'Мало места в Storage Domain',
   backup_failed: 'Ошибка бэкапа',

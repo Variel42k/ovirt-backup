@@ -19,10 +19,17 @@ import (
 func (s *Service) Run(ctx context.Context) {
 	tick := time.NewTicker(2 * time.Minute)
 	defer tick.Stop()
+	recoveryTick := time.NewTicker(5 * time.Second)
+	defer recoveryTick.Stop()
+	_ = s.ReconcileRecovery(ctx)
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-recoveryTick.C:
+			if err := s.ReconcileRecovery(ctx); err != nil && ctx.Err() == nil {
+				s.log.Warn().Err(err).Msg("проверка автоматического восстановления миграций")
+			}
 		case <-tick.C:
 			items, err := s.st.ListVMTransfers(ctx)
 			if err != nil {
@@ -35,7 +42,7 @@ func (s *Service) Run(ctx context.Context) {
 					waiting := false
 					if t.BatchID != "" {
 						for _, other := range items {
-							if other.BatchID == t.BatchID && (other.Status == "queued" || other.Status == "running") {
+							if other.BatchID == t.BatchID && (other.Status == "queued" || other.Status == "running" || other.Status == "recovering" || other.Status == "blocked") {
 								waiting = true
 								break
 							}
@@ -64,14 +71,47 @@ func (s *Service) stopSource(ctx context.Context, t *model.VMTransfer) error {
 		return err
 	}
 	if state != "down" {
-		if state != "up" {
+		if state != "up" && !(recoveryEnabled(t) && t.RecoveryPolicy.AllowForceStopSource && (state == "not_responding" || state == "powering_down" || state == "reboot_in_progress")) {
 			return fmt.Errorf("источник в состоянии %s; требуется штатное выключение", state)
 		}
-		if err = src.ShutdownVM(ctx, t.Request.SourceVMID); err != nil {
-			return err
+		if t.WasRunning && t.DowntimeStartedAt == nil {
+			now := time.Now().UTC()
+			t.DowntimeStartedAt = &now
+			if err = s.save(t); err != nil {
+				return err
+			}
 		}
-		if _, err = src.WaitVMStatus(ctx, t.Request.SourceVMID, []string{"down"}, 10*time.Minute); err != nil {
-			return err
+		err = src.ShutdownVM(ctx, t.Request.SourceVMID)
+		if err == nil {
+			_, err = src.WaitVMStatus(ctx, t.Request.SourceVMID, []string{"down"}, s.powerTimeout(t))
+		}
+		if err != nil {
+			if !recoveryEnabled(t) || !t.RecoveryPolicy.AllowForceStopSource || ctx.Err() != nil {
+				return err
+			}
+			if t.TargetVMID != "" {
+				dst, e := s.pool.Get(ctx, t.Request.TargetServerID)
+				if e != nil {
+					return e
+				}
+				v, e := dst.GetVMState(ctx, t.TargetVMID)
+				if e != nil {
+					return e
+				}
+				if v.Status != "down" || !transferTargetOwned(t, v) {
+					return fmt.Errorf("%w: принудительная остановка источника требует подтверждённой выключенной цели", errUnsafeRecovery)
+				}
+			}
+			recoveryEvent(t, "force_stop_source", "Штатное выключение не удалось; применяется разрешённое политикой выключение по питанию")
+			if err = s.save(t); err != nil {
+				return err
+			}
+			if err = src.StopVM(ctx, t.Request.SourceVMID); err != nil {
+				return err
+			}
+			if _, err = src.WaitVMStatus(ctx, t.Request.SourceVMID, []string{"down"}, s.powerTimeout(t)); err != nil {
+				return err
+			}
 		}
 	}
 	t.SourceStopped = true
@@ -262,6 +302,9 @@ func (s *Service) synchronize(ctx context.Context, t *model.VMTransfer, final bo
 		var diskDone int64
 		_, err = s.engine.Restore(ctx, backup.RestoreRequest{TransferID: t.ID, RunID: run.ID, DiskIDs: []string{id}, Target: model.RestoreToDisk, TargetServerID: t.Request.TargetServerID, TargetDiskID: t.DiskMap[id], DeltaAfterRunID: t.AppliedRunID, TriggeredBy: "vm-transfer:" + t.ID,
 			Progress: func(done, total, speed int64) {
+				if completed+done > t.TransferredBytes {
+					t.LastProgressAt = time.Now().UTC()
+				}
 				diskDone = done
 				t.TransferredBytes = completed + done
 				t.BytesPerSecond = speed
@@ -362,8 +405,37 @@ func (s *Service) startTarget(ctx context.Context, t *model.VMTransfer) error {
 			}
 		}
 		if !available {
-			return fmt.Errorf("выбранный целевой хост недоступен; запуск цели остановлен")
+			if !recoveryEnabled(t) || !t.RecoveryPolicy.AllowHostFallback {
+				return fmt.Errorf("выбранный целевой хост недоступен; запуск цели остановлен")
+			}
+			for _, h := range hosts {
+				if h.Status != "up" || h.ClusterID != t.Request.ClusterID {
+					continue
+				}
+				storage, e := dst.HostStorageDomains(ctx, t.Request.TargetServerID, h.ID)
+				if e != nil {
+					continue
+				}
+				for _, d := range storage.Domains {
+					if d.ID == t.Request.StorageDomainID && d.Status == "active" {
+						recoveryEvent(t, "host_fallback", "Хост недоступен; выбран доступный хост "+h.Name)
+						t.Request.HostID = h.ID
+						available = true
+						break
+					}
+				}
+				if available {
+					break
+				}
+			}
+			if !available {
+				return fmt.Errorf("нет доступного хоста выбранного кластера с целевым доменом")
+			}
 		}
+	}
+	t.TargetStartRequested = true
+	if err = s.save(t); err != nil {
+		return err
 	}
 	if err = dst.StartVMOnHost(ctx, t.TargetVMID, t.Request.HostID); err != nil {
 		return err
@@ -372,7 +444,10 @@ func (s *Service) startTarget(ctx context.Context, t *model.VMTransfer) error {
 	if err = s.save(t); err != nil {
 		return err
 	}
-	if _, err = dst.WaitVMStatus(ctx, t.TargetVMID, []string{"up"}, 10*time.Minute); err != nil {
+	if _, err = dst.WaitVMStatus(ctx, t.TargetVMID, []string{"up"}, s.powerTimeout(t)); err != nil {
+		return err
+	}
+	if err = s.waitTargetGuest(ctx, t); err != nil {
 		return err
 	}
 	t.Status = "awaiting_confirmation"
@@ -395,33 +470,61 @@ func (s *Service) rollback(ctx context.Context, t *model.VMTransfer, action stri
 		if e != nil {
 			return e
 		}
+		matches := 0
 		for _, v := range vms {
 			if v.Description == "jhvirt-transfer:"+t.ID {
 				t.TargetVMID = v.ID
-				break
+				matches++
 			}
+		}
+		if matches > 1 {
+			return fmt.Errorf("%w: найдены несколько целей с меткой операции", errUnsafeRecovery)
 		}
 	}
 	if t.TargetVMID != "" {
+		if recoveryEnabled(t) || action == "retry_prepare" || action == "hold" || action == "rollback_keep" {
+			v, e := dst.GetVMState(ctx, t.TargetVMID)
+			if e != nil && !ovirt.IsNotFound(e) {
+				return e
+			}
+			if e == nil && !transferTargetOwned(t, v) {
+				return fmt.Errorf("%w: целевая ВМ не принадлежит миграции", errUnsafeRecovery)
+			}
+		}
 		state, _, e := dst.VMStatus(ctx, t.TargetVMID)
 		if e != nil && !ovirt.IsNotFound(e) {
 			return e
 		}
 		if e == nil {
 			if state != "down" {
-				if err = dst.ShutdownVM(ctx, t.TargetVMID); err != nil {
-					return err
+				err = dst.ShutdownVM(ctx, t.TargetVMID)
+				if err == nil {
+					_, err = dst.WaitVMStatus(ctx, t.TargetVMID, []string{"down"}, s.powerTimeout(t))
 				}
-				if _, err = dst.WaitVMStatus(ctx, t.TargetVMID, []string{"down"}, 10*time.Minute); err != nil {
-					return err
+				if err != nil {
+					if !recoveryEnabled(t) || !t.RecoveryPolicy.AllowForceStopTarget || ctx.Err() != nil {
+						return err
+					}
+					recoveryEvent(t, "force_stop_target", "Применяется разрешённое политикой выключение цели по питанию")
+					if err = s.save(t); err != nil {
+						return err
+					}
+					if err = dst.StopVM(ctx, t.TargetVMID); err != nil {
+						return err
+					}
+					if _, err = dst.WaitVMStatus(ctx, t.TargetVMID, []string{"down"}, s.powerTimeout(t)); err != nil {
+						return err
+					}
 				}
 			}
-			if err = dst.DeleteVM(ctx, t.TargetVMID, false); err != nil {
-				return err
-			}
-			// Deletion is asynchronous; do not restart the source until absence is proven.
-			if err = dst.WaitTransferVMDeleted(ctx, t.TargetVMID, 5*time.Minute); err != nil {
-				return err
+			if action != "hold" && action != "rollback_keep" {
+				if err = dst.DeleteVM(ctx, t.TargetVMID, false); err != nil {
+					return err
+				}
+				// Deletion is asynchronous; do not restart the source until absence is proven.
+				if err = dst.WaitTransferVMDeleted(ctx, t.TargetVMID, 5*time.Minute); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -433,11 +536,25 @@ func (s *Service) rollback(ctx context.Context, t *model.VMTransfer, action stri
 	if err != nil {
 		return err
 	}
+	if action == "hold" {
+		if state != "down" {
+			if err = src.ShutdownVM(ctx, t.Request.SourceVMID); err != nil {
+				return err
+			}
+			if _, err = src.WaitVMStatus(ctx, t.Request.SourceVMID, []string{"down"}, s.powerTimeout(t)); err != nil {
+				return err
+			}
+		}
+		t.SourceStopped = true
+		t.Status, t.Phase, t.Error = "held", "held", ""
+		t.ManualPause = true
+		return s.save(t)
+	}
 	if t.WasRunning && state == "down" {
 		if err = src.StartVM(ctx, t.Request.SourceVMID); err != nil {
 			return err
 		}
-		if _, err = src.WaitVMStatus(ctx, t.Request.SourceVMID, []string{"up"}, 10*time.Minute); err != nil {
+		if _, err = src.WaitVMStatus(ctx, t.Request.SourceVMID, []string{"up"}, s.powerTimeout(t)); err != nil {
 			return err
 		}
 	}
@@ -446,9 +563,17 @@ func (s *Service) rollback(ctx context.Context, t *model.VMTransfer, action stri
 	}
 	t.SourceStopped = !t.WasRunning
 	t.TargetStarted = false
+	t.TargetStartRequested = false
+	t.DowntimeStartedAt = nil
 	t.Status = "rolled_back"
+	if action == "rollback_keep" {
+		t.Status = "rolled_back_retained"
+	}
 	if action == "cancel" {
 		t.Status = "canceled"
+	}
+	if action == "retry_prepare" {
+		t.Status = "running"
 	}
 	t.Phase = t.Status
 	t.Error = ""

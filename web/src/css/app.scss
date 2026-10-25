@@ -160,7 +160,8 @@ body.body--dark {
   .bg-grey-2 { background: var(--jhv-surface-muted) !important; }
   .bg-blue-1 { background: var(--jhv-surface-info) !important; }
   .bg-green-1 { background: var(--jhv-surface-success) !important; }
-  .bg-orange-1 { background: var(--jhv-surface-warning) !important; }
+  .bg-orange-1,
+  .bg-amber-1 { background: var(--jhv-surface-warning) !important; }
   .bg-red-1 { background: var(--jhv-surface-danger) !important; }
 
   .text-grey-5,

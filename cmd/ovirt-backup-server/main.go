@@ -63,6 +63,8 @@ func run() error {
 	configPath := flag.String("config", "config/ovirt-backup.yaml", "путь к файлу конфигурации")
 	showVersion := flag.Bool("version", false, "показать версию и выйти")
 	checkConfig := flag.Bool("check-config", false, "проверить конфигурацию и выйти")
+	supervise := flag.Bool("supervise", false, "запускать службу под независимым контролем зависания и перезапуска")
+	healthcheck := flag.Bool("healthcheck", false, "проверить локальную службу по настроенному адресу и TLS и выйти")
 	setupOperation := flag.String("setup", "", "операция установщика с YAML/JSON через stdin")
 	registerStorage := flag.String("register-backup-storage", "", "зарегистрировать локальный каталог копий в БД и выйти (с доверенного хоста)")
 	registerReadOnly := flag.Bool("register-backup-storage-read-only", true, "новое хранилище только для чтения; существующее не меняется")
@@ -101,6 +103,9 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	if *healthcheck {
+		return checkServiceHealth(cfg)
+	}
 	if *resetUser == "" {
 		if *recoveryTokenFile != "" || *revokeAllAccess {
 			return fmt.Errorf("-recovery-token-file и -revoke-all-access допустимы только вместе с -reset-password")
@@ -127,6 +132,14 @@ func run() error {
 	if *checkConfig {
 		fmt.Println("конфигурация корректна")
 		return nil
+	}
+	if *supervise {
+		if *resetUser != "" || *registerStorage != "" {
+			return fmt.Errorf("-supervise нельзя совмещать со служебной операцией")
+		}
+		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer cancel()
+		return superviseConfiguredService(ctx, cfg)
 	}
 	// Keep the startup values separately: DELETE runtime-setting returns to
 	// YAML/environment even after the effective config is overlaid from DB.

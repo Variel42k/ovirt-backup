@@ -21,7 +21,7 @@ async function mockTransfers(page: Page, warm = true) {
     if (path === '/servers/target/restore-networks') body = list([{ id: 'network', name: 'Target network', network: 'VM LAN', kind: 'vnic_profile' }])
     if (path === '/vm-transfers/batches/plan') {
       const req = route.request().postDataJSON()
-      body = { items: req.items.map((request: unknown, i: number) => ({ request, source_name: i ? 'Second VM' : 'Migration VM', total_bytes: 1000000, nics: [], blockers: [], warnings: ['UUID целевой ВМ будет новым'], warm_available: warm })), total_bytes: req.items.length * 1000000, blockers: [] }
+      body = { items: req.items.map((request: unknown, i: number) => ({ request, source_name: i ? 'Second VM' : 'Migration VM', total_bytes: 1073741824, nics: [], blockers: [], warnings: ['UUID целевой ВМ будет новым'], warm_available: warm })), total_bytes: req.items.length * 1073741824, blockers: [] }
     }
     if (path === '/vm-transfers/batches') { submitted = route.request().postDataJSON(); body = { id: 'batch', items: submitted!.items.map((request: unknown, i: number) => ({ id: 'transfer'+i, request, batch_id: 'batch', status: 'queued' })), errors: [] } }
     await route.fulfill({ json: body })
@@ -39,6 +39,8 @@ for (const [mode, execution, count] of [['cold','sequential',1],['warm','sequent
     await expect(dialog.getByRole('button', { name: 'Далее', exact: true })).toBeEnabled()
     const bounds = await dialog.locator('.q-card').first().boundingBox()
     if (info.project.name === 'desktop') { expect(bounds!.width).toBeLessThan(1000); expect(bounds!.x).toBeGreaterThan(100) }
+    const capture = info.project.name === 'desktop' && mode === 'warm' && execution === 'parallel' && count === 2
+    if (capture) await dialog.locator('.q-card').first().screenshot({ path: info.outputPath('doc-migration-source.png'), animations: 'disabled' })
     await dialog.getByRole('button', { name: 'Далее', exact: true }).click()
     await dialog.getByLabel('Целевое подключение oVirt').click()
     await page.getByRole('option', { name: 'Target Engine', exact: true }).click()
@@ -54,8 +56,24 @@ for (const [mode, execution, count] of [['cold','sequential',1],['warm','sequent
       if (label === 'Домен для дисков целевых ВМ') await expect(page.getByRole('option', { name: /Host A domain/ })).toHaveCount(0)
       await page.getByRole('option', { name }).click()
     }
-    if (mode === 'warm') await dialog.getByRole('radio', { name: 'Предварительное копирование, затем переключение', exact: true }).click()
+    if (mode === 'warm') {
+      await dialog.getByRole('radio', { name: 'Предварительное копирование, затем переключение', exact: true }).click()
+      await dialog.getByLabel('Синхронизация подготовленной цели', { exact: true }).click()
+      await page.getByRole('option', { name: 'Только вручную', exact: true }).click()
+      await dialog.getByLabel('Синхронизация подготовленной цели', { exact: true }).scrollIntoViewIfNeeded()
+      await page.screenshot({ path: info.outputPath('migration-manual-sync.png'), animations: 'disabled' })
+    }
     if (execution === 'parallel') await dialog.getByRole('radio', { name: 'Параллельно', exact: true }).click()
+    if (capture) {
+      const panel = dialog.locator('.q-card__section.scroll')
+      await panel.evaluate(el => { el.scrollTop = 0 })
+      const area = (await panel.boundingBox())!
+      await page.screenshot({ path: info.outputPath('doc-migration-placement.png'), clip: { ...area, height: Math.min(405, area.height) }, animations: 'disabled' })
+      await dialog.getByRole('radio', { name: 'Указать новые сети', exact: true }).evaluate(el => el.scrollIntoView({ block: 'start' }))
+      await panel.evaluate(el => { el.scrollTop = Math.max(0, el.scrollTop - 90) })
+      const networksArea = (await panel.boundingBox())!
+      await page.screenshot({ path: info.outputPath('doc-migration-networks.png'), clip: { ...networksArea, height: 448 }, animations: 'disabled' })
+    }
     await dialog.getByRole('button', { name: 'Проверить план', exact: true }).click()
     await expect(dialog).toContainText('UUID целевой ВМ будет новым')
     await expect(dialog.getByRole('button', { name: 'Начать миграцию' })).toBeDisabled()
@@ -65,7 +83,7 @@ for (const [mode, execution, count] of [['cold','sequential',1],['warm','sequent
     await expect(dialog).toContainText('Группа создана')
     expect(submitted()).toMatchObject({ execution, parallelism: execution === 'parallel' ? 2 : 1, confirm: true })
     expect(submitted()!.items).toHaveLength(count)
-    for (const item of submitted()!.items) expect(item).toMatchObject({ source_server_id: 'source', target_server_id: 'target', cluster_id: 'cluster', host_id: 'hostB', storage_domain_id: 'domainB', storage_target_id: 'repo', mode, network_mappings: [{ target_id: 'network' }] })
+    for (const item of submitted()!.items) expect(item).toMatchObject({ source_server_id: 'source', target_server_id: 'target', cluster_id: 'cluster', host_id: 'hostB', storage_domain_id: 'domainB', storage_target_id: 'repo', mode, auto_sync_interval_seconds: mode === 'warm' ? -1 : 0, network_mappings: [{ target_id: 'network' }] })
     expect(errors).toEqual([])
   })
 }

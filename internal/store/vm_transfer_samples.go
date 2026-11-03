@@ -68,12 +68,20 @@ func (s *Store) RecordVMTransferSample(ctx context.Context, t *model.VMTransfer)
 		last := previous[len(previous)-1]
 		if t.Status != "running" {
 			sample.StageID, sample.Bytes, sample.Total, sample.Direction = last.StageID, last.Bytes, last.Total, last.Direction
-		} else if last.StageID == sample.StageID && sample.Bytes >= last.Bytes {
+		} else if last.StageID == sample.StageID && last.Direction == sample.Direction && sample.Direction != "control" && sample.Bytes >= last.Bytes {
 			elapsed := sample.At.Sub(last.At).Seconds()
-			if elapsed > 0 {
+			if elapsed > 0 && elapsed <= 20 {
 				sample.Speed = int64(float64(sample.Bytes-last.Bytes) / elapsed)
+			} else {
+				sample.Speed = 0
 			}
+		} else {
+			// A stage boundary or counter reset is a new baseline, not traffic.
+			sample.Speed = 0
 		}
+	}
+	if len(previous) == 0 || sample.Direction == "control" || sample.Speed < 0 {
+		sample.Speed = 0
 	}
 	raw, err := json.Marshal(sample)
 	if err != nil {

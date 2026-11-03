@@ -1,0 +1,91 @@
+npm notice run ovirt-backup-web@0.1.0 build
+npm notice run vue-tsc --noEmit && vite build
+vite v6.4.5 building for production...
+transforming...
+✓ 405 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                                                                       0.45 kB │ gzip:   0.29 kB
+dist/assets/flUhRq6tzZclQEJ-Vdg-IuiaDsNcIhQ8tQ-D-x-0Q06.woff2                       128.62 kB
+dist/assets/flUhRq6tzZclQEJ-Vdg-IuiaDsNa-OUIwM9U8.woff                              175.41 kB
+dist/assets/VMTransferDialog-TwfLkW0S.css                                             0.19 kB │ gzip:   0.15 kB
+dist/assets/EngineLeftovers-D2GepxpM.css                                              0.26 kB │ gzip:   0.22 kB
+dist/assets/VMTransfersPage-N5hqg3Dj.css                                              0.45 kB │ gzip:   0.27 kB
+dist/assets/ServerDetailPage-1l-x-DQu.css                                             0.47 kB │ gzip:   0.27 kB
+dist/assets/BackupsPage-6SHQ-cRg.css                                                  0.49 kB │ gzip:   0.27 kB
+dist/assets/AlertsPage-tjThFhp_.css                                                   0.50 kB │ gzip:   0.28 kB
+dist/assets/DiscoveryPage-DE93n9EU.css                                                0.63 kB │ gzip:   0.30 kB
+dist/assets/IOChart-BqTctrlg.css                                                      1.01 kB │ gzip:   0.45 kB
+dist/assets/CoveragePage-C7BG5DCw.css                                                 1.12 kB │ gzip:   0.44 kB
+dist/assets/HelpButton-C-VjcVxs.css                                                   1.71 kB │ gzip:   0.59 kB
+dist/assets/DocumentationPage-c8kRy8Gd.css                                           15.99 kB │ gzip:   3.58 kB
+dist/assets/index-CxHhflBr.css                                                      220.77 kB │ gzip:  38.10 kB
+dist/assets/_plugin-vue_export-helper-DlAUqK2U.js                                     0.09 kB │ gzip:   0.10 kB
+dist/assets/QSpace-DFEew5_d.js                                                        0.15 kB │ gzip:   0.15 kB
+dist/assets/format-CI6KVz8z.js                                                        0.34 kB │ gzip:   0.26 kB
+dist/assets/copy-to-clipboard-BpSNY7tk.js                                             0.45 kB │ gzip:   0.30 kB
+dist/assets/QTabPanels-CBv6V-pr.js                                                    0.61 kB │ gzip:   0.38 kB
+dist/assets/touch-CAyG4izs.js                                                         0.61 kB │ gzip:   0.38 kB
+dist/assets/QBtnGroup-BXjo2z-3.js                                                     0.65 kB │ gzip:   0.39 kB
+dist/assets/ClosePopup-DWOrWMF8.js                                                    0.66 kB │ gzip:   0.37 kB
+dist/assets/QList-qQrQfGAC.js                                                         0.67 kB │ gzip:   0.38 kB
+dist/assets/QMarkupTable-DBYJ2Fry.js                                                  0.78 kB │ gzip:   0.44 kB
+dist/assets/PageLoadError.vue_vue_type_script_setup_true_lang-C5r1S3u0.js             0.82 kB │ gzip:   0.57 kB
+dist/assets/unsavedChanges-CvSHKQsb.js                                                0.85 kB │ gzip:   0.56 kB
+dist/assets/QInnerLoading-BiT2oHhv.js                                                 0.86 kB │ gzip:   0.52 kB
+dist/assets/QBadge-ftgmhjlZ.js                                                        0.89 kB │ gzip:   0.50 kB
+dist/assets/use-element-size-CszewLY1.js                                              0.90 kB │ gzip:   0.52 kB
+dist/assets/QSkeleton-BvdIjmpE.js                                                     1.10 kB │ gzip:   0.59 kB
+dist/assets/IdentityPage-CyOpymYZ.js                                                  1.14 kB │ gzip:   0.72 kB
+dist/assets/QPage-BUJnXDbV.js                                                         1.58 kB │ gzip:   0.76 kB
+dist/assets/QLinearProgress-DMxv11IQ.js                                               1.74 kB │ gzip:   0.81 kB
+dist/assets/operations-CxxUM7SD.js                                                    1.81 kB │ gzip:   0.94 kB
+dist/assets/QBreadcrumbs-oOpkTDi7.js                                                  1.87 kB │ gzip:   0.87 kB
+dist/assets/QBtnToggle-Q3YeA227.js                                                    2.05 kB │ gzip:   0.95 kB
+dist/assets/QForm-B9u6B3FG.js                                                         2.29 kB │ gzip:   1.08 kB
+dist/assets/BackupTypeHelpCard.vue_vue_type_script_setup_true_lang-DY695yAa.js        2.93 kB │ gzip:   1.26 kB
+dist/assets/QChip-DTpT7bgq.js                                                         2.96 kB │ gzip:   1.24 kB
+dist/assets/LoginPage-DofsKN2k.js                                                     3.62 kB │ gzip:   1.73 kB
+dist/assets/QBtnDropdown-Ds77qtyB.js                                                  3.62 kB │ gzip:   1.49 kB
+dist/assets/QTooltip-CvoBdvyZ.js                                                      4.60 kB │ gzip:   2.08 kB
+dist/assets/HelpButton.vue_vue_type_script_setup_true_lang-C6vqWEA3.js                4.69 kB │ gzip:   1.91 kB
+dist/assets/QLayout-CTHlz85R.js                                                       5.60 kB │ gzip:   2.45 kB
+dist/assets/DirectoryPicker.vue_vue_type_script_setup_true_lang-jr-GTpWb.js           6.53 kB │ gzip:   2.69 kB
+dist/assets/QExpansionItem-DqgWD364.js                                                6.62 kB │ gzip:   2.73 kB
+dist/assets/QMenu-KcUlSAIk.js                                                         6.68 kB │ gzip:   2.90 kB
+dist/assets/FreezeMountpointsField.vue_vue_type_script_setup_true_lang-BKRgjj8-.js    6.75 kB │ gzip:   3.00 kB
+dist/assets/QFile-Dl4iS4ND.js                                                         6.96 kB │ gzip:   3.09 kB
+dist/assets/use-panel-Ci_YhWh3.js                                                     7.19 kB │ gzip:   2.83 kB
+dist/assets/IOChart-BQFbAACR.js                                                       9.44 kB │ gzip:   3.31 kB
+dist/assets/EngineLeftovers.vue_vue_type_script_setup_true_lang-D3gu7kXq.js          11.05 kB │ gzip:   4.16 kB
+dist/assets/QTabs-BITOPFQQ.js                                                        11.09 kB │ gzip:   4.44 kB
+dist/assets/BootTargetPicker.vue_vue_type_script_setup_true_lang-L7rEPwdw.js         11.35 kB │ gzip:   3.88 kB
+dist/assets/UsersAccessPage-C2gnBv-L.js                                              11.76 kB │ gzip:   4.16 kB
+dist/assets/RetentionPage-CpZDDKKl.js                                                15.17 kB │ gzip:   5.12 kB
+dist/assets/EngineConfigPage-B4k2Icr9.js                                             15.77 kB │ gzip:   5.18 kB
+dist/assets/AlertsPage-Dp_SxNDV.js                                                   17.22 kB │ gzip:   6.11 kB
+dist/assets/CoveragePage-D9OgYKVG.js                                                 17.72 kB │ gzip:   5.86 kB
+dist/assets/QItemLabel-Drq2qype.js                                                   19.75 kB │ gzip:   7.39 kB
+dist/assets/DashboardPage-Ba0r6hBD.js                                                20.43 kB │ gzip:   6.30 kB
+dist/assets/DiscoveryPage-DCfS_KrM.js                                                21.33 kB │ gzip:   7.56 kB
+dist/assets/ImageImportPage-CgnBCoxh.js                                              22.36 kB │ gzip:   7.48 kB
+dist/assets/VMTransferDialog-CmEntgMN.js                                             25.66 kB │ gzip:   8.85 kB
+dist/assets/QTable-Bjnhoia5.js                                                       26.83 kB │ gzip:   9.20 kB
+dist/assets/GitlabCleanPage-B6RbFLW-.js                                              28.24 kB │ gzip:   9.01 kB
+dist/assets/QSelect-LTi1pe2U.js                                                      29.97 kB │ gzip:  10.43 kB
+dist/assets/FileBackupsPage-BKCWzCWb.js                                              31.42 kB │ gzip:   9.34 kB
+dist/assets/VMDetailPage-wlI4WA1u.js                                                 33.43 kB │ gzip:  10.56 kB
+dist/assets/MainLayout-Db2ZgAMM.js                                                   34.25 kB │ gzip:  11.89 kB
+dist/assets/DbDumpsPage-Bk3OsV4s.js                                                  35.81 kB │ gzip:  10.20 kB
+dist/assets/VMTransfersPage-C9FfK0ob.js                                              42.64 kB │ gzip:  12.11 kB
+dist/assets/StoragesPage-BIGV88lb.js                                                 48.49 kB │ gzip:  13.68 kB
+dist/assets/VerifyPage-HrpOgZjj.js                                                   49.13 kB │ gzip:  13.60 kB
+dist/assets/IdentitySettingsPanel.vue_vue_type_script_setup_true_lang-CawIKgmx.js    52.30 kB │ gzip:  14.16 kB
+dist/assets/ServerDetailPage-r_5ju3zg.js                                             56.90 kB │ gzip:  15.85 kB
+dist/assets/ServersPage-CYTXC0F3.js                                                  60.40 kB │ gzip:  14.53 kB
+dist/assets/JobsPage-BSmyhh-A.js                                                     63.66 kB │ gzip:  17.49 kB
+dist/assets/SettingsPage-COgAZohj.js                                                102.55 kB │ gzip:  25.29 kB
+dist/assets/BackupsPage-7EU3ehsQ.js                                                 126.99 kB │ gzip:  32.33 kB
+dist/assets/DocumentationPage-CU_M3OG1.js                                           130.77 kB │ gzip:  44.58 kB
+dist/assets/index-eiBxAHeu.js                                                       338.96 kB │ gzip: 122.39 kB
+✓ built in 8.67s

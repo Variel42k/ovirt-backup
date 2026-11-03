@@ -96,6 +96,9 @@ func (s *Service) plan(ctx context.Context, r model.VMTransferRequest, ownID str
 	if r.Mode != "cold" && r.Mode != "warm" {
 		p.Blockers = append(p.Blockers, "Выберите режим миграции: cold или warm")
 	}
+	if err := validateAutoSyncInterval(r.AutoSyncIntervalSeconds); err != nil {
+		p.Blockers = append(p.Blockers, err.Error())
+	}
 	source, err := s.st.GetServer(ctx, r.SourceServerID)
 	if err != nil {
 		return nil, fmt.Errorf("исходное подключение: %w", err)

@@ -913,9 +913,9 @@ func (c *Config) Validate() error {
 	// бы пакеты друг на друга. При добавлении алгоритма правятся оба места, и
 	// тест на согласованность есть в internal/backup.
 	switch c.Backup.Compression {
-	case "none", "zstd", "gzip", "s2":
+	case "none", "zstd", "gzip", "s2", "lz4", "brotli":
 	default:
-		return fmt.Errorf("backup.compression must be none, zstd, gzip or s2, got %q", c.Backup.Compression)
+		return fmt.Errorf("backup.compression must be none, zstd, gzip, s2, lz4 or brotli, got %q", c.Backup.Compression)
 	}
 	if c.Backup.CompressionLevel < 1 || c.Backup.CompressionLevel > 9 {
 		return fmt.Errorf("backup.compression_level must be between 1 and 9, got %d", c.Backup.CompressionLevel)

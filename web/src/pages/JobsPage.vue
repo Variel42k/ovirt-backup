@@ -10,6 +10,7 @@ import {
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import BackupOptionsPicker from '@/components/BackupOptionsPicker.vue'
+import BackupCompressionSelect from '@/components/BackupCompressionSelect.vue'
 import FreezeMountpointsField from '@/components/FreezeMountpointsField.vue'
 import BootTargetPicker from '@/components/BootTargetPicker.vue'
 import HelpButton from '@/components/HelpButton.vue'
@@ -109,6 +110,7 @@ const emptyForm = () => ({
   },
   export_qcow2: false,
   encrypt: false,
+  compression: '',
   priority: 0,
   concurrency: 1,
 })
@@ -470,6 +472,7 @@ function openEdit(job: BackupJob) {
     exclude_disk_ids: job.exclude_disk_ids ?? [],
     max_duration_minutes: job.max_duration ? Math.round(job.max_duration / 60_000_000_000) : 0,
     max_read_mbps: job.max_read_mbps ?? 0,
+    compression: job.compression ?? '',
     verify_after: job.verify_after ?? '',
     verify_options: { ...emptyForm().verify_options, ...(job.verify_options ?? {}) },
     consistency: job.consistency || (job.quiesce ? 'filesystem' : 'crash'),
@@ -541,7 +544,9 @@ function nextJobStep() {
 // было невозможно.
 function jobRequestBody(): Record<string, unknown> {
   const current = form.value as Record<string, unknown>
-  return Object.fromEntries(Object.keys(emptyForm()).map((key) => [key, current[key]]))
+  const body = Object.fromEntries(Object.keys(emptyForm()).map((key) => [key, current[key]]))
+  if (isProxmoxJob.value || ['ova', 'config'].includes(form.value.type)) body.compression = ''
+  return body
 }
 
 async function save() {
@@ -1329,6 +1334,9 @@ const columns = [
           </template>
 
           <template v-if="jobStep === 4">
+          <div v-if="!isProxmoxJob && !['ova', 'config'].includes(form.type)" class="col-12">
+            <BackupCompressionSelect v-model="form.compression" />
+          </div>
           <div class="col-12 col-sm-4">
             <q-select
               v-model="form.verify_after"
@@ -1528,6 +1536,7 @@ const columns = [
                 <q-item><q-item-section><q-item-label caption>Способ и расписание</q-item-label><q-item-label>{{ app.backupTypeTitle(form.type) }} · {{ form.schedule || 'только вручную' }}</q-item-label></q-item-section><q-item-section side><q-btn flat label="Изменить" @click="jobStep = 2" /></q-item-section></q-item>
                 <q-item><q-item-section><q-item-label caption>Хранение</q-item-label><q-item-label>{{ form.type === 'ova' ? `${form.ova_host_id || 'хост не выбран'} · ${form.ova_directory || 'каталог не задан'}` : form.storage_target_ids.map(app.storageName).join(', ') || 'не выбрано' }}</q-item-label></q-item-section><q-item-section side><q-btn flat label="Изменить" @click="jobStep = 3" /></q-item-section></q-item>
                 <q-item><q-item-section><q-item-label caption>Защита и проверка</q-item-label><q-item-label>{{ form.encrypt ? 'шифрование включено' : 'без шифрования' }} · {{ form.verify_after ? `проверка: ${app.verifyModeTitle(form.verify_after)}` : 'без автоматической проверки' }}</q-item-label></q-item-section><q-item-section side><q-btn flat label="Изменить" @click="jobStep = 4" /></q-item-section></q-item>
+                <q-item v-if="!isProxmoxJob && !['ova', 'config'].includes(form.type)"><q-item-section><q-item-label caption>Сжатие</q-item-label><q-item-label>{{ form.compression ? form.compression.toUpperCase() : `Системная настройка (${(app.meta?.capabilities.compression || 'zstd').toUpperCase()})` }}</q-item-label></q-item-section><q-item-section side><q-btn flat label="Изменить" @click="jobStep = 4" /></q-item-section></q-item>
               </q-list>
             </div>
           </template>

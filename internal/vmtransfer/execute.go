@@ -17,7 +17,7 @@ import (
 
 // Run refreshes standby targets until an operator requests final cutover.
 func (s *Service) Run(ctx context.Context) {
-	tick := time.NewTicker(2 * time.Minute)
+	tick := time.NewTicker(15 * time.Second)
 	defer tick.Stop()
 	recoveryTick := time.NewTicker(5 * time.Second)
 	defer recoveryTick.Stop()
@@ -36,7 +36,7 @@ func (s *Service) Run(ctx context.Context) {
 				continue
 			}
 			for _, t := range items {
-				if t.Status == "ready" && t.Request.Mode == "warm" {
+				if autoSyncDue(t, time.Now()) {
 					// Preparing the rest of a group has priority over periodic
 					// re-syncs, otherwise a long sequential group can starve.
 					waiting := false
@@ -389,6 +389,12 @@ func (s *Service) startTarget(ctx context.Context, t *model.VMTransfer) error {
 	}
 	set.Close()
 	for _, nic := range nics {
+		// The list is already loaded. Avoid redundant PUTs (and their Engine
+		// events) on retry, but do not infer a missing on_boot value.
+		connected := wanted[nic.Name]
+		if nic.OnBoot != nil && bool(nic.Linked) == connected && bool(*nic.OnBoot) == connected {
+			continue
+		}
 		if err = dst.SetTransferNIC(ctx, t.TargetVMID, nic.ID, wanted[nic.Name]); err != nil {
 			return err
 		}

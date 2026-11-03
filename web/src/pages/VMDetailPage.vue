@@ -10,6 +10,7 @@ import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import VMTransferDialog from '@/components/VMTransferDialog.vue'
 import BackupOptionsPicker from '@/components/BackupOptionsPicker.vue'
+import BackupCompressionSelect from '@/components/BackupCompressionSelect.vue'
 import EngineLeftovers from '@/components/EngineLeftovers.vue'
 import BackupTypeHelpCard from '@/components/BackupTypeHelpCard.vue'
 import HelpButton from '@/components/HelpButton.vue'
@@ -51,6 +52,7 @@ const maxFreezeSeconds = ref(0)
 // Выборочная заморозка — только KVM; пусто — все файловые системы гостя.
 const freezeMountpoints = ref<string[]>([])
 const encrypt = ref(false)
+const compression = ref('')
 const exportQcow2 = ref(false)
 const verifyAfter = ref<string>('')
 const verifyOptions = ref({
@@ -230,6 +232,7 @@ async function startBackup() {
       max_freeze_seconds: effectiveFreezeBy.value === 'engine' ? 0 : maxFreezeSeconds.value,
       freeze_mountpoints: isKvm.value && consistency.value !== 'crash' ? freezeMountpoints.value : undefined,
       encrypt: encrypt.value,
+      compression: !isProxmox.value && !['ova', 'config'].includes(selectedType.value) ? compression.value : '',
       export_qcow2: canExportQcow2.value && exportQcow2.value,
       verify_after: verifyAfter.value || undefined,
       verify_options: verifyAfter.value === 'boot' ? verifyOptions.value : undefined,
@@ -531,6 +534,9 @@ onMounted(load)
                   «Движок» останавливает запись на доли секунды.
                 </span>
               </q-banner>
+            </div>
+            <div v-if="!isProxmox && !['ova', 'config'].includes(selectedType)" class="col-12">
+              <BackupCompressionSelect v-model="compression" />
             </div>
             <div class="col-12 row items-center q-gutter-md">
               <q-toggle

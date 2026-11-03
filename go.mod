@@ -1,8 +1,9 @@
 module github.com/Variel42k/ovirt-backup
 
-go 1.27.0
+go 1.27.3
 
 require (
+	github.com/andybalholm/brotli v1.2.7
 	github.com/cloudsoda/go-smb2 v0.0.0-20260803221621-0b399b9d036c
 	github.com/coreos/go-oidc/v3 v3.20.0
 	github.com/digitalocean/go-libvirt v0.0.0-20260609165003-6254771e63a8
@@ -10,14 +11,17 @@ require (
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/klauspost/compress v1.19.1
 	github.com/minio/minio-go/v7 v7.2.1
+	github.com/pierrec/lz4/v4 v4.1.33
 	github.com/pkg/sftp v1.13.11
 	github.com/prometheus/client_golang v1.24.1
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/rs/zerolog v1.35.1
 	github.com/spf13/viper v1.21.0
-	golang.org/x/crypto v0.56.0
+	go.yaml.in/yaml/v3 v3.0.4
+	golang.org/x/crypto v0.58.0
 	golang.org/x/oauth2 v0.36.0
-	golang.org/x/sys v0.47.0
+	golang.org/x/sync v0.24.0
+	golang.org/x/sys v0.49.0
 )
 
 require (
@@ -61,10 +65,8 @@ require (
 	github.com/subosito/gotenv v1.6.0 // indirect
 	github.com/tinylib/msgp v1.6.1 // indirect
 	github.com/zeebo/xxh3 v1.1.0 // indirect
-	go.yaml.in/yaml/v3 v3.0.4 // indirect
-	golang.org/x/net v0.57.0 // indirect
-	golang.org/x/sync v0.22.0 // indirect
-	golang.org/x/text v0.41.0 // indirect
+	golang.org/x/net v0.62.0 // indirect
+	golang.org/x/text v0.43.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/ini.v1 v1.67.2 // indirect
 )

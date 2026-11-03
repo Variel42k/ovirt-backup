@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/Variel42k/ovirt-backup/internal/config"
+	"github.com/Variel42k/ovirt-backup/internal/model"
 	"github.com/Variel42k/ovirt-backup/internal/secret"
 )
 
@@ -166,6 +167,9 @@ func TestConfigAcceptsEveryCompression(t *testing.T) {
 
 	for _, name := range Compressions {
 		cfg.Backup.Compression = name
+		if !model.ValidBackupCompression(name) {
+			t.Errorf("job model does not accept %q", name)
+		}
 		if err := cfg.Validate(); err != nil {
 			t.Errorf("конфигурация не принимает %q, хотя кодек его поддерживает: %v", name, err)
 		}
@@ -174,5 +178,98 @@ func TestConfigAcceptsEveryCompression(t *testing.T) {
 	cfg.Backup.Compression = "lzma"
 	if err := cfg.Validate(); err == nil {
 		t.Error("конфигурация приняла алгоритм, которого нет в кодеке")
+	}
+}
+
+func TestResolveCompressionPreservesRunChoice(t *testing.T) {
+	var e Engine
+	if err := e.SetCompression(CompressionZstd); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := e.ResolveCompression("")
+	if err != nil || snapshot != CompressionZstd {
+		t.Fatalf("inherit: %q %v", snapshot, err)
+	}
+	if err = e.SetCompression(CompressionBrotli); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot != CompressionZstd {
+		t.Fatal("run choice changed")
+	}
+	for _, name := range []string{CompressionLZ4, CompressionNone} {
+		got, err := e.ResolveCompression(name)
+		if err != nil || got != name {
+			t.Fatalf("explicit %s: %q %v", name, got, err)
+		}
+	}
+	if _, err = e.ResolveCompression("neural"); err == nil {
+		t.Fatal("unknown codec accepted")
+	}
+}
+
+func TestAdditionalCodecsRejectOversizedPlaintext(t *testing.T) {
+	for _, name := range []string{CompressionLZ4, CompressionBrotli} {
+		c, err := newCodec(name, 3, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stored, _, err := c.encode(compressibleChunk(2 * testChunkSize))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = c.decode(stored, testChunkSize); err == nil {
+			t.Fatalf("%s accepted oversized plaintext", name)
+		}
+		c.close()
+	}
+}
+
+// Exercise an LZ4 block boundary and a chunk larger than the Brotli window.
+func TestAdditionalCodecsReadMultiBlockChunks(t *testing.T) {
+	plain := compressibleChunk((4 << 20) + 137)
+	for _, name := range []string{CompressionLZ4, CompressionBrotli} {
+		c, err := newCodec(name, 3, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stored, digest, err := c.encode(plain)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := c.decode(stored, len(plain))
+		if err != nil || !bytes.Equal(got, plain) {
+			t.Fatalf("%s multi-block round trip: %v", name, err)
+		}
+		if err := verifyDigest(got, digest); err != nil {
+			t.Fatal(err)
+		}
+		c.close()
+	}
+}
+
+// Synthetic local CPU benchmark, not an end-to-end VM or storage benchmark.
+func BenchmarkChunkCompression(b *testing.B) {
+	plain := compressibleChunk(1 << 20)
+	for _, name := range Compressions {
+		b.Run(name, func(b *testing.B) {
+			c, err := newCodec(name, 3, nil)
+			if err != nil {
+				b.Fatal(err)
+			}
+			defer c.close()
+			stored, _, err := c.encode(plain)
+			if err != nil {
+				b.Fatal(err)
+			}
+			b.SetBytes(int64(len(plain)))
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if _, _, err = c.encode(plain); err != nil {
+					b.Fatal(err)
+				}
+			}
+			b.ReportMetric(float64(len(stored))/float64(len(plain)), "stored/raw")
+		})
 	}
 }

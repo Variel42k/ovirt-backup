@@ -2,6 +2,17 @@ package model
 
 import "time"
 
+// CancellationState is a live observation, never a reservation or an action.
+type VMTransferCancellationState struct {
+	ObservedAt   time.Time `json:"observed_at"`
+	SourceStatus string    `json:"source_status"`
+	SourceError  string    `json:"source_error,omitempty"`
+	TargetStatus string    `json:"target_status"`
+	TargetExists *bool     `json:"target_exists"`
+	TargetVMID   string    `json:"target_vm_id,omitempty"`
+	TargetError  string    `json:"target_error,omitempty"`
+}
+
 type VMTransferSample struct {
 	At        time.Time `json:"at"`
 	Phase     string    `json:"phase"`
@@ -15,18 +26,20 @@ type VMTransferSample struct {
 
 // VMTransferRequest describes a move between independent oVirt managers.
 type VMTransferRequest struct {
-	SourceServerID  string                    `json:"source_server_id"`
-	SourceVMID      string                    `json:"source_vm_id"`
-	TargetServerID  string                    `json:"target_server_id"`
-	ClusterID       string                    `json:"cluster_id"`
-	HostID          string                    `json:"host_id,omitempty"`
-	StorageDomainID string                    `json:"storage_domain_id"`
-	StorageTargetID string                    `json:"storage_target_id"`
-	Name            string                    `json:"name"`
-	Mode            string                    `json:"mode"` // cold or warm
-	NetworkMappings []RestoreVMNetworkMapping `json:"network_mappings"`
-	PreserveMAC     bool                      `json:"preserve_mac"`
-	Confirm         bool                      `json:"confirm"`
+	SourceServerID  string `json:"source_server_id"`
+	SourceVMID      string `json:"source_vm_id"`
+	TargetServerID  string `json:"target_server_id"`
+	ClusterID       string `json:"cluster_id"`
+	HostID          string `json:"host_id,omitempty"`
+	StorageDomainID string `json:"storage_domain_id"`
+	StorageTargetID string `json:"storage_target_id"`
+	Name            string `json:"name"`
+	Mode            string `json:"mode"` // cold or warm
+	// Zero preserves the legacy two-minute period; -1 disables periodic sync.
+	AutoSyncIntervalSeconds int                       `json:"auto_sync_interval_seconds,omitempty"`
+	NetworkMappings         []RestoreVMNetworkMapping `json:"network_mappings"`
+	PreserveMAC             bool                      `json:"preserve_mac"`
+	Confirm                 bool                      `json:"confirm"`
 }
 
 type VMTransferPlan struct {

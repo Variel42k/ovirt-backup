@@ -6,7 +6,9 @@
 [DISK-ARCHITECTURE.md](DISK-ARCHITECTURE.md), горячий бэкап и защита
 работающей ВМ — в [HOT-BACKUP.md](HOT-BACKUP.md), заморозка гостя — в
 [GUEST-FREEZE.md](GUEST-FREEZE.md), внешний контракт — в
-[API.md](API.md).
+[API.md](API.md). Использование CPU, памяти, сети и хранилищ, действующие
+ограничения и направления оптимизации описаны в
+[RESOURCE-USAGE.md](RESOURCE-USAGE.md).
 
 Подробные схемы — в [diagrams/jhvirt-architecture.drawio](diagrams/jhvirt-architecture.drawio):
 14 вкладок от контекста системы до защиты СУБД. Слой «Защита» на

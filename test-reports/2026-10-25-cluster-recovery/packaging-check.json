@@ -1,0 +1,14 @@
+{
+  "compose_rendered": true,
+  "healthcheck": [
+    "CMD",
+    "/app/ovirt-backup-server",
+    "-healthcheck",
+    "-config",
+    "/app/config/ovirt-backup.yaml"
+  ],
+  "image_supervisor_defaults_match": true,
+  "installer_tests": "passed",
+  "supervisor_tests": "passed",
+  "stand_changed_by_checks": false
+}

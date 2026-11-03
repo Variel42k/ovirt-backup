@@ -1,0 +1,45 @@
+npm notice run ovirt-backup-web@0.1.0 npx
+npm notice run playwright test e2e/backup-compression.spec.ts e2e/vm-transfer-wizard.spec.ts e2e/cluster-recovery.spec.ts --reporter=list
+
+Running 34 tests using 1 worker
+
+(node:24652) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ok  1 [desktop] › e2e\backup-compression.spec.ts:36:44 › алгоритм lz4 сохраняется в задании и после перезагрузки (7.7s)
+  ok  2 [desktop] › e2e\backup-compression.spec.ts:36:44 › алгоритм brotli сохраняется в задании и после перезагрузки (2.2s)
+  ok  3 [desktop] › e2e\backup-compression.spec.ts:68:36 › выбор системной настройки сохраняется явно (1.3s)
+  ok  4 [desktop] › e2e\backup-compression.spec.ts:68:36 › выбор none сохраняется явно (1.1s)
+  ok  5 [desktop] › e2e\backup-compression.spec.ts:81:1 › Proxmox не предлагает неприменимое сжатие чанков (845ms)
+  ok  6 [desktop] › e2e\cluster-recovery.spec.ts:47:1 › политики кластеров изолированы, сохраняются и сбрасываются через общий интерфейс (2.3s)
+  ok  7 [desktop] › e2e\cluster-recovery.spec.ts:75:1 › наблюдатель не меняет политику, оператор не разрешает сброс питания (813ms)
+  ok  8 [desktop] › e2e\cluster-recovery.spec.ts:89:1 › ошибка сохранения политики остаётся видна на странице (489ms)
+  ok  9 [desktop] › e2e\vm-transfer-wizard.spec.ts:33:3 › окно миграции: cold, sequential, 1 ВМ (2.2s)
+  ok 10 [desktop] › e2e\vm-transfer-wizard.spec.ts:33:3 › окно миграции: warm, sequential, 1 ВМ (2.2s)
+  ok 11 [desktop] › e2e\vm-transfer-wizard.spec.ts:33:3 › окно миграции: cold, sequential, 2 ВМ (2.2s)
+  ok 12 [desktop] › e2e\vm-transfer-wizard.spec.ts:33:3 › окно миграции: cold, parallel, 2 ВМ (2.1s)
+  ok 13 [desktop] › e2e\vm-transfer-wizard.spec.ts:33:3 › окно миграции: warm, sequential, 2 ВМ (2.4s)
+  ok 14 [desktop] › e2e\vm-transfer-wizard.spec.ts:33:3 › окно миграции: warm, parallel, 2 ВМ (2.6s)
+  ok 15 [desktop] › e2e\vm-transfer-wizard.spec.ts:87:1 › миграция открывается окном в списке ВМ и поддерживает выделение группы (1.3s)
+  ok 16 [desktop] › e2e\vm-transfer-wizard.spec.ts:104:3 › проверка формы: контраст, сети конфигурации и объём ВМ — light (1.8s)
+  ok 17 [desktop] › e2e\vm-transfer-wizard.spec.ts:104:3 › проверка формы: контраст, сети конфигурации и объём ВМ — dark (1.7s)
+(node:20436) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ok 18 [mobile] › e2e\backup-compression.spec.ts:36:44 › алгоритм lz4 сохраняется в задании и после перезагрузки (2.0s)
+  ok 19 [mobile] › e2e\backup-compression.spec.ts:36:44 › алгоритм brotli сохраняется в задании и после перезагрузки (2.1s)
+  ok 20 [mobile] › e2e\backup-compression.spec.ts:68:36 › выбор системной настройки сохраняется явно (1.0s)
+  ok 21 [mobile] › e2e\backup-compression.spec.ts:68:36 › выбор none сохраняется явно (1.2s)
+  ok 22 [mobile] › e2e\backup-compression.spec.ts:81:1 › Proxmox не предлагает неприменимое сжатие чанков (726ms)
+  ok 23 [mobile] › e2e\cluster-recovery.spec.ts:47:1 › политики кластеров изолированы, сохраняются и сбрасываются через общий интерфейс (1.9s)
+  ok 24 [mobile] › e2e\cluster-recovery.spec.ts:75:1 › наблюдатель не меняет политику, оператор не разрешает сброс питания (713ms)
+  ok 25 [mobile] › e2e\cluster-recovery.spec.ts:89:1 › ошибка сохранения политики остаётся видна на странице (458ms)
+  ok 26 [mobile] › e2e\vm-transfer-wizard.spec.ts:33:3 › окно миграции: cold, sequential, 1 ВМ (2.3s)
+  ok 27 [mobile] › e2e\vm-transfer-wizard.spec.ts:33:3 › окно миграции: warm, sequential, 1 ВМ (2.4s)
+  ok 28 [mobile] › e2e\vm-transfer-wizard.spec.ts:33:3 › окно миграции: cold, sequential, 2 ВМ (2.2s)
+  ok 29 [mobile] › e2e\vm-transfer-wizard.spec.ts:33:3 › окно миграции: cold, parallel, 2 ВМ (2.3s)
+  ok 30 [mobile] › e2e\vm-transfer-wizard.spec.ts:33:3 › окно миграции: warm, sequential, 2 ВМ (2.4s)
+  ok 31 [mobile] › e2e\vm-transfer-wizard.spec.ts:33:3 › окно миграции: warm, parallel, 2 ВМ (2.5s)
+  ok 32 [mobile] › e2e\vm-transfer-wizard.spec.ts:87:1 › миграция открывается окном в списке ВМ и поддерживает выделение группы (1.1s)
+  ok 33 [mobile] › e2e\vm-transfer-wizard.spec.ts:104:3 › проверка формы: контраст, сети конфигурации и объём ВМ — light (1.7s)
+  ok 34 [mobile] › e2e\vm-transfer-wizard.spec.ts:104:3 › проверка формы: контраст, сети конфигурации и объём ВМ — dark (1.6s)
+
+  34 passed (1.1m)

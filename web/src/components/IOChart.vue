@@ -13,6 +13,8 @@ import { bytes, dateTime } from '@/api/format'
 // working when other things are broken, and a page that needs a CDN is not that.
 
 export interface IOPoint {
+  /** Begin a new line after an unobserved interval or a stage boundary. */
+  breakBefore?: boolean
   at: string
   /** Чтение и запись в байтах в секунду. */
   read: number
@@ -123,6 +125,7 @@ function path(pick: (p: IOPoint) => number, top: number, bottom: number, max: nu
       started = false
       return
     }
+    if (p.breakBefore) started = false
     const x = xAt(p.at)
     const y = bottom - (Math.min(value, max) / max) * span
     out += `${started ? 'L' : 'M'}${x.toFixed(1)},${y.toFixed(1)} `

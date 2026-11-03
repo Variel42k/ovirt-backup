@@ -1,0 +1,12 @@
+goos: linux
+goarch: amd64
+pkg: github.com/Variel42k/ovirt-backup/internal/backup
+cpu: AMD Ryzen 5 9600X 6-Core Processor             
+BenchmarkChunkCompression/zstd-12         	     286	    651330 ns/op	1609.90 MB/s	         0.003105 stored/raw	  532608 B/op	       3 allocs/op
+BenchmarkChunkCompression/gzip-12         	     135	   1271624 ns/op	 824.60 MB/s	         0.07128 stored/raw	  568694 B/op	       4 allocs/op
+BenchmarkChunkCompression/s2-12           	     261	    722764 ns/op	1450.79 MB/s	         0.08558 stored/raw	 1065724 B/op	       3 allocs/op
+BenchmarkChunkCompression/lz4-12          	     206	    874902 ns/op	1198.51 MB/s	         0.1242 stored/raw	  194911 B/op	       9 allocs/op
+BenchmarkChunkCompression/brotli-12       	      37	   4125000 ns/op	 254.20 MB/s	         0.04710 stored/raw	10856738 B/op	      19 allocs/op
+BenchmarkChunkCompression/none-12         	     397	    452784 ns/op	2315.84 MB/s	         1.000 stored/raw	     128 B/op	       2 allocs/op
+PASS
+ok  	github.com/Variel42k/ovirt-backup/internal/backup	1.559s

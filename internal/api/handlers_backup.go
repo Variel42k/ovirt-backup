@@ -64,6 +64,7 @@ type jobPayload struct {
 	VerifyOptions model.VerifyOptions `json:"verify_options"`
 	ExportQcow2   bool                `json:"export_qcow2"`
 	Encrypt       bool                `json:"encrypt"`
+	Compression   *string             `json:"compression"`
 
 	Priority    int `json:"priority"`
 	Concurrency int `json:"concurrency"`
@@ -101,6 +102,9 @@ func (p jobPayload) apply(dst *model.BackupJob) {
 	dst.VerifyOptions = p.VerifyOptions
 	dst.ExportQcow2 = p.ExportQcow2
 	dst.Encrypt = p.Encrypt
+	if p.Compression != nil {
+		dst.Compression = strings.ToLower(strings.TrimSpace(*p.Compression))
+	}
 	dst.Priority = p.Priority
 	dst.Concurrency = p.Concurrency
 	if p.FallbackType != "" {
@@ -121,6 +125,9 @@ func (s *Server) validateJob(ctx context.Context, job *model.BackupJob) error {
 	}
 	if !srv.Kind.SupportsBackup() {
 		return badRequest("резервное копирование %s в этой версии не поддерживается", srv.Kind.Title())
+	}
+	if srv.Kind.UsesProxmoxAPI() && job.Compression != "" {
+		return badRequest("Proxmox использует нативный архив vzdump с zstd; выбор сжатия чанков неприменим")
 	}
 	if job.LegacyIncrementalMode != "" && !srv.Kind.UsesOVirtAPI() {
 		return badRequest("совместимый инкремент предназначен только для oVirt и его производных")
@@ -425,6 +432,7 @@ type adHocRequest struct {
 	FreezeBy           string   `json:"freeze_by"`
 	FreezeMountpoints  []string `json:"freeze_mountpoints"`
 	Encrypt            bool     `json:"encrypt"`
+	Compression        string   `json:"compression"`
 	// ExportQcow2 создаёт управляемый проверенный QCOW2-артефакт так же, как
 	// одноимённый параметр задания. Разовый запуск не должен иметь урезанный
 	// путь данных по сравнению с запуском по расписанию.
@@ -442,6 +450,15 @@ func (s *Server) handleAdHocBackup(w http.ResponseWriter, r *http.Request) {
 	var req adHocRequest
 	if err := decodeJSON(r, &req); err != nil {
 		s.writeError(w, r, err)
+		return
+	}
+	req.Compression = strings.ToLower(strings.TrimSpace(req.Compression))
+	if !model.ValidBackupCompression(req.Compression) {
+		s.writeError(w, r, badRequest("неизвестный алгоритм сжатия %q", req.Compression))
+		return
+	}
+	if req.Compression != "" && (req.Type == string(model.BackupOVA) || req.Type == string(model.BackupConfig)) {
+		s.writeError(w, r, badRequest("выбор сжатия доступен только для бэкапа с дисками"))
 		return
 	}
 	if req.ServerID == "" || req.VMID == "" || (req.Type != string(model.BackupOVA) && req.StorageTargetID == "") {
@@ -502,6 +519,10 @@ func (s *Server) handleAdHocBackup(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if srv.Kind.UsesProxmoxAPI() {
+		if req.Compression != "" {
+			s.writeError(w, r, badRequest("Proxmox использует нативный архив vzdump с zstd; выбор сжатия чанков неприменим"))
+			return
+		}
 		if !srv.HasProxmoxDataPlane() {
 			s.writeError(w, r, badRequest("для Proxmox сначала настройте SSH-канал данных и закрепите ключи всех узлов"))
 			return
@@ -605,6 +626,7 @@ func (s *Server) handleAdHocBackup(w http.ResponseWriter, r *http.Request) {
 		FreezeBy:              freezeBy,
 		FreezeMountpoints:     mountpoints,
 		Encrypt:               req.Encrypt,
+		Compression:           req.Compression,
 		ExportQcow2:           req.ExportQcow2,
 		VerifyAfter:           verifyMode,
 		VerifyOptions:         req.VerifyOptions,

@@ -62,6 +62,10 @@ func newCodec(compression string, level int, cipher *secret.Cipher) (*codec, err
 		c.algo = newGzipCompressor(level)
 	case CompressionS2:
 		c.algo = newS2Compressor(level)
+	case CompressionLZ4:
+		c.algo = &lz4Compressor{level: level}
+	case CompressionBrotli:
+		c.algo = &brotliCompressor{level: level}
 	default:
 		// Раньше неизвестное имя молча означало «без сжатия», и такой кодек
 		// отдавал бы сжатые байты как готовые данные. Отказ громче и дешевле.

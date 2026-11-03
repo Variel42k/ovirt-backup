@@ -1,0 +1,249 @@
+{
+  "GO-2026-6603": {
+    "module": "golang.org/x/net",
+    "version": "v0.57.0",
+    "fix": "v0.60.0",
+    "trace_count": 40,
+    "example": [
+      {
+        "package": "net/http/internal/http2",
+        "function": "Close"
+      },
+      {
+        "package": "github.com/Variel42k/ovirt-backup/internal/backup",
+        "function": "VerifyRepositoryOnly"
+      }
+    ]
+  },
+  "GO-2026-6610": {
+    "module": "golang.org/x/net",
+    "version": "v0.57.0",
+    "fix": "v0.60.0",
+    "trace_count": 6,
+    "example": [
+      {
+        "package": "net/http",
+        "function": "roundTrip"
+      },
+      {
+        "package": "net/http",
+        "function": "RoundTrip"
+      },
+      {
+        "package": "github.com/Variel42k/ovirt-backup/internal/api",
+        "function": "RoundTrip"
+      }
+    ]
+  },
+  "GO-2026-6611": {
+    "module": "golang.org/x/net",
+    "version": "v0.57.0",
+    "fix": "v0.60.0",
+    "trace_count": 40,
+    "example": [
+      {
+        "package": "net/http/internal/http2",
+        "function": "WriteHeader"
+      },
+      {
+        "package": "github.com/Variel42k/ovirt-backup/internal/api",
+        "function": "WriteHeader"
+      }
+    ]
+  },
+  "GO-2026-6612": {
+    "module": "golang.org/x/net",
+    "version": "v0.57.0",
+    "fix": "v0.60.0",
+    "trace_count": 6,
+    "example": [
+      {
+        "package": "net/http/internal/http2",
+        "function": "Read"
+      },
+      {
+        "package": "github.com/Variel42k/ovirt-backup/internal/repo",
+        "function": "Read"
+      }
+    ]
+  },
+  "GO-2026-6617": {
+    "module": "golang.org/x/net",
+    "version": "v0.57.0",
+    "fix": "v0.60.0",
+    "trace_count": 40,
+    "example": [
+      {
+        "package": "net/http/internal/http2",
+        "function": "Close"
+      },
+      {
+        "package": "github.com/Variel42k/ovirt-backup/internal/backup",
+        "function": "VerifyRepositoryOnly"
+      }
+    ]
+  },
+  "GO-2026-6860": {
+    "module": "golang.org/x/net",
+    "version": "v0.57.0",
+    "fix": "v0.62.0",
+    "trace_count": 0,
+    "example": null
+  },
+  "GO-2026-6866": {
+    "module": "golang.org/x/net",
+    "version": "v0.57.0",
+    "fix": "v0.62.0",
+    "trace_count": 0,
+    "example": null
+  },
+  "GO-2026-6599": {
+    "module": "stdlib",
+    "version": "v1.27.0",
+    "fix": "v1.27.2",
+    "trace_count": 0,
+    "example": null
+  },
+  "GO-2026-6600": {
+    "module": "stdlib",
+    "version": "v1.27.0",
+    "fix": "v1.27.2",
+    "trace_count": 0,
+    "example": null
+  },
+  "GO-2026-6604": {
+    "module": "stdlib",
+    "version": "v1.27.0",
+    "fix": "v1.27.2",
+    "trace_count": 7,
+    "example": [
+      {
+        "package": "os",
+        "function": "MkdirAll"
+      },
+      {
+        "package": "github.com/Variel42k/ovirt-backup/internal/repo",
+        "function": "Put"
+      }
+    ]
+  },
+  "GO-2026-6605": {
+    "module": "stdlib",
+    "version": "v1.27.0",
+    "fix": "v1.27.2",
+    "trace_count": 6,
+    "example": [
+      {
+        "package": "net/http",
+        "function": "RoundTrip"
+      },
+      {
+        "package": "github.com/Variel42k/ovirt-backup/internal/api",
+        "function": "RoundTrip"
+      }
+    ]
+  },
+  "GO-2026-6607": {
+    "module": "stdlib",
+    "version": "v1.27.0",
+    "fix": "v1.27.2",
+    "trace_count": 5,
+    "example": [
+      {
+        "package": "crypto/tls",
+        "function": "DialContext"
+      },
+      {
+        "package": "github.com/Variel42k/ovirt-backup/internal/proxmox",
+        "function": "FetchCertificateChain"
+      }
+    ]
+  },
+  "GO-2026-6608": {
+    "module": "stdlib",
+    "version": "v1.27.0",
+    "fix": "v1.27.2",
+    "trace_count": 1,
+    "example": [
+      {
+        "package": "net/http",
+        "function": "roundTrip"
+      },
+      {
+        "package": "net/http",
+        "function": "RoundTrip"
+      },
+      {
+        "package": "github.com/Variel42k/ovirt-backup/internal/api",
+        "function": "RoundTrip"
+      }
+    ]
+  },
+  "GO-2026-6609": {
+    "module": "stdlib",
+    "version": "v1.27.0",
+    "fix": "v1.27.2",
+    "trace_count": 2,
+    "example": [
+      {
+        "package": "net/http",
+        "function": "serve"
+      },
+      {
+        "package": "net/http",
+        "function": "Serve"
+      },
+      {
+        "package": "github.com/Variel42k/ovirt-backup/cmd/jhvirt-keycloak-helper",
+        "function": "main"
+      }
+    ]
+  },
+  "GO-2026-6613": {
+    "module": "stdlib",
+    "version": "v1.27.0",
+    "fix": "v1.27.2",
+    "trace_count": 58,
+    "example": [
+      {
+        "package": "expvar",
+        "function": "init"
+      },
+      {
+        "package": "github.com/prometheus/client_golang/prometheus",
+        "function": "init"
+      },
+      {
+        "package": "github.com/Variel42k/ovirt-backup/internal/api",
+        "function": "init"
+      }
+    ]
+  },
+  "GO-2026-6809": {
+    "module": "stdlib",
+    "version": "v1.27.0",
+    "fix": "v1.27.3",
+    "trace_count": 1,
+    "example": [
+      {
+        "package": "crypto/tls",
+        "function": "dial"
+      },
+      {
+        "package": "crypto/tls",
+        "function": "DialContext"
+      },
+      {
+        "package": "github.com/Variel42k/ovirt-backup/internal/proxmox",
+        "function": "FetchCertificateChain"
+      }
+    ]
+  },
+  "GO-2026-5932": {
+    "module": "golang.org/x/crypto",
+    "version": "v0.56.0",
+    "fix": null,
+    "trace_count": 0,
+    "example": null
+  }
+}

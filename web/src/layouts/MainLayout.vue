@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import {
   api,
   dismissAllNotifications,
@@ -20,6 +20,12 @@ import OperationCenter from '@/components/OperationCenter.vue'
 const auth = useAuthStore()
 const app = useAppStore()
 const router = useRouter()
+const route = useRoute()
+watch(() => app.meta?.web_sections, () => {
+  if (route.meta.webSection && !app.sectionEnabled(String(route.meta.webSection))) {
+    void router.replace({ name: 'settings' })
+  }
+})
 
 // show-if-above сам открывает навигацию на широком экране. На мобильном
 // начальное true превращает её в модальную шторку поверх первой страницы.
@@ -68,7 +74,7 @@ const allLinks = [
   { name: 'documentation', label: 'Документация', icon: 'menu_book', perm: '', group: 'Справка' },
 ]
 
-const links = computed(() => allLinks.filter((l) => (!l.perm || auth.can(l.perm)) && (l.name !== 'vm-transfers' || auth.can('backups.read'))))
+const links = computed(() => allLinks.filter((l) => (!l.perm || auth.can(l.perm)) && app.sectionEnabled(l.name) && (l.name !== 'vm-transfers' || auth.can('backups.read'))))
 const linkGroups = computed(() => {
   const groups: { title: string; links: typeof allLinks }[] = []
   for (const link of links.value) {

@@ -1,0 +1,25 @@
+{
+  "status": "passed",
+  "verification_date": "2026-10-30",
+  "document_code_snapshot_date": "2026-10-30",
+  "pages": 113,
+  "sections": 107,
+  "new_visual_sections": 17,
+  "numbered_figures": 77,
+  "toc_destinations_verified": 107,
+  "missing_source_paths": [],
+  "visual_review": "All page contact sheets reviewed; all 17 added visual pages inspected at page scale; corrected failure-domain label, six-level heading and corporate-system scope rechecked after final export. Unchanged original sections retain previously verified layout.",
+  "graph_data": "Illustrative synthetic data, explicitly labelled; no new performance measurements or VM operations.",
+  "artifacts": [
+    {
+      "path": "E:\\git\\justhpc\\justhpc-virt-manager\\output\\visual-manual\\Backup_Virt_Manager_Visual_Manual_RU_2026-10-30_v3.docx",
+      "bytes": 3777575,
+      "sha256": "983568146bedeb5283abb681e2695231ef5a461b642e2abf67e8d7e192a467dc"
+    },
+    {
+      "path": "E:\\git\\justhpc\\justhpc-virt-manager\\output\\visual-manual\\Backup_Virt_Manager_Visual_Manual_RU_2026-10-30_v3.pdf",
+      "bytes": 4279177,
+      "sha256": "a5b87aacbedd684838f24b4fa0b43e18e46a21cd9153ad6fe44ae41bd933fd4f"
+    }
+  ]
+}

@@ -49,15 +49,16 @@ const DefaultChunkSize = 4 << 20
 // из конфигурации: сменить сжатие в настройках можно в любой момент, а копии,
 // сделанные до этого, обязаны читаться прежним кодеком.
 const (
-	CompressionNone = "none"
-	CompressionZstd = "zstd"
-	CompressionGzip = "gzip"
-	CompressionS2   = "s2"
+	CompressionNone   = "none"
+	CompressionZstd   = "zstd"
+	CompressionGzip   = "gzip"
+	CompressionS2     = "s2"
+	CompressionLZ4    = "lz4"
+	CompressionBrotli = "brotli"
 )
 
-// Compressions lists what a writer may be asked for, в порядке от плотного к
-// быстрому. Годится и для проверки настройки, и для подсказки в интерфейсе.
-var Compressions = []string{CompressionZstd, CompressionGzip, CompressionS2, CompressionNone}
+// Compressions lists the supported writer algorithms in UI display order.
+var Compressions = []string{CompressionZstd, CompressionGzip, CompressionS2, CompressionLZ4, CompressionBrotli, CompressionNone}
 
 // KnownCompression reports whether the algorithm is one this build can read.
 func KnownCompression(name string) bool {

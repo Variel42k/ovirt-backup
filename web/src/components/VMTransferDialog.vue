@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { api, errorMessage } from '@/api/client'
 import { bytes } from '@/api/format'
+import { autoSyncDescription } from '@/api/vmTransferMetrics'
 import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import type { Cluster, Host, RestoreNetworkTarget, StorageDomain, VM, VMTransferBatchPlan, VMTransferBatchRequest, VMTransferBatchResult, VMTransferNIC, VMTransferRequest } from '@/api/types'
@@ -15,6 +16,7 @@ const targetID = ref(''), clusterID = ref(''), hostID = ref(''), domainID = ref(
 const clusters = ref<Cluster[]>([]), hosts = ref<Host[]>([]), domains = ref<StorageDomain[]>([]), networks = ref<RestoreNetworkTarget[]>([])
 const networkMode = ref<'configuration' | 'custom'>('configuration')
 const mode = ref<'cold' | 'warm'>('cold'), execution = ref<'sequential' | 'parallel'>('sequential'), parallelism = ref(2), preserveMAC = ref(false), confirmed = ref(false)
+const autoSyncInterval = ref(120)
 const plan = ref<VMTransferBatchPlan | null>(null), result = ref<VMTransferBatchResult | null>(null)
 type Facts = { nics: VMTransferNIC[]; warm_available: boolean; warm_reason: string; total_bytes?: number; allocated_bytes?: number }
 type Draft = { name: string; network_mappings: VMTransferRequest['network_mappings'] }
@@ -116,7 +118,7 @@ function next() {
 }
 function request(): VMTransferBatchRequest {
   return { execution: execution.value, parallelism: execution.value === 'sequential' ? 1 : Number(parallelism.value), confirm: confirmed.value,
-    items: selectedIDs.value.map(id => ({ source_server_id: sourceID.value, source_vm_id: id, target_server_id: targetID.value, cluster_id: clusterID.value, host_id: hostID.value || '', storage_domain_id: domainID.value, storage_target_id: repositoryID.value, name: drafts[id].name.trim(), network_mappings: drafts[id].network_mappings.map(m => ({ ...m })), mode: mode.value, preserve_mac: preserveMAC.value, confirm: confirmed.value })) }
+    items: selectedIDs.value.map(id => ({ source_server_id: sourceID.value, source_vm_id: id, target_server_id: targetID.value, cluster_id: clusterID.value, host_id: hostID.value || '', storage_domain_id: domainID.value, storage_target_id: repositoryID.value, name: drafts[id].name.trim(), network_mappings: drafts[id].network_mappings.map(m => ({ ...m })), mode: mode.value, auto_sync_interval_seconds: mode.value === 'warm' ? autoSyncInterval.value : 0, preserve_mac: preserveMAC.value, confirm: confirmed.value })) }
 }
 async function preview() {
   error.value = ''; confirmed.value = false
@@ -194,6 +196,14 @@ onUnmounted(() => { sourceSequence++; factsSequence++; targetSequence++; domainS
             <q-checkbox v-model="preserveMAC" dense label="Сохранить исходные MAC-адреса" @update:model-value="invalidate" />
             <q-separator /><div class="text-subtitle2">Режим переноса</div>
             <q-option-group v-model="mode" :options="[{ label: 'С остановкой на время переноса', value: 'cold' }, { label: 'Предварительное копирование, затем переключение', value: 'warm', disable: !warmAvailable }]" @update:model-value="invalidate" />
+            <q-select v-if="mode === 'warm'" v-model="autoSyncInterval" outlined dense emit-value map-options class="q-mt-sm"
+              label="Синхронизация подготовленной цели"
+              :options="[{label:'Только вручную',value:-1},{label:'Каждые 2 минуты',value:120},{label:'Каждые 5 минут',value:300},{label:'Каждые 15 минут',value:900},{label:'Каждые 30 минут',value:1800}]"
+              @update:model-value="invalidate" />
+            <div v-if="mode === 'warm'" class="text-caption text-grey-7 q-mt-sm">
+              Редкие проходы уменьшают число операций на Engine, но увеличивают возможную финальную дельту и простой.
+              Ручной режим сохраняет первую и финальную синхронизации. Штатные события Engine при операциях сохраняются.
+            </div>
             <div v-if="!warmAvailable" class="text-caption text-grey-7">Нужны Backup API и incremental на всех дисках каждой ВМ. Недоступно: {{ blockedWarm || 'дождитесь загрузки конфигурации' }}.</div>
             <div class="text-subtitle2">Выполнение группы</div>
             <q-option-group v-model="execution" inline :options="[{ label: 'Последовательно', value: 'sequential' }, { label: 'Параллельно', value: 'parallel' }]" @update:model-value="invalidate" />
@@ -206,6 +216,7 @@ onUnmounted(() => { sourceSequence++; factsSequence++; targetSequence++; domainS
             <div class="text-caption">Временная копия: {{ repositories.find(s => s.id === repositoryID)?.name }}</div>
             <div class="text-caption">{{ clusters.find(c => c.id === clusterID)?.name }} · {{ hosts.find(h => h.id === hostID)?.name || 'Хост автоматически' }} · {{ domains.find(d => d.id === domainID)?.name }}</div>
             <div>{{ mode === 'warm' ? 'Предварительное копирование' : 'С остановкой' }} · {{ execution === 'sequential' ? 'Последовательно' : `Параллельно, до ${parallelism} ВМ` }}</div>
+            <div v-if="mode === 'warm'" class="text-caption">{{ autoSyncDescription(autoSyncInterval) }}</div>
             <q-banner v-for="text in plan.blockers" :key="text" dense class="bg-red-1">{{ text }}</q-banner>
             <q-list bordered separator><q-item v-for="(p, index) in plan.items" :key="p.request.source_vm_id"><q-item-section><q-item-label>{{ index + 1 }}. {{ p.source_name }} → {{ p.request.name }}</q-item-label><q-item-label caption>{{ bytes(p.total_bytes) }} · Автовосстановление: {{ p.recovery_policy?.enabled ? 'по политике исходного кластера' : 'выключено' }}</q-item-label></q-item-section></q-item></q-list>
             <q-banner v-for="text in [...new Set(plan.items.flatMap(p => p.warnings))]" :key="text" dense class="bg-amber-1">{{ text }}</q-banner>

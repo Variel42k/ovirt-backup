@@ -9,7 +9,7 @@ Type=simple
 User=@USER_NAME@
 Group=@USER_NAME@
 WorkingDirectory=@PREFIX@
-ExecStart=@PREFIX@/bin/ovirt-backup-server -config @PREFIX@/config/ovirt-backup.yaml
+ExecStart=@PREFIX@/bin/ovirt-backup-server -supervise -config @PREFIX@/config/ovirt-backup.yaml
 Restart=on-failure
 RestartSec=5s
 

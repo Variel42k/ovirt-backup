@@ -715,6 +715,7 @@ func (s *Scheduler) TriggerJob(ctx context.Context, jobID, triggeredBy string, s
 				FreezeMountpoints:     job.FreezeMountpoints,
 				MaxReadMBps:           job.MaxReadMBps,
 				Encrypt:               job.Encrypt,
+				Compression:           job.Compression,
 				ExportQcow2:           job.ExportQcow2,
 				VerifyAfter:           job.VerifyAfter,
 				VerifyOptions:         job.VerifyOptions,

@@ -1,0 +1,32 @@
+{
+  "config": {
+    "protocol_version": "v1.0.0",
+    "scanner_name": "govulncheck",
+    "scanner_version": "v1.7.0",
+    "db": "https://vuln.go.dev",
+    "db_last_modified": "2026-10-27T21:16:18Z",
+    "go_version": "go1.27.3",
+    "scan_level": "symbol",
+    "scan_mode": "source"
+  },
+  "finding_messages": 1,
+  "unique_advisories": 1,
+  "advisories_per_level": {
+    "module_only": 1,
+    "import": 0,
+    "call": 0
+  },
+  "details": {
+    "GO-2026-5932": {
+      "module": "golang.org/x/crypto",
+      "version": "v0.58.0",
+      "fixed_version": null,
+      "summary": "The golang.org/x/crypto/openpgp package is unmaintained, unsafe by design, and has known security issues",
+      "levels": [
+        "module_only"
+      ],
+      "url": "https://pkg.go.dev/vuln/GO-2026-5932"
+    }
+  },
+  "note": "Levels may overlap for the same advisory; call traces indicate static reachability, not demonstrated exploitation."
+}

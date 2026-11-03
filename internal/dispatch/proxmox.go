@@ -24,6 +24,9 @@ import (
 // archive already uses zstd, so the repository container adds encryption and
 // chunk hashes but deliberately does not compress the bytes a second time.
 func (d *Dispatcher) executeProxmox(ctx context.Context, srv *model.Server, req backup.RunRequest) (*model.BackupRun, error) {
+	if req.Compression != "" {
+		return nil, errors.New("Proxmox использует нативный архив vzdump с zstd; выбор сжатия чанков неприменим")
+	}
 	if d.proxmox == nil {
 		return nil, errors.New("драйвер Proxmox не инициализирован")
 	}

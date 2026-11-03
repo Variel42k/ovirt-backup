@@ -161,13 +161,22 @@ func TestChainMayMixCompressionAlgorithms(t *testing.T) {
 			Type: model.BackupIncremental, DiskID: "d1"},
 		map[int64][]byte{2: pattern('C', testChunkSize)})
 
-	reader, err := NewChainReader(backend, nil, []*DiskManifest{full, inc, latest})
+	lz4Run := writeRun(t, backend, "mixed-lz4.data",
+		WriterOptions{Compression: CompressionLZ4, Level: 3},
+		DiskManifest{RunID: "lz4", ChainID: "full", ParentRunID: "latest", ChainIndex: 3,
+			Type: model.BackupIncremental, DiskID: "d1"}, map[int64][]byte{3: pattern('D', testChunkSize)})
+	brotliRun := writeRun(t, backend, "mixed-brotli.data",
+		WriterOptions{Compression: CompressionBrotli, Level: 3},
+		DiskManifest{RunID: "brotli", ChainID: "full", ParentRunID: "lz4", ChainIndex: 4,
+			Type: model.BackupIncremental, DiskID: "d1"}, map[int64][]byte{4: pattern('E', testChunkSize)})
+	reader, err := NewChainReader(backend, nil, []*DiskManifest{full, inc, latest, lz4Run, brotliRun})
 	if err != nil {
 		t.Fatalf("chain reader: %v", err)
 	}
 	defer reader.Close()
 	for index, want := range [][]byte{
 		pattern('A', testChunkSize), pattern('B', testChunkSize), pattern('C', testChunkSize),
+		pattern('D', testChunkSize), pattern('E', testChunkSize),
 	} {
 		got, err := reader.ReadChunk(ctx, int64(index))
 		if err != nil {

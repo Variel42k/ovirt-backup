@@ -1,0 +1,12 @@
+npm notice run ovirt-backup-web@0.1.0 npx
+npm notice run playwright test e2e/backup-compression.spec.ts e2e/vm-transfer-wizard.spec.ts e2e/cluster-recovery.spec.ts --project=desktop -g алгоритм lz4|warm, parallel, 2|политики кластеров изолированы --reporter=list
+
+Running 3 tests using 1 worker
+
+(node:5184) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ok 1 [desktop] › e2e\backup-compression.spec.ts:36:44 › алгоритм lz4 сохраняется в задании и после перезагрузки (2.9s)
+  ok 2 [desktop] › e2e\cluster-recovery.spec.ts:47:1 › политики кластеров изолированы, сохраняются и сбрасываются через общий интерфейс (2.0s)
+  ok 3 [desktop] › e2e\vm-transfer-wizard.spec.ts:33:3 › окно миграции: warm, parallel, 2 ВМ (2.4s)
+
+  3 passed (8.0s)

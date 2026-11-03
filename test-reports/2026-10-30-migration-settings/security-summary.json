@@ -1,0 +1,314 @@
+{
+  "date": "2026-10-30",
+  "scope": "Local source checkout; no production deployment or live VM operations",
+  "go_before_windows": {
+    "config": {
+      "protocol_version": "v1.0.0",
+      "scanner_name": "govulncheck",
+      "scanner_version": "v1.7.0",
+      "db": "https://vuln.go.dev",
+      "db_last_modified": "2026-10-27T21:16:18Z",
+      "go_version": "go1.27.0",
+      "scan_level": "symbol",
+      "scan_mode": "source"
+    },
+    "finding_messages": 261,
+    "unique_advisories": 17,
+    "advisories_per_level": {
+      "module_only": 17,
+      "import": 14,
+      "call": 12
+    },
+    "details": {
+      "GO-2026-6603": {
+        "module": "golang.org/x/net",
+        "version": "v0.57.0",
+        "fixed_version": "v0.60.0",
+        "summary": "HTTP/2 server memory exhaustion due to Trailer headers in net/http",
+        "levels": [
+          "module_only",
+          "import",
+          "call"
+        ],
+        "url": "https://pkg.go.dev/vuln/GO-2026-6603"
+      },
+      "GO-2026-6610": {
+        "module": "golang.org/x/net",
+        "version": "v0.57.0",
+        "fixed_version": "v0.60.0",
+        "summary": "HTTP/2 transport accepts malformed framing-related headers in net/http",
+        "levels": [
+          "module_only",
+          "import",
+          "call"
+        ],
+        "url": "https://pkg.go.dev/vuln/GO-2026-6610"
+      },
+      "GO-2026-6611": {
+        "module": "golang.org/x/net",
+        "version": "v0.57.0",
+        "fixed_version": "v0.60.0",
+        "summary": "Excessive CPU consumption from repeated initial window changes in net/http",
+        "levels": [
+          "module_only",
+          "import",
+          "call"
+        ],
+        "url": "https://pkg.go.dev/vuln/GO-2026-6611"
+      },
+      "GO-2026-6612": {
+        "module": "golang.org/x/net",
+        "version": "v0.57.0",
+        "fixed_version": "v0.60.0",
+        "summary": "Double flow control refund on HTTP/2 server streams in net/http",
+        "levels": [
+          "module_only",
+          "import",
+          "call"
+        ],
+        "url": "https://pkg.go.dev/vuln/GO-2026-6612"
+      },
+      "GO-2026-6617": {
+        "module": "golang.org/x/net",
+        "version": "v0.57.0",
+        "fixed_version": "v0.60.0",
+        "summary": "HTTP/2 server crash due to HPACK encoder race in net/http",
+        "levels": [
+          "module_only",
+          "import",
+          "call"
+        ],
+        "url": "https://pkg.go.dev/vuln/GO-2026-6617"
+      },
+      "GO-2026-6860": {
+        "module": "golang.org/x/net",
+        "version": "v0.57.0",
+        "fixed_version": "v0.62.0",
+        "summary": "Avoid quadratic complexity when coalescing text nodes in html in golang.org/x/net",
+        "levels": [
+          "module_only"
+        ],
+        "url": "https://pkg.go.dev/vuln/GO-2026-6860"
+      },
+      "GO-2026-6866": {
+        "module": "golang.org/x/net",
+        "version": "v0.57.0",
+        "fixed_version": "v0.62.0",
+        "summary": "Check all ancestor namespace transitions when rendering raw text in html in golang.org/x/net",
+        "levels": [
+          "module_only"
+        ],
+        "url": "https://pkg.go.dev/vuln/GO-2026-6866"
+      },
+      "GO-2026-6599": {
+        "module": "stdlib",
+        "version": "v1.27.0",
+        "fixed_version": "v1.27.2",
+        "summary": "Reset context tracking on consecutive template expressions in html/template",
+        "levels": [
+          "module_only",
+          "import"
+        ],
+        "url": "https://pkg.go.dev/vuln/GO-2026-6599"
+      },
+      "GO-2026-6600": {
+        "module": "stdlib",
+        "version": "v1.27.0",
+        "fixed_version": "v1.27.2",
+        "summary": "Recognize yield as regexp preceder keyword in html/template",
+        "levels": [
+          "module_only",
+          "import"
+        ],
+        "url": "https://pkg.go.dev/vuln/GO-2026-6600"
+      },
+      "GO-2026-6604": {
+        "module": "stdlib",
+        "version": "v1.27.0",
+        "fixed_version": "v1.27.2",
+        "summary": "Root.Mkdir(All) can follow junctions out of the root on Windows in os",
+        "levels": [
+          "module_only",
+          "import",
+          "call"
+        ],
+        "url": "https://pkg.go.dev/vuln/GO-2026-6604"
+      },
+      "GO-2026-6605": {
+        "module": "stdlib",
+        "version": "v1.27.0",
+        "fixed_version": "v1.27.2",
+        "summary": "HTTP/1 client connection desynchronization after CONNECT rejection in net/http",
+        "levels": [
+          "module_only",
+          "import",
+          "call"
+        ],
+        "url": "https://pkg.go.dev/vuln/GO-2026-6605"
+      },
+      "GO-2026-6607": {
+        "module": "stdlib",
+        "version": "v1.27.0",
+        "fixed_version": "v1.27.2",
+        "summary": "Reject malformed ECH outer extension references in crypto/tls",
+        "levels": [
+          "module_only",
+          "import",
+          "call"
+        ],
+        "url": "https://pkg.go.dev/vuln/GO-2026-6607"
+      },
+      "GO-2026-6608": {
+        "module": "stdlib",
+        "version": "v1.27.0",
+        "fixed_version": "v1.27.2",
+        "summary": "Memory limit bypass when parsing MIME headers in net/textproto, mime/multipart",
+        "levels": [
+          "module_only",
+          "import",
+          "call"
+        ],
+        "url": "https://pkg.go.dev/vuln/GO-2026-6608"
+      },
+      "GO-2026-6609": {
+        "module": "stdlib",
+        "version": "v1.27.0",
+        "fixed_version": "v1.27.2",
+        "summary": "Lack of limit on size of parsed Range headers in net/http",
+        "levels": [
+          "module_only",
+          "import",
+          "call"
+        ],
+        "url": "https://pkg.go.dev/vuln/GO-2026-6609"
+      },
+      "GO-2026-6613": {
+        "module": "stdlib",
+        "version": "v1.27.0",
+        "fixed_version": "v1.27.2",
+        "summary": "HTTP/1 server connection desynchronization after 2xx CONNECT response in net/http",
+        "levels": [
+          "module_only",
+          "import",
+          "call"
+        ],
+        "url": "https://pkg.go.dev/vuln/GO-2026-6613"
+      },
+      "GO-2026-6809": {
+        "module": "stdlib",
+        "version": "v1.27.0",
+        "fixed_version": "v1.27.3",
+        "summary": "Distrust compromised intermediate certificates in crypto/x509",
+        "levels": [
+          "module_only",
+          "import",
+          "call"
+        ],
+        "url": "https://pkg.go.dev/vuln/GO-2026-6809"
+      },
+      "GO-2026-5932": {
+        "module": "golang.org/x/crypto",
+        "version": "v0.56.0",
+        "fixed_version": null,
+        "summary": "The golang.org/x/crypto/openpgp package is unmaintained, unsafe by design, and has known security issues",
+        "levels": [
+          "module_only"
+        ],
+        "url": "https://pkg.go.dev/vuln/GO-2026-5932"
+      }
+    },
+    "note": "Levels may overlap for the same advisory; call traces indicate static reachability, not demonstrated exploitation."
+  },
+  "go_after_linux": {
+    "config": {
+      "protocol_version": "v1.0.0",
+      "scanner_name": "govulncheck",
+      "scanner_version": "v1.7.0",
+      "db": "https://vuln.go.dev",
+      "db_last_modified": "2026-10-27T21:16:18Z",
+      "go_version": "go1.27.3",
+      "scan_level": "symbol",
+      "scan_mode": "source"
+    },
+    "finding_messages": 1,
+    "unique_advisories": 1,
+    "advisories_per_level": {
+      "module_only": 1,
+      "import": 0,
+      "call": 0
+    },
+    "details": {
+      "GO-2026-5932": {
+        "module": "golang.org/x/crypto",
+        "version": "v0.58.0",
+        "fixed_version": null,
+        "summary": "The golang.org/x/crypto/openpgp package is unmaintained, unsafe by design, and has known security issues",
+        "levels": [
+          "module_only"
+        ],
+        "url": "https://pkg.go.dev/vuln/GO-2026-5932"
+      }
+    },
+    "note": "Levels may overlap for the same advisory; call traces indicate static reachability, not demonstrated exploitation."
+  },
+  "npm_before_production": {
+    "info": 0,
+    "low": 1,
+    "moderate": 0,
+    "high": 5,
+    "critical": 0,
+    "total": 6
+  },
+  "npm_after_all_dependencies": {
+    "info": 0,
+    "low": 0,
+    "moderate": 0,
+    "high": 0,
+    "critical": 0,
+    "total": 0
+  },
+  "tests": {
+    "go_test_all_exit_code": 0,
+    "go_vet_all_exit_code": 0,
+    "go_packages_with_tests_passed": 38,
+    "go_log_has_fail": false,
+    "browser_passed": 52,
+    "browser_summary_present": true
+  },
+  "limits": [
+    "Windows before / Linux after: platforms differ",
+    "Go source scan is not a full container or supply-chain scan",
+    "No completed FSTEC BDU check",
+    "No formal conformity or attestation conclusion"
+  ],
+  "evidence": [
+    {
+      "file": "govulncheck.json",
+      "sha256": "89a6b992169cd9ad628cb450d0beea141cdc76a70141a8c4e8cfd4a90fd8531c"
+    },
+    {
+      "file": "govulncheck-linux-after.json",
+      "sha256": "d333f808757735336fbc727bc7cd067564dcb4380769c028cc2627719aaff582"
+    },
+    {
+      "file": "npm-audit.json",
+      "sha256": "6c43df22afde63554c35f8874f6fdf709207dbac02589bde544c53fa1d412bfd"
+    },
+    {
+      "file": "npm-audit-after.json",
+      "sha256": "1e279a1fab13802a2f0798e0aac56f692f9c47d8fa2b4dbf57c28b7706e369db"
+    },
+    {
+      "file": "go-tests-linux.txt",
+      "sha256": "67f58b7683685697c89000b03589e2714f8891d270e712a220e717399edb850f"
+    },
+    {
+      "file": "go-vet-linux.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "file": "browser-tests.txt",
+      "sha256": "97c39cf72bf15094536ac80605f1ef624e714550c90ce30336b4e0d42d0005fd"
+    }
+  ]
+}

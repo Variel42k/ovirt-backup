@@ -64,6 +64,8 @@ test('политики кластеров изолированы, сохраня
   await page.getByRole('option', { name: 'Cluster A', exact: true }).click()
   await expect(page.getByLabel('Ожидание прогресса, с', { exact: true })).toHaveValue('120')
   await page.screenshot({ path: info.outputPath('cluster-recovery.png'), fullPage: true, animations: 'disabled' })
+  if (info.project.name === 'desktop') await page.locator('.q-card').filter({ has: page.getByRole('switch', { name: 'Автоматически восстанавливать миграции', exact: true }) }).last()
+    .screenshot({ path: info.outputPath('doc-cluster-recovery.png'), animations: 'disabled' })
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true)
   await page.getByRole('button', { name: 'Вернуть общие настройки', exact: true }).click()
   await page.getByRole('dialog').getByRole('button', { name: 'Вернуть настройки', exact: true }).click()

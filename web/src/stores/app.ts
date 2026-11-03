@@ -41,6 +41,12 @@ export const useAppStore = defineStore('app', () => {
   const enabledStorages = computed(() => storages.value.filter((s) => s.enabled && !s.read_only))
   const onlineServers = computed(() => servers.value.filter((s) => s.state === 'online'))
 
+  function sectionEnabled(name: string): boolean {
+    if (name === 'discovery') return meta.value?.web_sections?.discovery !== false
+    if (name === 'gitlab-clean') return meta.value?.web_sections?.gitlab_clean !== false
+    return true
+  }
+
   function backupTypeTitle(value?: string): string {
     return meta.value?.backup_types.find((t) => t.value === value)?.title ?? value ?? '—'
   }
@@ -155,6 +161,7 @@ export const useAppStore = defineStore('app', () => {
     loading,
     enabledStorages,
     onlineServers,
+    sectionEnabled,
     backupTypeTitle,
     verifyModeTitle,
     actionTitle,

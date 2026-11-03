@@ -1,0 +1,118 @@
+{
+  "date": "2026-10-30",
+  "scope": "Working copy; local Docker Desktop; no production deployment or live VM actions",
+  "tests": {
+    "go_packages_passed": 38,
+    "go_test_and_vet_exit": 0,
+    "web_build_exit": 0,
+    "browser_tests_passed": 10,
+    "additional_codec_checks_and_benchmark_exit": 0
+  },
+  "new_modules": {
+    "github.com/pierrec/lz4/v4": "v4.1.33",
+    "github.com/andybalholm/brotli": "v1.2.7"
+  },
+  "runtime": {
+    "go": "1.27.3",
+    "os": "linux",
+    "arch": "amd64",
+    "postgres": "17",
+    "cgo": false,
+    "gosumdb": "sum.golang.org",
+    "goproxy_for_checks": "https://goproxy.cn"
+  },
+  "scan": {
+    "config": {
+      "protocol_version": "v1.0.0",
+      "scanner_name": "govulncheck",
+      "scanner_version": "v1.7.0",
+      "db": "https://vuln.go.dev",
+      "db_last_modified": "2026-10-27T21:16:18Z",
+      "go_version": "go1.27.3",
+      "scan_level": "symbol",
+      "scan_mode": "source"
+    },
+    "finding_messages": 1,
+    "unique_advisories": 1,
+    "advisories_per_level": {
+      "module_only": 1,
+      "import": 0,
+      "call": 0
+    },
+    "details": {
+      "GO-2026-5932": {
+        "module": "golang.org/x/crypto",
+        "version": "v0.58.0",
+        "fixed_version": null,
+        "summary": "The golang.org/x/crypto/openpgp package is unmaintained, unsafe by design, and has known security issues",
+        "levels": [
+          "module_only"
+        ],
+        "url": "https://pkg.go.dev/vuln/GO-2026-5932"
+      }
+    },
+    "note": "Levels may overlap for the same advisory; call traces indicate static reachability, not demonstrated exploitation."
+  },
+  "limits": [
+    "Synthetic CPU benchmark, 1 MiB patterned buffer, level 3, includes SHA-256; no live VM throughput measurement",
+    "Mocked browser API",
+    "Neural codec not implemented",
+    "Not a full container or FSTEC BDU assessment"
+  ],
+  "files": [
+    {
+      "path": "go.mod",
+      "sha256": "f73f6767d3d07bc371e3474e5c16f0ba22bf6e2629f3800c15eb9173eceef5bc"
+    },
+    {
+      "path": "go.sum",
+      "sha256": "a49461476b294b0831087891a1cf2489c59b5e3fc8410de2252c4be35c32ed64"
+    },
+    {
+      "path": "internal/backup/codec.go",
+      "sha256": "28ca6d5f26951f4f17915e16f1175d83020bfadeebb28ad94da7fe706c251309"
+    },
+    {
+      "path": "internal/backup/codec_additional.go",
+      "sha256": "9ac5beb7e92496b034d880c70932ad5a49548fc12261a09a0174b9350e5d6f80"
+    },
+    {
+      "path": "internal/backup/runner.go",
+      "sha256": "2950bf2c349f3ac8c683c2017098a98655583ad151ba9575603bf515b6253da7"
+    },
+    {
+      "path": "internal/model/compression.go",
+      "sha256": "7d97a6a38e2fc81d0ed6f911371b0ea436b278570677ca9d1f3ef8ce7b35a56a"
+    },
+    {
+      "path": "internal/store/migrations/0074_job_compression.sql",
+      "sha256": "08a6710e8bf07f51a919135396ea3722e050e2f01a28ec41e0204b10d1f8eb6d"
+    },
+    {
+      "path": "docs/COMPRESSION.md",
+      "sha256": "a267f3f886d68877b8d790480ce5f2ccac900d6391f833c674456b4c8e822264"
+    }
+  ],
+  "evidence": [
+    {
+      "path": "browser-tests.txt",
+      "sha256": "ab28376f7c126a1181d16355a04675cc963d9ba6278a427bccc0f00403005eb4"
+    },
+    {
+      "path": "codec-benchmark.txt",
+      "sha256": "a185655b2e390b60ee4a489b9e00364a0f94cf7ae2d99612e4f37428dacfa9bd"
+    },
+    {
+      "path": "go-tests-and-vet.txt",
+      "sha256": "a40a68a6539beb4d2742419d029a145d7616a32a64e59385f79dc3d76197e62b"
+    },
+    {
+      "path": "govulncheck-stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "web-build.txt",
+      "sha256": "a0bd2ef02d1b7abcf477b460eed06153c047b9d0d57c3cdabf8f010ca6e78981"
+    }
+  ]
+}

@@ -327,6 +327,7 @@ export interface RuntimeCompressionOption {
 }
 
 export interface RuntimeSettings {
+  web_sections?: import('./types').WebSections
   compression: {
     value: string
     level: number

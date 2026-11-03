@@ -77,7 +77,7 @@ spec:
         - name: jhvirt
           image: "{{ .Values.image.repository }}:{{ default .Chart.AppVersion .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          args: ["-config", "/app/config/kubernetes.yaml"]
+          args: ["-supervise", "-config", "/app/config/kubernetes.yaml"]
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
           env:

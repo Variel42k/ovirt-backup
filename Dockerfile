@@ -11,7 +11,7 @@ RUN npm run build:fast
 
 # Сборка бинаря. CGO не нужен ни для чего, поэтому образ получается
 # статическим и не тянет за собой libc сборочного дистрибутива.
-FROM docker.io/library/golang:1.27-alpine@sha256:4c9fe60190a2a3350ddc51de80d0224b8a6698d12bdfc999fee45ea9d6c46dbc AS build
+FROM docker.io/library/golang:1.27.3-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb AS build
 WORKDIR /build
 RUN apk add --no-cache git
 COPY go.mod go.sum ./

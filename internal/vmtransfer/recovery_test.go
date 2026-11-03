@@ -88,6 +88,8 @@ func recoveryFixture(t *testing.T, targetUnavailable, foreignTarget bool) (*Serv
 			w.WriteHeader(500)
 		case path == "/vms/source-vm":
 			fmt.Fprint(w, `{"id":"source-vm","status":"down"}`)
+		case path == "/vms":
+			fmt.Fprint(w, `{"vm":[{"id":"target-vm","description":"jhvirt-transfer:move"}]}`)
 		case path == "/vms/target-vm":
 			if targetUnavailable {
 				w.WriteHeader(503)

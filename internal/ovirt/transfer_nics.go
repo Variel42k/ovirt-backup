@@ -10,6 +10,7 @@ type TransferNIC struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
 	Linked      Bool   `json:"linked"`
+	OnBoot      *Bool  `json:"on_boot"`
 	VNICProfile struct {
 		ID string `json:"id"`
 	} `json:"vnic_profile"`

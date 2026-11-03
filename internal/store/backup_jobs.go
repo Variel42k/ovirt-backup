@@ -19,7 +19,7 @@ const jobColumns = `id, name, enabled, server_id, vm_ids, vm_name_regex, cluster
 	replication_enabled, force_full_next, storage_mode, ova_host_id, ova_directory,
 	consistency, require_consistency, max_freeze_sec, freeze_by, max_read_mbps, freeze_mountpoints`
 
-const jobColumnsWithLegacy = jobColumns + `, legacy_incremental_mode`
+const jobColumnsWithLegacy = jobColumns + `, legacy_incremental_mode, compression`
 
 // CreateBackupJob stores a new job definition.
 func (s *Store) CreateBackupJob(ctx context.Context, j *model.BackupJob) error {
@@ -38,7 +38,7 @@ func (s *Store) CreateBackupJob(ctx context.Context, j *model.BackupJob) error {
 	j.NormalizeConsistency()
 
 	_, err := s.db.Exec(ctx, `INSERT INTO backup_jobs (`+jobColumnsWithLegacy+`)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		j.ID, j.Name, j.Enabled, j.ServerID, encodeJSON(j.VMIDs), j.VMNameRegex,
 		encodeJSON(j.ClusterIDs), encodeJSON(j.Tags), encodeJSON(j.ExcludeVMIDs),
 		encodeJSON(j.ExcludeDiskIDs), string(j.Type), j.FullEvery, string(j.FallbackType),
@@ -49,7 +49,7 @@ func (s *Store) CreateBackupJob(ctx context.Context, j *model.BackupJob) error {
 		j.NextRunAt, j.CreatedAt, j.UpdatedAt, j.ReplicationEnabled, j.ForceFullNext,
 		string(j.StorageMode), j.OVAHostID, j.OVADirectory,
 		string(j.Consistency), j.RequireConsistency, toSeconds(j.MaxFreeze), string(j.FreezeBy), j.MaxReadMBps,
-		encodeJSON(j.FreezeMountpoints), string(j.LegacyIncrementalMode))
+		encodeJSON(j.FreezeMountpoints), string(j.LegacyIncrementalMode), j.Compression)
 	if err != nil {
 		return fmt.Errorf("insert backup job: %w", err)
 	}
@@ -72,7 +72,7 @@ func (s *Store) UpdateBackupJob(ctx context.Context, j *model.BackupJob) error {
 		verify_options=?, export_qcow2=?, encrypt=?, priority=?, concurrency=?, updated_at=?,
 		replication_enabled=?, force_full_next=?, storage_mode=?, ova_host_id=?, ova_directory=?,
 		consistency=?, require_consistency=?, max_freeze_sec=?, freeze_by=?, max_read_mbps=?,
-		freeze_mountpoints=?, legacy_incremental_mode=? WHERE id=?`,
+		freeze_mountpoints=?, legacy_incremental_mode=?, compression=? WHERE id=?`,
 		j.Name, j.Enabled, j.ServerID, encodeJSON(j.VMIDs), j.VMNameRegex, encodeJSON(j.ClusterIDs),
 		encodeJSON(j.Tags), encodeJSON(j.ExcludeVMIDs), encodeJSON(j.ExcludeDiskIDs),
 		string(j.Type), j.FullEvery, string(j.FallbackType), j.Schedule, toSeconds(j.MaxDuration),
@@ -80,7 +80,7 @@ func (s *Store) UpdateBackupJob(ctx context.Context, j *model.BackupJob) error {
 		j.ExportQcow2, j.Encrypt, j.Priority, j.Concurrency, j.UpdatedAt,
 		j.ReplicationEnabled, j.ForceFullNext, string(j.StorageMode), j.OVAHostID, j.OVADirectory,
 		string(j.Consistency), j.RequireConsistency, toSeconds(j.MaxFreeze), string(j.FreezeBy), j.MaxReadMBps,
-		encodeJSON(j.FreezeMountpoints), string(j.LegacyIncrementalMode), j.ID)
+		encodeJSON(j.FreezeMountpoints), string(j.LegacyIncrementalMode), j.Compression, j.ID)
 	if err != nil {
 		return fmt.Errorf("update backup job: %w", err)
 	}
@@ -171,7 +171,7 @@ func scanJob(row rowScanner) (*model.BackupJob, error) {
 		&j.Encrypt, &j.Priority, &j.Concurrency, &lastRun, &lastStatus, &nextRun,
 		&createdAt, &updatedAt, &j.ReplicationEnabled, &j.ForceFullNext, &storageMode,
 		&j.OVAHostID, &j.OVADirectory, &consistency, &j.RequireConsistency, &maxFreezeSec, &freezeBy, &j.MaxReadMBps,
-		&freezeMountpoints, &legacyMode)
+		&freezeMountpoints, &legacyMode, &j.Compression)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}

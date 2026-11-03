@@ -45,7 +45,9 @@ type virtualizationKindDescriptor struct {
 // metaResponse tells the SPA what this deployment can do, which is what lets
 // the UI hide features that would only fail.
 type metaResponse struct {
+	WebSections         model.WebSections              `json:"web_sections"`
 	BackupTypes         []optionDescriptor             `json:"backup_types"`
+	CompressionOptions  []optionDescriptor             `json:"compression_options"`
 	VerifyModes         []optionDescriptor             `json:"verify_modes"`
 	StorageKinds        []optionDescriptor             `json:"storage_kinds"`
 	VirtualizationKinds []virtualizationKindDescriptor `json:"virtualization_kinds"`
@@ -147,7 +149,13 @@ func storageKindOptions() []optionDescriptor {
 }
 
 func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
-	resp := metaResponse{DefaultRetention: model.DefaultRetention()}
+	resp := metaResponse{DefaultRetention: model.DefaultRetention(), CompressionOptions: backupCompressionOptions()}
+	sections, err := s.store.WebSections(r.Context())
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	resp.WebSections = sections
 
 	descriptions := map[model.BackupType]string{
 		model.BackupFull:         "Полная копия через Backup API. Создаёт checkpoint — основу для инкрементов. ВМ не останавливается.",

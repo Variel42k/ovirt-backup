@@ -102,6 +102,22 @@ func (e *Engine) SetCompression(name string) error {
 	return nil
 }
 
+// ResolveCompression snapshots the effective algorithm for one run. Empty
+// means inherit; "none" is an explicit choice and must not inherit.
+func (e *Engine) ResolveCompression(name string) (string, error) {
+	if name == "" {
+		name = e.Compression()
+		// Embedded callers historically used an empty config for no compression.
+		if name == "" {
+			name = CompressionNone
+		}
+	}
+	if !KnownCompression(name) {
+		return "", fmt.Errorf("неизвестный алгоритм сжатия %q", name)
+	}
+	return name, nil
+}
+
 // acquireHeavy занимает место в очереди проверок и восстановлений.
 //
 // Ожидание прерывается вместе с контекстом: операция, отменённая пока стояла
@@ -157,6 +173,7 @@ type RunRequest struct {
 	// см. model.BackupJob.FreezeMountpoints.
 	FreezeMountpoints []string
 	Encrypt           bool
+	Compression       string
 	ExportQcow2       bool
 	VerifyAfter       model.VerifyMode
 	VerifyOptions     model.VerifyOptions
@@ -185,6 +202,13 @@ type RunRequest struct {
 // Errors are recorded on the run before being returned, so a caller that only
 // logs still leaves a full explanation visible in the UI.
 func (e *Engine) Execute(ctx context.Context, req RunRequest) (*model.BackupRun, error) {
+	compression, err := e.ResolveCompression(req.Compression)
+	if err != nil {
+		return nil, err
+	}
+	if req.Compression != "" && (req.Type == model.BackupOVA || req.Type == model.BackupConfig) {
+		return nil, fmt.Errorf("выбор сжатия доступен только для бэкапа с дисками")
+	}
 	srv, err := e.store.GetServer(ctx, req.ServerID)
 	if err != nil {
 		return nil, fmt.Errorf("сервер: %w", err)
@@ -229,7 +253,7 @@ func (e *Engine) Execute(ctx context.Context, req RunRequest) (*model.BackupRun,
 		Status:                model.RunPending,
 		StorageTargetID:       target.ID,
 		Encrypted:             req.Encrypt,
-		Compression:           e.Compression(),
+		Compression:           compression,
 		LegacyIncrementalMode: req.LegacyIncrementalMode,
 		CreatedAt:             time.Now().UTC(),
 	}

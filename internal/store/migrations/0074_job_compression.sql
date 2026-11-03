@@ -1,0 +1,1 @@
+ALTER TABLE backup_jobs ADD COLUMN compression TEXT NOT NULL DEFAULT '';

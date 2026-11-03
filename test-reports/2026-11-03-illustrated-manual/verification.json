@@ -1,0 +1,172 @@
+{
+  "status": "passed",
+  "date": "2026-11-03",
+  "pages": 138,
+  "sections": 131,
+  "figures": 101,
+  "new_illustrated_sections": 24,
+  "toc_destinations_verified": 131,
+  "preserved_opaque_parts": 92,
+  "preserved_images": 77,
+  "retained_sections_with_matching_body_text": 102,
+  "new_pages": [
+    {
+      "section": 4,
+      "page": 11,
+      "title": "Почему принятая задача может ещё не передавать данные"
+    },
+    {
+      "section": 9,
+      "page": 16,
+      "title": "Маршрут от подключения до проверенной копии"
+    },
+    {
+      "section": 15,
+      "page": 22,
+      "title": "Выбор алгоритма сжатия"
+    },
+    {
+      "section": 16,
+      "page": 23,
+      "title": "Как определяется алгоритм конкретного запуска"
+    },
+    {
+      "section": 17,
+      "page": 24,
+      "title": "Путь чанка при сжатии и шифровании"
+    },
+    {
+      "section": 18,
+      "page": 25,
+      "title": "Что происходит с несжимаемыми данными"
+    },
+    {
+      "section": 19,
+      "page": 26,
+      "title": "Как читать локальное сравнение кодеков"
+    },
+    {
+      "section": 20,
+      "page": 27,
+      "title": "Восстановление цепочки с разными кодеками"
+    },
+    {
+      "section": 21,
+      "page": 28,
+      "title": "Нейросетевое сжатие как исследовательский вариант"
+    },
+    {
+      "section": 29,
+      "page": 36,
+      "title": "Состав копии и исключённые диски"
+    },
+    {
+      "section": 34,
+      "page": 41,
+      "title": "Шаг задания Охват"
+    },
+    {
+      "section": 35,
+      "page": 42,
+      "title": "Шаг задания Способ"
+    },
+    {
+      "section": 36,
+      "page": 43,
+      "title": "Шаг задания Хранение"
+    },
+    {
+      "section": 37,
+      "page": 44,
+      "title": "Шаг задания Проверка и защита"
+    },
+    {
+      "section": 38,
+      "page": 45,
+      "title": "Шаг задания Итог"
+    },
+    {
+      "section": 52,
+      "page": 59,
+      "title": "Как выбрать физическую копию для восстановления"
+    },
+    {
+      "section": 57,
+      "page": 64,
+      "title": "Как различаются файлы и логический дамп базы"
+    },
+    {
+      "section": 65,
+      "page": 72,
+      "title": "Миграция шаг Источник"
+    },
+    {
+      "section": 66,
+      "page": 73,
+      "title": "Миграция шаг Размещение"
+    },
+    {
+      "section": 67,
+      "page": 74,
+      "title": "Миграция шаг Имена и сети"
+    },
+    {
+      "section": 73,
+      "page": 80,
+      "title": "Питание ВМ при готовности и переключении"
+    },
+    {
+      "section": 78,
+      "page": 85,
+      "title": "Как группа занимает последовательные и параллельные слоты"
+    },
+    {
+      "section": 86,
+      "page": 93,
+      "title": "Что происходит с новыми данными цели при возврате"
+    },
+    {
+      "section": 92,
+      "page": 99,
+      "title": "Как читать политику восстановления кластера"
+    }
+  ],
+  "missing_source_paths": [],
+  "prior_server_test_date": "2026-10-30",
+  "prior_go_packages_passed": 38,
+  "prior_key_files_hash_matched": [
+    "go.mod",
+    "go.sum",
+    "internal/backup/codec.go",
+    "internal/backup/codec_additional.go",
+    "internal/backup/runner.go",
+    "internal/model/compression.go",
+    "internal/store/migrations/0074_job_compression.sql",
+    "docs/COMPRESSION.md"
+  ],
+  "fresh_browser_tests_passed": 34,
+  "capture_rechecks_passed": [
+    3,
+    1,
+    1
+  ],
+  "visual_review": "All new illustrated pages inspected at page scale. Cover, contents and changed retained pages reviewed. Original styles, themes, images and opaque parts preserved byte-for-byte; retained body text compared with the previously reviewed PDF except declared content edits.",
+  "limits": [
+    "Browser API mocked; no live VM operations",
+    "CPU measurements are the saved synthetic benchmark of 2026-10-30",
+    "No new FSTEC conformity assessment; retained assessment explicitly dated",
+    "Neural compression not implemented"
+  ],
+  "artifacts": [
+    {
+      "path": "E:\\git\\justhpc\\justhpc-virt-manager\\output\\illustrated-manual\\Backup_Virt_Manager_Illustrated_Manual_RU_2026-11-03_v4.docx",
+      "bytes": 4229871,
+      "sha256": "1b157b8fde9f07b7e8f5f4dd686e6c85cbde2a03d90e7aa2886caa4e7c7a5ede"
+    },
+    {
+      "path": "E:\\git\\justhpc\\justhpc-virt-manager\\output\\illustrated-manual\\Backup_Virt_Manager_Illustrated_Manual_RU_2026-11-03_v4.pdf",
+      "bytes": 5204558,
+      "sha256": "7cb28f89e5f6d48f692d4eb3cf7cd100ba4b1ce18c7df3bc66ac180dc97a7b29"
+    }
+  ]
+}

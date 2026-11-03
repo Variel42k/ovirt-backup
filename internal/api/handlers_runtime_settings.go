@@ -32,6 +32,7 @@ type runtimeTimezoneResponse struct {
 }
 
 type runtimeSettingsResponse struct {
+	WebSections   model.WebSections            `json:"web_sections"`
 	Compression   runtimeCompressionResponse   `json:"compression"`
 	Timezone      runtimeTimezoneResponse      `json:"timezone"`
 	LogRotation   runtimeLogRotationResponse   `json:"log_rotation"`
@@ -44,6 +45,10 @@ type runtimeBackupQualityResponse struct {
 }
 
 func (s *Server) runtimeSettings(r *http.Request) (runtimeSettingsResponse, error) {
+	sections, err := s.store.WebSections(r.Context())
+	if err != nil {
+		return runtimeSettingsResponse{}, err
+	}
 	stored, err := s.store.RuntimeSettings(r.Context())
 	if err != nil {
 		return runtimeSettingsResponse{}, err
@@ -72,20 +77,10 @@ func (s *Server) runtimeSettings(r *http.Request) (runtimeSettingsResponse, erro
 		qualityValue = s.quality.Settings()
 	}
 
-	descriptions := map[string]string{
-		backup.CompressionZstd: "Оптимальный баланс скорости и размера; значение по умолчанию.",
-		backup.CompressionGzip: "Совместимый gzip-поток; медленнее zstd.",
-		backup.CompressionS2:   "Минимальная нагрузка на процессор ценой большего размера.",
-		backup.CompressionNone: "Без сжатия; для хранилищ, которые сжимают данные сами.",
-	}
-	options := make([]optionDescriptor, 0, len(backup.Compressions))
-	for _, value := range backup.Compressions {
-		options = append(options, optionDescriptor{
-			Value: value, Title: strings.ToUpper(value), Description: descriptions[value],
-		})
-	}
+	options := backupCompressionOptions()
 
 	return runtimeSettingsResponse{
+		WebSections: sections,
 		Compression: runtimeCompressionResponse{
 			Value: compression, Level: s.cfg.Backup.CompressionLevel,
 			Source: compressionSource, Options: options,

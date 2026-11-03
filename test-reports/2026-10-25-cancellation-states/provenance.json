@@ -1,0 +1,27 @@
+{
+  "source_sha256": "44e4c9c86e31f5ed40f0484ffab6bbad40800bc42c3f7b1cc7ce3686c034fb81",
+  "source_files": 773,
+  "browser": {
+    "startTime": "2026-10-25T07:46:47.015Z",
+    "duration": 88005.605,
+    "expected": 58,
+    "skipped": 0,
+    "unexpected": 0,
+    "flaky": 0
+  },
+  "final_controls": {
+    "startTime": "2026-10-25T07:51:21.620Z",
+    "duration": 26178.523,
+    "expected": 22,
+    "skipped": 0,
+    "unexpected": 0,
+    "flaky": 0
+  },
+  "production_deployed": false,
+  "go_checks": [
+    "go vet ./...",
+    "go test ./..."
+  ],
+  "frontend_build": "npm run build passed",
+  "real_vm_commands_sent": false
+}

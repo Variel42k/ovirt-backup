@@ -153,6 +153,19 @@ func (s *Server) handleVMTransferSamples(w http.ResponseWriter, r *http.Request)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": len(items)})
 }
+
+func (s *Server) handleVMTransferCancellationState(w http.ResponseWriter, r *http.Request) {
+	if s.vmTransfers == nil {
+		s.writeError(w, r, badRequest("служба миграции не инициализирована"))
+		return
+	}
+	state, err := s.vmTransfers.CancellationState(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, state)
+}
 func (s *Server) handlePlanVMTransfer(w http.ResponseWriter, r *http.Request) {
 	var req model.VMTransferRequest
 	if err := decodeJSON(r, &req); err != nil {

@@ -1,5 +1,7 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
+import { useAppStore } from '@/stores/app'
+import { notify, notifyError } from '@/api/client'
 
 const routes = [
   {
@@ -35,10 +37,10 @@ const routes = [
 			{ path: 'file-backups', name: 'file-backups', component: () => import('@/pages/FileBackupsPage.vue'), meta: { perm: 'file_backups.read' } },
       { path: 'verify', name: 'verify', component: () => import('@/pages/VerifyPage.vue'), meta: { perm: 'backups.read' } },
       { path: 'image-import', name: 'image-import', component: () => import('@/pages/ImageImportPage.vue'), meta: { perm: 'backups.read' } },
-      { path: 'gitlab-clean', name: 'gitlab-clean', component: () => import('@/pages/GitlabCleanPage.vue'), meta: { perm: 'servers.read' } },
+      { path: 'gitlab-clean', name: 'gitlab-clean', component: () => import('@/pages/GitlabCleanPage.vue'), meta: { perm: 'servers.read', webSection: 'gitlab-clean' } },
       { path: 'db-dumps', name: 'db-dumps', component: () => import('@/pages/DbDumpsPage.vue'), meta: { perm: 'jobs.read' } },
       { path: 'coverage', name: 'coverage', component: () => import('@/pages/CoveragePage.vue'), meta: { perm: 'monitoring.read' } },
-      { path: 'discovery', name: 'discovery', component: () => import('@/pages/DiscoveryPage.vue'), meta: { perm: 'monitoring.read' } },
+      { path: 'discovery', name: 'discovery', component: () => import('@/pages/DiscoveryPage.vue'), meta: { perm: 'monitoring.read', webSection: 'discovery' } },
       { path: 'retention', name: 'retention', component: () => import('@/pages/RetentionPage.vue'), meta: { perm: 'backups.read' } },
       { path: 'storages', name: 'storages', component: () => import('@/pages/StoragesPage.vue'), meta: { perm: 'storages.read' } },
       { path: 'alerts', name: 'alerts', component: () => import('@/pages/AlertsPage.vue'), meta: { perm: 'alerts.read' } },
@@ -100,6 +102,19 @@ router.beforeEach(async (to) => {
   const requiredPermission = String(to.meta.perm ?? '')
   if (requiredPermission && !auth.can(requiredPermission)) {
     return { name: landingRoutes.find((candidate) => !candidate.perm || auth.can(candidate.perm))?.name ?? 'settings' }
+  }
+  if (to.meta.webSection) {
+    const app = useAppStore()
+    try {
+      await app.reloadMeta()
+    } catch (err) {
+      notifyError(err, 'Не удалось проверить доступность раздела')
+      return { name: 'settings' }
+    }
+    if (!app.sectionEnabled(String(to.meta.webSection))) {
+      notify({ type: 'warning', message: 'Раздел отключён в параметрах системы' })
+      return { name: 'settings' }
+    }
   }
   return true
 })

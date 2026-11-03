@@ -113,6 +113,10 @@ func (d *Dispatcher) Execute(ctx context.Context, req backup.RunRequest) (*model
 
 // executeLibvirt runs a hot backup against a bare libvirt host.
 func (d *Dispatcher) executeLibvirt(ctx context.Context, srv *model.Server, req backup.RunRequest) (*model.BackupRun, error) {
+	compression, err := d.Engine.ResolveCompression(req.Compression)
+	if err != nil {
+		return nil, err
+	}
 	if req.ExportQcow2 {
 		if _, err := backup.FindQemuImg(d.cfg.QemuImgPath); err != nil {
 			return nil, fmt.Errorf("export_qcow2: %w", err)
@@ -150,7 +154,7 @@ func (d *Dispatcher) executeLibvirt(ctx context.Context, srv *model.Server, req 
 		Status:          model.RunPending,
 		StorageTargetID: target.ID,
 		Encrypted:       req.Encrypt,
-		Compression:     d.Engine.Compression(),
+		Compression:     compression,
 		CreatedAt:       time.Now().UTC(),
 	}
 

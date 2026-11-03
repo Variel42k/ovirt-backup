@@ -612,6 +612,8 @@ type BackupJob struct {
 	ExportQcow2 bool `json:"export_qcow2"`
 	// Шифровать данные в хранилище (AES-256-GCM на чанк).
 	Encrypt bool `json:"encrypt"`
+	// Empty inherits the system algorithm; "none" explicitly disables compression.
+	Compression string `json:"compression"`
 
 	Priority    int `json:"priority"` // больше — раньше в очереди
 	Concurrency int `json:"concurrency"`
@@ -626,6 +628,12 @@ type BackupJob struct {
 // Validate checks the parts of a job definition that must hold before it is
 // stored, independent of the current inventory.
 func (j *BackupJob) Validate() error {
+	if !ValidBackupCompression(j.Compression) {
+		return fmt.Errorf("неизвестный алгоритм сжатия: %q", j.Compression)
+	}
+	if j.Compression != "" && (j.Type == BackupOVA || j.Type == BackupConfig) {
+		return fmt.Errorf("выбор сжатия доступен только для бэкапа с дисками")
+	}
 	if j.Name == "" {
 		return fmt.Errorf("имя задания не может быть пустым")
 	}

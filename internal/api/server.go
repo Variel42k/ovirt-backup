@@ -218,6 +218,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /vm-transfers/source", s.perm(model.PermServersRead, s.handleVMTransferSource))
 	mux.HandleFunc("GET /vm-transfers/{id}", s.perm(model.PermServersRead, s.perm(model.PermBackupsRead, s.handleGetVMTransfer)))
 	mux.HandleFunc("GET /vm-transfers/{id}/samples", s.perm(model.PermServersRead, s.perm(model.PermBackupsRead, s.handleVMTransferSamples)))
+	mux.HandleFunc("GET /vm-transfers/{id}/cancellation-state", s.perm(model.PermServersRead, s.perm(model.PermBackupsRead, s.handleVMTransferCancellationState)))
 	mux.HandleFunc("POST /vm-transfers/plan", s.perm(model.PermServersWrite, s.perm(model.PermBackupsWrite, s.management(s.handlePlanVMTransfer))))
 	mux.HandleFunc("POST /vm-transfers", s.perm(model.PermServersWrite, s.perm(model.PermBackupsWrite, s.management(s.handleCreateVMTransfer))))
 	mux.HandleFunc("POST /vm-transfers/{id}/action", s.perm(model.PermServersWrite, s.perm(model.PermBackupsWrite, s.management(s.handleVMTransferAction))))
@@ -434,6 +435,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 
 	// Параметры, которые применяются без перезапуска и переживают его в БД.
 	mux.HandleFunc("GET /settings/runtime", s.perm(model.PermSettingsRead, s.handleRuntimeSettings))
+	mux.HandleFunc("PUT /settings/runtime/web-sections", s.perm(model.PermSettingsAdmin, s.handleSetWebSections))
 	mux.HandleFunc("GET /settings/identity", s.perm(model.PermUsersAdmin, s.handleGetIdentitySettings))
 	mux.HandleFunc("PUT /settings/identity", s.perm(model.PermUsersAdmin, s.handleSetIdentitySettings))
 	mux.HandleFunc("POST /settings/identity/embedded-keycloak", s.perm(model.PermUsersAdmin, s.handleBootstrapEmbeddedKeycloak))

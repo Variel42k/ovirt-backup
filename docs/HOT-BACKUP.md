@@ -7,7 +7,9 @@
 Про заморозку гостя — в [GUEST-FREEZE.md](GUEST-FREEZE.md), про устройство
 дисков QEMU — в [DISK-ARCHITECTURE.md](DISK-ARCHITECTURE.md), про повседневную
 эксплуатацию — в [OPERATIONS.md](OPERATIONS.md). Схемы ниже рисует GitHub; во
-встроенной документации они показаны исходником Mermaid.
+встроенной документации они показаны исходником Mermaid. Потребление ресурсов
+службы, ограничения параллелизма и особенности памяти восстановления описаны
+в [RESOURCE-USAGE.md](RESOURCE-USAGE.md).
 
 ---
 

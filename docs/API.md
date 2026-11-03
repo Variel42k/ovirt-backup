@@ -533,7 +533,7 @@ curl -b cookies.txt -X PUT http://localhost:8080/api/v1/api-tokens/<id> \
 
 ```jsonc
 // PUT /settings/runtime/compression
-{ "compression": "gzip" } // zstd|gzip|s2|none
+{ "compression": "gzip" } // zstd|gzip|s2|lz4|brotli|none
 
 // PUT /settings/runtime/timezone
 { "timezone": "Asia/Yekaterinburg" }
@@ -565,6 +565,14 @@ curl -b cookies.txt -X PUT http://localhost:8080/api/v1/api-tokens/<id> \
 `DELETE` удаляет переопределение и возвращает значения из YAML/окружения.
 Сжатие меняется только для новых запусков; активный запуск использует алгоритм,
 зафиксированный при старте. `compression_level` через этот API не изменяется.
+
+`GET /meta` также публикует `compression_options` с названиями и описаниями
+кодеков. В POST/PUT задания и POST `/backups` поле `compression` задаёт алгоритм
+блочной копии; `""` наследует системную настройку, `none` явно выключает сжатие.
+Отсутствующее поле при PUT задания сохраняет прежнее переопределение. Для
+Proxmox, OVA и копии только конфигурации явный выбор неприменим.
+См. [COMPRESSION.md](COMPRESSION.md).
+
 Смена часового пояса немедленно пересчитывает будущие точки всех cron-заданий,
 но не отменяет и не перезапускает уже выполняющиеся бэкапы. Эта же зона используется web,
 отчётами, уведомлениями и журналом; открытые web-сессии получают SSE-событие
@@ -1483,9 +1491,19 @@ Mute/snooze не скрывает alert в web и не меняет его state
 | Метод | Путь | Описание |
 |---|---|---|
 | `GET` | `/settings/runtime` | эффективные значения и источник `config`/`database` |
+| `PUT` | `/settings/runtime/web-sections` | сохранить общую доступность разделов web; право `settings.admin` |
 | `PUT/DELETE` | `/settings/runtime/timezone` | сохранить системную IANA-зону или сбросить к YAML/окружению |
 | `PUT` | `/settings/runtime/backup-quality` | сохранить полный набор порогов в PostgreSQL |
 | `DELETE` | `/settings/runtime/backup-quality` | сбросить к YAML/окружению |
+
+`PUT /settings/runtime/web-sections` принимает оба обязательных логических поля
+`{"discovery":false,"gitlab_clean":true}` и возвращает сохранённый объект.
+Отсутствующие, `null` и нелогические значения отклоняются. По умолчанию оба
+раздела включены. Значение `web_sections` также возвращается в `/meta` и
+`/settings/runtime`, поэтому доступно web-пользователям без административного
+права чтения настроек. Изменение публикует `settings.changed`.
+Настройка скрывает меню и закрывает прямые маршруты web; права API и расписание
+поиска сервисов регулируются отдельно. Это не механизм разграничения доступа.
 
 ```json
 {
@@ -1659,6 +1677,7 @@ source.addEventListener('alert', (e) => console.log(JSON.parse(e.data)))
 | `GET /vm-transfers/source?server_id=…&vm_id=…` | Исходные NIC и доступность предварительного копирования |
 | `GET /vm-transfers/{id}` | Состояние, этап, созданные ресурсы и ошибка |
 | `GET /vm-transfers/{id}/samples` | До 600 сохранённых замеров передачи: этап, направление, байты, скорость |
+| `GET /vm-transfers/{id}/cancellation-state` | Состояния питания из Engine перед выбором отмены; `target_exists: null` означает, что наличие цели не удалось проверить; команды ВМ не выполняются |
 | `POST /vm-transfers/plan` | Предварительная проверка без остановки и создания ресурсов |
 | `POST /vm-transfers` | Создание и запуск подтверждённой миграции |
 | `POST /vm-transfers/{id}/action` | `sync`, `cutover`, `pause`, `resume`, `recover`, `hold`, `rollback_keep`, `complete`, `cancel`, `rollback`, `forget` |

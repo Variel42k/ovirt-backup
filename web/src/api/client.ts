@@ -281,6 +281,7 @@ const unwrap = <T>(data: ListResponse<T>): T[] => data.items ?? []
 export const api = {
   listVMTransfers: () => http.get<ListResponse<import('./types').VMTransfer>>('/vm-transfers').then(r => unwrap(r.data)),
   vmTransferSamples: (id: string) => http.get<ListResponse<import('./types').VMTransferSample>>(`/vm-transfers/${id}/samples`).then(r => unwrap(r.data)),
+  vmTransferCancellationState: (id: string) => http.get<import('./types').VMTransferCancellationState>(`/vm-transfers/${id}/cancellation-state`, { timeout: 20000 }).then(r => r.data),
   vmTransferSource: (server_id: string, vm_id: string) => http.get<{ nics: import('./types').VMTransferNIC[]; total_bytes: number; allocated_bytes: number; warm_available: boolean; warm_reason: string }>('/vm-transfers/source', { params: { server_id, vm_id } }).then(r => r.data),
   planVMTransferBatch: (request: import('./types').VMTransferBatchRequest) => http.post<import('./types').VMTransferBatchPlan>('/vm-transfers/batches/plan', request).then(r => r.data),
   createVMTransferBatch: (request: import('./types').VMTransferBatchRequest) => http.post<import('./types').VMTransferBatchResult>('/vm-transfers/batches', request).then(r => r.data),
@@ -697,6 +698,8 @@ export const api = {
 
   // Настройки, которые сохраняются в PostgreSQL и действуют без перезапуска.
   runtimeSettings: () => http.get<RuntimeSettings>('/settings/runtime').then((r) => r.data),
+  setWebSections: (value: import('./types').WebSections) =>
+    http.put<import('./types').WebSections>('/settings/runtime/web-sections', value).then((r) => r.data),
   identitySettings: () => http.get<IdentitySettings>('/settings/identity').then((r) => r.data),
   keycloakConsoleAdmin: (local_password: string) =>
     http.post<import('./settings-types').KeycloakConsoleCredentials>('/settings/identity/console-admin', { local_password }, { timeout: 130_000 }).then((r) => r.data),

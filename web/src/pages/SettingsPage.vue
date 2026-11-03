@@ -134,6 +134,21 @@ const sectionLoading = ref<Record<SettingsSection, boolean>>({
 const loading = ref(false)
 const runtimeUnavailable = computed(() => sectionLoading.value.runtime || Boolean(sectionErrors.value.runtime))
 const runtimeSettings = ref<RuntimeSettings | null>(null)
+const webSectionsBusy = ref(false)
+const webSections = computed(() => app.meta?.web_sections ?? runtimeSettings.value?.web_sections ?? { discovery: true, gitlab_clean: true })
+async function setWebSection(key: 'discovery' | 'gitlab_clean', enabled: boolean) {
+  webSectionsBusy.value = true
+  try {
+    const value = await api.setWebSections({ ...webSections.value, [key]: enabled })
+    if (app.meta) app.meta.web_sections = value
+    if (runtimeSettings.value) runtimeSettings.value.web_sections = value
+    notifyOk('Доступность разделов сохранена')
+  } catch (err) {
+    notifyError(err, 'Не удалось изменить доступность разделов')
+  } finally {
+    webSectionsBusy.value = false
+  }
+}
 const compressionBusy = ref(false)
 const timezoneBusy = ref(false)
 const timezoneForm = ref('')
@@ -1278,6 +1293,38 @@ watch(() => [route.query, route.meta.settingsTab], applyDeepLink)
                       aria-label="Всплывающие уведомления"
                       @update:model-value="setPopupNotificationsEnabled"
                     />
+                  </q-item-section>
+                </q-item>
+              </q-list>
+
+              <q-list bordered separator dense class="q-mb-md" data-testid="web-sections-settings">
+                <q-item-label header>Разделы веб-интерфейса</q-item-label>
+                <q-item>
+                  <q-item-section>
+                    <q-item-label>Поиск сервисов</q-item-label>
+                    <q-item-label caption>Поиск приложений и карта окружения</q-item-label>
+                  </q-item-section>
+                  <q-item-section side>
+                    <q-toggle :model-value="webSections.discovery" aria-label="Раздел Поиск сервисов"
+                      :disable="!auth.can('settings.admin') || webSectionsBusy || !app.meta"
+                      @update:model-value="value => setWebSection('discovery', value)" />
+                  </q-item-section>
+                </q-item>
+                <q-item>
+                  <q-item-section>
+                    <q-item-label>Очистка GitLab</q-item-label>
+                    <q-item-label caption>Анализ репозиториев и очистка истории</q-item-label>
+                  </q-item-section>
+                  <q-item-section side>
+                    <q-toggle :model-value="webSections.gitlab_clean" aria-label="Раздел Очистка GitLab"
+                      :disable="!auth.can('settings.admin') || webSectionsBusy || !app.meta"
+                      @update:model-value="value => setWebSection('gitlab_clean', value)" />
+                  </q-item-section>
+                </q-item>
+                <q-item>
+                  <q-item-section class="text-caption text-grey-7">
+                    Общая настройка для всех пользователей. Выключенный раздел скрыт в меню и недоступен по прямой ссылке.
+                    Фоновые задания и разрешения API настраиваются отдельно.
                   </q-item-section>
                 </q-item>
               </q-list>

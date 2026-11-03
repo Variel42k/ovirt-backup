@@ -358,6 +358,8 @@ export interface BackupJob {
   verify_options?: BootVerifyOptions
   export_qcow2: boolean
   encrypt: boolean
+  /** Empty inherits the system algorithm; none explicitly disables compression. */
+  compression?: string
   priority: number
   concurrency: number
   last_run_at?: string
@@ -1538,7 +1540,14 @@ export interface DocGuideContent extends DocGuide {
   markdown: string
 }
 
+export interface WebSections {
+  discovery: boolean
+  gitlab_clean: boolean
+}
+
 export interface Meta {
+  web_sections?: WebSections
+  compression_options?: OptionDescriptor[]
   backup_types: OptionDescriptor[]
   verify_modes: OptionDescriptor[]
   storage_kinds: OptionDescriptor[]
@@ -1982,6 +1991,7 @@ export interface DiscoverySettingsResponse {
 }
 
 export interface VMTransferRequest {
+  auto_sync_interval_seconds?: number
   source_server_id: string; source_vm_id: string; target_server_id: string
   cluster_id: string; host_id?: string; storage_domain_id: string; storage_target_id: string
   name: string; mode: 'cold' | 'warm'; preserve_mac: boolean; confirm: boolean
@@ -1994,6 +2004,7 @@ export interface VMTransferPlan {
   nics: VMTransferNIC[]; blockers: string[]; warnings: string[]; warm_available: boolean; warm_reason: string
 }
 export interface VMTransfer {
+	was_running?: boolean
 	active_action?: string
 	 recovery_policy?: MigrationRecoveryPolicy; source_cluster_id?: string; recovery_action?: string
 	 recovery_attempts?: number; rollback_attempts?: number; next_recovery_at?: string; manual_pause?: boolean
@@ -2031,3 +2042,8 @@ export interface ClusterRecoveryPolicy {
 }
 
 export interface VMTransferSample { at: string; phase: string; stage_id: string; direction: string; progress: number; bytes: number; total: number; speed: number }
+
+export interface VMTransferCancellationState {
+  observed_at: string; source_status: string; source_error?: string
+  target_status: string; target_exists: boolean | null; target_vm_id?: string; target_error?: string
+}

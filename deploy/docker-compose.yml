@@ -245,14 +245,7 @@ services:
       - database
 
     healthcheck:
-      test:
-        - CMD-SHELL
-        - >-
-          if [ "${JHV_TLS_ENABLED:-false}" = "true" ]; then
-            wget --no-check-certificate -qO- https://127.0.0.1:8080/healthz;
-          else
-            wget -qO- http://127.0.0.1:8080/healthz;
-          fi
+      test: ["CMD", "/app/ovirt-backup-server", "-healthcheck", "-config", "/app/config/ovirt-backup.yaml"]
       interval: 30s
       timeout: 5s
       retries: 3

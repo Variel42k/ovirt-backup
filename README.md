@@ -609,6 +609,8 @@ jvbackup list -repo 'webdavs://backup:pass@cloud.example.org/remote.php/dav/file
 - [`docs/DISK-ARCHITECTURE.md`](docs/DISK-ARCHITECTURE.md) — как устроены диски
   QEMU, почему горячий бэкап возможен и где проходят его границы.
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — устройство сервиса и принятые решения.
+- [`docs/RESOURCE-USAGE.md`](docs/RESOURCE-USAGE.md) — CPU, память, сеть и СХД:
+  действующие лимиты, оценки по коду, план оптимизации и нагрузочных проверок.
 - [`docs/BACKUP-FORMAT.md`](docs/BACKUP-FORMAT.md) — формат хранения бэкапов и разбор
   архива без этого сервиса.
 - [`docs/OPERATIONS.md`](docs/OPERATIONS.md) — эксплуатация, наблюдение,

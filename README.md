@@ -418,6 +418,65 @@ YAML/env-файлы. Для автоматизации используйте `-
 компилятор C и `make` не требуются, поэтому собрать
 Linux-бинарь можно и из-под Windows. Подробности — [docs/BUILD.md](docs/BUILD.md).
 
+### Раздельная установка бэкенда и фронтенда
+
+Один установщик поддерживает оба режима. На ВМ остаются API, PostgreSQL и
+службы резервного копирования. Контейнер на рабочем компьютере раздаёт
+существующий веб-интерфейс и передаёт запросы API на ВМ, включая вход,
+загрузку файлов и поток событий.
+
+**На ВМ.** Установите бэкенд из комплекта `.run`. В примере сертификат API
+выписан на `backup.example.org`, а браузер будет открывать фронтенд по
+`https://localhost:9443`.
+
+```bash
+sudo sh ./ovirt-backup-<версия>-linux-amd64.run \
+  --mode systemd --backend-only --port 8080 --url https://localhost:9443 \
+  --tls files --tls-cert-file /root/api.crt --tls-key-file /root/api.key
+```
+
+Для Docker Compose используйте `--mode docker` с теми же параметрами.
+Для самоподписанного сертификата API передайте `--tls self-signed
+--backend-host backup.example.org`. Его публичный сертификат берётся из
+`/opt/jhvirt/config/tls/server.crt` при установке через systemd. Порт API должен
+быть доступен с рабочего компьютера. При `--tls none` установщик публикует API
+на `127.0.0.1`, чтобы на ВМ можно было подключить собственный TLS-прокси.
+
+**На компьютере.** В PowerShell из корня репозитория можно вызвать скрипт через
+Git Bash. Укажите адрес API, PEM-пару для `localhost` и, если сертификат API
+подписан внутренним CA, добавьте `--backend-ca-file`. Для самоподписанного
+сертификата API в этот параметр передаётся сам публичный сертификат.
+Сертификат `localhost` должен быть доверенным для браузера.
+
+```powershell
+podman machine start
+$env:CONTAINER_CONNECTION = 'podman-machine-default'
+& 'C:\Program Files\Git\bin\bash.exe' deploy/install.sh `
+  --mode frontend --container-engine podman --port 9443 `
+  --backend-url https://backup.example.org:8080 --backend-ca-file ./api-ca.pem `
+  --tls files --tls-cert-file ./localhost.crt --tls-key-file ./localhost.key
+```
+
+Если ваше подключение Podman без прав root называется иначе, используйте его
+имя из `podman system connection list`. С Docker Desktop замените
+`--container-engine podman` на `--container-engine docker` и пропустите настройки
+Podman. В Linux этот же скрипт можно запустить
+через `sh deploy/install.sh`, а из комплекта через `sh ./ovirt-backup-<версия>-linux-amd64.run`.
+Откройте `https://localhost:9443`. Этот адрес должен совпадать с `--url` на ВМ.
+Если используется OIDC, в клиенте провайдера зарегистрируйте адрес возврата
+`https://localhost:9443/api/v1/auth/oidc/callback`. Для встроенного Keycloak
+укажите на ВМ его доступный рабочему компьютеру `--keycloak-url`.
+
+Для проверки в изолированной сети допустим HTTP. На ВМ задайте `--url
+http://localhost:9080 --port 8080 --tls none --allow-http`. На компьютере
+задайте `--port 9080 --backend-url http://backup.example.org:8080` и опустите
+параметры TLS. Интерфейс будет доступен по `http://localhost:9080`.
+
+При `--no-start` установщик подготовит контейнер `jhvirt-frontend`.
+Чтобы пересобрать фронтенд после обновления бэкенда, удалите этот контейнер
+командой `podman rm -f jhvirt-frontend` или `docker rm -f jhvirt-frontend`
+и повторите установку из той же версии проекта, что запущена на ВМ.
+
 ### Разработка
 
 Все команды — через `./run`; он же собирает и проверяет. `make` не нужен, но

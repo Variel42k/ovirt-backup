@@ -8,7 +8,18 @@
 # Корневой Dockerfile остаётся для сборки из репозитория; этот едет внутрь
 # комплекта и используется установщиком.
 
-FROM docker.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+FROM docker.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS alpine-base
+
+FROM alpine-base AS frontend
+RUN apk upgrade --no-cache && apk add --no-cache ca-certificates
+WORKDIR /app
+COPY bin/jhvirt-frontend /app/jhvirt-frontend
+COPY web/dist /app/web/dist
+USER 10001:10001
+EXPOSE 8080
+ENTRYPOINT ["/app/jhvirt-frontend"]
+
+FROM alpine-base AS runtime
 
 # qemu-img стал частью основного пути данных: oVirt 4.3 отдаёт qcow2 как файл
 # тома, и служба собирает гостевой образ локально. Поэтому образ из .run не
@@ -21,7 +32,6 @@ RUN apk upgrade --no-cache && \
 
 WORKDIR /app
 COPY bin/ovirt-backup-server /app/ovirt-backup-server
-COPY web/dist /app/web/dist
 COPY config/ovirt-backup.yaml /app/config/ovirt-backup.yaml
 
 # Ключ шифрования секретов и временные файлы восстановления; при локальном
@@ -42,3 +52,9 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 
 ENTRYPOINT ["/app/ovirt-backup-server"]
 CMD ["-supervise", "-config", "/app/config/ovirt-backup.yaml"]
+
+FROM runtime AS backend
+ENV JHV_SERVER_SERVE_SPA=false JHV_LOGGING_FILE=/app/data/logs/jhvirt.log
+
+FROM runtime AS combined
+COPY web/dist /app/web/dist

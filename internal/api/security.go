@@ -5,21 +5,15 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+
+	"github.com/Variel42k/ovirt-backup/internal/webui"
 )
 
 // securityHeaders применяется защита браузера как к API, так и к SPA ответам.
 func (s *Server) securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
-		h.Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
-		h.Set("Referrer-Policy", "no-referrer")
-		h.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
-		h.Set("X-Content-Type-Options", "nosniff")
-		h.Set("X-Frame-Options", "DENY")
-		h.Set("X-Permitted-Cross-Domain-Policies", "none")
-		if s.secureCookies() {
-			h.Set("Strict-Transport-Security", "max-age=31536000")
-		}
+		webui.SetBrowserHeaders(h, s.secureCookies())
 		if strings.HasPrefix(r.URL.Path, "/api/") {
 			h.Set("Cache-Control", "no-store")
 		}

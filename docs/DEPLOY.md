@@ -9,8 +9,11 @@
 3. Нативная служба systemd: приложение работает как `jhvirt.service`,
    PostgreSQL может быть локальной или внешней.
 
-Podman не поддерживается. Установщик отличает настоящий Docker от
-`podman-docker` и для `--mode podman` выводит явную ошибку.
+Установщик поддерживает раздельное развёртывание. На сервере запустите Docker
+Compose или systemd с `--backend-only`. На рабочем компьютере используйте
+`--mode frontend` с Docker или Podman. Значение `--url` на сервере должно
+совпадать с локальным адресом фронтенда в браузере. В `--backend-url` на рабочем
+компьютере укажите доступный ему адрес API на сервере.
 
 Установщик создаёт конфигурацию, проверяет её, запускает приложение и ждёт
 `/readyz`. Для Docker и новой локальной БД он печатает пароль первого
@@ -111,6 +114,12 @@ HTTPS через nginx, который передаёт запросы на ло
 | `--mode docker` | Docker Compose v2 |
 | `--mode docker-compose` | старый `docker-compose` v1 |
 | `--mode systemd` | нативная служба systemd |
+| `--backend-only` | установить API, базу и фоновые службы без веб-интерфейса |
+| `--backend-host backup.example.org` | имя или IP ВМ для самоподписанного сертификата API в режиме `--backend-only` |
+| `--mode frontend` | запустить на рабочем компьютере контейнер веб-интерфейса с доступом только через loopback |
+| `--container-engine docker\|podman` | выбрать контейнерный движок для фронтенда |
+| `--backend-url https://backup.example.org:8080` | адрес API для отдельного фронтенда |
+| `--backend-ca-file ./api-ca.pem` | доверенный PEM CA или публичный самоподписанный сертификат API |
 | `--url http[s]://host[:port]` | обязательный внешний URL в unattended-режиме |
 | `--port 8080` | опубликованный Docker-порт и `JHV_SERVER_PORT` для systemd |
 | `--database-url-file /root/jhvirt.dsn` | внешняя PostgreSQL только для systemd; файл `0600` |

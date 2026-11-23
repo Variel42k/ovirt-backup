@@ -12,6 +12,15 @@
 #   ./install.sh --mode docker         docker compose
 #   ./install.sh --mode docker-compose docker-compose (старый, через дефис)
 #   ./install.sh --mode systemd        бинарь, PostgreSQL и служба systemd
+#   ./install.sh --mode systemd --backend-only --url https://localhost:9443
+#                --tls self-signed --backend-host backup.example.org
+#                                      установить API и службы на ВМ
+#   ./install.sh --mode frontend --backend-url https://backup.example.org:8080
+#                --container-engine podman|docker --port 9443
+#                --tls files --tls-cert-file localhost.crt --tls-key-file localhost.key
+#                                      установить веб-интерфейс на этом компьютере
+#   ./install.sh --mode frontend ... --backend-ca-file /path/ca.pem
+#                                      доверять внутреннему CA бэкенда
 #   ./install.sh --url https://host    внешний адрес (обязателен без диалога)
 #   ./install.sh --port 18080          порт наружу, если 8080 занят
 #   ./install.sh --database-url-file /root/jhvirt.dsn  внешняя PostgreSQL
@@ -109,6 +118,7 @@ KEYCLOAK_DB_USER="keycloak_app"
 LOCAL_ADMIN_USER="local-admin"
 
 MODE=""; URL=""; DATABASE_URL_FILE=""; UNINSTALL_TARGET=""; START=1; PORT=8080
+BACKEND_ONLY=0; BACKEND_HTTP_PUBLISHED=0; BACKEND_HOST=""; BACKEND_URL=""; BACKEND_CA_FILE=""; CONTAINER_ENGINE=""
 UPDATE_REQUESTED=0; UPDATE_BACKUP_FILE=""
 URL_EXPLICIT=0; PORT_EXPLICIT=0
 UNINSTALL_REMOVE_CONFIG=0; UNINSTALL_REMOVE_DATA=0
@@ -163,6 +173,15 @@ while [ $# -gt 0 ]; do
         --allow-http) ALLOW_HTTP=1; shift ;;
         --mode) [ $# -ge 2 ] || die "--mode требует значение"; MODE="$2"; shift 2 ;;
         --mode=*) MODE="${1#--mode=}"; shift ;;
+        --backend-only) BACKEND_ONLY=1; shift ;;
+        --backend-host) [ $# -ge 2 ] || die "--backend-host требует значение"; BACKEND_HOST="$2"; shift 2 ;;
+        --backend-host=*) BACKEND_HOST="${1#--backend-host=}"; shift ;;
+        --backend-url) [ $# -ge 2 ] || die "--backend-url требует значение"; BACKEND_URL="$2"; shift 2 ;;
+        --backend-url=*) BACKEND_URL="${1#--backend-url=}"; shift ;;
+        --backend-ca-file) [ $# -ge 2 ] || die "--backend-ca-file требует путь"; BACKEND_CA_FILE="$2"; shift 2 ;;
+        --backend-ca-file=*) BACKEND_CA_FILE="${1#--backend-ca-file=}"; shift ;;
+        --container-engine) [ $# -ge 2 ] || die "--container-engine требует docker или podman"; CONTAINER_ENGINE="$2"; shift 2 ;;
+        --container-engine=*) CONTAINER_ENGINE="${1#--container-engine=}"; shift ;;
         --url) [ $# -ge 2 ] || die "--url требует значение"; URL="$2"; URL_EXPLICIT=1; shift 2 ;;
         --url=*) URL="${1#--url=}"; URL_EXPLICIT=1; shift ;;
         --port) [ $# -ge 2 ] || die "--port требует значение"; PORT="$2"; PORT_EXPLICIT=1; shift 2 ;;
@@ -1475,6 +1494,7 @@ migration_prepare_import() {
             MI_PORT="$(env_file_value "$MI_ENV" JHV_SERVER_PORT)"; [ -z "$MI_PORT" ] || PORT="$MI_PORT"
         fi
     fi
+    if [ "$(env_file_value "$MI_ENV" JHV_SERVER_SERVE_SPA)" = false ]; then BACKEND_ONLY=1; fi
     if [ -s "$MIGRATION_TMP/tls/server.crt" ] && [ -s "$MIGRATION_TMP/tls/server.key" ]; then
         MIGRATION_TLS_AVAILABLE=1
         if [ -z "$TLS_MODE" ] && [ -z "$TLS_CERT_FILE" ] && [ -z "$TLS_KEY_FILE" ] && [ ! -t 0 ]; then
@@ -1883,8 +1903,9 @@ load_update_runtime_settings() {
             fi
             UPDATE_VALUE="$(env_file_value "$UPDATE_ENV" JHV_BIND_ADDRESS)"
             [ -z "$UPDATE_VALUE" ] || BIND_ADDRESS="$UPDATE_VALUE"
+            UPDATE_TLS="$(env_file_value "$UPDATE_ENV" JHV_TLS_ENABLED)"
             if [ -z "$TLS_MODE" ]; then
-                if [ "$(env_file_value "$UPDATE_ENV" JHV_TLS_ENABLED)" = true ]; then
+                if [ "$UPDATE_TLS" = true ]; then
                     TLS_MODE=preserve
                     READY_SCHEME=https
                 else
@@ -1905,9 +1926,9 @@ load_update_runtime_settings() {
             fi
             UPDATE_VALUE="$(env_file_value "$UPDATE_ENV" JHV_SERVER_ADDR)"
             [ -z "$UPDATE_VALUE" ] || BIND_ADDRESS="$UPDATE_VALUE"
+            UPDATE_TLS="$(env_file_value "$UPDATE_ENV" JHV_SERVER_TLS_ENABLED)"
+            [ -n "$UPDATE_TLS" ] || UPDATE_TLS="$(yaml_server_tls_value "$PREFIX/config/$CONFIG_NAME" enabled 2>/dev/null || true)"
             if [ -z "$TLS_MODE" ]; then
-                UPDATE_TLS="$(env_file_value "$UPDATE_ENV" JHV_SERVER_TLS_ENABLED)"
-                [ -n "$UPDATE_TLS" ] || UPDATE_TLS="$(yaml_server_tls_value "$PREFIX/config/$CONFIG_NAME" enabled 2>/dev/null || true)"
                 if [ "$UPDATE_TLS" = true ]; then
                     TLS_MODE=preserve
                     READY_SCHEME=https
@@ -1918,6 +1939,10 @@ load_update_runtime_settings() {
             fi
             ;;
     esac
+    if [ "$(env_file_value "$UPDATE_ENV" JHV_SERVER_SERVE_SPA)" = false ]; then
+        BACKEND_ONLY=1
+        if [ "$UPDATE_TLS" = false ] && [ "$BIND_ADDRESS" = 0.0.0.0 ]; then BACKEND_HTTP_PUBLISHED=1; fi
+    fi
     [ -n "$URL" ] || die "в существующей установке не найден внешний URL; задайте --url явно"
 }
 
@@ -2242,6 +2267,121 @@ choose() {
     done
 }
 
+validate_port() {
+    case "$1" in
+        ''|*[!0-9]*) die "порт должен быть числом: --port 18080" ;;
+    esac
+    [ "$1" -ge 1 ] 2>/dev/null && [ "$1" -le 65535 ] 2>/dev/null ||
+        die "порт должен быть в диапазоне 1..65535: --port 18080"
+}
+
+validate_url() {
+    case "$1" in
+        http://*|https://*) ;;
+        *) die "адрес должен начинаться с http:// или https://: $1" ;;
+    esac
+    AUTHORITY="${1#*://}"
+    [ -n "$AUTHORITY" ] || die "в адресе не указан хост: $1"
+    case "$AUTHORITY" in
+        */*|*\?*|*\#*|*[[:space:]]*)
+            die "укажите только схему, хост и порт без пути: $1" ;;
+        :*|*:|*@*)
+            die "в адресе неверно указан хост или порт: $1" ;;
+    esac
+}
+
+install_frontend() (
+    [ "$BACKEND_ONLY" -eq 0 ] && [ -z "$BACKEND_HOST$URL$MIGRATION_ACTION" ] && [ "$UPDATE_REQUESTED" -eq 0 ] ||
+        die "для фронтенда используйте --mode frontend --backend-url URL [--container-engine docker|podman] [--port PORT]"
+    [ -n "$BACKEND_URL" ] || die "задайте адрес API на ВМ через --backend-url"
+    validate_url "${BACKEND_URL%/}"
+    validate_port "$PORT"
+    if [ -n "$BACKEND_CA_FILE" ]; then
+        case "$BACKEND_URL" in https://*) ;; *) die "--backend-ca-file используется с HTTPS" ;; esac
+        [ -f "$BACKEND_CA_FILE" ] && [ -r "$BACKEND_CA_FILE" ] || die "CA бэкенда недоступен: $BACKEND_CA_FILE"
+    fi
+    case "${TLS_MODE:-none}" in
+        none)
+            [ -z "$TLS_CERT_FILE$TLS_KEY_FILE" ] || die "для TLS-файлов фронтенда укажите --tls files"
+            scheme=http ;;
+        files)
+            [ -f "$TLS_CERT_FILE" ] && [ -r "$TLS_CERT_FILE" ] || die "сертификат фронтенда недоступен: $TLS_CERT_FILE"
+            [ -f "$TLS_KEY_FILE" ] && [ -r "$TLS_KEY_FILE" ] || die "закрытый ключ фронтенда недоступен: $TLS_KEY_FILE"
+            scheme=https ;;
+        *) die "для фронтенда используйте --tls files с PEM-сертификатом и ключом или --tls none" ;;
+    esac
+    if [ -z "$CONTAINER_ENGINE" ]; then
+        if is_real_docker; then
+            CONTAINER_ENGINE=docker
+        else
+            CONTAINER_ENGINE=podman
+        fi
+    fi
+    case "$CONTAINER_ENGINE" in docker|podman) ;; *) die "--container-engine принимает docker или podman" ;; esac
+    have "$CONTAINER_ENGINE" && "$CONTAINER_ENGINE" info >/dev/null 2>&1 ||
+        die "$CONTAINER_ENGINE недоступен. На Windows для Podman проверьте podman machine start и podman system connection list."
+
+    name=jhvirt-frontend
+    image=localhost/jhvirt-frontend:local
+    if "$CONTAINER_ENGINE" container inspect "$name" >/dev/null 2>&1; then
+        die "контейнер $name уже существует. Для новой установки сначала удалите его командой $CONTAINER_ENGINE rm -f $name."
+    fi
+    if [ "$BUNDLE" -eq 1 ]; then context="$HERE"; else context="$HERE/.."; fi
+    step "сборка фронтенда ($CONTAINER_ENGINE)"
+    set --
+    if [ "$CONTAINER_ENGINE" = podman ]; then set -- --network=host --format=docker; fi
+    (cd "$context" && "$CONTAINER_ENGINE" build "$@" --target frontend -t "$image" .)
+
+    set -- --name "$name" --restart unless-stopped --publish "127.0.0.1:$PORT:8080" \
+        --env "JHV_FRONTEND_BACKEND_URL=$BACKEND_URL"
+    if [ "$CONTAINER_ENGINE" = podman ]; then
+        case "$(uname -s)" in
+            MINGW*|MSYS*)
+                if [ "$(podman info --format '{{.Host.Security.Rootless}}')" = true ]; then
+                    set -- "$@" --network=pasta
+                fi ;;
+        esac
+    fi
+    certs=""
+    if [ "$scheme" = https ] || [ -n "$BACKEND_CA_FILE" ]; then
+        certs="$(mktemp -d "${TMPDIR:-/tmp}/jhvirt-frontend.XXXXXX")" || die "не удалось создать временный каталог"
+        trap 'rm -rf "$certs"' EXIT
+        trap 'exit 1' HUP INT TERM
+        umask 077
+        mkdir "$certs/material"
+        if [ "$scheme" = https ]; then
+            cp "$TLS_CERT_FILE" "$certs/material/frontend.crt"
+            cp "$TLS_KEY_FILE" "$certs/material/frontend.key"
+            set -- "$@" --env JHV_FRONTEND_TLS_CERT_FILE=/app/frontend.crt --env JHV_FRONTEND_TLS_KEY_FILE=/app/frontend.key
+        fi
+        if [ -n "$BACKEND_CA_FILE" ]; then
+            cp "$BACKEND_CA_FILE" "$certs/material/backend-ca.pem"
+            set -- "$@" --env JHV_FRONTEND_BACKEND_CA_FILE=/app/backend-ca.pem
+        fi
+        # Передаём PEM-файлы в контейнер после сборки образа. UID 10001
+        # получает доступ к ключу, даже если исходный файл имеет режим 0600.
+        (cd "$certs/material" && tar --owner=10001 --group=10001 --mode=0600 -cf "$certs/certificates.tar" *)
+    fi
+    MSYS2_ARG_CONV_EXCL='*' "$CONTAINER_ENGINE" container create "$@" "$image" >/dev/null
+    if [ -n "$certs" ] && ! MSYS2_ARG_CONV_EXCL='*' "$CONTAINER_ENGINE" cp -a - "$name:/app/" < "$certs/certificates.tar"; then
+        "$CONTAINER_ENGINE" container rm "$name" >/dev/null
+        die "не удалось скопировать сертификаты во фронтенд"
+    fi
+    if [ "$START" -eq 1 ]; then
+        "$CONTAINER_ENGINE" container start "$name" >/dev/null
+    else
+        say "Для запуска выполните $CONTAINER_ENGINE start $name"
+    fi
+    say "Веб-интерфейс: $scheme://localhost:$PORT"
+    say "Бэкенд: $BACKEND_URL"
+)
+
+if [ "$MODE" = frontend ]; then
+    install_frontend
+    exit 0
+fi
+[ -z "$BACKEND_URL$BACKEND_CA_FILE$CONTAINER_ENGINE" ] || die "параметры фронтенда требуют --mode frontend"
+
 if [ "$UNINSTALL_REMOVE_CONFIG" -eq 1 ] && [ "$MODE" != uninstall ]; then
     die "--remove-config используется только вместе с --uninstall"
 fi
@@ -2308,6 +2448,7 @@ fi
 
 choose_storage_destinations
 load_update_runtime_settings
+[ -z "$BACKEND_HOST" ] || [ "$BACKEND_ONLY" -eq 1 ] || die "--backend-host используется вместе с --backend-only"
 
 # Права root нужны там, где скрипт трогает систему: раскладывает комплект в
 # /opt, заводит пользователя, ставит юнит. Запуск контейнеров из каталога
@@ -2317,20 +2458,12 @@ if [ "$BUNDLE" -eq 1 ] || [ "$MODE" = systemd ]; then
     [ "$(id -u)" -eq 0 ] || die "нужны права root: sudo $SELF"
 fi
 
-validate_port() {
-    case "$1" in
-        ''|*[!0-9]*) die "порт должен быть числом: --port 18080" ;;
-    esac
-    [ "$1" -ge 1 ] 2>/dev/null && [ "$1" -le 65535 ] 2>/dev/null ||
-        die "порт должен быть в диапазоне 1..65535: --port 18080"
-}
-
 validate_port "$PORT"
 
 case "$MODE" in
     docker)         has_docker  || die "docker compose недоступен" ;;
     docker-compose) has_dockerc || die "docker-compose не найден" ;;
-    podman)         die "Podman больше не поддерживается; используйте Docker Compose или systemd" ;;
+    podman)         die "для бэкенда используйте Docker Compose или systemd; для фронтенда задайте --mode frontend --container-engine podman" ;;
     systemd)        has_systemd || die "systemd не найден" ;;
     *) die "неизвестный способ: $MODE" ;;
 esac
@@ -2350,21 +2483,6 @@ fi
 # Из URL выводится флаг Secure у сессионной cookie. Поэтому без терминала URL
 # обязателен: предположение https при фактическом HTTP делает вход нерабочим.
 
-validate_url() {
-    case "$URL" in
-        http://*|https://*) ;;
-        *) die "адрес должен начинаться с http:// или https://: $URL" ;;
-    esac
-    AUTHORITY="${URL#*://}"
-    [ -n "$AUTHORITY" ] || die "в адресе не указан хост: $URL"
-    case "$AUTHORITY" in
-        */*|*\?*|*\#*|*[[:space:]]*)
-            die "укажите только схему, хост и порт без пути: $URL" ;;
-        :*|*:|*@*)
-            die "в адресе неверно указан хост или порт: $URL" ;;
-    esac
-}
-
 ask_url() {
     if [ -z "$URL" ]; then
         [ -t 0 ] || die "без диалога внешний адрес обязателен: --url https://host:$PORT"
@@ -2379,7 +2497,7 @@ ask_url() {
         read -r URL || URL=""
         [ -n "$URL" ] || URL="$GUESS"
     fi
-    validate_url
+    validate_url "$URL"
 }
 
 # --- TLS приложения --------------------------------------------------------
@@ -2492,7 +2610,12 @@ url_host() {
 }
 
 tls_host_from_url() {
-    TLS_HOST="$(url_host "$URL")"
+    if [ "$BACKEND_ONLY" -eq 1 ]; then
+        [ -n "$BACKEND_HOST" ] || die "для самоподписанного сертификата API задайте --backend-host с именем или IP ВМ"
+        TLS_HOST="$BACKEND_HOST"
+    else
+        TLS_HOST="$(url_host "$URL")"
+    fi
     case "$TLS_HOST" in
         ""|*[!A-Za-z0-9_.:-]*) die "не удалось получить безопасное имя сертификата из URL: $URL" ;;
     esac
@@ -2517,6 +2640,14 @@ tls_validate_pair() {
 prepare_tls() {
     case "$TLS_MODE" in
         none)
+            if [ "$BACKEND_ONLY" -eq 1 ]; then
+                if [ "$ALLOW_HTTP" -eq 1 ] || [ "$BACKEND_HTTP_PUBLISHED" -eq 1 ]; then
+                    BIND_ADDRESS=0.0.0.0
+                else
+                    BIND_ADDRESS=127.0.0.1
+                fi
+                return 0
+            fi
             case "$URL" in
                 https://*) BIND_ADDRESS=127.0.0.1 ;;
                 http://*)
@@ -2534,12 +2665,14 @@ prepare_tls() {
             fi
             [ -s "$MIGRATION_TMP/tls/server.crt" ] && [ -s "$MIGRATION_TMP/tls/server.key" ] ||
                 die "в пакете включён TLS, но нет сертификата или ключа"
-            migration_tls_matches_url || die "сертификат из пакета не подходит к адресу $URL.
+            [ "$BACKEND_ONLY" -eq 1 ] || migration_tls_matches_url || die "сертификат из пакета не подходит к адресу $URL.
 Выберите новый самоподписанный сертификат, укажите PEM-пару либо выключите собственный TLS."
             ;;
         self-signed|files) ;;
         *) die "--tls принимает none, self-signed или files" ;;
     esac
+
+    if [ "$BACKEND_ONLY" -eq 1 ]; then BIND_ADDRESS=0.0.0.0; fi
 
     case "$TLS_DAYS" in ''|*[!0-9]*) die "--tls-days должен быть целым числом" ;; esac
     [ "$TLS_DAYS" -ge 1 ] && [ "$TLS_DAYS" -le 3650 ] ||
@@ -3233,6 +3366,7 @@ prepare_oidc() {
         # Keycloak. Именно он попадёт в issuer, поэтому браузер и служба будут
         # звать провайдера одинаково.
         if [ -z "$KEYCLOAK_URL" ]; then
+            [ "$BACKEND_ONLY" -eq 0 ] || die "для раздельной установки укажите доступный с рабочего компьютера адрес Keycloak через --keycloak-url"
             KC_PUBLIC_HOST="$(url_host "$URL")"
             case "$KC_PUBLIC_HOST" in *:*) KC_PUBLIC_AUTHORITY="[$KC_PUBLIC_HOST]" ;; *) KC_PUBLIC_AUTHORITY="$KC_PUBLIC_HOST" ;; esac
             case "$URL" in
@@ -5270,6 +5404,11 @@ PostgreSQL хранит пароль внутри тома и новый не п
         say "    создан $WORK/.env, пароль базы сгенерирован"
 	fi
 
+	if [ "$BACKEND_ONLY" -eq 1 ]; then
+		set_plain_env JHV_BUILD_TARGET backend "$WORK/.env"
+		set_plain_env JHV_SERVER_SERVE_SPA false "$WORK/.env"
+	fi
+
 	if [ "$BUNDLE" -eq 1 ]; then
 		chown -R "$USER_NAME:$USER_NAME" "$PREFIX/bin" "$PREFIX/web" \
             "$PREFIX/config" "$PREFIX/data" "$PREFIX/logs" "$PREFIX/docs"
@@ -5452,7 +5591,11 @@ PostgreSQL хранит пароль внутри тома и новый не п
         say "  ГОТОВО"
     fi
     say ""
-    say "  интерфейс:     $URL"
+    if [ "$BACKEND_ONLY" -eq 1 ]; then
+        say "  адрес отдельного фронтенда: $URL"
+    else
+        say "  интерфейс:     $URL"
+    fi
     show_backup_locations
     [ -z "$UPDATE_BACKUP_FILE" ] || say "  backup до обновления: $UPDATE_BACKUP_FILE"
     if [ "$OIDC_MODE" != none ] && [ "$OIDC_ALLOW_LOCAL_LOGIN" = false ]; then
@@ -5872,7 +6015,7 @@ install_systemd() {
 Из репозитория соберите его: ./run build --target linux/amd64"
 
     [ -f "$HERE/bin/$SERVER_BINARY" ] || die "в комплекте нет bin/$SERVER_BINARY"
-    [ -f "$HERE/web/dist/index.html" ] || die "в комплекте нет web/dist/index.html"
+    [ "$BACKEND_ONLY" -eq 1 ] || [ -f "$HERE/web/dist/index.html" ] || die "в комплекте нет web/dist/index.html"
     [ -f "$HERE/config/$CONFIG_NAME" ] || die "в комплекте нет конфигурации"
     [ -f "$HERE/systemd/jhvirt.service" ] || die "в комплекте нет unit systemd"
     [ -f "$HERE/systemd/jhvirt-dr-backup.service" ] || die "в комплекте нет unit резервирования"
@@ -5933,7 +6076,7 @@ install_systemd() {
     install -m 0755 "$HERE/systemd/dr-backup.sh" "$PREFIX/bin/ovirt-backup-dr-backup"
     install -m 0755 "$HERE/recover-admin.sh" "$PREFIX/bin/ovirt-backup-recover-admin"
     rm -rf "$PREFIX/web/dist"
-    cp -r "$HERE/web/dist" "$PREFIX/web/dist"
+    [ "$BACKEND_ONLY" -eq 1 ] || cp -r "$HERE/web/dist" "$PREFIX/web/dist"
     [ -d "$HERE/docs" ] && cp -r "$HERE/docs/." "$PREFIX/docs/"
     [ -f "$HERE/proxmox/jhvirt-pve-data-plane" ] && \
         install -o root -g root -m 0755 "$HERE/proxmox/jhvirt-pve-data-plane" "$PREFIX/proxmox/"
@@ -6020,6 +6163,7 @@ install_systemd() {
 	set_env JHV_SERVER_EXTERNAL_URL "$URL" "$ENV_FILE"
 	set_env JHV_SERVER_PORT "$PORT" "$ENV_FILE"
 	set_env JHV_SERVER_ADDR "$BIND_ADDRESS" "$ENV_FILE"
+	if [ "$BACKEND_ONLY" -eq 1 ]; then set_env JHV_SERVER_SERVE_SPA false "$ENV_FILE"; fi
 	write_systemd_oidc
 	RECOVERY_TOKEN_FILE="$PREFIX/config/recovery.token"
 	step "host-only recovery-токен"
@@ -6175,7 +6319,11 @@ install_systemd() {
     fi
     say ""
     say "  каталог:        $PREFIX"
-    say "  интерфейс:      $URL"
+    if [ "$BACKEND_ONLY" -eq 1 ]; then
+        say "  адрес отдельного фронтенда: $URL"
+    else
+        say "  интерфейс:      $URL"
+    fi
     show_backup_locations
     [ -z "$UPDATE_BACKUP_FILE" ] || say "  backup до обновления: $UPDATE_BACKUP_FILE"
     if [ -n "$ADMPASS" ]; then

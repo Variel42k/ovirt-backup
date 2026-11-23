@@ -1,4 +1,4 @@
-package api
+package webui
 
 import (
 	"net/http"
@@ -6,8 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-
-	"github.com/Variel42k/ovirt-backup/internal/config"
 )
 
 // Оболочку приложения браузер обязан перепроверять, файлы сборки — нет.
@@ -29,9 +27,7 @@ func TestAppShellIsRevalidatedAndAssetsAreCached(t *testing.T) {
 		t.Fatalf("файл сборки: %v", err)
 	}
 
-	var cfg config.Config
-	cfg.Server.SPADir = dir
-	handler := (&Server{cfg: cfg}).spaHandler()
+	handler := Handler(dir)
 
 	cases := []struct {
 		path string

@@ -28,6 +28,7 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
+      target: "${JHV_BUILD_TARGET:-combined}"
       args:
         VERSION: ${VERSION:-dev}
     image: ovirt-backup:${VERSION:-dev}
@@ -48,6 +49,7 @@ services:
     environment:
       JHV_SERVER_ADDR: "0.0.0.0"
       JHV_SERVER_PORT: "8080"
+      JHV_SERVER_SERVE_SPA: "${JHV_SERVER_SERVE_SPA:-true}"
       # Обязателен: из него выводится флаг Secure у куки сессии. Умолчание
       # http://localhost означало бы куку без Secure в боевой установке за
       # обратным прокси — ровно там, где она нужнее всего.

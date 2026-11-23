@@ -343,9 +343,9 @@ valid_host_timezone() {
     [ "$1" = UTC ] || [ -f "/usr/share/zoneinfo/$1" ]
 }
 
-# Debian-like systems expose /etc/timezone, while RHEL-like systems normally
-# only symlink /etc/localtime.  timedatectl is the last discovery mechanism:
-# it may be unavailable in a minimal installer environment even on systemd.
+# В Debian-подобных системах есть /etc/timezone, а в RHEL-подобных обычно
+# доступна ссылка /etc/localtime. timedatectl проверяем последним, поскольку
+# в минимальной среде установки его может не быть даже с systemd.
 host_timezone() {
     HTZ_VALUE="${TZ:-}"
     if valid_host_timezone "$HTZ_VALUE"; then printf '%s' "$HTZ_VALUE"; return; fi
@@ -3172,8 +3172,8 @@ prepare_keycloak_ad() {
     elif [ "$OIDC_EXISTING" -eq 0 ]; then
         die "новая настройка LDAPS требует --keycloak-ad-ca-file с цепочкой корпоративного CA"
     fi
-    # Host-side preflight precedes changes to the LDAP provider. The Keycloak
-    # test below separately exercises container DNS, its truststore and bind.
+    # Проверка на хосте предшествует изменению провайдера LDAP. Ниже отдельно
+    # проверяем DNS контейнера Keycloak, хранилище доверия и LDAP bind.
     if [ -n "$KEYCLOAK_AD_CA_FILE" ]; then
         while ! setup_tool tls-check "$KEYCLOAK_AD_URL" "$KEYCLOAK_AD_CA_FILE"; do
             [ -t 0 ] || die "предварительная проверка LDAPS не пройдена"
@@ -3441,8 +3441,8 @@ load_systemd_oidc() {
 write_systemd_oidc() {
     [ "$OIDC_MODE" != none ] || { set_env JHV_AUTH_OIDC_ENABLED false "$ENV_FILE"; return 0; }
     write_oidc_config "$PREFIX/config/$CONFIG_NAME"
-    # Existing inline secrets are kept until explicitly migrated; do not create
-    # two simultaneous secret sources in a manually maintained configuration.
+    # Сохраняем существующие встроенные секреты до явной миграции.
+    # В ручной конфигурации должен оставаться один источник секретов.
     if [ "$OIDC_EXISTING" -eq 0 ] || [ -n "$OIDC_CLIENT_SECRET_FILE" ]; then
         WSO_SECRET="$PREFIX/config/oidc-client.secret"
         WSO_TMP="$(mktemp "$WSO_SECRET.XXXXXX")"
@@ -3806,9 +3806,9 @@ keycloak_remove_stale_recovery_admins() {
         done
 }
 
-# Keycloak bootstrap-admin is deliberately temporary. A fresh installation
-# replaces it with an ordinary master-realm administrator before the password
-# is removed from keycloak.conf.
+# Учётная запись bootstrap-admin в Keycloak временная. При новой установке
+# создаём обычного администратора области master перед удалением пароля
+# из keycloak.conf.
 keycloak_create_permanent_admin() {
     [ -n "$KEYCLOAK_BOOTSTRAP_USER" ] || return 0
     [ "$KEYCLOAK_BOOTSTRAP_USER" != "$KEYCLOAK_ADMIN_USER" ] || return 0
@@ -3964,12 +3964,11 @@ oidc_app_check() {
         }')"
     case "$OAC_LOCATION" in
         http://*|https://*)
-            # Discovery alone is insufficient for the bundled Keycloak. An
-            # unknown scope is rejected by the authorization endpoint, so the
-            # first redirect looks healthy while the browser immediately
-            # returns to /login?oidc_error=... . External providers may expose
-            # their public issuer only to client DNS, therefore this extra
-            # host-side probe is intentionally limited to the bundled mode.
+            # Проверяем встроенный Keycloak и после получения конфигурации OIDC.
+            # При неизвестной области доступа первый редирект выглядит штатно,
+            # но браузер сразу возвращается на /login?oidc_error=... .
+            # Публичный issuer внешнего провайдера может разрешаться только
+            # через DNS клиента, поэтому этот запрос с хоста делаем для встроенного режима.
             if [ "$OIDC_MODE" = keycloak ]; then
                 # Публичный адрес обязан попасть в redirect браузеру, но сам
                 # сервер может не ходить на собственный внешний IP из-за
@@ -4688,11 +4687,10 @@ normalize_docker_keycloak_vault_permissions() {
     NDKV_PATH="$(docker_host_path "$NDKV_WORK" "$NDKV_VALUE")"
     [ -d "$NDKV_PATH" ] || return 0
 
-    # Bundle updates intentionally chown most of PREFIX to the service user.
-    # The Keycloak file vault is different: it is mounted read-only and the
-    # Keycloak image runs with GID 0. Restore a stable host ownership/mode after
-    # every update/restore so host-specific UID/GID values can never leak into
-    # the container and make ${vault.ad-bind} unreadable.
+    # При обновлении файлов в PREFIX их владельцем становится пользователь службы.
+    # Хранилище секретов Keycloak монтируется только для чтения, а образ
+    # работает с GID 0. Восстанавливаем владельца и права на хосте после
+    # обновления или восстановления, чтобы Keycloak мог читать ${vault.ad-bind}.
     chown root:root "$NDKV_PATH" || die "не удалось восстановить владельца каталога Keycloak vault: $NDKV_PATH"
     chmod 0750 "$NDKV_PATH" || die "не удалось восстановить права каталога Keycloak vault: $NDKV_PATH"
 
@@ -4719,10 +4717,9 @@ verify_docker_keycloak_vault_runtime() {
     VDKV_SECRET="$VDKV_PATH/${VDKV_REALM}_ad-bind"
     [ -f "$VDKV_SECRET" ] || return 0
 
-    # If embedded Keycloak is not part of this installation there is nothing
-    # to verify. If it is running, test the bind mount using the image's normal
-    # user rather than root so an update cannot finish successfully with a
-    # vault that will fail only on the first domain login.
+    # Проверяем том, когда запущен встроенный Keycloak. Выполняем проверку
+    # от пользователя образа, чтобы обнаружить недоступное хранилище секретов
+    # до первого входа через домен.
     # shellcheck disable=SC2086
     VDKV_CID="$(cd "$VDKV_WORK" && $VDKV_RUN ps -q keycloak 2>/dev/null || true)"
     [ -n "$VDKV_CID" ] || return 0

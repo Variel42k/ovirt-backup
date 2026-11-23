@@ -12,10 +12,9 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
-// expandWebTargets turns the explicitly configured scan scope into bounded
-// HTTP probes. VM addresses are handled separately; these targets cover
-// reverse proxies, load balancers and services not represented in the
-// virtualization inventory.
+// expandWebTargets превращает явно настроенную область сканирования в ограниченные HTTP
+// зонды. адреса ВМ обрабатываются отдельно; эти цели охватывают обратные прокси,
+// балансировщики нагрузки и услуги, не представленные в инвентаре виртуализации.
 func expandWebTargets(cfg config.DiscoveryConfig) ([]webTarget, error) {
 	var out []webTarget
 	seen := map[string]bool{}
@@ -39,8 +38,8 @@ func expandWebTargets(cfg config.DiscoveryConfig) ([]webTarget, error) {
 				return nil, fmt.Errorf("некорректная web-цель %q: %w", raw, err)
 			}
 			add(target)
-			// The URL preserves its exact scheme, port, path and query, while
-			// the same host is also checked on every configured service port.
+			// URL сохраняет свою точную схему, порт, путь и запрос, в то время как тот же
+			// хост также проверяется на каждом сконфигурированном порту обслуживания.
 			for _, port := range cfg.WebPorts {
 				add(webTarget{Host: target.Host, Port: port, Source: "configured"})
 			}
@@ -136,10 +135,10 @@ func webTargetsWithout(targets, excluded []webTarget) []webTarget {
 
 const dynamicNetworkPrefixBits = 24
 
-// dynamicInventoryTargets derives private /24 networks from addresses already
-// reported by the selected virtualization inventory. This finds reverse
-// proxies and appliances on the same VM networks without hard-coded ranges.
-// max_addresses remains the safety boundary; only complete networks are used.
+// dynamicInventoryTargets выводит частные /24 сети из адресов, уже сообщенных выбранным
+// инвентарем виртуализации. Это находит обратные прокси и устройства в одних и тех же сетях
+// ВМ без жестких диапазонов.
+// max_addresses остается граница безопасности; Используются только полноценные сети.
 func dynamicInventoryTargets(vms []*model.VM, hosts []*model.Host, servers []*model.Server, cfg config.DiscoveryConfig) ([]webTarget, bool) {
 	selectedServers := make(map[string]bool, len(servers))
 	for _, server := range servers {
@@ -233,8 +232,8 @@ func discoveredHostnameTargets(services []*model.DiscoveredService, cfg config.D
 	return mergeWebTargets(out)
 }
 
-// selectDiscoveryServers applies the saved scope to enabled virtualization
-// connections. An empty list deliberately means every enabled connection.
+// selectDiscoveryServers применяет сохраненный объем к включенным соединениям
+// виртуализации. Пустой список намеренно означает каждое включенное соединение.
 func selectDiscoveryServers(all []*model.Server, selectedIDs []string) ([]*model.Server, error) {
 	selected := make(map[string]bool, len(selectedIDs))
 	for _, id := range selectedIDs {
@@ -258,9 +257,9 @@ func selectDiscoveryServers(all []*model.Server, selectedIDs []string) ([]*model
 	return out, nil
 }
 
-// virtualizationWebTargets adds the management endpoint and every cached
-// hypervisor address belonging to the selected connections. VM addresses are
-// still scanned separately so they retain their VM association.
+// virtualizationWebTargets добавляет конечную точку управления и каждый кэшированный адрес
+// гипервизора, принадлежащий выбранным соединениям. адреса ВМ по-прежнему сканируются
+// отдельно, поэтому они сохраняют свою ассоциацию с ВМ.
 func virtualizationWebTargets(servers []*model.Server, hosts []*model.Host, cfg config.DiscoveryConfig) ([]webTarget, error) {
 	serverByID := make(map[string]*model.Server, len(servers))
 	var out []webTarget

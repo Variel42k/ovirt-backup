@@ -8,26 +8,23 @@ import (
 	"strings"
 )
 
-// Reading the health of NFS and iSCSI paths off a hypervisor.
+// Чтение здоровья NFS и iSCSI путь от гипервизора.
 //
 // The question an operator asks is "теряются ли пакеты до хранилища". Neither
-// NFS nor iSCSI reports packet loss as such — the kernel reports what loss does
-// to it, and that is what /proc/self/mountstats contains:
+// NFS и iSCSI не сообщает о потере пакетов как таковой — ядро сообщает, что потеря делает с
+// ним, и это то, что /proc/self/mountstats содержит:
 //
 //	xprt: tcp <port> <bind> <connect> <connect_time> <idle> <sends> <recvs>
 //	      <bad_xids> <req_u> <bklog_u> <max_slots> <sending_u> <pending_u>
 //
-// A retransmission (sends exceeding recvs over time) means a call went
-// unanswered long enough that the client sent it again. A major timeout means
-// the client exhausted its retry schedule — the guest sees that as a disk that
-// stopped responding. bad_xids means an answer arrived for a call that was
-// already given up on, the classic fingerprint of a congested or duplicating
-// path.
+// Если sends растёт быстрее recvs, клиент повторяет запросы без ответа. Крупный таймаут
+// означает, что попытки исчерпаны и диск в госте перестал отвечать. bad_xids растёт при
+// запоздалых ответах к уже завершившимся запросам, например при перегрузке сети или
+// дублировании пакетов.
 //
-// Everything is parsed from counters, so a single read means nothing on its
-// own; the caller turns pairs of reads into rates.
+// Ядро отдаёт накопительные счётчики. Скорости вычисляем по разнице двух замеров.
 
-// MountCounters holds the raw per-mount counters as the kernel reports them.
+// MountCounters хранит необработанные счётчики для точки монтирования в формате ядра.
 type MountCounters struct {
 	// MountPoint — где смонтировано; Source — server:/export.
 	MountPoint string
@@ -52,11 +49,10 @@ type MountCounters struct {
 	Recvs int64
 }
 
-// Retransmits derives how many calls had to be sent again.
+// Retransmits считает, сколько запросов пришлось отправить повторно.
 //
-// The kernel counts transmissions, not retransmissions: a call sent once
-// contributes one, a call sent three times contributes three. The excess over
-// the number of operations is what was resent.
+// Ядро считает все передачи. Из их числа вычитаем количество операций,
+// чтобы получить число повторов.
 func (c MountCounters) Retransmits() int64 {
 	if c.Transmits <= c.Operations {
 		return 0
@@ -64,7 +60,7 @@ func (c MountCounters) Retransmits() int64 {
 	return c.Transmits - c.Operations
 }
 
-// ParseMountStats extracts the NFS mounts from /proc/self/mountstats content.
+// ParseMountStats изъ /proc/self/mountstats содержащихъ мѣстъ извлекаютъ NFS содержаніе.
 func ParseMountStats(raw string) []MountCounters {
 	var out []MountCounters
 	var current *MountCounters
@@ -89,7 +85,7 @@ func ParseMountStats(raw string) []MountCounters {
 			flush()
 			inPerOp = false
 			fields := strings.Fields(line)
-			// device <source> mounted on <point> with fstype <type> ...
+			// устройство <source> установлено на <point> с fstype <type>...
 			if len(fields) < 8 {
 				continue
 			}
@@ -119,7 +115,7 @@ func ParseMountStats(raw string) []MountCounters {
 	return out
 }
 
-// parseXprt reads the transport line, where the loss indicators live.
+// parseXprt чи́тъ м. транспортная линия, гдѣ живутъ показатели потерь.
 func parseXprt(line string, m *MountCounters) {
 	fields := strings.Fields(line)
 	// xprt: <proto> ... — расположение полей зависит от протокола: у tcp
@@ -145,7 +141,7 @@ func parseXprt(line string, m *MountCounters) {
 	m.BadXIDs = atoi64(fields[base+2])
 }
 
-// parsePerOp accumulates one operation's counters.
+// parsePerOp накапливает счётчики одной операции.
 //
 //	OP: <ops> <trans> <timeouts> <bytes_sent> <bytes_recv> <queue> <rtt> <execute>
 func parsePerOp(line string, m *MountCounters) {
@@ -175,7 +171,7 @@ func atoi64(s string) int64 {
 	return v
 }
 
-// ISCSISession is the state of one iSCSI session on the host.
+// ISCSISession описывает состояние одного сеанса iSCSI на хосте.
 type ISCSISession struct {
 	// Target — IQN цели, Portal — адрес портала.
 	Target string
@@ -184,10 +180,10 @@ type ISCSISession struct {
 	State string
 }
 
-// Healthy reports whether the session is usable right now.
+// Healthy сообщает, является ли сессия пригодной для использования прямо сейчас.
 func (s ISCSISession) Healthy() bool { return strings.EqualFold(s.State, "LOGGED_IN") }
 
-// MountStats reads the NFS counters from the hypervisor.
+// MountStats читает счётчики NFS на гипервизоре.
 func (c *Conn) MountStats(ctx context.Context) ([]MountCounters, error) {
 	out, err := c.Run(ctx, "cat /proc/self/mountstats 2>/dev/null || true")
 	if err != nil {
@@ -196,11 +192,10 @@ func (c *Conn) MountStats(ctx context.Context) ([]MountCounters, error) {
 	return ParseMountStats(string(out)), nil
 }
 
-// ISCSISessions reads the iSCSI session states from the hypervisor.
+// ISCSISessions считывает состояния iSCSI сессии из гипервизора.
 //
-// sysfs rather than iscsiadm: the tool is not installed everywhere, needs root,
-// and its output format has changed between versions, while the sysfs layout
-// has been stable for a decade.
+// sysfs, а не iscsiadm: инструмент не везде установлен, нужен root, и его выходной формат
+// менялся между версиями, в то время как макет sysfs был стабильным в течение десятилетия.
 func (c *Conn) ISCSISessions(ctx context.Context) ([]ISCSISession, error) {
 	const script = `for s in /sys/class/iscsi_session/session*; do
   [ -d "$s" ] || continue

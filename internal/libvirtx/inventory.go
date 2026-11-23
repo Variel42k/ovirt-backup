@@ -11,15 +11,13 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
-// Mapping libvirt onto the shared inventory model.
+// Отображение libvirt на общую модель инвентаризации.
 //
-// The service was built around oVirt's vocabulary — engines, hosts, VMs,
-// storage domains. A bare libvirt server has no engine and exactly one host,
-// so it is presented as a single-host cluster: everything above this file then
-// works unchanged, and the dashboard shows a KVM box next to an oVirt cluster
-// without special cases.
+// Общая модель заимствует у oVirt движки, хосты, ВМ и домены хранения. Автономный libvirt
+// представляет один хост. Для общей модели считаем его одноузловым кластером, который
+// отображается рядом с oVirt без отдельных правил.
 
-// Inventory is one complete snapshot of a libvirt host.
+// Inventory содержит полный снимок инвентаря одного хоста libvirt.
 type Inventory struct {
 	Info  *HostInfo
 	Host  *model.Host
@@ -27,11 +25,11 @@ type Inventory struct {
 	Disks []*model.Disk
 }
 
-// HostObjectID is the identifier of the synthetic host entry. A libvirt server
-// is its own hypervisor, so the id is stable and needs no discovery.
+// HostObjectID идентифицирует виртуальную запись хоста. Сервер libvirt сам является
+// гипервизором, поэтому идентификатор постоянный.
 const HostObjectID = "hypervisor"
 
-// FetchInventory collects the whole inventory of one libvirt host.
+// FetchInventory собирает полный инвентарь одного хоста libvirt.
 func (c *Conn) FetchInventory(ctx context.Context, serverID string) (*Inventory, error) {
 	info, err := c.HostInfo(ctx)
 	if err != nil {
@@ -50,9 +48,8 @@ func (c *Conn) FetchInventory(ctx context.Context, serverID string) (*Inventory,
 			CPUCores:    info.CPUs,
 			MemoryBytes: info.MemoryKiB * 1024,
 			OSVersion:   "libvirt " + info.Version,
-			// A bare libvirt host has no engine-managed power management, so
-			// fencing it from here is not possible — and saying so keeps the
-			// remediation engine from offering an action that cannot work.
+			// У автономного хоста libvirt нет управления питанием через движок. Не
+			// предлагаем фенсинг, который нельзя выполнить.
 			PowerMgmtOn: false,
 		},
 	}
@@ -69,7 +66,7 @@ func (c *Conn) FetchInventory(ctx context.Context, serverID string) (*Inventory,
 		}
 		parsed, err := c.describe(dom)
 		if err != nil {
-			// One unreadable domain must not hide the rest of the inventory.
+			// Один нечитаемый домен не должен скрывать остальную часть инвентаря.
 			continue
 		}
 
@@ -97,8 +94,8 @@ func (c *Conn) FetchInventory(ctx context.Context, serverID string) (*Inventory,
 				continue
 			}
 			modelDisk := &model.Disk{
-				// libvirt has no disk identifier of its own; the target device
-				// is unique within a domain, so the pair identifies it.
+				// libvirt не имеет собственного идентификатора диска; целевое устройство
+				// уникально в домене, поэтому пара идентифицирует его.
 				ID:            parsed.UUID + ":" + disk.Target,
 				ServerID:      serverID,
 				Alias:         disk.Target,
@@ -110,8 +107,8 @@ func (c *Conn) FetchInventory(ctx context.Context, serverID string) (*Inventory,
 				StorageDomain: disk.Source,
 				StorageType:   disk.Type,
 				ContentType:   contentTypeFor(disk.Device),
-				// Changed block tracking is a property of the format here, not
-				// a flag somebody has to switch on as in oVirt.
+				// Измененное отслеживание блоков является свойством формата здесь, а не
+				// флагом, который кто-то должен включить, как в oVirt.
 				BackupMode: backupModeFor(disk),
 			}
 			if capacity, allocation, err := c.blockSize(dom, disk.Source); err == nil {
@@ -131,8 +128,8 @@ func (c *Conn) FetchInventory(ctx context.Context, serverID string) (*Inventory,
 	return inv, nil
 }
 
-// domainAddresses prefers qemu-agent data and falls back to DHCP leases.
-// Container bridges and link-local addresses are not service endpoints.
+// domainAddresses предпочитает qemu-agent data и отступает к DHCP аренде.
+// Контейнерные мосты и локальные адреса не являются конечными точками обслуживания.
 func (c *Conn) domainAddresses(dom golibvirt.Domain, agent bool) []string {
 	sources := []golibvirt.DomainInterfaceAddressesSource{golibvirt.DomainInterfaceAddressesSrcLease}
 	if agent {
@@ -175,9 +172,9 @@ func virtualInterfaceName(name string) bool {
 	return false
 }
 
-// blockSize asks libvirt how large a disk actually is. The domain XML does not
-// carry the size, and guessing from the file would be wrong for block devices
-// and for images with a backing chain.
+// blockSize спрашивает libvirt насколько велик диск на самом деле. Домен XML не несет
+// размер, и угадывание из файла было бы неправильным для блочных устройств и для образов с
+// цепочкой родительских образов.
 func (c *Conn) blockSize(dom golibvirt.Domain, source string) (capacity, allocation int64, err error) {
 	if source == "" {
 		return 0, 0, fmt.Errorf("у диска нет источника")
@@ -189,8 +186,9 @@ func (c *Conn) blockSize(dom golibvirt.Domain, source string) (capacity, allocat
 	return int64(cap), int64(alloc), nil
 }
 
-// vmStatusFor maps libvirt's states onto the vocabulary the rest of the
-// service already speaks, so alerts and remediation need no per-driver logic.
+// vmStatusFor отображает состояния libvirt на словарный запас, который уже говорит
+// остальная часть службы, поэтому оповещения и исправление не нуждаются в логике для
+// водителя.
 func vmStatusFor(state State) string {
 	switch state {
 	case StateRunning, StateBlocked:
@@ -202,8 +200,8 @@ func vmStatusFor(state State) string {
 	case StateShutOff:
 		return "down"
 	case StateCrashed:
-		// A crashed domain is off and needs starting, which is exactly how the
-		// remediation engine treats "down".
+		// Разбитый домен выключен и нуждается в запуске, что именно так относится к
+		// механизму восстановления "down".
 		return "down"
 	case StatePMSuspended:
 		return "suspended"
@@ -212,7 +210,7 @@ func vmStatusFor(state State) string {
 	}
 }
 
-// pauseReasonFor carries the detail that explains an unusual state.
+// pauseReasonFor несет в себе деталь, объясняющую необычное состояние.
 func pauseReasonFor(state State) string {
 	switch state {
 	case StateCrashed:
@@ -224,8 +222,8 @@ func pauseReasonFor(state State) string {
 	}
 }
 
-// normaliseFormat aligns libvirt's driver type with the vocabulary used for
-// oVirt disks, where qcow2 is spelled "cow".
+// normaliseFormat сопоставляет тип драйвера libvirt со словарем, используемым для oVirt
+// дисков, где qcow2 пишется "cow".
 func normaliseFormat(format string) string {
 	switch format {
 	case "qcow2":
@@ -253,7 +251,7 @@ func contentTypeFor(device string) string {
 	}
 }
 
-// DomainByUUID finds a domain handle from the identifier the inventory uses.
+// DomainByUUID находит обработчик домена из идентификатора, который использует инвентарь.
 func (c *Conn) DomainByUUID(ctx context.Context, uuid string) (golibvirt.Domain, *Domain, error) {
 	domains, _, err := c.lv.ConnectListAllDomains(1, 0)
 	if err != nil {

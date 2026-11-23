@@ -11,9 +11,9 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/ovirt"
 )
 
-// ReconcileStaleRestores closes upload tickets left by a process crash and
-// marks the corresponding operations as failed. oVirt 4.3 otherwise keeps a
-// paused_system ImageTransfer and its disk lock indefinitely.
+// ReconcileStaleRestores закрывает билеты на загрузку, оставленные в результате сбоя
+// процесса, и отмечает соответствующие операции как неудавшиеся. oVirt 4.3 в противном
+// случае сохраняет paused_system ImageTransfer и блокировку диска на неопределенный срок.
 func (e *Engine) ReconcileStaleRestores(ctx context.Context) error {
 	importErr := e.reconcileInterruptedImageImports(ctx)
 	restores, err := e.store.ListInterruptedRestoreRuns(ctx)
@@ -71,8 +71,8 @@ func (e *Engine) closeInterruptedRestoreTransfer(ctx context.Context, run *model
 		})
 	} else {
 		if run.Target != model.RestoreToNewDisk {
-			// Without a saved transfer ID an existing disk does not prove
-			// ownership: its upload may belong to another operator.
+			// Без сохраненного идентификатора передачи существующий диск не подтверждает
+			// право собственности: его загрузка может принадлежать другому оператору.
 			return nil
 		}
 		// Совместимость с операциями, начатыми до сохранения transfer_id: диск

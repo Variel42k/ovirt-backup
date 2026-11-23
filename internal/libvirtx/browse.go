@@ -6,28 +6,26 @@ import (
 	"strings"
 )
 
-// RemoteDir is one directory on the hypervisor, as seen through the existing
-// SSH connection.
+// RemoteDir описывает каталог гипервизора, доступный через открытое SSH-соединение.
 type RemoteDir struct {
-	// Canonical is the path after resolving every symlink, which is the only
-	// form worth comparing against an allowed root: a link is resolved on the
-	// hypervisor, not here, so the check has to be made on what it resolved to.
+	// Canonical содержит путь после разрешения всех символических ссылок. Только его
+	// сравниваем с разрешённым корнем, поскольку ссылки разрешаются на гипервизоре.
 	Canonical string
 	Entries   []string
 	Writable  bool
 }
 
-// ListDirectories enumerates the subdirectories of path on the hypervisor.
+// ListDirectories перечисляет подкаталоги пути на гипервизоре.
 //
-// Symlinks are skipped entirely rather than followed. Locally the picker
-// follows a link and checks where it lands; here the landing place is on
-// another machine, and re-checking it would cost another round trip per entry.
-// Skipping is stricter than necessary and cheaper to be sure about — a scratch
-// directory reached through a symlink is not a case worth supporting.
+// Символические ссылки пропускаем. Для локального каталога можно сразу проверить путь
+// назначения, а на гипервизоре для этого потребовался бы дополнительный запрос для каждой
+// ссылки.
+// Пропуск является более строгим, чем необходимо, и дешевле, чтобы быть уверенным —
+// временный рабочий каталог, достигаемый через символическую ссылку, не стоит поддерживать.
 //
-// The writability probe matches PrepareScratchDir: a backup creates the
-// directory and writes into it, so the question the operator actually has is
-// whether that will work, and only a real attempt answers it.
+// Тест на разрешение записи соответствует PrepareScratchDir: резервная копия создает
+// каталог и записывает в него, поэтому вопрос, который на самом деле есть у оператора,
+// заключается в том, будет ли это работать, и только реальная попытка отвечает на него.
 func (c *Conn) ListDirectories(ctx context.Context, path string) (*RemoteDir, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, fmt.Errorf("не задан каталог")
@@ -60,7 +58,7 @@ func (c *Conn) ListDirectories(ctx context.Context, path string) (*RemoteDir, er
 	return result, nil
 }
 
-// listScript builds the one command the hypervisor runs.
+// listScript строит одну команду, которую выполняет гипервизор.
 //
 // Одной командой, а не тремя: каждая — отдельная сессия SSH, а между ними
 // каталог успевает измениться, и ответ получился бы про разные состояния.

@@ -23,9 +23,8 @@ function restoredActivities(): UIActivity[] {
   try {
     const value = JSON.parse(localStorage.getItem(storageKey) ?? '[]') as UIActivity[]
     if (!Array.isArray(value)) return []
-    // A browser reload cannot keep the original request object. Leave the
-    // activity visible, but explain that its authoritative state is on the
-    // destination page and can be refreshed there.
+    // После перезагрузки браузера исходный запрос теряется. Оставляем операцию в списке и
+    // указываем, где обновить её состояние.
     return value.slice(0, 30).map((item) => {
       if (item.state !== 'running') return item
       const expired = Date.now() - Date.parse(item.updated_at) > 15 * 60_000

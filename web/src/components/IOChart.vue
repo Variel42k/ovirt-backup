@@ -2,18 +2,15 @@
 import { computed, ref } from 'vue'
 import { bytes, dateTime } from '@/api/format'
 
-// A two-band chart: throughput above, latency below.
+// Верхний график показывает пропускную способность, нижний показывает задержку.
 //
-// They are drawn together because neither answers the question alone. High
-// throughput with low latency is a disk doing its job; low throughput with high
-// latency is a disk in trouble, and on a chart of throughput alone the two look
-// identical — a flat line near zero.
+// Обе метрики нужны для диагностики. По низкой пропускной способности нельзя отличить
+// простаивающий диск от диска с высокой задержкой.
 //
-// Inline SVG, no chart library: the whole point of this service is to keep
-// working when other things are broken, and a page that needs a CDN is not that.
+// Встроенный SVG позволяет отобразить график без библиотеки и доступа к CDN.
 
 export interface IOPoint {
-  /** Begin a new line after an unobserved interval or a stage boundary. */
+  /** После пропуска измерений или смены этапа начинаем новый отрезок линии. */
   breakBefore?: boolean
   at: string
   /** Чтение и запись в байтах в секунду. */

@@ -18,8 +18,8 @@ func TestExpandWebTargetsIncludesNamesURLsAndNetworks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Bare name: 2 ports; URL: its exact endpoint plus 2 configured ports;
-	// /30: 4 addresses * 2 ports.
+	// Имя хоста даёт два порта. Для URL добавляем заданный адрес и два порта
+	// из настроек. Сеть /30 даёт четыре адреса по два порта.
 	if len(targets) != 13 {
 		t.Fatalf("targets=%d, want 13: %#v", len(targets), targets)
 	}
@@ -74,8 +74,8 @@ func TestVirtualizationWebTargetsIncludesManagerAndHypervisors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// One exact manager endpoint plus two ports for the standalone KVM and
-	// two ports for the oVirt hypervisor.
+	// Одна точная конечная точка менеджера плюс два порта для автономного KVM и два порта
+	// для oVirt гипервизора.
 	if len(targets) != 5 {
 		t.Fatalf("targets=%d, want 5: %#v", len(targets), targets)
 	}

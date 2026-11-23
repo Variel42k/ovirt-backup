@@ -79,6 +79,9 @@ func TestLeftoverSnapshotRules(t *testing.T) {
 	}{
 		{"запуск завершён", snapshotAt("s1", "jhvirt backup done", "ok", time.Hour), true},
 		{"запуск идёт", snapshotAt("s2", "jhvirt backup live", "ok", time.Minute), false},
+		{"описание завершённого запуска", snapshotAt("s-new", "Backup snapshot done", "ok", time.Hour), true},
+		{"описание идущего запуска", snapshotAt("s-live", "Backup snapshot live", "ok", time.Hour), false},
+		{"описание неизвестного запуска", snapshotAt("s-foreign", "Backup snapshot other", "ok", 8*time.Hour), false},
 		{"записан в запуске", snapshotAt("snap-rec", "jhvirt backup recorded", "ok", time.Hour), true},
 		{"запуска нет, снапшот старый", snapshotAt("s3", "jhvirt backup lost", "ok", 7*time.Hour), true},
 		{"запуска нет, снапшот свежий", snapshotAt("s4", "jhvirt backup lost", "ok", time.Hour), false},

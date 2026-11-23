@@ -1,0 +1,46 @@
+?   	github.com/Variel42k/ovirt-backup/cmd/jhvirt-keycloak-helper	[no test files]
+?   	github.com/Variel42k/ovirt-backup/cmd/jhvirt-setup	[no test files]
+ok  	github.com/Variel42k/ovirt-backup/cmd/jvbackup	(cached)
+ok  	github.com/Variel42k/ovirt-backup/cmd/ovirt-backup-server	1.483s
+?   	github.com/Variel42k/ovirt-backup/docs	[no test files]
+ok  	github.com/Variel42k/ovirt-backup/internal/api	11.473s
+ok  	github.com/Variel42k/ovirt-backup/internal/auditlog	(cached)
+ok  	github.com/Variel42k/ovirt-backup/internal/backup	11.513s
+ok  	github.com/Variel42k/ovirt-backup/internal/config	(cached)
+ok  	github.com/Variel42k/ovirt-backup/internal/dbdump	1.182s
+ok  	github.com/Variel42k/ovirt-backup/internal/discovery	(cached)
+ok  	github.com/Variel42k/ovirt-backup/internal/dispatch	0.349s
+ok  	github.com/Variel42k/ovirt-backup/internal/dr	(cached)
+ok  	github.com/Variel42k/ovirt-backup/internal/embeddedkeycloak	(cached)
+?   	github.com/Variel42k/ovirt-backup/internal/events	[no test files]
+ok  	github.com/Variel42k/ovirt-backup/internal/filebackup	0.038s
+ok  	github.com/Variel42k/ovirt-backup/internal/fsbrowse	(cached)
+ok  	github.com/Variel42k/ovirt-backup/internal/gitclean	(cached)
+ok  	github.com/Variel42k/ovirt-backup/internal/guesthealth	(cached)
+ok  	github.com/Variel42k/ovirt-backup/internal/hosthelper	(cached)
+ok  	github.com/Variel42k/ovirt-backup/internal/imageio	(cached)
+ok  	github.com/Variel42k/ovirt-backup/internal/keycloakadmin	(cached)
+ok  	github.com/Variel42k/ovirt-backup/internal/kvm	(cached)
+ok  	github.com/Variel42k/ovirt-backup/internal/libvirtx	0.338s
+ok  	github.com/Variel42k/ovirt-backup/internal/logging	(cached)
+ok  	github.com/Variel42k/ovirt-backup/internal/model	(cached)
+ok  	github.com/Variel42k/ovirt-backup/internal/monitor	3.070s
+ok  	github.com/Variel42k/ovirt-backup/internal/notify	(cached)
+ok  	github.com/Variel42k/ovirt-backup/internal/ovirt	(cached)
+ok  	github.com/Variel42k/ovirt-backup/internal/proxmox	(cached)
+ok  	github.com/Variel42k/ovirt-backup/internal/quality	1.066s
+ok  	github.com/Variel42k/ovirt-backup/internal/replication	1.714s
+ok  	github.com/Variel42k/ovirt-backup/internal/repo	(cached)
+ok  	github.com/Variel42k/ovirt-backup/internal/retention	(cached)
+ok  	github.com/Variel42k/ovirt-backup/internal/scheduler	1.413s
+?   	github.com/Variel42k/ovirt-backup/internal/secret	[no test files]
+ok  	github.com/Variel42k/ovirt-backup/internal/setup	(cached)
+ok  	github.com/Variel42k/ovirt-backup/internal/sshpool	(cached)
+ok  	github.com/Variel42k/ovirt-backup/internal/sshstats	(cached)
+ok  	github.com/Variel42k/ovirt-backup/internal/sshtrust	(cached)
+ok  	github.com/Variel42k/ovirt-backup/internal/store	8.771s
+?   	github.com/Variel42k/ovirt-backup/internal/store/storetest	[no test files]
+?   	github.com/Variel42k/ovirt-backup/internal/testdb	[no test files]
+ok  	github.com/Variel42k/ovirt-backup/internal/vmtransfer	13.403s
+ok  	github.com/Variel42k/ovirt-backup/pkg/nbd	(cached)
+?   	github.com/Variel42k/ovirt-backup/scripts	[no test files]

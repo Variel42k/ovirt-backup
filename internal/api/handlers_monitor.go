@@ -27,7 +27,7 @@ func (s *Server) handleListAlerts(w http.ResponseWriter, r *http.Request) {
 		Limit:    queryInt(r, "limit", 200),
 		Accepted: queryBool(r, "accepted"),
 	}
-	// By default the list shows what still needs attention; resolved alerts
+	// По умолчанию список показывает, что еще требует внимания; Решенные предупреждения
 	// are history and only clutter the working view. Раздел принятых — журнал:
 	// закрытые оповещения с пояснениями остаются в нём.
 	if state := r.URL.Query().Get("state"); state != "" {
@@ -118,7 +118,7 @@ func (s *Server) handleListRemediations(w http.ResponseWriter, r *http.Request) 
 	writeList(w, items)
 }
 
-// modeRequest switches auto-remediation between check and live mode.
+// modeRequest переключает автовосстановление между проверочным и живым режимом.
 type modeRequest struct {
 	DryRun bool   `json:"dry_run"`
 	Note   string `json:"note"`
@@ -127,7 +127,7 @@ type modeRequest struct {
 	Confirm bool `json:"confirm"`
 }
 
-// modeResponse describes the mode in force and the history behind it.
+// modeResponse описывается режим в силе и история, стоящая за ним.
 type modeResponse struct {
 	DryRun  bool                       `json:"dry_run"`
 	Enabled bool                       `json:"enabled"`
@@ -156,9 +156,8 @@ func (s *Server) handleGetRemediationMode(w http.ResponseWriter, r *http.Request
 			break
 		}
 	}
-	// Showing the running tally is what makes the mode usable: an operator
-	// deciding whether to go live wants to know what has been observed so far,
-	// not only after the archive is written.
+	// Текущий счётчик показывает оператору результаты наблюдений до закрытия периода и
+	// записи архива.
 	if resp.Current != nil {
 		if digest, err := s.observedDigest(r.Context(), resp.Current); err == nil {
 			resp.Observed = digest
@@ -174,7 +173,8 @@ func (s *Server) handleSetRemediationMode(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Leaving check mode is the moment the automation starts touching production.
+	// Выход из режима проверки — момент, когда автоматизация начинает касаться
+	// производства.
 	if !req.DryRun && !req.Confirm {
 		s.writeError(w, r, badRequest(
 			"выход из режима проверки означает, что действия начнут выполняться на боевых машинах, "+
@@ -204,7 +204,7 @@ func (s *Server) handleSetRemediationMode(w http.ResponseWriter, r *http.Request
 	})
 }
 
-// observedDigest counts what the open period has seen so far.
+// observedDigest подсчитано, что до сих пор наблюдалось в открытом периоде.
 func (s *Server) observedDigest(ctx context.Context, period *model.RemediationPeriod) (*model.RemediationDigest, error) {
 	records, err := s.store.RemediationsBetween(ctx, period.StartedAt, nil)
 	if err != nil {
@@ -231,8 +231,8 @@ func (s *Server) observedDigest(ctx context.Context, period *model.RemediationPe
 	return digest, nil
 }
 
-// handleGetRemediationArchive returns the decisions collected during a closed
-// check period.
+// handleGetRemediationArchive возвращает решения, собранные в течение закрытого периода
+// проверки.
 func (s *Server) handleGetRemediationArchive(w http.ResponseWriter, r *http.Request) {
 	period, err := s.store.GetRemediationPeriod(r.Context(), r.PathValue("id"))
 	if err != nil {
@@ -260,7 +260,7 @@ func modeLabel(dryRun bool) string {
 	return "боевой"
 }
 
-// manualRemediationRequest asks for a corrective action explicitly.
+// manualRemediationRequest требует явного корректирующего действия.
 type manualRemediationRequest struct {
 	ServerID string `json:"server_id"`
 	Scope    string `json:"scope"`
@@ -271,9 +271,8 @@ type manualRemediationRequest struct {
 	Confirm bool `json:"confirm"`
 }
 
-// handleManualRemediation lets an operator run the same corrective action the
-// monitor would, bypassing the cooldown and attempt limits — those exist to
-// stop a robot from looping, not to stop a person who has looked at the box.
+// handleManualRemediation позволяет оператору выполнить действие монитора без задержки и
+// предела попыток. Эти ограничения сдерживают повторные автоматические действия.
 func (s *Server) handleManualRemediation(w http.ResponseWriter, r *http.Request) {
 	var req manualRemediationRequest
 	if err := decodeJSON(r, &req); err != nil {
@@ -381,10 +380,10 @@ func (s *Server) handleHealthSamples(w http.ResponseWriter, r *http.Request) {
 	writeList(w, samples)
 }
 
-// handleEvents streams state changes to the browser over server-sent events.
+// handleEvents потоки изменений состояния в браузере через события, отправленные сервером.
 //
-// SSE rather than websockets: the traffic is one-directional, it survives
-// proxies that mangle upgrades, and the browser reconnects on its own.
+// SSE вместо websockets: трафик является однонаправленным, он выживает прокси, которые
+// mangle обновляет, и браузер повторно подключается самостоятельно.
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -395,8 +394,8 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	// Nginx buffers responses by default, which would hold every event until
-	// the connection closes.
+	// Nginx буферизирует ответы по умолчанию, который будет удерживать каждое событие, пока
+	// соединение не закроется.
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 
@@ -406,8 +405,8 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "retry: 5000\n\n")
 	flusher.Flush()
 
-	// A heartbeat keeps intermediaries from dropping an idle connection and
-	// lets the client notice a dead link.
+	// Сердцебиение удерживает посредников от простоя соединения и позволяет клиенту
+	// заметить мертвую ссылку.
 	ticker := time.NewTicker(20 * time.Second)
 	defer ticker.Stop()
 
@@ -432,7 +431,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// ioOverview is what the disk monitoring screen loads in one call.
+// ioOverview — это то, что экран мониторинга диска загружается за один вызов.
 type ioOverview struct {
 	Disks  []*model.DiskSample  `json:"disks"`
 	Mounts []*model.MountSample `json:"mounts"`
@@ -479,7 +478,7 @@ func (s *Server) handleMountSamples(w http.ResponseWriter, r *http.Request) {
 	writeList(w, items)
 }
 
-// handleStoragePaths lists the current state of every storage path of a host.
+// handleStoragePaths перечисляет текущее состояние каждого пути хранения узла.
 func (s *Server) handleStoragePaths(w http.ResponseWriter, r *http.Request) {
 	items, err := s.store.LatestMountSamples(r.Context(), r.PathValue("id"))
 	if err != nil {

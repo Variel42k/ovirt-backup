@@ -104,9 +104,9 @@ func (e *Engine) snapshotEngineConfig(ctx context.Context, jobID, serverID, targ
 	return run, nil
 }
 
-// ApplyEngineConfigRetention applies the regular GFS policy to snapshots made
-// by one server-level job. Engine snapshots have no incremental ancestry, so
-// each selected run can be removed independently.
+// ApplyEngineConfigRetention применяет политику GFS к снапшотам одного серверного задания.
+// У этих снапшотов нет инкрементальных зависимостей, поэтому выбранные запуски удаляются
+// независимо.
 func (e *Engine) ApplyEngineConfigRetention(ctx context.Context, job *model.EngineConfigJob) error {
 	if job == nil || job.Retention.Empty() {
 		return nil

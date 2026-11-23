@@ -1,4 +1,4 @@
-// Package store provides persistence for the service.
+// Пакет store обеспечивает постоянство сервиса.
 //
 // СУБД одна — PostgreSQL. Раньше поддерживались две, и схема была написана на
 // пересечении диалектов; от этого остались BIGINT-миллисекунды вместо
@@ -29,18 +29,18 @@ import (
 //go:embed migrations/*.sql
 var migrationFS embed.FS
 
-// migrationLockKey serializes schema changes across application replicas.
-// Kubernetes may start several pods at once, and every pod sees the same set
-// of unapplied migrations. A session advisory lock keeps that race out of the
-// migration engine without introducing a Kubernetes-specific dependency.
+// migrationLockKey сериализует изменения схемы в репликах приложений.
+// Kubernetes может запускать несколько стручков одновременно, и каждый стручок видит один и
+// тот же набор незадействованных миграций. Сессионный консультативный замок удерживает эту
+// гонку от механизма миграции, не вводя зависимость, специфичную для Kubernetes.
 const migrationLockKey int64 = 7_240_120
 
-// DB wraps *sql.DB.
+// DB обмота́ть *скл. DB обмотать.
 type DB struct {
 	*sql.DB
 }
 
-// Open connects to the configured database and prepares it for use.
+// Open соединяется с сконфигурированной базой данных и подготавливает ее к использованию.
 func Open(ctx context.Context, cfg config.DatabaseConfig) (*DB, error) {
 	return openPostgres(ctx, cfg.Postgres)
 }
@@ -66,8 +66,8 @@ func openPostgres(ctx context.Context, cfg config.PostgresConfig) (*DB, error) {
 	return &DB{DB: sqlDB}, nil
 }
 
-// Rebind converts a query written with `?` placeholders into the dialect's
-// native form: PostgreSQL wants $1, $2, ...
+// Rebind преобразует запрос, написанный с `?` заполнителями, в нативную форму диалекта:
+// PostgreSQL хочет $1, $2,...
 func (db *DB) Rebind(query string) string {
 	var b strings.Builder
 	b.Grow(len(query) + 8)
@@ -85,22 +85,22 @@ func (db *DB) Rebind(query string) string {
 	return b.String()
 }
 
-// Exec runs a statement after rebinding placeholders.
+// Exec выполняется после переплетения заполнителей.
 func (db *DB) Exec(ctx context.Context, query string, args ...any) (sql.Result, error) {
 	return db.ExecContext(ctx, db.Rebind(query), args...)
 }
 
-// Query runs a query after rebinding placeholders.
+// Query запускает запрос после повторной привязки заполнителей.
 func (db *DB) Query(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
 	return db.QueryContext(ctx, db.Rebind(query), args...)
 }
 
-// QueryRow runs a single-row query after rebinding placeholders.
+// QueryRow запускает однорядный запрос после переплетения заполнителей.
 func (db *DB) QueryRow(ctx context.Context, query string, args ...any) *sql.Row {
 	return db.QueryRowContext(ctx, db.Rebind(query), args...)
 }
 
-// InTx runs fn inside a transaction, rolling back on error or panic.
+// InTx забега́ть фн. внутр. транзакцию, откатываться по ошибке или панике.
 func (db *DB) InTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -119,9 +119,9 @@ func (db *DB) InTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
 	return tx.Commit()
 }
 
-// Migrate applies every embedded migration that has not run yet. Migration
-// files are named NNNN_description.sql and applied in numeric order; each file
-// runs inside its own transaction.
+// Migrate применяется каждая встроенная миграция, которая еще не запущена. Миграционные
+// файлы называются NNNN_description.sql и применяются в цифровом порядке; Каждый файл
+// запускается внутри своей транзакции.
 func (db *DB) Migrate(ctx context.Context) error {
 	lockConn, err := db.Conn(ctx)
 	if err != nil {
@@ -132,8 +132,9 @@ func (db *DB) Migrate(ctx context.Context) error {
 		return fmt.Errorf("acquire migration lock: %w", err)
 	}
 	defer func() {
-		// Closing the dedicated connection releases the lock even when the
-		// explicit unlock fails because the caller context was cancelled.
+		// Закрытие отдельного соединения освобождает блокировку, даже если явное
+		// освобождение блокировки выходит из строя, потому что контекст вызывающего кода
+		// был отменен.
 		unlockCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_, _ = lockConn.ExecContext(unlockCtx, `SELECT pg_advisory_unlock($1)`, migrationLockKey)

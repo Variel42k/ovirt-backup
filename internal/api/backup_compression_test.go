@@ -53,3 +53,13 @@ func TestAdHocCompressionRejectsInvalidAndNonDiskChoicesBeforeExecution(t *testi
 		}
 	}
 }
+
+func TestCompressionPreviewRequiresExplicitSourceReadConfirmation(t *testing.T) {
+	s := &Server{}
+	r := httptest.NewRequest(http.MethodPost, "/servers/s/vms/v/compression-preview", bytes.NewBufferString(`{}`))
+	w := httptest.NewRecorder()
+	s.handleCompressionPreview(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("preview may touch source without confirmation: %d", w.Code)
+	}
+}

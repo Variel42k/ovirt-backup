@@ -13,21 +13,20 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
-// The boot test: reassemble the backup, put it on a hypervisor, start it as an
-// isolated VM and wait for the guest to say hello.
+// Тест запуска ВМ: повторно соберите резервную копию, поместите ее на гипервизор, запустите
+// ее как изолированную ВМ и дождитесь, пока гость поздоровается.
 //
-// It lives here rather than in internal/backup for the same reason the backup
-// driver does — it needs a libvirt connection, and internal/kvm already depends
-// on the format package. The engine calls back into it through a registered
-// verifier, so the record, its progress and the stored report stay in one place.
+// Проверке требуется соединение libvirt. Она находится здесь, поскольку internal/kvm уже
+// зависит от пакета формата. Движок вызывает зарегистрированную функцию, и запись проверки,
+// прогресс и отчёт ведутся в одном месте.
 //
-// The cost is deliberate and worth stating plainly: the image travels to the
-// hypervisor at its logical size (compressed on the wire, sparse on disk), and
-// a guest without qemu-guest-agent can only ever report "started but silent".
-// Every other mode reasons about bytes; this one is the only one that answers
-// the question an operator actually has.
+// Образ передаётся на гипервизор в полном логическом размере со сжатием в сети и
+// сохраняется разреженным на диске. Без qemu-guest-agent можно подтвердить только запуск
+// ВМ, без ответа гостя.
+// Все остальные модальные причины о байтах; Это единственный ответ на вопрос, который на
+// самом деле есть у оператора.
 
-// registerVerifiers wires the modes the engine cannot perform on its own.
+// registerVerifiers режимы, которые движок не может выполнять самостоятельно.
 func (d *Dispatcher) registerVerifiers() {
 	d.Engine.RegisterVerifier(model.VerifyBoot, d.verifyBoot)
 }
@@ -136,8 +135,8 @@ func (d *Dispatcher) verifyBoot(ctx context.Context, req backup.ExternalVerifyRe
 		if !opts.KeepOnFailure {
 			d.removePlannedImages(driver, plans)
 		}
-		// The domain never started: that is a failed verification, not a
-		// broken request, so it goes into the report.
+		// Домен никогда не запускался: это неудачная проверка, а не сломанный запрос,
+		// поэтому он попадает в отчет.
 		for i := range report.Disks {
 			report.Disks[i].OK = false
 			report.Disks[i].Problems = append(report.Disks[i].Problems, err.Error())
@@ -350,11 +349,11 @@ func (d *Dispatcher) removePlannedImages(driver *kvm.Driver, plans []bootDiskPla
 	}
 }
 
-// uploadImage assembles the chain and streams it to the hypervisor.
+// uploadImage собирает цепь и направляет ее в гипервизор.
 //
-// The image is produced and consumed at the same time through a pipe: nothing
-// is staged on the backup server, which is the only way a terabyte disk can be
-// verified on a machine with tens of gigabytes free.
+// Образ восстанавливается и передаётся одновременно через канал. Временный файл на сервере
+// копий не создаётся, поэтому терабайтный образ можно проверить при наличии нескольких
+// десятков гигабайт.
 func (d *Dispatcher) uploadImage(ctx context.Context, driver *kvm.Driver, reader *backup.ChainReader,
 	remote string, compress bool, req backup.ExternalVerifyRequest, progressBase, progressTotal int64) (int64, error) {
 
@@ -374,8 +373,8 @@ func (d *Dispatcher) uploadImage(ctx context.Context, driver *kvm.Driver, reader
 		if elapsed := time.Since(started); elapsed > 0 {
 			speed = int64(float64(done) / elapsed.Seconds())
 		}
-		// Upload occupies the first 80% of the bar; the boot itself is the
-		// rest and has no measurable progress of its own.
+		// Загрузка занимает первые 80% бара; Ботинок сам по себе является остальным и не
+		// имеет измеримого прогресса.
 		pct := int(current * 100 / max64(progressTotal, 1))
 		d.Engine.UpdateVerifyTransfer(ctx, req.Record, "writing_data", pct*80/100,
 			current, progressTotal, speed)
@@ -390,9 +389,8 @@ func (d *Dispatcher) uploadImage(ctx context.Context, driver *kvm.Driver, reader
 	go func() {
 		var sink io.WriteCloser = pw
 		if compress {
-			// Fast level, not best: the payload here is mostly holes, which
-			// compress to nothing at any level, and real data is usually
-			// already compressed inside the guest.
+			// Выбираем быстрый уровень. Невыделенные диапазоны хорошо сжимаются
+			// на любом уровне, а остальные данные обычно уже сжаты внутри гостя.
 			gz, err := gzip.NewWriterLevel(pw, gzip.BestSpeed)
 			if err != nil {
 				_ = pw.CloseWithError(err)
@@ -423,13 +421,11 @@ func (d *Dispatcher) uploadImage(ctx context.Context, driver *kvm.Driver, reader
 	return written, nil
 }
 
-// writeImage serialises the merged chain as a flat image.
+// writeImage сериализует слитую цепочку в виде плоского образа.
 //
-// Holes are written out as real zeros rather than skipped. dd on the far side
-// writes sequentially, so the zeros are what holds later data at its correct
-// offset; conv=sparse is what keeps them from reaching the platter. Skipping
-// them here instead would shift the whole tail of the image and produce a
-// backup that verifies as "did not boot" for a reason that is entirely ours.
+// На принимающей стороне dd пишет последовательно, поэтому передаём нули для сохранения
+// смещений последующих данных. conv=sparse не выделяет блоки на диске под эти нули. Пропуск
+// нулей при передаче сдвинул бы остаток образа и сорвал проверку загрузки.
 func writeImage(ctx context.Context, reader *backup.ChainReader, dst io.Writer, progress func(int64)) (int64, error) {
 	var written int64
 	zeros := make([]byte, 1<<20)
@@ -458,12 +454,11 @@ func writeImage(ctx context.Context, reader *backup.ChainReader, dst io.Writer, 
 	return written, err
 }
 
-// resolveBootHost picks the hypervisor the test VM runs on.
+// resolveBootHost выбирает гипервизор, на котором запускается тестовая ВМ.
 //
-// Defaulting to the backup's own server is only correct when that server is a
-// libvirt host. An oVirt engine cannot start an image it does not manage, so
-// there the operator has to name a host — the API refuses the request before it
-// gets this far, and this is the guard for the scheduled path.
+// Использовать исходный сервер по умолчанию можно только для libvirt. oVirt не запускает
+// образ, которым не управляет, поэтому оператор указывает хост. API проверяет это заранее,
+// а здесь то же правило применяется к запускам по расписанию.
 func (d *Dispatcher) resolveBootHost(ctx context.Context, ownServerID, requested string) (*model.Server, error) {
 	id := requested
 	if id == "" {

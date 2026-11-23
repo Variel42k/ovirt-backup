@@ -1,5 +1,5 @@
-// Package proxmox implements the bounded part of the Proxmox VE REST API used
-// for cluster inventory and power management.
+// Пакет proxmox реализует ограниченную часть Proxmox VE REST API, используемую для
+// инвентаризации кластера и управления питанием.
 package proxmox
 
 import (
@@ -20,9 +20,9 @@ import (
 
 const maxResponseBytes = 16 << 20
 
-// Config describes one cluster-wide Proxmox API connection. TokenID has the
-// canonical user@realm!token-name form and TokenSecret is the UUID shown once
-// when the token is created.
+// Config описывает подключение к API кластера Proxmox. TokenID имеет вид
+// user@realm!token-name. TokenSecret содержит UUID, который показывается один раз при
+// создании токена.
 type Config struct {
 	BaseURL     string
 	TokenID     string
@@ -32,8 +32,8 @@ type Config struct {
 	Timeout     time.Duration
 }
 
-// Client is safe for concurrent use. API tokens need no login session or CSRF
-// token, which keeps background polling stateless.
+// Client безопасен для одновременного использования. API токены не нуждаются в сеансе входа
+// в систему или CSRF токене, который сохраняет фоновый опрос без состояния.
 type Client struct {
 	baseURL     string
 	tokenID     string
@@ -41,7 +41,7 @@ type Client struct {
 	http        *http.Client
 }
 
-// APIError is a sanitized non-2xx response from Proxmox.
+// APIError является дезинфицированным не-2xx ответом от Proxmox.
 type APIError struct {
 	Status int
 	Method string
@@ -56,7 +56,7 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("Proxmox вернул HTTP %d для %s %s: %s", e.Status, e.Method, e.Path, e.Body)
 }
 
-// New validates the endpoint and builds a token-authenticated client.
+// New проверяет конечную точку и строит клиент, аутентифицированный токеном.
 func New(cfg Config) (*Client, error) {
 	base, err := normalizeBaseURL(cfg.BaseURL)
 	if err != nil {
@@ -85,8 +85,8 @@ func New(cfg Config) (*Client, error) {
 	transport.TLSClientConfig = &tls.Config{
 		MinVersion: tls.VersionTLS12,
 		RootCAs:    pool,
-		// This is an explicit laboratory escape hatch. The model records how
-		// long it remains enabled and the monitor raises an alert.
+		// Это явный лабораторный аварийный люк. Модель записывает, как долго она остается
+		// включенной, и монитор вызывает предупреждение.
 		InsecureSkipVerify: cfg.InsecureTLS,
 	}
 	return &Client{

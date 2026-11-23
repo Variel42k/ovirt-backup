@@ -9,22 +9,20 @@ import (
 	"time"
 )
 
-// VM power management.
+// Управление питанием ВМ.
 //
-// oVirt models these as POST .../action with an (often empty) JSON body. The
-// engine answers immediately and the state machine advances asynchronously,
-// so every caller that cares about the outcome must poll — WaitVMStatus does
-// that.
+// oVirt принимает такие действия через POST .../action с телом JSON. Движок отвечает сразу,
+// а состояние меняется асинхронно. Результат проверяем позже через WaitVMStatus.
 
-// StartVM boots a stopped VM. On a VM that is paused (including paused by an
-// I/O error) the same call resumes it, which is exactly what the auto-revive
-// engine needs.
+// StartVM загружает остановленную ВМ. На ВМ, которая приостановлена (в том числе
+// приостановлена из-за ошибки I/O), тот же вызов возобновляет ее, что именно то, что нужно
+// движку автоматического восстановления.
 func (c *Client) StartVM(ctx context.Context, vmID string) error {
 	return c.post(ctx, "/vms/"+vmID+"/start", struct{}{}, nil)
 }
 
-// StartVMOnHost asks the engine to run on the operator's selected host.
-// An empty host leaves placement to the engine scheduler.
+// StartVMOnHost просит движок запуститься на выбранном оператором узле.
+// Пустой хост оставляет место для планировщика движка.
 func (c *Client) StartVMOnHost(ctx context.Context, vmID, hostID string) error {
 	if hostID == "" {
 		return c.StartVM(ctx, vmID)
@@ -34,34 +32,34 @@ func (c *Client) StartVMOnHost(ctx context.Context, vmID, hostID string) error {
 	}}, nil)
 }
 
-// ShutdownVM asks the guest to power off cleanly. Requires a guest agent or
-// ACPI support; if neither answers the VM simply stays up.
+// ShutdownVM просит гостя чисто выключить ВМ. Требуется гостевой агент или ACPI поддержка;
+// Если ни один из ответов не отвечает, ВМ просто остается.
 func (c *Client) ShutdownVM(ctx context.Context, vmID string) error {
 	return c.post(ctx, "/vms/"+vmID+"/shutdown", struct{}{}, nil)
 }
 
-// StopVM cuts power to the VM. Data loss inside the guest is possible.
+// StopVM отключает питание ВМ. Потеря данных внутри гостя возможна.
 func (c *Client) StopVM(ctx context.Context, vmID string) error {
 	return c.post(ctx, "/vms/"+vmID+"/stop", struct{}{}, nil)
 }
 
-// SuspendVM saves the VM state to storage and stops execution.
+// SuspendVM сохраняет состояние ВМ в хранилище и прекращает выполнение.
 func (c *Client) SuspendVM(ctx context.Context, vmID string) error {
 	return c.post(ctx, "/vms/"+vmID+"/suspend", struct{}{}, nil)
 }
 
-// RebootVM asks the guest to restart.
+// RebootVM попроси́ть гостя перезапустить.
 func (c *Client) RebootVM(ctx context.Context, vmID string) error {
 	return c.post(ctx, "/vms/"+vmID+"/reboot", struct{}{}, nil)
 }
 
-// ResetVM performs a hard reset, equivalent to the reset button.
+// ResetVM выполняет жесткий сброс, эквивалентный кнопке сброса.
 func (c *Client) ResetVM(ctx context.Context, vmID string) error {
 	return c.post(ctx, "/vms/"+vmID+"/reset", struct{}{}, nil)
 }
 
-// MigrateVM moves a running VM to another host. An empty hostID lets the
-// scheduler pick.
+// MigrateVM переносит запущенную ВМ на другой хост. Пустой hostID позволяет выбирать
+// планировщику.
 func (c *Client) MigrateVM(ctx context.Context, vmID, hostID string) error {
 	body := map[string]any{}
 	if hostID != "" {
@@ -70,7 +68,7 @@ func (c *Client) MigrateVM(ctx context.Context, vmID, hostID string) error {
 	return c.post(ctx, "/vms/"+vmID+"/migrate", body, nil)
 }
 
-// VMStatus reads just the current status of a VM.
+// VMStatus считывает только текущее состояние ВМ.
 func (c *Client) VMStatus(ctx context.Context, vmID string) (status, detail string, err error) {
 	var vm VM
 	if err := c.get(ctx, "/vms/"+vmID, &vm); err != nil {
@@ -106,7 +104,7 @@ func (c *Client) SearchVMs(ctx context.Context, query string) ([]VM, error) {
 	return list.VM, nil
 }
 
-// WaitVMStatus polls until the VM reaches one of the wanted statuses.
+// WaitVMStatus опрашивает ВМ до перехода в одно из заданных состояний.
 func (c *Client) WaitVMStatus(ctx context.Context, vmID string, wanted []string, timeout time.Duration) (string, error) {
 	want := map[string]bool{}
 	for _, w := range wanted {
@@ -134,8 +132,8 @@ func (c *Client) WaitVMStatus(ctx context.Context, vmID string, wanted []string,
 	}
 }
 
-// FreezeFilesystems asks the guest agent to quiesce the filesystems so a
-// snapshot or backup is application-consistent rather than crash-consistent.
+// FreezeFilesystems просит гостевого агента успокоить файловые системы, чтобы снапшот или
+// резервная копия были совместимы с приложением, а не сбоями.
 func (c *Client) FreezeFilesystems(ctx context.Context, vmID string) error {
 	return c.post(ctx, "/vms/"+vmID+"/freezefilesystems", struct{}{}, nil)
 }
@@ -158,30 +156,29 @@ func FreezeMayBePending(err error) bool {
 	return false
 }
 
-// ThawFilesystems releases a freeze. It must be called even when the operation
-// in between failed, otherwise the guest stays frozen.
+// ThawFilesystems высвобождает заморозку. Он должен быть вызван даже тогда, когда операция
+// между ними не удалась, в противном случае гость остается замороженным.
 func (c *Client) ThawFilesystems(ctx context.Context, vmID string) error {
 	return c.post(ctx, "/vms/"+vmID+"/thawfilesystems", struct{}{}, nil)
 }
 
-// Host management.
+// Управление хостом.
 
-// ActivateHost brings a host out of maintenance.
+// ActivateHost выводит хост из режима обслуживания.
 func (c *Client) ActivateHost(ctx context.Context, hostID string) error {
 	return c.post(ctx, "/hosts/"+hostID+"/activate", struct{}{}, nil)
 }
 
-// DeactivateHost puts a host into maintenance, migrating its VMs away.
+// DeactivateHost переводит хост в режим обслуживания, перенося его ВМ подальше.
 func (c *Client) DeactivateHost(ctx context.Context, hostID string) error {
 	return c.post(ctx, "/hosts/"+hostID+"/deactivate", struct{}{}, nil)
 }
 
-// FenceHost drives the host's power management. fenceType is one of
-// start, stop, restart, status or manual.
+// FenceHost Управля́ние питанием хоста. fenceType — один из вариантов запуска, остановки,
+// перезапуска, состояния или руководства.
 //
-// This is the most destructive operation in the client: a restart kills every
-// VM running on the host. The caller is responsible for having established
-// that the host really is unreachable, and for the operator having opted in.
+// Перезапуск останавливает все ВМ на хосте. Перед вызовом нужно подтвердить недоступность
+// хоста и явное согласие оператора.
 func (c *Client) FenceHost(ctx context.Context, hostID, fenceType string) error {
 	switch fenceType {
 	case "start", "stop", "restart", "status", "manual":
@@ -191,7 +188,7 @@ func (c *Client) FenceHost(ctx context.Context, hostID, fenceType string) error 
 	return c.post(ctx, "/hosts/"+hostID+"/fence", action{FenceType: fenceType}, nil)
 }
 
-// HostStatus reads just the current status of a host.
+// HostStatus читает только текущий статус хоста.
 func (c *Client) HostStatus(ctx context.Context, hostID string) (string, error) {
 	var h Host
 	if err := c.get(ctx, "/hosts/"+hostID, &h); err != nil {
@@ -200,7 +197,7 @@ func (c *Client) HostStatus(ctx context.Context, hostID string) (string, error) 
 	return h.Status, nil
 }
 
-// WaitHostStatus polls until the host reaches one of the wanted statuses.
+// WaitHostStatus опрашивает хост до перехода в одно из заданных состояний.
 func (c *Client) WaitHostStatus(ctx context.Context, hostID string, wanted []string, timeout time.Duration) (string, error) {
 	want := map[string]bool{}
 	for _, w := range wanted {
@@ -228,11 +225,9 @@ func (c *Client) WaitHostStatus(ctx context.Context, hostID string, wanted []str
 	}
 }
 
-// Disk management.
+// Управление дисками.
 
-// CreateDisk provisions a new disk in a storage domain. It is used by restore
-// when the operator asks for a fresh disk rather than overwriting an existing
-// one.
+// CreateDisk создаёт диск в домене хранения. Используется при восстановлении в новый диск.
 func (c *Client) CreateDisk(ctx context.Context, req CreateDiskRequest) (*Disk, error) {
 	if req.StorageDomainID == "" {
 		return nil, errors.New("не указан домен хранения")
@@ -270,7 +265,7 @@ func (c *Client) CreateDisk(ctx context.Context, req CreateDiskRequest) (*Disk, 
 	return &disk, nil
 }
 
-// CreateDiskRequest describes a disk to provision.
+// CreateDiskRequest описывает диск для обеспечения.
 type CreateDiskRequest struct {
 	Alias           string
 	Description     string
@@ -286,7 +281,7 @@ type CreateDiskRequest struct {
 	InitialSize int64
 }
 
-// WaitDiskStatus polls until a disk leaves the locked state.
+// WaitDiskStatus опросы до тех пор, пока диск не покинет заблокированное состояние.
 func (c *Client) WaitDiskStatus(ctx context.Context, diskID, wanted string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for {
@@ -312,7 +307,7 @@ func (c *Client) WaitDiskStatus(ctx context.Context, diskID, wanted string, time
 	}
 }
 
-// AttachDisk binds an existing disk to a VM.
+// AttachDisk привязывает существующий диск к ВМ.
 func (c *Client) AttachDisk(ctx context.Context, vmID, diskID, iface string, bootable bool) error {
 	if iface == "" {
 		iface = "virtio_scsi"
@@ -326,8 +321,7 @@ func (c *Client) AttachDisk(ctx context.Context, vmID, diskID, iface string, boo
 	return c.post(ctx, "/vms/"+vmID+"/diskattachments", body, nil)
 }
 
-// AttachDiskWhenUnlocked binds a disk to a VM and waits out the engine's lock
-// on the disk.
+// AttachDiskWhenUnlocked связывает диск с ВМ и выжидает блокировку движка на диске.
 //
 // После загрузки движок показывает status=ok и конечную фазу ImageTransfer
 // раньше, чем снимает блокировку своей команды: подключение, отправленное
@@ -368,7 +362,7 @@ func (c *Client) attachDiskWhenUnlocked(ctx context.Context, vmID, diskID, iface
 	}
 }
 
-// DeleteDisk removes a disk permanently.
+// DeleteDisk удаляет диск навсегда.
 func (c *Client) DeleteDisk(ctx context.Context, diskID string) error {
 	return c.del(ctx, "/disks/"+diskID)
 }

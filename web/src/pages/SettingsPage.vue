@@ -135,11 +135,11 @@ const loading = ref(false)
 const runtimeUnavailable = computed(() => sectionLoading.value.runtime || Boolean(sectionErrors.value.runtime))
 const runtimeSettings = ref<RuntimeSettings | null>(null)
 const webSectionsBusy = ref(false)
-const webSections = computed(() => app.meta?.web_sections ?? runtimeSettings.value?.web_sections ?? { discovery: true, gitlab_clean: true })
-async function setWebSection(key: 'discovery' | 'gitlab_clean', enabled: boolean) {
+const webSections = computed(() => app.meta?.web_sections ?? runtimeSettings.value?.web_sections ?? { discovery: true })
+async function setDiscoverySection(enabled: boolean) {
   webSectionsBusy.value = true
   try {
-    const value = await api.setWebSections({ ...webSections.value, [key]: enabled })
+    const value = await api.setWebSections({ discovery: enabled })
     if (app.meta) app.meta.web_sections = value
     if (runtimeSettings.value) runtimeSettings.value.web_sections = value
     notifyOk('Доступность разделов сохранена')
@@ -1307,18 +1307,7 @@ watch(() => [route.query, route.meta.settingsTab], applyDeepLink)
                   <q-item-section side>
                     <q-toggle :model-value="webSections.discovery" aria-label="Раздел Поиск сервисов"
                       :disable="!auth.can('settings.admin') || webSectionsBusy || !app.meta"
-                      @update:model-value="value => setWebSection('discovery', value)" />
-                  </q-item-section>
-                </q-item>
-                <q-item>
-                  <q-item-section>
-                    <q-item-label>Очистка GitLab</q-item-label>
-                    <q-item-label caption>Анализ репозиториев и очистка истории</q-item-label>
-                  </q-item-section>
-                  <q-item-section side>
-                    <q-toggle :model-value="webSections.gitlab_clean" aria-label="Раздел Очистка GitLab"
-                      :disable="!auth.can('settings.admin') || webSectionsBusy || !app.meta"
-                      @update:model-value="value => setWebSection('gitlab_clean', value)" />
+                      @update:model-value="setDiscoverySection" />
                   </q-item-section>
                 </q-item>
                 <q-item>

@@ -1,5 +1,5 @@
-// Package monitor watches the managed engines and, within the limits the
-// operator has set, brings things back up.
+// Пакет monitor опрашивает движки и выполняет восстановительные действия в пределах,
+// заданных оператором.
 package monitor
 
 import (
@@ -19,7 +19,7 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/store"
 )
 
-// Monitor polls every enabled engine on a fixed interval.
+// Monitor опрашивает каждый включенный движок на фиксированном интервале.
 type Monitor struct {
 	store      *store.Store
 	pool       *ovirt.Pool
@@ -41,7 +41,7 @@ type Monitor struct {
 	quality func() model.BackupQualitySettings
 }
 
-// New builds the monitor.
+// New постройте монитор.
 func New(st *store.Store, pool *ovirt.Pool, libvirtPool *libvirtx.Pool, proxmoxPool *proxmox.Pool, rem *Remediator,
 	cfg config.MonitorConfig, bus *events.Bus, log zerolog.Logger) *Monitor {
 	return &Monitor{
@@ -74,7 +74,8 @@ func (m *Monitor) domainFreeThresholds() (warning, critical int) {
 	return warning, critical
 }
 
-// Run polls until the context is cancelled. It returns when the loop stops.
+// Run опросы до тех пор, пока контекст не будет отменен. Он возвращается, когда петля
+// останавливается.
 func (m *Monitor) Run(ctx context.Context) {
 	if !m.cfg.Enabled {
 		m.log.Info().Msg("мониторинг выключен в конфигурации")
@@ -82,8 +83,8 @@ func (m *Monitor) Run(ctx context.Context) {
 	}
 	m.log.Info().Dur("интервал", m.cfg.Interval).Msg("мониторинг запущен")
 
-	// Poll immediately so a freshly started service does not show "unknown"
-	// for a whole interval.
+	// Опрос немедленно, так что недавно начатый сервис не показывает "unknown" в течение
+	// всего интервала.
 	m.PollAll(ctx)
 
 	ticker := time.NewTicker(m.cfg.Interval)
@@ -100,7 +101,7 @@ func (m *Monitor) Run(ctx context.Context) {
 	}
 }
 
-// PollAll polls every enabled server concurrently.
+// PollAll опрашивает каждый включенный сервер одновременно.
 func (m *Monitor) PollAll(ctx context.Context) {
 	servers, err := m.store.ListEnabledServers(ctx)
 	if err != nil {
@@ -111,8 +112,8 @@ func (m *Monitor) PollAll(ctx context.Context) {
 	var wg sync.WaitGroup
 	for _, srv := range servers {
 		if !m.claim(srv.ID) {
-			// The previous poll of this engine is still running — a slow or
-			// hanging engine must not stack up overlapping polls.
+			// Предыдущий опрос этого движка все еще работает — медленный или висящий движок
+			// не должен складывать перекрывающиеся опросы.
 			m.log.Debug().Str("сервер", srv.Name).Msg("предыдущий опрос ещё выполняется, пропуск")
 			continue
 		}
@@ -147,12 +148,12 @@ func (m *Monitor) release(serverID string) {
 	delete(m.inFlight, serverID)
 }
 
-// PollServer refreshes one engine's inventory and evaluates its state.
+// PollServer обновляет инвентарь одного движка и оценивает его состояние.
 func (m *Monitor) PollServer(ctx context.Context, srv *model.Server) error {
 	m.checkInsecureTLS(ctx, srv)
 
-	// A bare libvirt host has no engine REST API; everything downstream of the
-	// inventory is shared, so the split is confined to fetching it.
+	// У автономного libvirt нет REST API движка. Отличается только получение инвентаря,
+	// дальнейшая обработка общая.
 	if srv.Kind.UsesLibvirt() {
 		return m.pollLibvirt(ctx, srv)
 	}
@@ -217,9 +218,9 @@ func (m *Monitor) PollServer(ctx context.Context, srv *model.Server) error {
 	return nil
 }
 
-// recordServerFailure marks an engine as degraded or offline and raises the
-// alert. Degraded comes first: a single failed poll is usually a blip, and
-// paging on every blip trains people to ignore the alerts.
+// recordServerFailure помечает движок как деградированный или автономный и поднимает
+// тревогу. Деградация стоит на первом месте: один неудавшийся опрос, как правило, является
+// вспышкой, и подкачки на каждом вспышке обучают людей игнорировать предупреждения.
 func (m *Monitor) recordServerFailure(ctx context.Context, srv *model.Server, cause error, started time.Time) error {
 	now := time.Now().UTC()
 	srv.FailureCount++
@@ -251,8 +252,8 @@ func (m *Monitor) recordServerFailure(ctx context.Context, srv *model.Server, ca
 		severity := model.SeverityCritical
 		message := fmt.Sprintf("движок %s недоступен: %v", srv.Name, cause)
 		if ovirt.IsAuthError(cause) {
-			// Bad credentials are not an outage; saying so avoids sending
-			// somebody to the datacentre for a password change.
+			// Плохие учётные данные аутентификации не являются сбоем; Это позволяет
+			// избежать отправки кого-то в центр обработки данных для смены пароля.
 			message = fmt.Sprintf("движок %s отверг учётные данные: %v", srv.Name, cause)
 		}
 		m.raise(ctx, &model.Alert{
@@ -261,8 +262,8 @@ func (m *Monitor) recordServerFailure(ctx context.Context, srv *model.Server, ca
 			Details: cause.Error(),
 		})
 
-		// Rebuilding the client is the only thing worth trying automatically:
-		// a stale TLS session or an expired token looks exactly like an outage.
+		// Восстановление клиента — это единственное, что стоит попробовать автоматически:
+		// устаревший TLS сеанс или просроченный токен выглядит точно так же, как сбой.
 		if !ovirt.IsAuthError(cause) {
 			_, _ = m.remediator.Consider(ctx, Situation{
 				ServerID: srv.ID, Scope: model.ScopeServer, ObjectID: srv.ID,
@@ -284,15 +285,15 @@ func (m *Monitor) syncInventory(ctx context.Context, srv *model.Server, inv *ovi
 	if err := m.store.SyncStorageDomains(ctx, srv.ID, inv.Domains); err != nil {
 		return err
 	}
-	// VMs and disks depend on each other for display; sync VMs first so a disk
-	// referencing a VM always finds it.
+	// ВМ и диски зависят друг от друга для отображения; Сначала синхронизируйте ВМ, чтобы
+	// диск, ссылающийся на ВМ, всегда находил ее.
 	if err := m.store.SyncVMs(ctx, srv.ID, inv.VMs); err != nil {
 		return err
 	}
 	return m.store.SyncDisks(ctx, srv.ID, inv.Disks)
 }
 
-// evaluateHosts raises alerts about hypervisor nodes and proposes fixes.
+// evaluateHosts поднимает оповещения об узлах гипервизора и предлагает исправления.
 func (m *Monitor) evaluateHosts(ctx context.Context, srv *model.Server, hosts []*model.Host, now time.Time) []model.HealthSample {
 	samples := make([]model.HealthSample, 0, len(hosts))
 	threshold := m.cfg.FailureThreshold
@@ -326,10 +327,8 @@ func (m *Monitor) evaluateHosts(ctx context.Context, srv *model.Server, hosts []
 			if failures < threshold {
 				continue
 			}
-			// Fencing is the only way back for a host the engine cannot talk
-			// to, and it is also the action that kills every VM on it — which
-			// is why it stays behind an explicit opt-in and a power-management
-			// check.
+			// Фенсинг восстанавливает управление недоступным хостом и прерывает работу всех его ВМ.
+			// Проверяем явное разрешение оператора и наличие управления питанием.
 			if !h.PowerMgmtOn {
 				m.log.Debug().Str("хост", h.Name).
 					Msg("хост не отвечает, но управление питанием не настроено — автоматическая перезагрузка невозможна")
@@ -342,7 +341,8 @@ func (m *Monitor) evaluateHosts(ctx context.Context, srv *model.Server, hosts []
 			})
 
 		case "maintenance":
-			// Maintenance is an operator decision, not a fault; only surface it.
+			// Режим технического обслуживания является решением оператора, а не ошибкой;
+			// Только поверхность его.
 			m.raise(ctx, &model.Alert{
 				ServerID: srv.ID, Scope: model.ScopeHost, ObjectID: h.ID, ObjectName: h.Name,
 				Kind: model.AlertHostMaintenance, Severity: model.SeverityInfo,
@@ -367,7 +367,7 @@ func (m *Monitor) evaluateHosts(ctx context.Context, srv *model.Server, hosts []
 	return samples
 }
 
-// evaluateVMs raises alerts about virtual machines and proposes fixes.
+// evaluateVMs поднимает оповещения о ВМ и предлагает исправления.
 func (m *Monitor) evaluateVMs(ctx context.Context, srv *model.Server, vms []*model.VM, now time.Time) []model.HealthSample {
 	var samples []model.HealthSample
 	threshold := m.cfg.FailureThreshold
@@ -376,8 +376,8 @@ func (m *Monitor) evaluateVMs(ctx context.Context, srv *model.Server, vms []*mod
 	}
 
 	for _, vm := range vms {
-		// The cached row carries the operator's intent, which the freshly
-		// fetched object does not know about.
+		// Кэшированная строка несет намерение оператора, о котором только что полученный
+		// объект не знает.
 		stored, err := m.store.GetVM(ctx, srv.ID, vm.ID)
 		if err != nil {
 			continue
@@ -426,19 +426,20 @@ func (m *Monitor) evaluateVMs(ctx context.Context, srv *model.Server, vms []*mod
 	return samples
 }
 
-// classifyVM decides whether a VM's state is a problem and what to do about it.
+// classifyVM решает, является ли состояние ВМ проблемой и что с этим делать.
 func classifyVM(vm *model.VM, desired model.VMDesiredState) (problem string, severity model.Severity, kind string, action model.RemediationAction) {
 	switch vm.Status {
 	case "paused":
 		switch vm.PauseStatus {
 		case "eio", "enospc":
-			// The guest is frozen because storage failed or filled up. Resuming
-			// is right once storage is back, and harmless if it is not — the VM
-			// simply pauses again.
+			// Гость заморожен, потому что хранилище не удалось или заполнено. Возобновление
+			// происходит, как только хранилище возвращается, и безвредно, если это не так —
+			// ВМ просто снова останавливается.
 			return fmt.Sprintf("ВМ %s на паузе из-за проблемы с хранилищем (%s)", vm.Name, vm.PauseStatus),
 				model.SeverityCritical, model.AlertVMPaused, model.ActionVMUnpause
 		default:
-			// A VM paused by a person must stay paused.
+			// Виртуальная машина, поставленная на паузу человеком, должна оставаться на
+			// паузе.
 			return fmt.Sprintf("ВМ %s на паузе", vm.Name),
 				model.SeverityWarning, model.AlertVMPaused, ""
 		}
@@ -448,9 +449,9 @@ func classifyVM(vm *model.VM, desired model.VMDesiredState) (problem string, sev
 			model.SeverityCritical, model.AlertVMUnknown, ""
 
 	case "unknown":
-		// The engine lost contact with the host; the VM may well be running.
-		// Starting it elsewhere from here would risk two copies writing to the
-		// same disks, so this is reported and left to the operator.
+		// Движок потерял связь с хостом, но ВМ может продолжать работу.
+		// Запуск его в другом месте отсюда рискует две копии записи на те же диски, так что
+		// это сообщается и оставляется оператору.
 		return fmt.Sprintf("состояние ВМ %s неизвестно движку", vm.Name),
 			model.SeverityCritical, model.AlertVMUnknown, ""
 
@@ -466,14 +467,14 @@ func classifyVM(vm *model.VM, desired model.VMDesiredState) (problem string, sev
 	}
 }
 
-// evaluateDomains raises alerts about storage domains.
+// evaluateDomains поднимает оповещения о доменах хранения.
 func (m *Monitor) evaluateDomains(ctx context.Context, srv *model.Server, domains []*model.StorageDomain, now time.Time) []model.HealthSample {
 	samples := make([]model.HealthSample, 0, len(domains))
 	warnFree, criticalFree := m.domainFreeThresholds()
 
 	for _, d := range domains {
-		// ISO and export domains have no capacity worth alerting on and are
-		// routinely left inactive on purpose.
+		// ISO и экспортные домены не имеют возможности оповещения и обычно остаются
+		// неактивными по назначению.
 		if d.Type != "" && d.Type != "data" {
 			continue
 		}
@@ -538,7 +539,7 @@ func gibibytes(n int64) string {
 	return fmt.Sprintf("%.1f ГиБ", float64(n)/(1<<30))
 }
 
-// raise stores an alert and notifies subscribers.
+// raise хранит оповещение и уведомляет подписчиков.
 func (m *Monitor) raise(ctx context.Context, alert *model.Alert) {
 	if err := m.store.RaiseAlert(ctx, alert); err != nil {
 		m.log.Warn().Err(err).Str("объект", alert.ObjectName).Msg("не удалось записать оповещение")
@@ -557,7 +558,7 @@ func orDash(s string) string {
 	return s
 }
 
-// checkInsecureTLS turns a permanent checkbox back into a temporary mode.
+// checkInsecureTLS возвращает постоянный флажок во временный режим.
 //
 // Раньше «не проверять сертификат» ставили, чтобы подключиться сегодня, и не
 // снимали никогда: напомнить было некому. Опрос идёт каждые полминуты и знает,

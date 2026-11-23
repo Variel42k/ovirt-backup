@@ -11,16 +11,14 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
-// ServerLoader fetches a connection definition by id. The pool takes it as a
-// function so that this package does not have to know about the store.
+// ServerLoader извлекает определение соединения по идентификатору. Пул принимает его как
+// функцию, чтобы этот пакет не должен был знать о магазине.
 type ServerLoader func(ctx context.Context, serverID string) (*model.Server, error)
 
-// Pool keeps one authenticated client per engine.
+// Pool сохраняет один аутентифицированный клиент на каждый движок.
 //
-// Re-authenticating on every call would be wasteful — the monitor polls every
-// half minute — but a cached client must not outlive a credential change, so
-// each entry remembers only the connection fields it was built from. Runtime
-// state such as last_checked_at must not rotate the SSO token.
+// Сохраняем клиент между частыми опросами. При изменении учётных данных создаём новый
+// клиент, а изменения runtime-полей вроде last_checked_at не должны менять SSO-токен.
 type Pool struct {
 	load    ServerLoader
 	timeout time.Duration
@@ -35,8 +33,8 @@ type poolEntry struct {
 	key    connectionKey
 }
 
-// connectionKey deliberately excludes state, inventory and display metadata.
-// It is kept private because it contains the already in-memory credential.
+// connectionKey намеренно исключает состояние, инвентаризацию и отображение метаданных.
+// Он остается приватным, поскольку содержит уже имеющиеся в памяти учётные данные.
 type connectionKey struct {
 	kind        model.ServerKind
 	engineURL   string
@@ -57,7 +55,7 @@ func connectionKeyFor(srv *model.Server) connectionKey {
 	}
 }
 
-// NewPool builds a pool. timeout applies to individual API calls.
+// NewPool строит пул. тайм-аут применяется к отдельным API вызовам.
 func NewPool(load ServerLoader, timeout time.Duration, log zerolog.Logger) *Pool {
 	if timeout <= 0 {
 		timeout = 60 * time.Second
@@ -70,9 +68,9 @@ func NewPool(load ServerLoader, timeout time.Duration, log zerolog.Logger) *Pool
 	}
 }
 
-// Get returns a client for the engine, building one if needed. A connection
-// whose definition changed since the client was created is rebuilt, so editing
-// credentials in the UI takes effect immediately.
+// Get возвращает клиент для движка, создавая его, если это необходимо. Соединение,
+// определение которого изменилось с момента создания клиента, перестраивается, поэтому
+// немедленно вступает в силу редактирование учётных данных аутентификации в UI.
 func (p *Pool) Get(ctx context.Context, serverID string) (*Client, error) {
 	srv, err := p.load(ctx, serverID)
 	if err != nil {
@@ -81,7 +79,7 @@ func (p *Pool) Get(ctx context.Context, serverID string) (*Client, error) {
 	return p.ForServer(srv)
 }
 
-// ForServer returns a client for an already-loaded definition.
+// ForServer возвращает клиент для уже загруженного определения.
 func (p *Pool) ForServer(srv *model.Server) (*Client, error) {
 	if srv == nil {
 		return nil, fmt.Errorf("сервер не задан")
@@ -115,14 +113,14 @@ func (p *Pool) ForServer(srv *model.Server) (*Client, error) {
 	}
 
 	if old, ok := p.entries[srv.ID]; ok {
-		// Drop the previous token so the engine does not accumulate sessions.
+		// Откажитесь от предыдущего токена, чтобы движок не накапливал сессии.
 		go old.client.Logout(context.Background())
 	}
 	p.entries[srv.ID] = &poolEntry{client: client, key: key}
 	return client, nil
 }
 
-// Invalidate drops the cached client for one engine.
+// Invalidate сбрасывает кэшированный клиент на один движок.
 func (p *Pool) Invalidate(serverID string) {
 	p.mu.Lock()
 	entry, ok := p.entries[serverID]
@@ -134,7 +132,7 @@ func (p *Pool) Invalidate(serverID string) {
 	}
 }
 
-// Close logs every cached session out.
+// Close все сеансы кэшируются.
 func (p *Pool) Close() {
 	p.mu.Lock()
 	entries := p.entries

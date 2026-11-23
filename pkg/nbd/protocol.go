@@ -1,21 +1,18 @@
-// Package nbd is a client for the Network Block Device protocol, limited to
-// what a backup tool needs: the fixed newstyle handshake, structured replies,
-// metadata contexts, ranged reads and block status queries.
+// Пакет nbd реализует части протокола Network Block Device, нужные для бэкапа. Это
+// согласование fixed newstyle, структурированные ответы, контексты метаданных, чтение
+// диапазонов и запросы состояния блоков.
 //
-// It exists instead of a binding to libnbd because that would mean cgo, and
-// cgo would cost the single static binary this project is built around. The
-// subset of the protocol involved is small and well specified, so the trade is
-// a few hundred lines of wire format against a runtime dependency on every
-// host the tool is copied to.
+// Привязка к libnbd потребовала бы cgo и лишила бы проект одного статического бинарника.
+// Небольшую часть протокола реализуем на Go, чтобы инструмент работал без внешней
+// библиотеки на каждом хосте.
 //
-// The client speaks to whatever QEMU exposes: a pull-mode backup export from
-// libvirt, a qemu-nbd server over a snapshot, or a plain qemu-nbd read-only
-// export. It never writes.
+// Клиент читает экспорт QEMU, открытый через libvirt pull или через qemu-nbd для снапшота
+// либо обычного экспорта только для чтения. Запись не поддерживается.
 package nbd
 
 import "fmt"
 
-// Handshake magic numbers, big-endian on the wire throughout the protocol.
+// Сигнатуры согласования. Для всего сетевого протокола используются числа big-endian.
 const (
 	magicNBD      uint64 = 0x4e42444d41474943 // "NBDMAGIC"
 	magicIHaveOpt uint64 = 0x49484156454F5054 // "IHAVEOPT"
@@ -26,19 +23,19 @@ const (
 	magicStructuredReply uint32 = 0x668e33ef
 )
 
-// Handshake flags sent by the server.
+// Флаги согласования, отправляемые сервером.
 const (
 	flagFixedNewstyle uint16 = 1 << 0
 	flagNoZeroes      uint16 = 1 << 1
 )
 
-// Handshake flags sent by the client in reply.
+// Флаги согласования, отправляемые клиентом в ответ.
 const (
 	clientFlagFixedNewstyle uint32 = 1 << 0
 	clientFlagNoZeroes      uint32 = 1 << 1
 )
 
-// Options exchanged during handshake.
+// Параметры, которыми обмениваются при согласовании.
 const (
 	optExportName      uint32 = 1
 	optAbort           uint32 = 2
@@ -49,7 +46,7 @@ const (
 	optSetMetaContext  uint32 = 10
 )
 
-// Option reply types. Values with the high bit set are errors.
+// Типы ответов на запрос параметров. У ошибок установлен старший бит.
 const (
 	repACK         uint32 = 1
 	repServer      uint32 = 2
@@ -67,7 +64,7 @@ const (
 	repErrTooBig        uint32 = 0x80000009
 )
 
-// Information types requested through NBD_OPT_GO.
+// Типы сведений, запрашиваемых через NBD_OPT_GO.
 const (
 	infoExport      uint16 = 0
 	infoName        uint16 = 1
@@ -75,8 +72,7 @@ const (
 	infoBlockSize   uint16 = 3
 )
 
-// Transmission commands. Only the read-side ones are implemented: a backup
-// tool that can write to the source is a backup tool that can destroy it.
+// Команды передачи. Реализовано только чтение, чтобы бэкап не мог повредить источник.
 const (
 	cmdRead        uint16 = 0
 	cmdDisconnect  uint16 = 2
@@ -84,7 +80,7 @@ const (
 	cmdBlockStatus uint16 = 7
 )
 
-// Structured reply chunk types.
+// Типы фрагментов структурированного ответа.
 const (
 	replyTypeNone        uint16 = 0
 	replyTypeOffsetData  uint16 = 1
@@ -94,42 +90,40 @@ const (
 	replyTypeErrorOffset uint16 = 0x8002
 )
 
-// replyFlagDone marks the last chunk of a structured reply.
+// replyFlagDone отмечает последний фрагмент структурированного ответа.
 const replyFlagDone uint16 = 1 << 0
 
-// Transmission flags reported by the server for an export.
+// Флаги передачи, сообщаемые сервером для экспорта.
 const (
-	// TransmissionReadOnly means the export refuses writes. Backup exports are
-	// always read-only, and a writable one is a sign the wrong export was
-	// opened.
+	// TransmissionReadOnly означает, что экспорт доступен только для чтения. Доступный на
+	// запись экспорт указывает, что открыт неверный источник.
 	TransmissionReadOnly     uint16 = 1 << 1
 	TransmissionSendFlush    uint16 = 1 << 2
 	TransmissionSendTrim     uint16 = 1 << 5
 	TransmissionCanMultiConn uint16 = 1 << 8
 )
 
-// Standard metadata context names.
+// Стандартные имена контекстов метаданных.
 const (
-	// ContextBaseAllocation describes which parts of the export are allocated
-	// and which read as zero. It is what a full backup uses to skip holes.
+	// ContextBaseAllocation указывает выделенные области и области, которые читаются как
+	// нули. Полный бэкап пропускает по этому контексту невыделенные диапазоны.
 	ContextBaseAllocation = "base:allocation"
 
-	// ContextDirtyBitmapPrefix + bitmap name describes which parts changed
-	// since the checkpoint that bitmap belongs to. This is the whole point of
-	// incremental backup.
+	// ContextDirtyBitmapPrefix и имя битовой карты задают контекст изменённых областей с
+	// момента соответствующего checkpoint. Этот контекст нужен инкрементальному бэкапу.
 	ContextDirtyBitmapPrefix = "qemu:dirty-bitmap:"
 
-	// ContextAllocationDepth tells which layer of a backing chain a block
-	// comes from. Not needed for backup, listed for completeness.
+	// ContextAllocationDepth сообщает, из какого слоя цепочки образов берётся блок. Для
+	// бэкапа не используется.
 	ContextAllocationDepth = "qemu:allocation-depth"
 )
 
-// DirtyBitmapContext builds the metadata context name for a bitmap.
+// DirtyBitmapContext формирует имя контекста метаданных для битовой карты.
 func DirtyBitmapContext(bitmap string) string {
 	return ContextDirtyBitmapPrefix + bitmap
 }
 
-// Status bits inside a base:allocation extent.
+// Биты состояния в диапазоне base:allocation.
 const (
 	// StateHole — область не выделена в образе.
 	StateHole uint32 = 1 << 0
@@ -137,11 +131,11 @@ const (
 	StateZero uint32 = 1 << 1
 )
 
-// StateDirty is the only bit defined for a qemu:dirty-bitmap context: the
-// range changed since the checkpoint.
+// StateDirty — единственный бит контекста qemu:dirty-bitmap. Он означает, что диапазон
+// менялся после checkpoint.
 const StateDirty uint32 = 1 << 0
 
-// Errno values the server may return.
+// Коды Errno, которые может вернуть сервер.
 const (
 	errPerm     uint32 = 1
 	errIO       uint32 = 5
@@ -153,12 +147,12 @@ const (
 	errShutdown uint32 = 108
 )
 
-// ServerError is a non-zero error code returned by the server for a command.
+// ServerError содержит ненулевой код ошибки, возвращённый сервером на команду.
 type ServerError struct {
 	Errno   uint32
 	Message string
-	// Offset is set for NBD_REPLY_TYPE_ERROR_OFFSET, pointing at the byte the
-	// server could not serve.
+	// Для NBD_REPLY_TYPE_ERROR_OFFSET поле Offset указывает байт, который сервер не смог
+	// обработать.
 	Offset    int64
 	HasOffset bool
 }
@@ -200,7 +194,7 @@ func errnoName(code uint32) string {
 	}
 }
 
-// OptionError is a refusal during handshake.
+// OptionError означает, что сервер отказал при согласовании параметра.
 type OptionError struct {
 	Option  uint32
 	Reply   uint32
@@ -215,8 +209,8 @@ func (e *OptionError) Error() string {
 	return fmt.Sprintf("сервер NBD отклонил опцию %s: %s", optionName(e.Option), reason)
 }
 
-// Unsupported reports whether the server simply does not implement the option,
-// which for optional features is a reason to fall back rather than to fail.
+// Unsupported проверяет, реализует ли сервер параметр. При отсутствии необязательной
+// возможности можно продолжить без неё.
 func (e *OptionError) Unsupported() bool { return e.Reply == repErrUnsup }
 
 func optionName(opt uint32) string {

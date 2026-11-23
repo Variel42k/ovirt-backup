@@ -92,7 +92,7 @@ func (s *Server) permissionsFor(ctx context.Context, name model.Role) []model.Pe
 	return role.Permissions
 }
 
-// requirePermission guards a handler with a single permission.
+// requirePermission сохраня́тель м. сохранительница ж. сост. по знач. глаг.
 func (s *Server) requirePermission(perm model.Permission, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		p := principalFrom(r.Context())

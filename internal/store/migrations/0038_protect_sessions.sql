@@ -1,10 +1,9 @@
--- Cookie values and OIDC identity tokens are credentials. A database read must
--- not be enough to reuse either one.
+-- Cookie и токены идентификации OIDC относятся к учётным данным.
+-- Прочитав БД, нельзя получить их в пригодном для повторного входа виде.
 --
--- Existing rows cannot be converted because the application encryption key is
--- intentionally unavailable to SQL migrations. Invalidate them once during
--- the upgrade; users authenticate again and all new rows use the protected
--- representation.
+-- Ключ шифрования приложения недоступен SQL-миграциям, поэтому существующие
+-- записи нельзя преобразовать. При обновлении завершаем текущие сеансы.
+-- Пользователи входят повторно, и новые записи сохраняются в защищённом виде.
 
 DELETE FROM sessions;
 

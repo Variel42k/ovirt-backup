@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/google/uuid"
 )
 
 // Движок уже открыл бэкап и держит диски, даже если его ответ не разобрался.
@@ -18,8 +20,10 @@ func TestStartBackupKeepsIDWhenAnswerDoesNotDecode(t *testing.T) {
 	})
 	var sent map[string]any
 	var query string
+	var correlationID string
 	mux.HandleFunc("/ovirt-engine/api/vms/вм-1/backups", func(w http.ResponseWriter, r *http.Request) {
 		query = r.URL.RawQuery
+		correlationID = r.Header.Get("Correlation-Id")
 		_ = json.NewDecoder(r.Body).Decode(&sent)
 		w.Header().Set("Content-Type", "application/json")
 		// description числом — поле, которое клиент ждёт строкой.
@@ -41,8 +45,11 @@ func TestStartBackupKeepsIDWhenAnswerDoesNotDecode(t *testing.T) {
 		t.Fatalf("идентификатор бэкапа потерян: %+v", backup)
 	}
 	// По метке уборка узнаёт свой бэкап, даже если запуск не записал его id.
-	if sent["description"] != "jhvirt run run-1" {
+	if sent["description"] != "Backup run run-1" {
 		t.Fatalf("метка службы не отправлена: %v", sent["description"])
+	}
+	if _, err := uuid.Parse(correlationID); err != nil {
+		t.Fatalf("ожидался UUID запроса, получено %q", correlationID)
 	}
 	if query != "" {
 		t.Fatalf("без запроса согласованности параметров быть не должно: %q", query)

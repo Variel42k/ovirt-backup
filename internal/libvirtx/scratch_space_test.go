@@ -35,8 +35,9 @@ type fakeHost struct {
 // statVFSCmder добавляет обработчику SFTP ответ на statvfs.
 type statVFSCmder struct{ sftp.FileCmder }
 
-// InMemHandler now implements StatVFS itself. Hide that optional method in the
-// unsupported-extension fixture, or this test reads the runner's real disk.
+// InMemHandler ныне реализуется StatVFS сама собою. Скрыть этот необязательный метод в
+// неподдерживаемом расширительном приспособлении, или этот тест считывает реальный диск
+// бегуна.
 type noStatVFSCmder struct{ sftp.FileCmder }
 
 func (statVFSCmder) StatVFS(*sftp.Request) (*sftp.StatVFS, error) {

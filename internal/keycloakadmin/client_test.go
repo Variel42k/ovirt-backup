@@ -310,9 +310,9 @@ func TestEnsureApplicationClientRejectsMismatchedExistingSecret(t *testing.T) {
 	}
 }
 
-// Optional contract test for the Keycloak version pinned by the deployment.
-// It is idempotent and deliberately uses a service account, matching the web
-// settings flow rather than the password grant of an interactive administrator.
+// Необязательный тест контракта для Keycloak версии, привязанной к развертыванию.
+// Он идемпотентный и намеренно использует учётную запись службы, соответствующую потоку
+// веб-настроек, а не паролю интерактивного администратора.
 func TestApplicationClientAgainstKeycloak(t *testing.T) {
 	issuer := os.Getenv("JHV_TEST_KEYCLOAK_ADMIN_ISSUER")
 	if issuer == "" {

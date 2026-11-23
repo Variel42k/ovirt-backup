@@ -21,7 +21,7 @@ const jobColumns = `id, name, enabled, server_id, vm_ids, vm_name_regex, cluster
 
 const jobColumnsWithLegacy = jobColumns + `, legacy_incremental_mode, compression`
 
-// CreateBackupJob stores a new job definition.
+// CreateBackupJob сохранить новое определение работы.
 func (s *Store) CreateBackupJob(ctx context.Context, j *model.BackupJob) error {
 	if j.ID == "" {
 		j.ID = uuid.NewString()
@@ -56,8 +56,8 @@ func (s *Store) CreateBackupJob(ctx context.Context, j *model.BackupJob) error {
 	return nil
 }
 
-// UpdateBackupJob rewrites a job definition, leaving the run bookkeeping
-// columns (last_run_at, last_status, next_run_at) to the scheduler.
+// UpdateBackupJob переписывает определение задания, оставляя столбцы бухгалтерского учета
+// выполнения (last_run_at, last_status, next_run_at) планировщику.
 func (s *Store) UpdateBackupJob(ctx context.Context, j *model.BackupJob) error {
 	j.UpdatedAt = time.Now().UTC()
 	if j.Concurrency <= 0 {
@@ -90,8 +90,8 @@ func (s *Store) UpdateBackupJob(ctx context.Context, j *model.BackupJob) error {
 	return nil
 }
 
-// SetJobSchedulingState records the outcome of a triggered run and the next
-// planned firing time.
+// SetJobSchedulingState регистрирует результат срабатывания запуска и следующее
+// запланированное время стрельбы.
 func (s *Store) SetJobSchedulingState(ctx context.Context, jobID string, lastRun *time.Time, status model.RunStatus, nextRun *time.Time) error {
 	_, err := s.db.Exec(ctx, `UPDATE backup_jobs SET last_run_at=?, last_status=?, next_run_at=?, updated_at=?
 		WHERE id=?`,
@@ -99,16 +99,15 @@ func (s *Store) SetJobSchedulingState(ctx context.Context, jobID string, lastRun
 	return err
 }
 
-// SetJobLastStatus finalises the status after asynchronous required copies
-// complete without disturbing the next cron occurrence calculated earlier by
-// the scheduler.
+// SetJobLastStatus завершает состояние после завершения асинхронных требуемых копий, не
+// нарушая следующее cron событие, вычисленное ранее планировщиком.
 func (s *Store) SetJobLastStatus(ctx context.Context, jobID string, status model.RunStatus) error {
 	_, err := s.db.Exec(ctx, `UPDATE backup_jobs SET last_status=?, updated_at=? WHERE id=?`,
 		string(status), time.Now().UTC(), jobID)
 	return err
 }
 
-// DeleteBackupJob removes a job definition. Runs it produced are kept.
+// DeleteBackupJob удалить определение работы. Руны, которые он производит, сохраняются.
 func (s *Store) DeleteBackupJob(ctx context.Context, id string) error {
 	res, err := s.db.Exec(ctx, `DELETE FROM backup_jobs WHERE id=?`, id)
 	if err != nil {
@@ -120,13 +119,13 @@ func (s *Store) DeleteBackupJob(ctx context.Context, id string) error {
 	return nil
 }
 
-// GetBackupJob loads one job definition.
+// GetBackupJob загружает одно определение работы.
 func (s *Store) GetBackupJob(ctx context.Context, id string) (*model.BackupJob, error) {
 	row := s.db.QueryRow(ctx, `SELECT `+jobColumnsWithLegacy+` FROM backup_jobs WHERE id=?`, id)
 	return scanJob(row)
 }
 
-// ListBackupJobs returns job definitions, optionally filtered by server.
+// ListBackupJobs возвращает определения заданий, необязательно отфильтрованные сервером.
 func (s *Store) ListBackupJobs(ctx context.Context, serverID string) ([]*model.BackupJob, error) {
 	query := `SELECT ` + jobColumnsWithLegacy + ` FROM backup_jobs`
 	args := []any{}
@@ -209,9 +208,9 @@ func scanJob(row rowScanner) (*model.BackupJob, error) {
 	return &j, nil
 }
 
-// EnableJobReplication migrates a legacy job to one primary read followed by
-// repository copies. The next invocation is full so every destination starts
-// from an unambiguous chain root.
+// EnableJobReplication переносит унаследованную работу на одно первичное чтение, за которым
+// следуют копии хранилища. Следующий вызов является полным, поэтому каждый пункт назначения
+// начинается с однозначного корня цепи.
 func (s *Store) EnableJobReplication(ctx context.Context, id string) error {
 	res, err := s.db.Exec(ctx, `UPDATE backup_jobs SET replication_enabled=?, force_full_next=?, updated_at=?
 		WHERE id=?`, true, true, time.Now().UTC(), id)
@@ -230,9 +229,9 @@ func (s *Store) ClearForceFullNext(ctx context.Context, id string) error {
 	return err
 }
 
-// ChangeJobPrimary reorders an existing target list and forces a new chain
-// root. It deliberately does not add a target: the regular job editor owns
-// replica membership, while this operation only promotes an existing one.
+// ChangeJobPrimary переупорядочивает существующий список целей и вводит новый корень цепи.
+// Он намеренно не добавляет цель: обычный редактор заданий владеет членством реплики, в то
+// время как эта операция только продвигает существующую.
 func (s *Store) ChangeJobPrimary(ctx context.Context, id, targetID string) (*model.BackupJob, error) {
 	job, err := s.GetBackupJob(ctx, id)
 	if err != nil {

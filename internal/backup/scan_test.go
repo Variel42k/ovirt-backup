@@ -10,9 +10,8 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/repo"
 )
 
-// The scanning path is what disaster recovery depends on: no database, no
-// service, just the objects. This test builds a real two-link chain in a real
-// repository and reads it back the way the CLI does.
+// При аварийном восстановлении используются объекты репозитория без базы и службы. Тест
+// создаёт цепочку из двух звеньев и читает её тем же способом, что и CLI.
 
 func writeStoredRun(t *testing.T, backend repo.Backend, prefix string, doc RunManifest,
 	disks map[string]map[int64][]byte, chunkSize int64) {

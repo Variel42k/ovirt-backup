@@ -9,7 +9,7 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
-// roleOrder ranks roles from most to least powerful.
+// roleOrder ранжирует роли от большинства до наименее могущественных.
 //
 // Пользователь обычно состоит в нескольких группах, и они отображаются в разные
 // роли. Брать первую попавшуюся — значит выдавать права по случайному порядку
@@ -18,8 +18,9 @@ import (
 // администраторские права, а остальные группы его не отменяют.
 var roleOrder = []model.Role{model.RoleAdmin, model.RoleOperator, model.RoleViewer}
 
-// Manual assignments override group membership, including a deliberate
-// downgrade. Never use the mutable username/email as an authorization key.
+// Ручные назначения перекрывают членство в группе, включая преднамеренное понижение.
+// Никогда не используйте переменное имя пользователя/электронную почту в качестве ключа
+// авторизации.
 func mapOIDCSubjectRole(cfg config.OIDCConfig, subject string, groups []string) (model.Role, error) {
 	if subject != "" {
 		if role, ok := cfg.SubjectRoleMapping[subject]; ok {
@@ -29,7 +30,7 @@ func mapOIDCSubjectRole(cfg config.OIDCConfig, subject string, groups []string) 
 	return mapOIDCRole(cfg, groups)
 }
 
-// mapOIDCRole turns the groups from the token into the role of the session.
+// mapOIDCRole превращает группы из токена в роль сессии.
 //
 // Пустой результат — не ошибка настройки, а отказ во входе: пользователь
 // провайдеру известен, но этой системе не назначен. Молча подставлять роль

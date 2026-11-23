@@ -48,12 +48,10 @@ func (s *Server) handleKeycloakConsoleAdmin(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, result)
 }
 
-// Ordinary user/group administration is already protected by users.admin on
-// the route. Requiring the local administrator password for every search and
-// membership toggle made the UI both noisy and weaker operationally: admins
-// started keeping the password in the form. The authenticated session is the
-// authorization boundary here; password re-entry remains only for critical
-// identity configuration and temporary Keycloak console credentials.
+// Поиск пользователей и изменение членства защищены правом users.admin и
+// аутентифицированным сеансом. Повторный запрос пароля для каждой операции побуждал
+// администраторов оставлять его в форме. Повторный ввод нужен для критичных изменений
+// настроек входа и доступа к временной консоли Keycloak.
 func (s *Server) handleSearchIdentityUsers(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Query string `json:"query"`
@@ -136,10 +134,9 @@ func (s *Server) handleSetIdentityUserGroup(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, result)
 }
 
-// handleSetIdentityUserRole changes only the per-subject access override. It
-// deliberately does not expose the rest of OIDC/LDAP configuration, so normal
-// user administration can rely on the authenticated users.admin session while
-// dangerous identity changes continue to require local-password confirmation.
+// handleSetIdentityUserRole меняет только индивидуальное назначение доступа. Для этого
+// достаточно сеанса с users.admin. Остальные настройки OIDC/LDAP доступны отдельно и
+// требуют подтверждения локальным паролем.
 func (s *Server) handleSetIdentityUserRole(w http.ResponseWriter, r *http.Request) {
 	userID := strings.TrimSpace(r.PathValue("id"))
 	if userID == "" || len(userID) > 255 {

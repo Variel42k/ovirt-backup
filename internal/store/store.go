@@ -8,14 +8,14 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/secret"
 )
 
-// ErrNotFound is returned by every Get* method when the row is absent.
+// ErrNotFound возвращается каждым методом Get*, когда строка отсутствует.
 var ErrNotFound = errors.New("не найдено")
 
-// ErrConflict is returned when a uniqueness constraint would be violated.
+// ErrConflict возвращается, когда будет нарушено ограничение уникальности.
 var ErrConflict = errors.New("объект с таким именем уже существует")
 
-// Store is the repository facade over the database. Credentials pass through
-// the cipher on the way in and out, so callers never see ciphertext.
+// Store — фасад репозитория над базой данных. учётные данные аутентификации проходят через
+// шифр при входе и выходе, поэтому клиенты этого интерфейса никогда не видят шифротекст.
 type Store struct {
 	db     *DB
 	cipher *secret.Cipher
@@ -24,16 +24,17 @@ type Store struct {
 	alertRaised func(model.Alert)
 }
 
-// New builds a Store over an open database handle.
+// New строит Магазин поверх открытой базы данных.
 func New(db *DB, c *secret.Cipher) *Store {
 	return &Store{db: db, cipher: c}
 }
 
-// DB exposes the underlying handle for health checks and maintenance tasks.
+// DB предоставляет базовую ручку для проверок работоспособности и задач режима
+// обслуживания.
 func (s *Store) DB() *DB { return s.db }
 
-// Close releases the database handle.
+// Close высвобождает обработчик базы данных.
 func (s *Store) Close() error { return s.db.Close() }
 
-// Ping verifies the database is reachable.
+// Ping проверяет, что база данных доступна.
 func (s *Store) Ping(ctx context.Context) error { return s.db.PingContext(ctx) }

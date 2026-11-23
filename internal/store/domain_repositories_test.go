@@ -31,8 +31,8 @@ func TestDomainInventoryAutomaticallyProvidesDestinations(t *testing.T) {
 		t.Fatalf("automatic domain: %+v", target)
 	}
 	id := target.ID
-	// Simulate upgrading an installation that has inventory but no automatic
-	// repository definitions, without requiring a live engine during startup.
+	// Имитируйте обновление установки, которая имеет инвентарь, но не имеет автоматических
+	// определений хранилища, не требуя живого движка во время запуска.
 	if err = s.DeleteStorageTarget(ctx, id); err != nil {
 		t.Fatal(err)
 	}
@@ -43,7 +43,8 @@ func TestDomainInventoryAutomaticallyProvidesDestinations(t *testing.T) {
 	if err != nil || !target.Automatic {
 		t.Fatalf("saved inventory: %+v %v", target, err)
 	}
-	// Renames and polls preserve identity, write namespace, settings and data references.
+	// Переименования и опросы сохраняют идентификатор, пишут пространство имен, настройки и
+	// ссылки на данные.
 	target.RateLimit = 30 << 20
 	if err = s.UpdateStorageTarget(ctx, target); err != nil {
 		t.Fatal(err)

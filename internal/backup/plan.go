@@ -10,11 +10,10 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/store"
 )
 
-// The planner answers the question an operator actually has in front of a VM:
-// "what are my options here, and which one should I pick?" — with the reasons
-// spelled out, because a recommendation nobody understands gets ignored.
+// Планировщик показывает доступные для ВМ варианты бэкапа и объясняет,
+// какой из них рекомендует и почему.
 
-// Assessment is the set of facts the recommendations are derived from.
+// Assessment — это набор фактов, из которых вытекают рекомендации.
 type Assessment struct {
 	ServerID   string `json:"server_id"`
 	ServerName string `json:"server_name"`
@@ -100,7 +99,7 @@ func (a Assessment) FullBytes() int64 {
 	return a.TotalUsed
 }
 
-// DiskFacts is what matters about one disk when choosing a strategy.
+// DiskFacts — это то, что имеет значение для одного диска при выборе стратегии.
 type DiskFacts struct {
 	ID              string `json:"id"`
 	Alias           string `json:"alias"`
@@ -119,7 +118,7 @@ type DiskFacts struct {
 	NotBackedUp string `json:"not_backed_up,omitempty"`
 }
 
-// Option is one offered backup strategy.
+// Option — одна из предложенных стратегий резервного копирования.
 type Option struct {
 	Type        model.BackupType `json:"type"`
 	Title       string           `json:"title"`
@@ -141,7 +140,7 @@ type Option struct {
 	SuggestedVerify model.VerifyMode `json:"suggested_verify"`
 }
 
-// SchedulePreset is a ready-made schedule an operator can accept as-is.
+// SchedulePreset — готовое расписание, которое оператор может принять как есть.
 type SchedulePreset struct {
 	Name        string                `json:"name"`
 	Description string                `json:"description"`
@@ -156,18 +155,17 @@ type SchedulePreset struct {
 	EstimatedFootprint int64 `json:"estimated_footprint"`
 }
 
-// Recommendation bundles everything the UI shows on the "как бэкапить эту ВМ"
-// screen.
+// Recommendation содержит данные для экрана с вариантами и рекомендацией по бэкапу ВМ.
 type Recommendation struct {
 	Assessment Assessment       `json:"assessment"`
 	Options    []Option         `json:"options"`
 	Presets    []SchedulePreset `json:"presets"`
 }
 
-// ProxmoxRecommendation describes the one data path Proxmox can expose
-// without staging an archive on its own backup storage: a complete native
-// vzdump stream. The dispatcher turns legacy full/snapshot jobs into this
-// format, while new jobs see only the honest supported choice here.
+// ProxmoxRecommendation описывает резервное копирование без промежуточного архива на
+// хранилище Proxmox. Используется полный штатный поток vzdump. Диспетчер переводит старые
+// задания full и snapshot на этот формат, а при создании нового задания показывается
+// поддерживаемый вариант.
 func ProxmoxRecommendation(srv *model.Server, vm *model.VM) *Recommendation {
 	ready := srv != nil && srv.HasProxmoxDataPlane()
 	a := Assessment{ServerID: srv.ID, ServerName: srv.Name, VMID: vm.ID, VMName: vm.Name,
@@ -198,12 +196,12 @@ func ProxmoxRecommendation(srv *model.Server, vm *model.VM) *Recommendation {
 		VerifyAfter: model.VerifyChain, Recommended: ready}}}
 }
 
-// defaultThroughput is the fallback estimate before any run has happened.
-// Deliberately conservative: an estimate that turns out optimistic erodes
-// trust faster than one that turns out generous.
+// defaultThroughput — запасная оценка до того, как произошел какой-либо пробег.
+// Намеренно консервативный: оценка, которая оказывается оптимистичной, разрушает доверие
+// быстрее, чем та, которая оказывается щедрой.
 const defaultThroughput = 120 << 20 // 120 МиБ/с
 
-// Recommend assesses a VM and produces the offered options.
+// Recommend оценивает ВМ и производит предложенные варианты.
 func (e *Engine) Recommend(ctx context.Context, serverID, vmID, storageTargetID string) (*Recommendation, error) {
 	srv, err := e.store.GetServer(ctx, serverID)
 	if err != nil {
@@ -263,13 +261,10 @@ func (e *Engine) Recommend(ctx context.Context, serverID, vmID, storageTargetID 
 			f.CanEnableCBT = true
 			a.CBTPossible++
 		default:
-			// oVirt only tracks changed blocks for qcow2 volumes.
+			// oVirt отслеживает изменённые блоки только для томов qcow2.
 			//
-			// The wording matters here. "Отслеживание недоступно" alone reads
-			// as "этот диск нельзя защитить", which is wrong and frightening:
-			// the disk is backed up hot like any other, it just cannot be
-			// copied incrementally. Saying both halves stops an operator from
-			// concluding that raw disks are unprotected.
+			// При отсутствии CBT полный горячий бэкап всё равно доступен.
+			// Сообщение должно явно указывать, что ограничение относится к инкрементам.
 			f.CBTBlocker = fmt.Sprintf(
 				"формат %s: карта изменённых блоков хранится в заголовке qcow2, у %s его нет. "+
 					"Диск бэкапится полностью и без остановки ВМ; недоступны только инкременты",
@@ -349,8 +344,8 @@ func (e *Engine) Recommend(ctx context.Context, serverID, vmID, storageTargetID 
 	}, nil
 }
 
-// enrichFromHistory derives throughput and typical increment size from what
-// actually happened, which beats any built-in constant.
+// enrichFromHistory получает пропускную способность и типичный размер приращения от того,
+// что на самом деле произошло, что бьет любую встроенную константу.
 func (e *Engine) enrichFromHistory(ctx context.Context, a *Assessment, storageTargetID string) {
 	runs, err := e.store.ListBackupRuns(ctx, store.RunFilter{
 		ServerID: a.ServerID,
@@ -391,7 +386,7 @@ func (e *Engine) enrichFromHistory(ctx context.Context, a *Assessment, storageTa
 	}
 }
 
-// buildOptions turns the assessment into the offered strategies.
+// buildOptions превращает оценку в предлагаемые стратегии.
 func buildOptions(a Assessment) []Option {
 	throughput := a.ObservedThroughput
 	if throughput <= 0 {
@@ -413,9 +408,9 @@ func buildOptions(a Assessment) []Option {
 	// incremental: остальные движок (4.4.5+) отдаёт в том же бэкапе целиком.
 	backupAPI := a.backupAPI()
 	incrementalReady := a.incrementalReady()
-	// oVirt 4.3 has no native Backup API, but the service can still build an
-	// incremental chain from ordinary snapshots. The operator chooses between
-	// reading and comparing the full image and retaining a QCOW2 snapshot base.
+	// oVirt 4.3 не имеет штатного Backup API, но служба может построить инкрементальную
+	// цепочку через обычные снапшоты. Оператор выбирает сравнение всего образа или
+	// сохранение опорного снапшота QCOW2.
 	legacyIncremental := !a.Libvirt && !a.EngineSupportsCBT && a.DiskCount > 0
 	legacyQcowNeedsQemu := false
 	if legacyIncremental && !a.QemuImgAvailable {
@@ -433,8 +428,8 @@ func buildOptions(a Assessment) []Option {
 
 	fullEstimate := a.FullBytes()
 
-	// Without measurements, assume a working day changes a few percent of the
-	// allocated data — the figure most storage teams plan around.
+	// Без измерений предположим, что рабочий день изменяет несколько процентов выделенных
+	// данных — цифра, которую планирует большинство команд хранения.
 	incrementEstimate := a.AverageIncrement
 	if incrementEstimate <= 0 {
 		incrementEstimate = fullEstimate / 20
@@ -596,8 +591,7 @@ func buildOptions(a Assessment) []Option {
 		}
 	}
 
-	// Exactly one recommendation: a list where everything is recommended is a
-	// list where nothing is.
+	// Точно одна рекомендация: список, где все рекомендуется, это список, где ничего нет.
 	switch {
 	case incrementalReady:
 		markRecommended(options, model.BackupIncremental,
@@ -648,8 +642,8 @@ func markRecommended(options []Option, typ model.BackupType, why string) {
 	}
 }
 
-// buildPresets offers complete schedules rather than individual settings, so
-// an operator who does not want to think about retention does not have to.
+// buildPresets предлагает полные расписания, а не индивидуальные настройки, поэтому
+// оператору, который не хочет думать об удержании, не нужно.
 //
 // Готовые расписания гостя не замораживают: горячий бэкап идёт без остановки
 // записи, а копия получается как после сбоя питания — журналируемые ФС и СУБД

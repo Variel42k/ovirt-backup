@@ -40,8 +40,8 @@ func TestRegisterBackupStoragePreservesFilesAndExistingSettings(t *testing.T) {
 	if len(st.targets) != 1 || !st.targets[0].ReadOnly || !st.targets[0].Enabled {
 		t.Fatalf("expected one enabled read-only repository: %+v", st.targets)
 	}
-	// An archive can restore an existing writable target: preserve its settings,
-	// do not duplicate the registration or disable existing backup jobs.
+	// Архив может восстановить существующую записываемую цель: сохранить ее настройки, не
+	// дублировать регистрацию или отключить существующие задания резервного копирования.
 	st.targets[0].ReadOnly, st.targets[0].Enabled = false, false
 	if err := RegisterBackupStorage(context.Background(), st, dir, true, &out); err != nil {
 		t.Fatal(err)

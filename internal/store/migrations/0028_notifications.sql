@@ -12,9 +12,9 @@ CREATE INDEX IF NOT EXISTS idx_alerts_notification_due
     ON alerts(next_notification_at)
     WHERE next_notification_at IS NOT NULL;
 
--- Existing active alerts must enter the new dispatcher once. Without this,
--- their next_notification_at would stay NULL forever because repeated monitor
--- observations preserve the reminder clock of an already firing alert.
+-- Передаём существующие активные оповещения в новый диспетчер один раз.
+-- Иначе next_notification_at останется NULL, поскольку монитор при повторном
+-- обнаружении активного оповещения сохраняет время напоминания.
 UPDATE alerts
 SET next_notification_at = NOW()
 WHERE state IN ('firing', 'acked') AND next_notification_at IS NULL;

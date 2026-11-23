@@ -10,8 +10,8 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/proxmox"
 )
 
-// pollProxmox refreshes inventory through the cluster-wide PVE API exposed by
-// every healthy node.
+// pollProxmox освежает инвентарь через кластер-широкий PVE API выставленный каждым здоровым
+// узлом.
 func (m *Monitor) pollProxmox(ctx context.Context, srv *model.Server) error {
 	started := time.Now()
 	if m.proxmox == nil {

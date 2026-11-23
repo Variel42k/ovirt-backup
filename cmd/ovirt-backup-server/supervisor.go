@@ -51,8 +51,9 @@ func configuredHealthProbe(cfg *config.Config) (*http.Client, string, func()) {
 	transport := &http.Transport{Proxy: nil}
 	if cfg.Server.TLS.Enabled {
 		scheme = "https"
-		// Pin the configured service certificate for the local liveness endpoint.
-		// This does not change verification of Engine or ImageIO connections.
+		// Прикрепите сконфигурированный служебный сертификат для локальной конечной точки
+		// живости.
+		// Это не меняет проверки Engine или ImageIO соединений.
 		transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true, VerifyConnection: func(state tls.ConnectionState) error {
 			data, e := os.ReadFile(cfg.Server.TLS.CertFile)
 			if e != nil {
@@ -84,8 +85,8 @@ func checkServiceHealth(cfg *config.Config) error {
 	return nil
 }
 
-// The parent has no DB/Engine clients. A replacement reconciles saved state
-// and proves target ownership and power state before changing any VM.
+// У родителей нет DB/Engine клиентов. Замена согласовывает сохраненное состояние и
+// доказывает целевое владение и текущий статус выполнения перед изменением любой ВМ.
 func superviseService(ctx context.Context, executable string, args []string, url string, client *http.Client, limits supervisorLimits) error {
 	for ctx.Err() == nil {
 		child := exec.Command(executable, args...)

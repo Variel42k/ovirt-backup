@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-// securityHeaders applies browser protections to both API and SPA responses.
+// securityHeaders применяется защита браузера как к API, так и к SPA ответам.
 func (s *Server) securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
@@ -27,8 +27,8 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 	})
 }
 
-// csrf rejects state-changing browser requests which carry a session cookie
-// but did not originate from this installation (or an explicit CORS origin).
+// csrf отклоняет изменяющие состояние запросы браузера, которые несут сеансовый файл
+// cookie, но не исходят от этой установки (или явного CORS источника).
 func (s *Server) csrf(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(r.URL.Path, "/api/") || csrfSafeMethod(r.Method) {
@@ -41,9 +41,10 @@ func (s *Server) csrf(next http.Handler) http.Handler {
 		hasSession := cookieErr == nil
 		hasBearer := strings.HasPrefix(strings.TrimSpace(r.Header.Get("Authorization")), "Bearer ")
 		if origin == "" {
-			// Command-line clients do not send Origin or Fetch Metadata. Browsers
-			// do, so an explicitly browser-originated cookie request must carry a
-			// verifiable Origin while curl-based administration keeps working.
+			// Клиенты командной строки не отправляют метаданные Origin или Fetch. Браузеры
+			// делают это, поэтому явно созданный браузером запрос cookie должен иметь
+			// проверяемый Origin, в то время как администрирование на основе curl
+			// продолжает работать.
 			if hasSession && !hasBearer && r.Header.Get("Sec-Fetch-Site") != "" {
 				writeJSON(w, http.StatusForbidden, errorResponse{
 					Error: "запрос с cookie отклонён: отсутствует Origin", Code: "csrf_origin_required",

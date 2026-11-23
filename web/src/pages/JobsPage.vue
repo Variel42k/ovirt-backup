@@ -1335,7 +1335,7 @@ const columns = [
 
           <template v-if="jobStep === 4">
           <div v-if="!isProxmoxJob && !['ova', 'config'].includes(form.type)" class="col-12">
-            <BackupCompressionSelect v-model="form.compression" />
+            <BackupCompressionSelect v-model="form.compression" :server-id="form.server_id" :vms="selectedVMs" :exclude-disk-ids="form.exclude_disk_ids" />
           </div>
           <div class="col-12 col-sm-4">
             <q-select

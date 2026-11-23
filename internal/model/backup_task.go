@@ -14,9 +14,8 @@ const (
 	BackupTaskFailed    BackupTaskStatus = "failed"
 )
 
-// BackupTask is a durable work unit. Payload is a snapshot of the resolved
-// request and job, so editing a policy while work is queued cannot change the
-// semantics of work already accepted.
+// BackupTask — сохраняемое задание. Payload фиксирует разрешённый запрос и параметры
+// задания, поэтому изменение политики не меняет уже поставленную в очередь работу.
 type BackupTask struct {
 	ID          string           `json:"id"`
 	JobRunID    string           `json:"job_run_id"`

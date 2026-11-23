@@ -95,16 +95,15 @@ func (o BackupOptions) args(kind string) ([]string, error) {
 
 var pveStorageID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
-// ValidStorageID reports whether value is safe to pass as a Proxmox storage
-// identifier. Keeping the same validation in plans and execution prevents a
-// plan from becoming ready for an operation the forced-command helper rejects.
+// ValidStorageID проверяет идентификатор хранилища Proxmox. Одна проверка при планировании
+// и выполнении исключает планы, которые отклонит SSH-хелпер.
 func ValidStorageID(value string) bool {
 	return pveStorageID.MatchString(value)
 }
 
-// DataPlane is the SSH transport for bytes that the Proxmox REST API cannot
-// return. The key should be restricted to dataPlaneHelper in authorized_keys;
-// every command sent here is a fixed protocol operation with validated fields.
+// DataPlane является SSH транспортом для байтов, которые Proxmox REST API не могут быть
+// возвращены. Ключ должен быть ограничен dataPlaneHelper в authorized_keys; каждая команда,
+// отправленная сюда, является фиксированной протокольной операцией с проверенными полями.
 //
 // Соединения к узлам берутся из общего пула (sshpool): перед каждым бэкапом
 // ВМ служба проверяет узел и затем читает архив, и соединение на каждую
@@ -142,8 +141,8 @@ func NewDataPlane(srv *model.Server, timeout time.Duration) (*DataPlane, error) 
 		trust: sshpool.Key(srv.SSHHostKey, fmt.Sprint(srv.SSHTrustAnyHostKey))}, nil
 }
 
-// Probe verifies authentication, host pinning and the helper protocol without
-// reading guest data or changing the node, and reports what the helper can do.
+// Probe проверяет аутентификацию, прикрепление хоста и протокол помощника без чтения данных
+// гостя или изменения узла и сообщает, что может сделать помощник.
 func (d *DataPlane) Probe(ctx context.Context, host string) (DataPlaneCaps, error) {
 	var stdout bytes.Buffer
 	if err := d.run(ctx, host, dataPlaneHelper+" probe", nil, &stdout); err != nil {
@@ -156,10 +155,10 @@ func (d *DataPlane) Probe(ctx context.Context, host string) (DataPlaneCaps, erro
 	return caps, nil
 }
 
-// Backup streams one native vzdump archive from the node that currently owns
-// the guest. No temporary archive is created on the Proxmox storage.
+// Резервное копирование передает один собственный архив vzdump из узла, который в настоящее
+// время владеет гостем. На Proxmox хранилище временный архив не создаётся.
 //
-// Non-zero opts need protocol 2 on the node; the caller learns it from Probe.
+// non-zero opts нужен протокол 2 на узле; Код вызова узнает его от Probe.
 func (d *DataPlane) Backup(ctx context.Context, host, vmID string, opts BackupOptions, consume func(io.Reader) error) error {
 	kind, numericID, err := ParseVMID(vmID)
 	if err != nil {
@@ -176,9 +175,9 @@ func (d *DataPlane) Backup(ctx context.Context, host, vmID string, opts BackupOp
 	return d.stream(ctx, host, command, consume)
 }
 
-// Restore feeds a native archive to qmrestore/pct restore. The helper assigns
-// fresh MAC addresses and keeps restored NICs disconnected unless the operator
-// explicitly selected attached networking.
+// Restore передает нативный архив для восстановления qmrestore/pct. Помощник назначает
+// свежие MAC адреса и сохраняет восстановление NICs отключенным, если оператор явно не
+// выбрал подключенную сеть.
 func (d *DataPlane) Restore(ctx context.Context, host, kind, vmID, storage, name string,
 	network model.RestoreVMNetwork, start bool, archive io.Reader) error {
 	if kind != "qemu" && kind != "lxc" {

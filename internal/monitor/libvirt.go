@@ -10,14 +10,12 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
-// Polling a bare libvirt host.
+// Опрос автономного хоста libvirt.
 //
-// The shape of the result is deliberately identical to the oVirt path: one
-// host, a list of VMs, a list of disks. Everything downstream — alerts,
-// remediation, the dashboard — then works without knowing which kind of
-// hypervisor it is looking at.
+// Результат имеет ту же форму, что и для oVirt: один хост, список ВМ и список дисков.
+// Оповещения, восстановление и панель используют его без привязки к типу гипервизора.
 
-// pollLibvirt refreshes one libvirt host's inventory and evaluates its state.
+// pollLibvirt обновляет инвентарь хоста libvirt и оценивает его состояние.
 func (m *Monitor) pollLibvirt(ctx context.Context, srv *model.Server) error {
 	started := time.Now()
 
@@ -42,7 +40,8 @@ func (m *Monitor) pollLibvirt(ctx context.Context, srv *model.Server) error {
 	srv.EngineVersion = inv.Info.Version
 	srv.ProductName = "libvirt"
 
-	// Incremental backup needs the pull-mode API, which landed in libvirt 6.0.
+	// Для дополнительного резервного копирования требуется режим тяги API, который
+	// приземлился в libvirt 6.0.
 	supported, _, err := conn.SupportsIncrementalBackup(ctx)
 	if err == nil {
 		srv.SupportsCBT = supported
@@ -94,9 +93,9 @@ func (m *Monitor) pollLibvirt(ctx context.Context, srv *model.Server) error {
 }
 
 func (m *Monitor) syncLibvirtInventory(ctx context.Context, srv *model.Server, inv *libvirtx.Inventory) error {
-	// A libvirt server has no clusters and no storage domains of its own;
-	// syncing empty lists is what removes anything left over from a
-	// connection that used to be an oVirt engine.
+	// libvirt сервер не имеет кластеров и собственных доменов хранения; Синхронизация
+	// пустых списков — то, что удаляет все, что осталось от соединения, которое раньше было
+	// движком oVirt.
 	if err := m.store.SyncClusters(ctx, srv.ID, nil); err != nil {
 		return err
 	}
@@ -112,7 +111,7 @@ func (m *Monitor) syncLibvirtInventory(ctx context.Context, srv *model.Server, i
 	return m.store.SyncDisks(ctx, srv.ID, inv.Disks)
 }
 
-// executeLibvirt performs a corrective action on a libvirt domain.
+// executeLibvirt выполняет корректирующее действие над libvirt доменом.
 func (r *Remediator) executeLibvirt(ctx context.Context, sit Situation) error {
 	conn, err := r.libvirt.Get(ctx, sit.ServerID)
 	if err != nil {
@@ -127,8 +126,8 @@ func (r *Remediator) executeLibvirt(ctx context.Context, sit Situation) error {
 		if err != nil {
 			return err
 		}
-		// StartDomain picks between "boot" and "resume" by looking at the
-		// current state: libvirt splits what oVirt merges into one call.
+		// StartDomain выбираетъ между "boot" и "resume" смотря на текущее состояніе:
+		// libvirt расщепляетъ то, что oVirt сливается въ одну звѣзду.
 		if err := conn.StartDomain(opCtx, dom); err != nil {
 			return err
 		}
@@ -152,9 +151,8 @@ func (r *Remediator) executeLibvirt(ctx context.Context, sit Situation) error {
 		return err
 
 	case model.ActionHostActivate, model.ActionHostFence:
-		// There is no engine above a bare libvirt host to activate or fence it
-		// through. Pretending otherwise would record a success that never
-		// happened.
+		// Автономный хост libvirt нельзя активировать или изолировать через движок. Иначе мы
+		// записали бы успех для невыполненного действия.
 		return fmt.Errorf("действие «%s» недоступно для голого хоста libvirt: "+
 			"им управляет не движок, а операционная система гипервизора", sit.Action.Title())
 

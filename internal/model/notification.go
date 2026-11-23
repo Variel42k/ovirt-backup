@@ -2,8 +2,8 @@ package model
 
 import "time"
 
-// NotificationSettings controls external delivery. Channel credentials stay
-// in YAML/environment; runtime policy itself is safe to keep in PostgreSQL.
+// NotificationSettings управляет внешней доставкой. Учётные данные канала
+// остаются в YAML или окружении. Политику доставки можно хранить в PostgreSQL.
 type NotificationSettings struct {
 	Enabled              bool     `json:"enabled"`
 	MinSeverity          Severity `json:"min_severity"`
@@ -15,9 +15,9 @@ type NotificationSettings struct {
 	Source               string   `json:"source"`
 }
 
-// NotificationSettingsOverride is the nullable database layer over startup
-// configuration. Nil means that the corresponding YAML/environment value (or
-// built-in default for the new fields) is still in force.
+// NotificationSettingsOverride — сводимый к нулю уровень базы данных над конфигурацией
+// запуска. Nil означает, что соответствующее значение YAML/окружающей среды (или встроенное
+// значение по умолчанию для новых полей) остается в силе.
 type NotificationSettingsOverride struct {
 	Enabled              *bool
 	MinSeverity          *Severity
@@ -27,7 +27,7 @@ type NotificationSettingsOverride struct {
 	MaxRepeats           *int
 }
 
-// NotificationPolicy overrides the global policy for one alert kind.
+// NotificationPolicy отменяет глобальную политику для одного типа предупреждений.
 type NotificationPolicy struct {
 	Kind           string   `json:"kind"`
 	Enabled        bool     `json:"enabled"`
@@ -46,8 +46,8 @@ const (
 	NotificationResolved NotificationEvent = "resolved"
 )
 
-// NotificationDelivery is one durable attempt for one channel. A separate
-// row per channel means retrying SMTP never duplicates a successful webhook.
+// NotificationDelivery хранит одну попытку доставки через один канал. Повтор SMTP не
+// отправит успешный webhook ещё раз.
 type NotificationDelivery struct {
 	ID          string            `json:"id"`
 	AlertID     string            `json:"alert_id"`

@@ -29,9 +29,9 @@ import (
 // проверки хранилищ, чтобы она не открывала соединение заново.
 var sftpPool = sshpool.New(20*time.Minute, 1)
 
-// sftpBackend stores backups on a remote host over SSH. It is the fallback for
-// sites that have neither object storage nor a shared mount, and it is the one
-// backend where the connection can drop mid-run, so it reconnects on demand.
+// sftpBackend хранит копии на удалённом хосте через SSH. Подходит для площадок без
+// объектного хранилища и общей точки монтирования. Если соединение оборвётся во время
+// бэкапа, хранилище переподключается по мере необходимости.
 type sftpBackend struct {
 	name     string
 	addr     string
@@ -65,8 +65,8 @@ func newSFTP(target *model.StorageTarget) (Backend, error) {
 	if target.PrivateKey != "" {
 		signer, err := ssh.ParsePrivateKey([]byte(target.PrivateKey))
 		if err != nil {
-			// A passphrase-protected key cannot be used unattended; say so
-			// instead of failing later with an opaque auth error.
+			// Ключ, защищенный паролем, нельзя использовать без присмотра; Скажите это,
+			// вместо того, чтобы позже ошибиться с непрозрачной ошибкой аутентификации.
 			return nil, fmt.Errorf("разбор приватного ключа SFTP: %w "+
 				"(ключ с парольной фразой не подходит для автоматических заданий)", err)
 		}
@@ -107,14 +107,14 @@ func newSFTP(target *model.StorageTarget) (Backend, error) {
 func (s *sftpBackend) Kind() model.StorageKind { return model.StorageSFTP }
 func (s *sftpBackend) Name() string            { return s.name }
 
-// conn returns a live SFTP client, dialing or redialing as needed.
+// conn возвращает живой SFTP клиент, набирая или перенабирая по мере надобности.
 func (s *sftpBackend) conn() (*sftp.Client, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if s.client != nil {
-		// Cheap liveness probe: a dead TCP connection fails here rather than
-		// halfway through writing a disk image.
+		// Дешевый зонд живости: мертвое соединение TCP не удается здесь, а не на полпути к
+		// записи образа диска.
 		if _, err := s.client.Getwd(); err == nil {
 			return s.client, nil
 		}
@@ -184,7 +184,7 @@ func (s *sftpBackend) mkdirAll(client *sftp.Client, dir string) error {
 		return err
 	}
 	if err := client.Mkdir(dir); err != nil {
-		// Another disk of the same run may have created it concurrently.
+		// Другой диск того же запуска, возможно, создал его одновременно.
 		if fi, statErr := client.Stat(dir); statErr == nil && fi.IsDir() {
 			return nil
 		}
@@ -217,7 +217,8 @@ func (s *sftpBackend) Put(ctx context.Context, key string, r io.Reader, size int
 		return written, fmt.Errorf("запись %s: %w", key, err)
 	}
 
-	// Rename does not overwrite on most SFTP servers, so clear the target.
+	// Переименование не перезаписывается на большинстве SFTP серверов, поэтому очищайте
+	// цель.
 	_ = client.Remove(full)
 	if err := client.Rename(tmp, full); err != nil {
 		_ = client.Remove(tmp)
@@ -296,7 +297,7 @@ func (s *sftpBackend) DeletePrefix(ctx context.Context, prefix string) (int, err
 		}
 		count++
 	}
-	// Remove the now-empty directory tree, deepest first.
+	// Удалите пустое дерево каталогов, сначала самое глубокое.
 	dir := s.remotePath(prefix)
 	if fi, err := client.Stat(dir); err == nil && fi.IsDir() {
 		s.removeEmptyDirs(client, dir)
@@ -351,8 +352,8 @@ func (s *sftpBackend) List(ctx context.Context, prefix string) ([]ObjectInfo, er
 	return out, nil
 }
 
-// Usage cannot be answered over plain SFTP; the protocol has no statvfs in the
-// base specification and the extension is not universally available.
+// Usage не может быть отвечено по ясному SFTP; протокол не имеет statvfs в базовой
+// спецификации и расширение не является универсально доступным.
 func (s *sftpBackend) Usage(ctx context.Context) (int64, int64, error) {
 	client, err := s.conn()
 	if err != nil {

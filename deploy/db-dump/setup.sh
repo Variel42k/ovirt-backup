@@ -85,10 +85,9 @@ install -d -m 0755 -o root -g root "$HOME_DIR/.ssh"
 AUTH="$HOME_DIR/.ssh/authorized_keys"
 [ ! -L "$AUTH" ] || die "$AUTH не должен быть символической ссылкой"
 LINE="restrict,command=\"/usr/local/sbin/jhvirt-db-dump\" $KEY"
-# Rebuild the file on every run. An older/manual installation may contain the
-# same key without restrictions; merely noticing that line would leave shell
-# access enabled. Remove every occurrence of this key and add one canonical,
-# forced-command-only entry.
+# Пересобираем файл при каждом запуске. После старой или ручной установки
+# тот же ключ мог остаться с доступом к оболочке. Удаляем все его записи
+# и создаём одну, разрешающую только принудительную команду.
 AUTH_TMP=$(mktemp "${AUTH}.XXXXXX")
 trap 'rm -f "$AUTH_TMP"' EXIT HUP INT TERM
 if [ -f "$AUTH" ]; then

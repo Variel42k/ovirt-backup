@@ -12,8 +12,8 @@ import (
 
 var ErrNoAddress = errors.New("нет пригодного IP гостя; автоматический сброс по сетевой проверке запрещён")
 
-// CheckTCP checks a guest-reported address. One shared deadline bounds all
-// addresses; lack of addresses is an unknown result, not proof of a hung guest.
+// CheckTCP проверяет адрес, указанный гостем. Один общий срок ограничивает все адреса;
+// отсутствие адресов — неизвестный результат, а не доказательство повешенного гостя.
 func CheckTCP(ctx context.Context, addresses []string, port int, timeout time.Duration) error {
 	if port == 0 {
 		return nil

@@ -5,9 +5,9 @@ import (
 	"time"
 )
 
-// BackupQualitySettings controls the quality evaluator. The same value is
-// used by YAML, runtime settings, the API and the web form so their ranges
-// cannot drift apart.
+// BackupQualitySettings проверя́тель м. проверяющій качество. То же значение используется
+// YAML, настройками времени выполнения, API и веб-формой, поэтому их диапазоны не могут
+// отдаляться друг от друга.
 type BackupQualitySettings struct {
 	StaleIntervals              int `json:"stale_intervals" mapstructure:"stale_intervals"`
 	VerifyMaxAgeDays            int `json:"verify_max_age_days" mapstructure:"verify_max_age_days"`
@@ -69,8 +69,8 @@ func (s BackupQualitySettings) Validate() error {
 	return nil
 }
 
-// RuntimeSettings contains operator overrides persisted in PostgreSQL.
-// Nil fields fall back to the process configuration loaded at startup.
+// RuntimeSettings содержит операторные переопределения, сохранившиеся в PostgreSQL.
+// Поля nil возвращаются к конфигурации процесса, загруженной при запуске.
 type RuntimeSettings struct {
 	BackupCompression                  *string   `json:"backup_compression,omitempty"`
 	SchedulerTimezone                  *string   `json:"scheduler_timezone,omitempty"`
@@ -93,7 +93,7 @@ type RuntimeSettings struct {
 	UpdatedAt                          time.Time `json:"updated_at,omitempty"`
 }
 
-// HasBackupQuality reports whether the quality override is stored.
+// HasBackupQuality сообщает, сохраняется ли переопределение качества.
 //
 // Пороги доменов сюда не входят: колонки появились позже остальных, и у
 // настроек, сохранённых до них, они пусты. Требовать их значило бы молча
@@ -132,7 +132,7 @@ func (s RuntimeSettings) BackupQuality(base BackupQualitySettings) BackupQuality
 	return out
 }
 
-// HasLogRotation reports whether all fields of the rotation override exist.
+// HasLogRotation сообщает, существуют ли все поля переопределения вращения.
 func (s RuntimeSettings) HasLogRotation() bool {
 	return s.LogMaxSizeMB != nil && s.LogMaxBackups != nil && s.LogMaxAgeDays != nil
 }

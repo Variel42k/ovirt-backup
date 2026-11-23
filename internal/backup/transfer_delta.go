@@ -8,8 +8,8 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
-// ChangedSince refuses a replaced/truncated baseline: silently streaming a full
-// disk here would invalidate the promised downtime and could mix generations.
+// ChangedSince отклоняет заменённую или усечённую базу. Неявная передача полного диска
+// могла бы превысить обещанное время простоя и смешать версии.
 func (r *ChainReader) ChangedSince(runID string) ([]int64, error) {
 	found := false
 	changed := map[int64]bool{}

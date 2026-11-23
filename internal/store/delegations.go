@@ -105,7 +105,7 @@ func (s *Store) RevokeApprovalDelegation(ctx context.Context, id string, at time
 	return nil
 }
 
-// RevokeAllApprovalDelegations invalidates every active delegated credential.
+// RevokeAllApprovalDelegations аннулирует все активные делегированные учётные данные.
 func (s *Store) RevokeAllApprovalDelegations(ctx context.Context, at time.Time) (int64, error) {
 	res, err := s.db.Exec(ctx,
 		`UPDATE approval_delegations SET revoked_at=? WHERE revoked_at IS NULL`, utc(at))

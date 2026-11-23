@@ -10,7 +10,7 @@
   }
 }
 
-// Keep VM actions in view when inventory columns need horizontal scrolling.
+// Действия с ВМ должны оставаться видны при горизонтальной прокрутке таблицы.
 .jhv-vm-table .q-table {
   th:last-child,
   td:last-child {
@@ -119,9 +119,8 @@
   z-index: 9600 !important;
 }
 
-// Semantic surfaces used by the application. Quasar components follow
-// body--dark themselves; these aliases cover legacy utility classes until
-// individual screens are migrated to the semantic names.
+// Компоненты Quasar сами учитывают body--dark. Эти переменные задают цвета для старых
+// вспомогательных классов до обновления страниц.
 :root {
   color-scheme: light;
   --jhv-surface-panel: #ffffff;

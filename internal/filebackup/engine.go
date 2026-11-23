@@ -195,7 +195,7 @@ func (e *Engine) execute(ctx context.Context, job *model.FileBackupJob, run *mod
 		for _, targetID := range job.StorageTargetIDs[1:] {
 			mirrorTarget, targetErr := e.store.GetStorageTarget(ctx, targetID)
 			if targetErr != nil || !mirrorTarget.Enabled || mirrorTarget.ReadOnly {
-				continue // finishCopies will retry/fill it from the primary
+				continue // finishCopies будет перепроверять/заполнять его из первичного
 			}
 			mirrorBackend, openErr := repo.Open(ctx, mirrorTarget)
 			if openErr != nil {
@@ -344,7 +344,7 @@ func (e *Engine) walkLocal(ctx context.Context, canonicalRoot string, backend re
 					}
 				}
 			default:
-				return nil // sockets and devices are intentionally not portable
+				return nil // Розетки и устройства намеренно не переносимы
 			}
 			if err != nil {
 				return err
@@ -368,8 +368,8 @@ func (e *Engine) finishCopies(ctx context.Context, job *model.FileBackupJob, pri
 	copyTarget := func(targetID string) {
 		err := e.replicateRun(ctx, job, primary, targetID)
 		if err != nil {
-			// A failed mirror gets one immediate fill pass. The operation is
-			// idempotent because already complete objects are skipped.
+			// Неудавшееся зеркало получает одно немедленное заполнение. Операция является
+			// идемпотентной, так как уже готовые объекты пропущены.
 			err = e.replicateRun(ctx, job, primary, targetID)
 		}
 		results <- copyResult{target: targetID, err: err}
@@ -466,7 +466,7 @@ func (e *Engine) replicateRun(ctx context.Context, job *model.FileBackupJob, pri
 		ordered = append(ordered, key)
 	}
 	sort.Strings(ordered)
-	ordered = append(ordered, primary.ManifestKey) // commit marker is always last
+	ordered = append(ordered, primary.ManifestKey) // commit маркер всегда последний
 	for _, key := range ordered {
 		written, err := copyObject(ctx, source, destination, key)
 		if err != nil {
@@ -630,9 +630,9 @@ func (e *Engine) Manifest(ctx context.Context, runID string) (*Manifest, error) 
 	return readManifest(ctx, backend, run.ManifestKey)
 }
 
-// ApplyRetention evaluates each job independently per repository. Ancestors
-// referenced by an incremental manifest are retained by the shared chain-safe
-// retention algorithm.
+// ApplyRetention оценивает каждую работу независимо в репозитории. Предки, на которые
+// ссылается инкрементальный манифест, сохраняются общим алгоритмом безопасного удержания
+// цепи.
 func (e *Engine) ApplyRetention(ctx context.Context) error {
 	jobs, err := e.store.ListFileBackupJobs(ctx)
 	if err != nil {

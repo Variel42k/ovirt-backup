@@ -23,9 +23,8 @@ func testStore(t *testing.T) *store.Store {
 	return storetest.New(t)
 }
 
-// The password printed at first start must be the one that logs in. It sounds
-// obvious, and it is exactly the kind of thing that breaks silently when the
-// generation and the hashing drift apart.
+// Пароль, напечатанный при первом запуске, должен быть тем, который входит. Это звучит
+// очевидно, и это именно то, что тихо ломается, когда поколение и хеширование расходятся.
 func TestBootstrapPasswordActuallyWorks(t *testing.T) {
 	ctx := context.Background()
 	st := testStore(t)
@@ -59,7 +58,7 @@ func TestBootstrapPasswordActuallyWorks(t *testing.T) {
 	}
 }
 
-// Losing the bootstrap password must not mean losing the installation.
+// Потеря первоначального пароля не должна означать потерю установки.
 func TestResetPasswordRestoresAccess(t *testing.T) {
 	ctx := context.Background()
 	st := testStore(t)
@@ -110,8 +109,8 @@ func TestResetPasswordRejectsBadInput(t *testing.T) {
 	}
 }
 
-// A disabled account is usually disabled by accident when someone is locked
-// out; a reset that leaves it disabled would not restore access.
+// Учетная запись отключена, как правило, случайно, когда кто-то заблокирован; сброс,
+// который оставляет его отключенным, не восстановит доступ.
 func TestResetPasswordReEnablesAccount(t *testing.T) {
 	ctx := context.Background()
 	st := testStore(t)

@@ -46,8 +46,8 @@ func TestDeletionConditionsWarnAndInvalidateReviewedPlan(t *testing.T) {
 	}
 }
 
-// run builds a successful backup created daysAgo days before the reference
-// point. parent links it into a chain.
+// run строит успешную резервную копию, созданную за daysAgo дней до контрольной точки.
+// родитель связывает ее в цепочку.
 func run(id string, daysAgo int, typ model.BackupType, parent string) *model.BackupRun {
 	return &model.BackupRun{
 		ID:          id,

@@ -54,7 +54,7 @@ func TestAdmissionAcrossTwoCoordinatorsHonorsBatchLimit(t *testing.T) {
 	if count != 2 {
 		t.Fatal("shared batch limit violated", count)
 	}
-	// Cleanup does not wait on a failed predecessor in sequential mode.
+	// Очистка не ждет неудачного предшественника в последовательном режиме.
 	for _, item := range items {
 		current, e := st.GetVMTransfer(ctx, item.ID)
 		if e != nil {

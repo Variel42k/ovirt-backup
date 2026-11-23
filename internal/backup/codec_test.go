@@ -10,7 +10,7 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/secret"
 )
 
-// compressibleChunk imitates a chunk of a real filesystem: repeating structure
+// compressibleChunk имитирует чанк реальной файловой системы: повторяющаяся структура
 // with a bit of variety. Полностью случайные байты для проверки сжатия не
 // годятся — они не сжимаются, и кодек законно вернул бы их как есть, а тогда
 // ветка распаковки в тесте не выполнилась бы ни разу.
@@ -224,7 +224,7 @@ func TestAdditionalCodecsRejectOversizedPlaintext(t *testing.T) {
 	}
 }
 
-// Exercise an LZ4 block boundary and a chunk larger than the Brotli window.
+// Упражнение LZ4 граница блока и чанк больше, чем окно Бротли.
 func TestAdditionalCodecsReadMultiBlockChunks(t *testing.T) {
 	plain := compressibleChunk((4 << 20) + 137)
 	for _, name := range []string{CompressionLZ4, CompressionBrotli} {
@@ -247,7 +247,7 @@ func TestAdditionalCodecsReadMultiBlockChunks(t *testing.T) {
 	}
 }
 
-// Synthetic local CPU benchmark, not an end-to-end VM or storage benchmark.
+// Синтетический локальный CPU бенчмарк, а не сквозная ВМ или бенчмарк хранилища.
 func BenchmarkChunkCompression(b *testing.B) {
 	plain := compressibleChunk(1 << 20)
 	for _, name := range Compressions {

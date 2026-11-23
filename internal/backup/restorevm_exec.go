@@ -78,8 +78,8 @@ func (e *Engine) planRestoreVM(ctx context.Context, req *model.RestoreVMRequest)
 	return plan, profile, err
 }
 
-// PrepareRestoreVM builds the platform-neutral part of a full restore plan.
-// Dispatchers use it before adding validations specific to oVirt or libvirt.
+// PrepareRestoreVM строит платформу-нейтральную часть полного плана восстановления.
+// Диспетчеры используют его перед добавлением валидаций, специфичных для oVirt или libvirt.
 func (e *Engine) PrepareRestoreVM(ctx context.Context, req *model.RestoreVMRequest) (*model.RestoreVMPlan, *VMProfile, error) {
 	if req == nil {
 		return nil, nil, errors.New("нет запроса на восстановление")
@@ -127,8 +127,8 @@ func (e *Engine) validateRestoreVMTarget(ctx context.Context, source *model.Back
 		plan.Blockers = append(plan.Blockers, "межплатформенное восстановление не поддерживается")
 	}
 	if target.Kind.UsesLibvirt() {
-		// The dispatcher adds live KVM pool/network validations. Reaching this
-		// method directly is valid for the platform-neutral part of a plan.
+		// Диспетчер добавляет живые KVM подтверждения пула/сети. Прямой доступ к этому
+		// методу действителен для платформенно-нейтральной части плана.
 		return
 	}
 	if strings.TrimSpace(req.ClusterID) == "" {
@@ -158,7 +158,7 @@ func (e *Engine) validateRestoreVMTarget(ctx context.Context, source *model.Back
 	}
 }
 
-// RestoreVM assembles a whole virtual machine from a backup point.
+// RestoreVM собирает всю ВМ из резервной точки.
 func (e *Engine) RestoreVM(ctx context.Context, req *model.RestoreVMRequest) (*RestoreVMResult, error) {
 	plan, profile, err := e.planRestoreVM(ctx, req)
 	if err != nil {
@@ -299,7 +299,7 @@ func (e *Engine) RestoreVM(ctx context.Context, req *model.RestoreVMRequest) (*R
 		record.Phase = "rollback"
 		return fail(err)
 	}
-	_ = restore // the child disk restore remains visible in restore history
+	_ = restore // Восстановление диска ребенка остается видимым в истории восстановления
 
 	record.Phase, record.Progress = "creating_networks", 92
 	_ = e.store.UpdateRestoreRun(ctx, record)

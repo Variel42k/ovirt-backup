@@ -12,8 +12,8 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/repo"
 )
 
-// storagePayload is the write shape of a backup repository. Secrets are
-// write-only: they go in through this struct and never come back out.
+// storagePayload — форма записи резервного хранилища. Секреты принимаются только на входе:
+// они проходят через эту структуру и никогда не возвращаются.
 type storagePayload struct {
 	Name     string `json:"name"`
 	Kind     string `json:"kind"`
@@ -106,8 +106,9 @@ func (p storagePayload) apply(dst *model.StorageTarget) {
 	}
 }
 
-// inheritWriteOnly supplies stored values that an edit form cannot read back.
-// Explicit clear flags win over inheritance.
+// inheritWriteOnly Поставляет сохраненные значения, которые форма редактирования не может
+// снова прочитать с диска.
+// Явные четкие флаги побеждают наследование.
 func (p *storagePayload) inheritWriteOnly(existing *model.StorageTarget) {
 	if p.SecretKey == "" {
 		p.SecretKey = existing.SecretKey
@@ -297,8 +298,8 @@ func (s *Server) handleCreateStorage(w http.ResponseWriter, r *http.Request) {
 	s.auditHostKeyTrust(r, model.ScopeStorageTarget, target.ID, target.Name,
 		target.TrustAnyHostKey, target.Kind == model.StorageSFTP)
 
-	// Check straight away: a repository that turns out to be unreachable is
-	// better discovered now than during the first nightly backup.
+	// Проверьте сразу: хранилище, которое оказывается недостижимым, лучше обнаруживается
+	// сейчас, чем во время первого ночного резервного копирования.
 	go s.checkStorage(context.WithoutCancel(r.Context()), target.ID)
 
 	writeJSON(w, http.StatusCreated, target)
@@ -459,8 +460,8 @@ func retargetTarget(before, after *model.StorageTarget) guardedTarget {
 	return guardedTarget{ID: before.ID, Name: before.Name, Summary: summary}
 }
 
-// ensureLocalPathUsable refuses to save a local repository whose directory
-// cannot be created.
+// ensureLocalPathUsable отказывается сохранять локальное хранилище, каталог которого не
+// может быть создан.
 //
 // Для сетевых хранилищ такая проверка была бы вредной: S3 или SFTP бывают
 // временно недоступны, и запрет на сохранение из-за этого означал бы, что
@@ -523,8 +524,8 @@ func (s *Server) handleDeleteStorage(w http.ResponseWriter, r *http.Request) {
 	}
 	force := queryBool(r, "force")
 
-	// Deleting the definition would orphan the data: the backups stay in the
-	// bucket, but nothing knows how to read them any more.
+	// При удалении настроек копии останутся в бакете, но служба потеряет
+	// возможность читать их.
 	count, err := s.store.CountRunsOnTarget(r.Context(), id)
 	if err != nil {
 		s.writeError(w, r, err)
@@ -537,8 +538,8 @@ func (s *Server) handleDeleteStorage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// A target with no backups yet can still be where a nightly job writes.
-	// Deleting it silently turns that job into a failure at two in the morning.
+	// Цель без резервных копий все еще может быть там, где ночная работа пишет.
+	// Безмолвное удаление превращает эту работу в неудачу в два часа ночи.
 	jobs, err := s.store.JobsOnTarget(r.Context(), id)
 	if err != nil {
 		s.writeError(w, r, err)
@@ -559,7 +560,7 @@ func (s *Server) handleDeleteStorage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
-// storageCheckResult reports whether a repository is usable.
+// storageCheckResult сообщает, пригоден ли репозиторий для использования.
 type storageCheckResult struct {
 	OK                bool   `json:"ok"`
 	Error             string `json:"error,omitempty"`
@@ -655,7 +656,7 @@ func (s *Server) handleCheckStorage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
-// checkStorage runs a repository check in the background.
+// checkStorage запускает проверку хранилища в фоне.
 func (s *Server) checkStorage(ctx context.Context, id string) {
 	target, err := s.store.GetStorageTarget(ctx, id)
 	if err != nil {

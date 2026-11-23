@@ -19,7 +19,7 @@ import (
 const acceptedAlertCondition = `(alerts.acked_at IS NOT NULL OR EXISTS
 	(SELECT 1 FROM alert_comments c WHERE c.alert_id=alerts.id))`
 
-// ListAlertComments returns the explanations of one alert, oldest first.
+// ListAlertComments возвраща́ютъ объясненія одного предупрежденія, старшаго перваго.
 func (s *Store) ListAlertComments(ctx context.Context, alertID string) ([]model.AlertComment, error) {
 	byAlert, err := s.alertComments(ctx, []string{alertID})
 	if err != nil {
@@ -61,7 +61,7 @@ func (s *Store) alertComments(ctx context.Context, alertIDs []string) (map[strin
 	return out, rows.Err()
 }
 
-// AddAlertComment appends an explanation to an accepted alert.
+// AddAlertComment добавляет пояснение к принятому оповещению.
 //
 // Пояснения только дописываются: это журнал того, что и когда понял
 // администратор, а не поле, которое можно переписать задним числом.

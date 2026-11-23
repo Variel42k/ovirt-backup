@@ -536,7 +536,7 @@ onMounted(load)
               </q-banner>
             </div>
             <div v-if="!isProxmox && !['ova', 'config'].includes(selectedType)" class="col-12">
-              <BackupCompressionSelect v-model="compression" />
+              <BackupCompressionSelect v-model="compression" :server-id="serverId" :vms="vm ? [vm] : []" />
             </div>
             <div class="col-12 row items-center q-gutter-md">
               <q-toggle

@@ -1,4 +1,4 @@
-// Package vmtransfer coordinates moves between independent oVirt engines.
+// Пакет vmtransfer координирует перенос ВМ между независимыми движками oVirt.
 package vmtransfer
 
 import (
@@ -197,7 +197,8 @@ func (s *Service) plan(ctx context.Context, r model.VMTransferRequest, ownID str
 	if err != nil {
 		return nil, fmt.Errorf("источник недоступен: %w", err)
 	}
-	// Live inventory verifies the destination before any source shutdown.
+	// Инвентаризация, запрошенная у виртуализации, проверяет назначение перед любым
+	// отключением источника.
 	existing, err := dst.SearchVMs(ctx, "")
 	if err != nil {
 		return nil, fmt.Errorf("цель недоступна: %w", err)
@@ -439,8 +440,8 @@ func (s *Service) startLocked(t *model.VMTransfer, action string) error {
 	return nil
 }
 
-// Queue admission is serialized with action requests. Waiting tasks do not
-// occupy backup/transfer workers; batch order and limits live in the database.
+// Очередь приема сериализована с запросами на действия. Задачи ожидания не занимают
+// резервных/трансферных работников; пакетный заказ и лимиты живут в базе данных.
 func (s *Service) acquireSlot(ctx context.Context, t *model.VMTransfer) error {
 	tick := time.NewTicker(500 * time.Millisecond)
 	defer tick.Stop()
@@ -577,8 +578,8 @@ func (s *Service) Action(ctx context.Context, id, action string, confirm bool) (
 		t.NextRecoveryAt = nil
 		return t, s.save(t)
 	}
-	// A warm standby has no foreground worker, but pausing must also stop its
-	// periodic synchronization without deleting or powering either VM.
+	// В теплом режиме ожидания нет работника переднего плана, но пауза также должна
+	// останавливать его периодическую синхронизацию без удаления или питания ВМ.
 	if action == "pause" && t.Status == "ready" {
 		if !confirm {
 			return nil, fmt.Errorf("подтвердите паузу")
@@ -664,7 +665,8 @@ func (s *Service) Action(ctx context.Context, id, action string, confirm bool) (
 	return &result, nil
 }
 
-// Resume from saved evidence, never apply disk changes after a possible start.
+// Повторите сохраненные доказательства, никогда не применяйте изменения диска после
+// возможного запуска.
 func resumeAction(t *model.VMTransfer) string {
 	if t.PendingAction != "" {
 		return t.PendingAction

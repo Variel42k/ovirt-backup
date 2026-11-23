@@ -1,7 +1,7 @@
-// Run with the service's configuration and environment, from its container:
-// go run ./scripts/verify-domain-repository.go -config ... -server ... -domain ...
-// Only creates and deletes disks in a unique smoke-test namespace. Does not
-// change repository definitions, jobs, VMs, or the application's database.
+// Запуск с конфигурацией и окружающей средой сервиса, из его контейнера: перейти к
+// запуску./scripts/verify-domain-repository.go -config... -server... (неопр.). -domain....
+// Только создает и удаляет диски в уникальном пространстве имен для тестирования дыма. Не
+// изменяет определения репозитория, задания, ВМ или базу данных приложения.
 package main
 
 import (
@@ -55,7 +55,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	// A typo in a configuration path must never generate a replacement key.
+	// Опечатка в пути конфигурации никогда не должна генерировать запасной ключ.
 	if cfg.Secrets.KeyBase64 == "" {
 		if _, err = os.Stat(cfg.Secrets.KeyFile); err != nil {
 			return err

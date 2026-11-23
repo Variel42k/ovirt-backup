@@ -6,10 +6,9 @@ import (
 	"time"
 )
 
-// DeleteOIDCSessions revokes every session issued through the external
-// provider while preserving local break-glass sessions. Identity settings use
-// it when a realm, client or role mapping changes so old authorization cannot
-// survive until the periodic revalidation window.
+// DeleteOIDCSessions отзывает сеансы внешнего провайдера и сохраняет локальные аварийные
+// сеансы. При изменении области, клиента или сопоставления ролей старые права прекращают
+// действовать сразу, без ожидания повторной проверки.
 func (s *Store) DeleteOIDCSessions(ctx context.Context) (int64, error) {
 	res, err := s.db.Exec(ctx, `DELETE FROM sessions WHERE user_id IN (
 		SELECT id FROM users WHERE provider='oidc'
@@ -20,8 +19,8 @@ func (s *Store) DeleteOIDCSessions(ctx context.Context) (int64, error) {
 	return res.RowsAffected()
 }
 
-// RevalidateOIDCSession cannot recreate a session revoked during a provider
-// request. The version check also prevents overwriting a rotated refresh token.
+// RevalidateOIDCSession не может воссоздать сеанс, отозванный во время запроса провайдера.
+// Проверка версии также предотвращает перезапись повернутого маркера обновления.
 func (s *Store) RevalidateOIDCSession(ctx context.Context, sess *model.Session, role model.Role, refresh string) error {
 	enc, err := s.cipher.Encrypt(refresh)
 	if err != nil {

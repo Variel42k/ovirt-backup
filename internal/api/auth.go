@@ -40,16 +40,14 @@ var dummyPasswordHash = func() string {
 	return string(h)
 }()
 
-// secureCookies decides whether the session cookie gets the Secure flag.
+// secureCookies решает, получит ли сеансовый файл cookie флаг Secure.
 //
-// Own TLS is the obvious case. The one that matters more in practice is a
-// reverse proxy terminating TLS in front of a service speaking plain HTTP —
-// the most common production layout there is. Deciding by TLS.Enabled alone
-// leaves the session cookie unmarked in exactly that setup, and a cookie
-// without Secure is one the browser will send over plain HTTP.
+// Cookie с флагом Secure нужна и при TLS на обратном прокси, когда служба принимает от него
+// обычный HTTP. Одной проверки TLS.Enabled недостаточно. Без Secure браузер может отправить
+// cookie сеанса по HTTP.
 //
-// external_url is the operator's own statement of how the browser reaches the
-// service, which is precisely the question Secure answers.
+// external_url — это собственное заявление оператора о том, как браузер достигает услуги,
+// что является именно вопросом Secure ответов.
 func (s *Server) secureCookies() bool {
 	return s.cfg.Server.TLS.Enabled ||
 		strings.HasPrefix(strings.ToLower(s.cfg.Server.ExternalURL), "https://")
@@ -59,7 +57,7 @@ type contextKey string
 
 const principalKey contextKey = "principal"
 
-// principal is the authenticated caller.
+// principal — подлинный позывной.
 type principal struct {
 	UserID   string
 	Username string
@@ -83,15 +81,15 @@ func (p *principal) Can(perm model.Permission) bool {
 	return false
 }
 
-// principalFrom extracts the caller from the request context.
+// principalFrom извлекает код вызова из контекста запроса.
 func principalFrom(ctx context.Context) *principal {
 	p, _ := ctx.Value(principalKey).(*principal)
 	return p
 }
 
-// EnsureBootstrapUser creates the first administrator when the user table is
-// empty. A generated password is printed once — writing it into the config
-// would leave a credential lying in a file nobody rotates.
+// EnsureBootstrapUser создает первого администратора, когда пользовательская таблица пуста.
+// Сгенерированный пароль печатается один раз — запись его в конфигурацию оставит учётные
+// данные, лежащие в файле, который никто не вращает.
 func EnsureBootstrapUser(ctx context.Context, st *store.Store, username, password string) (string, error) {
 	count, err := st.CountUsers(ctx)
 	if err != nil {
@@ -124,18 +122,17 @@ func EnsureBootstrapUser(ctx context.Context, st *store.Store, username, passwor
 	return generated, nil
 }
 
-// MinPasswordLength is the shortest password the service accepts anywhere.
+// MinPasswordLength — это самый короткий пароль, который служба принимает в любом месте.
 const MinPasswordLength = 10
 
-// ResetPassword sets a new password for an existing account and returns it.
+// ResetPassword Устанавливает новый пароль для существующей учётной записи и возвращает
+// его.
 //
-// This is the way back in after the bootstrap password is lost. Without it the
-// only recovery is deleting the database, which would also delete every
-// connection, schedule and backup record — a disproportionate price for a
-// mislaid password.
+// Этот способ позволяет вернуть доступ после потери начального пароля, сохраняя
+// подключения, расписания и историю бэкапов в базе.
 //
-// An empty password means "generate one", which keeps the operator from
-// choosing something weak under pressure and matches how bootstrap behaves.
+// Пустой пароль означает "generate one", что удерживает оператора от выбора чего-то слабого
+// под давлением и соответствует тому, как ведет себя бутстрап.
 func ResetPassword(ctx context.Context, st *store.Store, username, password string) (string, error) {
 	password, _, err := resetPassword(ctx, st, username, password, false)
 	return password, err
@@ -174,7 +171,7 @@ func resetPassword(ctx context.Context, st *store.Store, username, password stri
 	return password, revoked, nil
 }
 
-// generatePassword produces a printable random password.
+// generatePassword дает случайный пароль для печати.
 func generatePassword() (string, error) {
 	buf := make([]byte, 18)
 	if _, err := rand.Read(buf); err != nil {
@@ -255,8 +252,8 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		}
 		s.logins.Fail(req.Username)
 		s.audit(r, "auth.login", model.ScopeServer, req.Username, false, reason)
-		// Same answer for "no such user" and "wrong password": telling them
-		// apart is a free account-enumeration oracle.
+		// Для несуществующего пользователя и неверного пароля возвращаем одинаковый ответ,
+		// чтобы нельзя было перечислять учётные записи.
 		writeJSON(w, http.StatusUnauthorized, errorResponse{
 			Error: "неверное имя пользователя или пароль", Code: "unauthorized",
 		})
@@ -275,7 +272,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// issueSession creates the server-side session and hands the browser its cookie.
+// issueSession создает сеанс на стороне сервера и передает браузеру свой файл cookie.
 //
 // Обе двери — пароль и внешний провайдер — ведут сюда, и дальше приложение не
 // различает, какой из них вошли: сессия одна и та же. Разведи это на две ветки
@@ -378,13 +375,13 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// authenticate resolves the caller from a session cookie or a static API
-// token and attaches it to the request context.
+// authenticate разрешает код вызова из сеансового файла cookie или статического API токена
+// и присоединяет его к контексту запроса.
 func (s *Server) authenticate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !s.cfg.Auth.Enabled {
-			// Authentication off means the service is expected to sit behind
-			// something else that does it; everyone is an administrator here.
+			// Аутентификация означает, что ожидается, что сервис будет сидеть за чем-то
+			// еще, что это делает; Здесь каждый является администратором.
 			ctx := context.WithValue(r.Context(), principalKey,
 				&principal{Username: "anonymous", Role: model.RoleAdmin,
 					Permissions: model.AllPermissions()})
@@ -422,8 +419,8 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 	})
 }
 
-// principalFromToken resolves the caller from the Authorization header, used
-// by integrations that cannot hold a cookie.
+// principalFromToken разрешает код вызова из заголовка Authorization, используемый
+// интеграциями, которые не могут удерживать cookie.
 //
 // Проверяются две разновидности. Выданные из интерфейса живут в базе, имеют
 // имя, роль и срок, и отзываются нажатием кнопки. Перечисленные в файле
@@ -445,8 +442,8 @@ func (s *Server) principalFromToken(r *http.Request) *principal {
 	}
 
 	for _, token := range s.cfg.Auth.APITokens {
-		// Constant-time comparison: a timing side channel on a bearer token is
-		// a real, demonstrated attack.
+		// Сравнение с постоянным временем: хронометраж бокового канала на токене носителя
+		// является реальной, продемонстрированной атакой.
 		if subtle.ConstantTimeCompare([]byte(token), []byte(presented)) == 1 {
 			// В аудите такой токен отличим от выданного: у него нет имени, и
 			// строка «api-token (файл настроек)» — единственное, что можно о
@@ -458,7 +455,7 @@ func (s *Server) principalFromToken(r *http.Request) *principal {
 	return nil
 }
 
-// requireAuth rejects unauthenticated callers.
+// requireAuth отвергает неаутентифицированные клиенты этого интерфейса.
 func (s *Server) requireAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if principalFrom(r.Context()) == nil {
@@ -487,8 +484,8 @@ func newSessionToken() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(buf), nil
 }
 
-// audit records a state-changing call. Failures to write the audit line are
-// logged but never fail the request.
+// Аудит регистрирует вызов, изменяющий состояние. Сбои в записи строки аудита
+// регистрируются, но никогда не подводят запрос.
 // auditSystem записывает действие, у которого нет запроса и человека.
 //
 // Так выглядят действия, доведённые самой службой: заявка, у которой вышло

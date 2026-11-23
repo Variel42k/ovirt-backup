@@ -15,7 +15,7 @@ import (
 
 const userColumns = `id, username, password_hash, role, disabled, last_login_at, created_at, updated_at, provider, external_id`
 
-// CreateUser stores a new account. The caller supplies an already hashed
+// CreateUser хранит новую учётную запись. код вызова поставляет уже хэшированный
 // password; the store never sees plaintext. Внешние записи приходят сюда без
 // хеша вовсе — у них его нет.
 func (s *Store) CreateUser(ctx context.Context, u *model.User) error {
@@ -40,8 +40,8 @@ func (s *Store) CreateUser(ctx context.Context, u *model.User) error {
 	return nil
 }
 
-// UpdateUser changes the account name, role, disabled flag and, when non-empty,
-// the password hash.
+// UpdateUser изменяет имя учётной записи, роль, флаг отключения и, когда он не пуст, хэш
+// пароля.
 func (s *Store) UpdateUser(ctx context.Context, u *model.User) error {
 	query := `UPDATE users SET username=?, role=?, disabled=?, updated_at=?`
 	args := []any{u.Username, string(u.Role), u.Disabled, time.Now().UTC()}
@@ -73,7 +73,7 @@ func (s *Store) UpdateUser(ctx context.Context, u *model.User) error {
 	})
 }
 
-// DeleteUser removes an account and, by cascade, its sessions.
+// DeleteUser удаля́ет счет и, каскадом, его сессии.
 func (s *Store) DeleteUser(ctx context.Context, id string) error {
 	res, err := s.db.Exec(ctx, `DELETE FROM users WHERE id=?`, id)
 	if err != nil {
@@ -85,19 +85,19 @@ func (s *Store) DeleteUser(ctx context.Context, id string) error {
 	return nil
 }
 
-// GetUser loads an account by id.
+// GetUser загружает аккаунт по идентификатору.
 func (s *Store) GetUser(ctx context.Context, id string) (*model.User, error) {
 	row := s.db.QueryRow(ctx, `SELECT `+userColumns+` FROM users WHERE id=?`, id)
 	return scanUser(row)
 }
 
-// GetUserByName loads an account by its unique username.
+// GetUserByName загружает учётную запись своим уникальным именем пользователя.
 func (s *Store) GetUserByName(ctx context.Context, username string) (*model.User, error) {
 	row := s.db.QueryRow(ctx, `SELECT `+userColumns+` FROM users WHERE username=?`, username)
 	return scanUser(row)
 }
 
-// GetUserByExternal loads the account linked to an identity at a provider.
+// GetUserByExternal загружает учётную запись, связанную с личностью, у поставщика.
 //
 // Пустой externalID отсекается до запроса: у локальных записей эта колонка
 // пуста, и запрос с пустым значением нашёл бы первую попавшуюся локальную —
@@ -111,8 +111,8 @@ func (s *Store) GetUserByExternal(ctx context.Context, provider, externalID stri
 	return scanUser(row)
 }
 
-// SyncExternalUser applies to a linked account what the provider owns: the
-// visible name and the role derived from its groups.
+// SyncExternalUser относится к связанной учётной записи, которой владеет поставщик: видимое
+// имя и роль, полученная из его групп.
 //
 // Флаг disabled не трогается намеренно. Это местный рубильник: администратор
 // закрывает доступ здесь, не имея прав в чужом каталоге, и очередной вход не
@@ -132,7 +132,7 @@ func (s *Store) SyncExternalUser(ctx context.Context, u *model.User) error {
 	return nil
 }
 
-// ListUsers returns all accounts ordered by name.
+// ListUsers возвращает учётные записи в порядке имён.
 func (s *Store) ListUsers(ctx context.Context) ([]*model.User, error) {
 	rows, err := s.db.Query(ctx, `SELECT `+userColumns+` FROM users ORDER BY username`)
 	if err != nil {
@@ -151,15 +151,15 @@ func (s *Store) ListUsers(ctx context.Context) ([]*model.User, error) {
 	return out, rows.Err()
 }
 
-// CountUsers reports how many accounts exist, used to decide whether the
-// bootstrap admin has to be created.
+// CountUsers сообщает, сколько учётных записей существует, используется, чтобы решить,
+// должен ли быть создан bootstrap админ.
 func (s *Store) CountUsers(ctx context.Context) (int, error) {
 	var n int
 	err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM users`).Scan(&n)
 	return n, err
 }
 
-// TouchUserLogin records a successful authentication.
+// TouchUserLogin успешная аутентификация.
 func (s *Store) TouchUserLogin(ctx context.Context, id string) error {
 	_, err := s.db.Exec(ctx, `UPDATE users SET last_login_at=? WHERE id=?`,
 		time.Now().UTC(), id)
@@ -192,7 +192,7 @@ func scanUser(row rowScanner) (*model.User, error) {
 	return &u, nil
 }
 
-// CreateSession stores a server-side session.
+// CreateSession сохраняет сеанс на стороне сервера.
 func (s *Store) CreateSession(ctx context.Context, sess *model.Session) error {
 	if sess.CreatedAt.IsZero() {
 		sess.CreatedAt = time.Now().UTC()
@@ -218,8 +218,8 @@ func (s *Store) CreateSession(ctx context.Context, sess *model.Session) error {
 	return nil
 }
 
-// GetSession resolves a session token to the session and its owner, rejecting
-// expired sessions and disabled accounts.
+// GetSession разрешает токен сеанса сессии и его владельцу, отклоняя истекшие сеансы и
+// отключая учётные записи.
 func (s *Store) GetSession(ctx context.Context, token string) (*model.Session, error) {
 	row := s.db.QueryRow(ctx, `SELECT s.user_id, s.user_agent, s.remote_ip, s.expires_at,
 		s.created_at, s.oidc_id_token, u.username, u.role, u.disabled, u.provider,
@@ -265,10 +265,10 @@ func (s *Store) GetSession(ctx context.Context, token string) (*model.Session, e
 	return &sess, nil
 }
 
-// DeleteUserSessions closes every session of one account.
+// DeleteUserSessions закрывает каждую сессию одного аккаунта.
 //
-// A password reset is usually a reaction to losing control of the old one, so
-// the sessions issued against it must not outlive it.
+// Сброс пароля обычно является реакцией на потерю контроля над старым, поэтому сеансы,
+// выпущенные против него, не должны пережить его.
 func (s *Store) DeleteUserSessions(ctx context.Context, userID string) (int64, error) {
 	res, err := s.db.Exec(ctx, `DELETE FROM sessions WHERE user_id=?`, userID)
 	if err != nil {
@@ -278,7 +278,8 @@ func (s *Store) DeleteUserSessions(ctx context.Context, userID string) (int64, e
 	return n, nil
 }
 
-// DeleteAllSessions closes local and OIDC sessions after host-side recovery.
+// DeleteAllSessions закрывает локальные и OIDC сеансы после восстановления на стороне
+// хоста.
 func (s *Store) DeleteAllSessions(ctx context.Context) (int64, error) {
 	res, err := s.db.Exec(ctx, `DELETE FROM sessions`)
 	if err != nil {
@@ -288,17 +289,17 @@ func (s *Store) DeleteAllSessions(ctx context.Context) (int64, error) {
 	return n, nil
 }
 
-// AccessRecoveryResult counts credentials revoked atomically with a password
-// reset. Keeping the operation in one transaction avoids printing a new
-// password after only part of an incident response was applied.
+// AccessRecoveryResult подсчитывает учётные данные аутентификации, отозванные атомарно с
+// помощью сброса пароля. Сохранение операции в одной транзакции позволяет избежать печати
+// нового пароля после того, как была применена только часть ответа на инцидент.
 type AccessRecoveryResult struct {
 	Sessions    int64
 	APITokens   int64
 	Delegations int64
 }
 
-// RecoverUserAccess updates a local password and invalidates credentials in a
-// single transaction. With revokeAll=false only sessions of that user close.
+// RecoverUserAccess меняет локальный пароль и отзывает учётные данные одной транзакцией.
+// При revokeAll=false закрываются только сеансы этого пользователя.
 func (s *Store) RecoverUserAccess(ctx context.Context, userID, username, passwordHash string,
 	revokeAll bool, at time.Time) (AccessRecoveryResult, error) {
 	var out AccessRecoveryResult
@@ -354,7 +355,7 @@ func (s *Store) RecoverUserAccess(ctx context.Context, userID, username, passwor
 	return out, err
 }
 
-// DeleteSession logs a session out.
+// DeleteSession выходит сеанс.
 func (s *Store) DeleteSession(ctx context.Context, token string) error {
 	_, err := s.db.Exec(ctx, `DELETE FROM sessions WHERE token_hash=?`, sessionTokenHash(token))
 	return err
@@ -365,7 +366,7 @@ func sessionTokenHash(token string) string {
 	return fmt.Sprintf("%x", sum[:])
 }
 
-// PurgeExpiredSessions drops sessions past their expiry.
+// PurgeExpiredSessions повы́падающій сеансъ, превышающій свой срокъ.
 func (s *Store) PurgeExpiredSessions(ctx context.Context) (int64, error) {
 	res, err := s.db.Exec(ctx, `DELETE FROM sessions WHERE expires_at < ?`, time.Now().UTC())
 	if err != nil {

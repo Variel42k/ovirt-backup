@@ -1,12 +1,9 @@
-// Package sshtrust decides whether an SSH connection may proceed without a
-// pinned host key, and collects the key the host offers so an operator has
-// something to pin.
+// Пакет sshtrust решает, может ли соединение SSH протекать без прикреплённого ключа узла, и
+// собирает ключ, предлагаемый узлом, таким образом, оператору есть что прикрепить.
 //
-// The decision used to live in two places — the hypervisor connection and the
-// SFTP repository — and both resolved an empty key the same silent way: connect
-// anyway. That is the one failure mode nobody notices, because an intercepted
-// connection looks exactly like a working one. Here the absence of a key is an
-// error, and skipping verification is a separate, explicit, recorded choice.
+// Раньше подключения к гипервизору и SFTP при пустом ключе молча продолжались.
+// Перехваченное соединение при этом выглядело рабочим. Отсутствие ключа теперь вызывает
+// ошибку. Отключение проверки требует явного решения, которое записывается.
 package sshtrust
 
 import (
@@ -24,27 +21,25 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/sshstats"
 )
 
-// ErrNoHostKey means the connection has neither a pinned key nor a decision to
-// go without one.
+// ErrNoHostKey означает, что соединение не имеет ни закрепленного ключа, ни решения
+// обходиться без него.
 //
-// The wording names the way out, because the operator meeting this message is
-// usually adding a host and has no idea where a host key comes from.
+// Формулировка называет выход, потому что оператор, встречающийся с этим сообщением, обычно
+// добавляет хост и понятия не имеет, откуда берется ключ хоста.
 var ErrNoHostKey = errors.New("не задан ключ хоста: получите отпечаток и сверьте его, " +
 	"либо явно разрешите подключение без проверки")
 
-// Callback builds the host key check for a connection.
+// Callback создает проверку ключа хоста для соединения.
 //
-// trustAny is deliberately a separate argument rather than "hostKey == \"\"":
-// the caller has to have stored a decision somewhere for this to be reachable,
-// and that decision is what the interface shows and the audit log records.
+// trustAny передаётся отдельно от hostKey. Чтобы отключить проверку, вызывающий код должен
+// сохранить явное решение, которое видно в интерфейсе и журнале аудита.
 func Callback(hostKey string, trustAny bool) (ssh.HostKeyCallback, error) {
 	return callback(hostKey, trustAny, false)
 }
 
-// AddressBoundCallback requires every pinned key to name the exact SSH
-// endpoint it belongs to. It is used for clusters, where accepting one bare
-// authorized_keys line for every node would allow a compromised member to
-// impersonate another member.
+// AddressBoundCallback требует, чтобы каждый закреплённый SSH-ключ был привязан к точному
+// адресу. Это не позволяет скомпрометированному узлу кластера выдавать себя за соседний по
+// общему ключу без адреса.
 func AddressBoundCallback(hostKey string, trustAny bool) (ssh.HostKeyCallback, error) {
 	return callback(hostKey, trustAny, true)
 }
@@ -124,35 +119,32 @@ func callback(hostKey string, trustAny, requireAddress bool) (ssh.HostKeyCallbac
 	}, nil
 }
 
-// Fingerprint renders the SHA256 form an operator can compare against
-// `ssh-keyscan` or `ssh-keygen -lf` output on the host itself.
+// Fingerprint возвращает отпечаток SHA256 для сравнения с выводом ssh-keyscan или ssh-keygen
+// -lf на самом хосте.
 func Fingerprint(key ssh.PublicKey) string { return ssh.FingerprintSHA256(key) }
 
-// Key is a host key as offered by a server, in the two shapes the operator
-// needs: one to store and one to read out loud while comparing.
+// Key — это хост-ключ, предлагаемый сервером, в двух формах, необходимых оператору: один
+// для хранения и один для чтения вслух при сравнении.
 type Key struct {
-	// Line is the authorized_keys representation, which is what gets pinned.
+	// Линия — это authorized_keys представление, которое и закрепляется.
 	Line string `json:"line"`
-	// Type is the key algorithm, e.g. ssh-ed25519.
+	// Тип является ключевым алгоритмом, например ssh-ed25519.
 	Type string `json:"type"`
-	// Fingerprint is the SHA256 form shown for confirmation.
+	// Отпечаток пальца — форма SHA256, показанная для подтверждения.
 	Fingerprint string `json:"fingerprint"`
 }
 
-// errCollected aborts the handshake once the key is in hand.
+// errCollected прерывает рукопожатие, как только ключ находится в руке.
 var errCollected = errors.New("ключ получен")
 
-// Scan returns the host key a server presents, without authenticating.
+// Сканирование возвращает ключ хоста, представленный сервером, без аутентификации.
 //
-// No credentials are sent: the handshake is aborted from the host key callback,
-// which runs before authentication. So this is safe to call against an address
-// the operator has only typed and not yet trusted — which is precisely the
-// moment it is needed.
+// Проверка ключа хоста прерывает согласование до аутентификации. Учётные данные не
+// отправляются, поэтому можно запросить отпечаток по ещё не проверенному адресу.
 //
-// The result is not trustworthy on its own. Whoever could intercept the
-// connection could also answer this scan. It exists so the operator has a
-// fingerprint to compare with one obtained from the host by other means, and
-// the interface has to say so.
+// Ответ на запрос отпечатка может подменить тот, кто перехватывает соединение. Оператор
+// должен сравнить его со значением, полученным от хоста другим способом. Интерфейс поясняет
+// это.
 func Scan(ctx context.Context, addr string, timeout time.Duration) (*Key, error) {
 	if timeout <= 0 {
 		timeout = 15 * time.Second
@@ -182,8 +174,8 @@ func Scan(ctx context.Context, addr string, timeout time.Duration) (*Key, error)
 		_ = conn.SetDeadline(time.Now().Add(timeout))
 	}
 
-	// The handshake is expected to fail with errCollected; any other outcome
-	// means we never saw a key.
+	// Потерпит неудачу errCollected. Любой другой результат означает, что мы никогда не
+	// видели ключа.
 	client, _, _, err := ssh.NewClientConn(conn, addr, cfg)
 	if client != nil {
 		_ = client.Close()

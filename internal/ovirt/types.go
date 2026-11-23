@@ -9,16 +9,14 @@ import (
 	"time"
 )
 
-// The oVirt REST API is generated from an XML schema, and its JSON rendering
-// inherits that: integers and booleans come back as quoted strings in most
-// places and as native JSON scalars in a few others, depending on the engine
-// version and the fork. Num and Bool accept either form so the DTOs below do
-// not have to care.
+// REST API oVirt генерируется из схемы XML. В ответах JSON целые числа и логические
+// значения могут быть строками или скалярами в зависимости от версии и форка движка. Num и
+// Bool принимают оба варианта.
 
-// Num is an integer that tolerates being quoted.
+// Num — целое число, допускающее цитирование.
 type Num int64
 
-// UnmarshalJSON accepts 123, "123", "" and null.
+// UnmarshalJSON принимает 123, "123", "" и null.
 func (n *Num) UnmarshalJSON(b []byte) error {
 	s := strings.TrimSpace(string(b))
 	if s == "null" || s == `""` || s == "" {
@@ -28,7 +26,7 @@ func (n *Num) UnmarshalJSON(b []byte) error {
 	s = strings.Trim(s, `"`)
 	v, err := strconv.ParseInt(s, 10, 64)
 	if err != nil {
-		// Some fields (memory statistics on old builds) arrive as floats.
+		// Некоторые поля (статистика памяти на старых сборках) поступают в виде поплавков.
 		f, ferr := strconv.ParseFloat(s, 64)
 		if ferr != nil {
 			return err
@@ -39,16 +37,16 @@ func (n *Num) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-// Int64 returns the value as a plain integer.
+// Int64 возвращает значение в виде простого целого числа.
 func (n Num) Int64() int64 { return int64(n) }
 
-// Int returns the value as a plain int.
+// Int возвращает значение как plain int.
 func (n Num) Int() int { return int(n) }
 
-// Bool is a boolean that tolerates being quoted.
+// Bool булеа́н м. булеа́н, который терпит цитирование.
 type Bool bool
 
-// UnmarshalJSON accepts true, "true", false, "false", "" and null.
+// UnmarshalJSON принимает true, "true", false, "false", "" и null.
 func (b *Bool) UnmarshalJSON(data []byte) error {
 	s := strings.Trim(strings.TrimSpace(string(data)), `"`)
 	switch strings.ToLower(s) {
@@ -60,23 +58,22 @@ func (b *Bool) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// Bool returns the value as a plain bool.
+// Bool возвращает значение в виде простого бул.
 func (b Bool) Bool() bool { return bool(b) }
 
-// Timestamp is a moment that tolerates every shape the engine uses for one.
+// Временная метка — момент, который выдерживает любую форму, используемую движком для
+// одного.
 //
-// The API renders timestamps as epoch milliseconds — sometimes as a JSON
-// number, sometimes quoted — and some forks render an ISO-8601 string instead.
-// Declaring such a field as a plain string makes the whole document fail to
-// decode the moment the engine sends a number, which is how a field nobody
-// reads managed to break connecting to a server entirely.
+// API отображает временные метки как миллисекунды эпохи — иногда как JSON число, иногда
+// цитируемое — и некоторые вилки вместо этого отображают строку ISO-8601.
+// Если такое поле объявлено string, числовое значение ломает разбор всего документа. Так
+// даже поле, которое ни один клиент не читает, могло сорвать подключение.
 type Timestamp struct {
 	Raw  string
 	When time.Time
 }
 
-// UnmarshalJSON accepts 1754566800000, "1754566800000", an ISO-8601 string,
-// "" and null.
+// UnmarshalJSON принимает 1754566800000, "1754566800000", строку ISO-8601, "" и null.
 func (t *Timestamp) UnmarshalJSON(b []byte) error {
 	s := strings.TrimSpace(string(b))
 	if s == "null" || s == `""` || s == "" {
@@ -95,33 +92,33 @@ func (t *Timestamp) UnmarshalJSON(b []byte) error {
 			return nil
 		}
 	}
-	// An unparseable timestamp is kept verbatim rather than rejected: the
-	// document around it is what the caller actually came for.
+	// Неразборчивая метка времени хранится дословно, а не отклоняется: документ вокруг нее
+	// — то, для чего на самом деле пришел код вызова.
 	return nil
 }
 
-// Time returns the parsed moment; the zero value means it was absent or in a
-// shape we do not recognise.
+// Time возвращает разобранный момент; нулевое значение означает, что оно отсутствовало или
+// находилось в форме, которую мы не знаем.
 func (t Timestamp) Time() time.Time { return t.When }
 
-// String renders the original value as the engine sent it.
+// String отображает исходное значение по мере его отправки движком.
 func (t Timestamp) String() string { return t.Raw }
 
-// Ref is the `{"id": "..."}` shape used all over the API to point at another
-// object. The name is present when the engine inlines it.
+// Ref представляет ссылку на объект вида {"id": "..."}. Если движок передал имя в ответе,
+// оно тоже доступно.
 type Ref struct {
 	ID   string `json:"id,omitempty"`
 	Name string `json:"name,omitempty"`
 	Href string `json:"href,omitempty"`
 }
 
-// Fault is the engine's error payload.
+// Fault — полезная нагрузка при ошибке движка.
 type Fault struct {
 	Reason string `json:"reason,omitempty"`
 	Detail string `json:"detail,omitempty"`
 }
 
-// APIInfo is the root document at /ovirt-engine/api.
+// APIInfo является корневым документом в /ovirt-engine/api.
 type APIInfo struct {
 	ProductInfo struct {
 		Name    string `json:"name"`
@@ -149,7 +146,7 @@ type countPair struct {
 	Active Num `json:"active"`
 }
 
-// Version renders the engine version as major.minor.build.revision.
+// Version отображает версию движка как major.minor.build.revision.
 func (a *APIInfo) Version() string {
 	if a.ProductInfo.Version.FullVersion != "" {
 		return a.ProductInfo.Version.FullVersion
@@ -159,9 +156,9 @@ func (a *APIInfo) Version() string {
 		strconv.Itoa(v.Build.Int()) + "." + strconv.Itoa(v.Revision.Int())
 }
 
-// SupportsIncrementalBackup reports whether the engine is new enough to expose
-// the Backup API with changed block tracking. Upstream added it in 4.4; the
-// forks track that numbering.
+// SupportsIncrementalBackup сообщает, является ли движок достаточно новым, чтобы выставить
+// Резервное копирование API с измененным отслеживанием блоков. Upstream добавил его в 4.4;
+// Вилки отслеживают эту нумерацию.
 func (a *APIInfo) SupportsIncrementalBackup() bool {
 	v := a.ProductInfo.Version
 	if v.Major > 4 {
@@ -170,7 +167,7 @@ func (a *APIInfo) SupportsIncrementalBackup() bool {
 	return v.Major == 4 && v.Minor >= 4
 }
 
-// Cluster is a compute cluster.
+// Cluster является вычислительным кластером.
 type Cluster struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
@@ -185,7 +182,7 @@ type clusterList struct {
 	Cluster []Cluster `json:"cluster"`
 }
 
-// Host is a hypervisor node.
+// Host — гипервизорный узел.
 type Host struct {
 	ID      string `json:"id"`
 	Name    string `json:"name"`
@@ -225,15 +222,14 @@ type hostList struct {
 	Host []Host `json:"host"`
 }
 
-// VM is a virtual machine.
+// VM виртуальная машина.
 type VM struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
 	Description string `json:"description"`
 	Status      string `json:"status"`
-	// status_detail carries the pause reason (eio, enospc, eperm) when the VM
-	// is paused; that is the difference between "storage broke" and "an
-	// operator paused it", so it drives whether auto-resume is safe.
+	// status_detail содержит причину паузы (eio, enospc, eperm). Она позволяет
+	// отличить сбой хранилища от действий оператора при автовозобновлении.
 	StatusDetail string `json:"status_detail"`
 	Cluster      Ref    `json:"cluster"`
 	Host         Ref    `json:"host"`
@@ -288,8 +284,8 @@ type vmList struct {
 	VM []VM `json:"vm"`
 }
 
-// IPs flattens the guest-reported addresses, skipping loopback and link-local
-// entries that are never useful to an operator.
+// IPs выравнивает адреса, сообщаемые гостями, пропуская петли и локальные записи ссылок,
+// которые никогда не полезны для оператора.
 func (v *VM) IPs() []string {
 	if v.ReportedDevices == nil {
 		return nil
@@ -327,11 +323,11 @@ func virtualGuestInterface(name string) bool {
 	return false
 }
 
-// HasGuestAgent reports whether the guest agent is responding, which decides
-// whether filesystem freeze (quiesce) is possible.
+// HasGuestAgent сообщает, отвечает ли гостевой агент, который решает, возможно ли
+// замораживание файловой системы (затишье).
 func (v *VM) HasGuestAgent() bool { return v.GuestOperatingSystem != nil }
 
-// TagNames returns the provider labels attached to the VM.
+// TagNames возвращает метки провайдера, прикрепленные к ВМ.
 func (v *VM) TagNames() []string {
 	if v.Tags == nil {
 		return nil
@@ -345,7 +341,7 @@ func (v *VM) TagNames() []string {
 	return out
 }
 
-// Disk is a virtual disk.
+// Disk — виртуальный диск.
 type Disk struct {
 	ID              string `json:"id"`
 	Name            string `json:"name"`
@@ -362,15 +358,15 @@ type Disk struct {
 	Sparse    Bool   `json:"sparse"`
 	Shareable Bool   `json:"shareable"`
 	Bootable  Bool   `json:"bootable"`
-	// Interface comes from the VM attachment (virtio, virtio_scsi, ide,
-	// sata). It is needed to reconnect a restored image with the same guest
-	// driver during a boot verification.
+	// Интерфейс происходит от вложения ВМ (virtio, virtio_scsi, ide, sata). Это необходимо
+	// для повторного подключения восстановленного образа с тем же гостевым драйвером во
+	// время проверки загрузки.
 	Interface string `json:"-"`
 	// Inactive — диск подключён к ВМ, но деактивирован: гость его не видит.
 	// Берётся из подключения, как и Interface. Backup API отказывается
 	// открывать бэкап, если в списке есть такой диск.
 	Inactive bool `json:"-"`
-	// backup: none | incremental — включает changed block tracking.
+	// backup: none | incremental — включает отслеживание изменённых блоков.
 	Backup string `json:"backup"`
 	// BackupMode есть только у дисков конкретного бэкапа (oVirt 4.4.5+):
 	// full — диск в этом бэкапе отдан целиком, incremental — только изменения
@@ -422,8 +418,8 @@ type diskList struct {
 	Disk []Disk `json:"disk"`
 }
 
-// AliasOrName returns the human label of the disk; oVirt fills one or the other
-// depending on the endpoint.
+// AliasOrName возвращает человеческую метку диска; oVirt Заполня́ет то или другое в
+// зависимости от конечной точки.
 func (d *Disk) AliasOrName() string {
 	if d.Alias != "" {
 		return d.Alias
@@ -431,7 +427,7 @@ func (d *Disk) AliasOrName() string {
 	return d.Name
 }
 
-// DomainID returns the first storage domain the disk lives on.
+// DomainID возвращает первый домен хранения, на котором находится диск.
 func (d *Disk) DomainID() string {
 	if d.StorageDomains == nil || len(d.StorageDomains.StorageDomain) == 0 {
 		return ""
@@ -439,7 +435,7 @@ func (d *Disk) DomainID() string {
 	return d.StorageDomains.StorageDomain[0].ID
 }
 
-// DomainName returns the name of the first storage domain, when inlined.
+// DomainName возвращает имя первого домена хранения, когда он встроен.
 func (d *Disk) DomainName() string {
 	if d.StorageDomains == nil || len(d.StorageDomains.StorageDomain) == 0 {
 		return ""
@@ -447,7 +443,7 @@ func (d *Disk) DomainName() string {
 	return d.StorageDomains.StorageDomain[0].Name
 }
 
-// DiskAttachment binds a disk to a VM.
+// DiskAttachment привязывает диск к ВМ.
 type DiskAttachment struct {
 	ID       string `json:"id"`
 	Bootable Bool   `json:"bootable"`
@@ -460,15 +456,14 @@ type DiskAttachment struct {
 	VM        Ref    `json:"vm"`
 }
 
-// Inactive reports whether the engine explicitly says the attachment is
-// deactivated.
+// Inactive показывает, сообщил ли движок, что подключение диска деактивировано.
 func (a DiskAttachment) Inactive() bool { return a.Active != nil && !a.Active.Bool() }
 
 type diskAttachmentList struct {
 	DiskAttachment []DiskAttachment `json:"disk_attachment"`
 }
 
-// StorageDomain is a data/iso/export domain.
+// StorageDomain является доменом данных/изо/экспорта.
 type StorageDomain struct {
 	ID             string `json:"id"`
 	Name           string `json:"name"`
@@ -493,7 +488,7 @@ type storageDomainList struct {
 	StorageDomain []StorageDomain `json:"storage_domain"`
 }
 
-// EffectiveStatus reports whether the domain is attached and usable.
+// EffectiveStatus сообщает, является ли домен присоединенным и пригодным для использования.
 //
 // В ответе движка два разных признака, и подставлять один вместо другого
 // нельзя. `status` (в списке доменов — `storage_domain_status` при
@@ -527,7 +522,7 @@ func (s *StorageDomain) EffectiveStatus() string {
 	return "active"
 }
 
-// Snapshot is a VM snapshot.
+// Snapshot — снапшот ВМ.
 type Snapshot struct {
 	ID                 string    `json:"id"`
 	Description        string    `json:"description"`
@@ -541,7 +536,7 @@ type snapshotList struct {
 	Snapshot []Snapshot `json:"snapshot"`
 }
 
-// Backup is an entry of the oVirt Backup API.
+// Backup — въ oVirt Backup API.
 type Backup struct {
 	ID               string `json:"id"`
 	FromCheckpointID string `json:"from_checkpoint_id"`
@@ -564,7 +559,7 @@ type backupList struct {
 	Backup []Backup `json:"backup"`
 }
 
-// Checkpoint is a CBT restore point kept by the engine.
+// Checkpoint — CBT точка восстановления, удерживаемая движком.
 type Checkpoint struct {
 	ID           string    `json:"id"`
 	ParentID     string    `json:"parent_id"`
@@ -577,7 +572,7 @@ type checkpointList struct {
 	Checkpoint []Checkpoint `json:"checkpoint"`
 }
 
-// ImageTransfer is a data-plane session against ovirt-imageio.
+// ImageTransfer — сеанс data-plane против ovirt-imageio.
 type ImageTransfer struct {
 	ID string `json:"id"`
 	// initializing | transferring | resuming | paused_system | paused_user |
@@ -599,7 +594,7 @@ type ImageTransfer struct {
 	Shallow           Bool   `json:"shallow"`
 }
 
-// Terminal reports whether the transfer will not progress any further.
+// Terminal сообщает, не будет ли дальше прогрессировать передача.
 func (t *ImageTransfer) Terminal() bool {
 	switch t.Phase {
 	case "finished_success", "finished_failure", "cancelled", "unknown":
@@ -608,7 +603,7 @@ func (t *ImageTransfer) Terminal() bool {
 	return false
 }
 
-// Event is an engine audit-log entry, used to explain failures.
+// Event является записью журнала аудита движка, используемой для объяснения отказов.
 type Event struct {
 	ID            string    `json:"id"`
 	Code          Num       `json:"code"`
@@ -622,7 +617,7 @@ type eventList struct {
 	Event []Event `json:"event"`
 }
 
-// action is the body oVirt expects for POST .../action endpoints.
+// action — тело oVirt ожидает POST../action конечных точек.
 type action struct {
 	Async         *bool  `json:"async,omitempty"`
 	FenceType     string `json:"fence_type,omitempty"`
@@ -632,21 +627,21 @@ type action struct {
 	MaximumMemory *Num   `json:"maximum_memory,omitempty"`
 }
 
-// parseEngineTime accepts the several timestamp shapes the API emits.
+// parseEngineTime принимает несколько форм временных меток, которые API излучает.
 func parseEngineTime(s string) time.Time {
 	if s == "" {
 		return time.Time{}
 	}
-	// Newer builds emit RFC 3339; older ones emit epoch milliseconds.
+	// Новые сборки излучают RFC 3339; Старшие излучают миллисекунды эпохи.
 	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02T15:04:05.000-07:00"} {
 		if t, err := time.Parse(layout, s); err == nil {
 			return t.UTC()
 		}
 	}
 	if epoch, err := strconv.ParseInt(s, 10, 64); err == nil {
-		// oVirt SSO uses Unix seconds for exp, while several REST resources use
-		// Unix milliseconds. Distinguish them by magnitude (year 5138 in seconds
-		// is still below this threshold).
+		// oVirt SSO использует секунды Unix для exp, в то время как несколько REST ресурсов
+		// используют миллисекунды Unix. Различить их по величине (год 5138 в секундах все
+		// еще ниже этого порога).
 		if epoch > -100_000_000_000 && epoch < 100_000_000_000 {
 			return time.Unix(epoch, 0).UTC()
 		}
@@ -655,8 +650,8 @@ func parseEngineTime(s string) time.Time {
 	return time.Time{}
 }
 
-// compactJSON renders a body without a trailing newline, which some older
-// engine builds mishandle on PUT.
+// compactJSON отображает тело без задней новой линии, на которой какой-то старый движок
+// строит неправильную обработку PUT.
 func compactJSON(v any) ([]byte, error) {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)

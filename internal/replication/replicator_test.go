@@ -103,8 +103,8 @@ func TestReplicatorCopiesPublishedObjectsAndRunManifestLast(t *testing.T) {
 		}
 	}
 
-	// A verified database row is not enough after a restart: an operator or a
-	// failed storage layer may have changed the destination object meanwhile.
+	// Верифицированной строки базы данных недостаточно после перезапуска: оператор или
+	// сбойный уровень хранения могут тем временем изменить объект назначения.
 	corruptKey := run.RepoPath + "disk-00.data"
 	corrupt := bytes.Repeat([]byte{'x'}, len(objects[corruptKey]))
 	if _, err := destination.Put(ctx, corruptKey, bytes.NewReader(corrupt), int64(len(corrupt))); err != nil {

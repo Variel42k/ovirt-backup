@@ -18,7 +18,7 @@ const alertColumns = `id, server_id, scope, object_id, object_name, kind, severi
 	notifications_muted, notifications_muted_until, notification_count,
 	last_notified_at, next_notification_at`
 
-// OnAlertRaised registers a callback for the moment a problem starts burning:
+// OnAlertRaised регистрирует обработчик срабатывания оповещения:
 // либо оповещения не было вовсе, либо прежнее уже погасили.
 //
 // Через обратный вызов, а не прямым обращением к отправителю: хранилище не
@@ -28,9 +28,9 @@ func (s *Store) OnAlertRaised(fn func(model.Alert)) {
 	s.alertRaised = fn
 }
 
-// RaiseAlert reports a problem. Repeated reports of the same (object, kind)
-// pair bump the counter and the last-seen timestamp instead of creating a new
-// row; a previously resolved alert starts firing again.
+// RaiseAlert сообщает о проблеме. Повторные сообщения одной и той же (объектной, родовой)
+// пары бьют счётчик и последнюю видимую метку времени вместо создания новой строки; Ранее
+// объявленная тревога снова начинает стрелять.
 //
 // Возвращает признак «загорелось только что». Он нужен оповещениям наружу:
 // монитор сообщает об одной и той же беде каждые полминуты, и на стенде такие
@@ -93,8 +93,8 @@ func (s *Store) RaiseAlert(ctx context.Context, a *model.Alert) error {
 	return nil
 }
 
-// ResolveAlert closes an alert if it is currently open. It is safe to call for
-// an object that never had one.
+// ResolveAlert закрывает оповещение, если оно открыто в данный момент. Можно с уверенностью
+// назвать объект, который никогда не имел его.
 func (s *Store) ResolveAlert(ctx context.Context, serverID string, scope model.Scope, objectID, kind string) error {
 	_, err := s.db.Exec(ctx, `UPDATE alerts SET state=?, resolved_at=?, next_notification_at=NULL,
 		resolution_notification_pending=(notification_count > 0)
@@ -107,8 +107,8 @@ func (s *Store) ResolveAlert(ctx context.Context, serverID string, scope model.S
 	return nil
 }
 
-// AckAlert marks an alert as acknowledged so it stops being counted as new
-// while the underlying problem is being worked on.
+// AckAlert отмечает предупреждение как признанное, так что оно перестает считаться новым, в
+// то время как основная проблема разрабатывается.
 //
 // Принять можно только активное оповещение: закрытое принимать незачем, а
 // повторное принятие переписало бы, кто и когда взял его в работу. Пояснение
@@ -145,7 +145,7 @@ func (s *Store) AckAlert(ctx context.Context, id, by, comment string) error {
 	})
 }
 
-// AlertFilter narrows an alert listing.
+// AlertFilter сужает список предупреждений.
 type AlertFilter struct {
 	ServerID string
 	Scope    model.Scope
@@ -161,7 +161,7 @@ type AlertFilter struct {
 	Limit    int
 }
 
-// ListAlerts returns alerts, most recently seen first.
+// ListAlerts возвращает оповещение, в последний раз замеченное первым.
 func (s *Store) ListAlerts(ctx context.Context, f AlertFilter) ([]*model.Alert, error) {
 	var where []string
 	var args []any
@@ -278,8 +278,8 @@ func (s *Store) ListAlerts(ctx context.Context, f AlertFilter) ([]*model.Alert, 
 	return out, nil
 }
 
-// CountOpenAlerts returns the number of firing and acked alerts, and how many
-// of the firing ones are critical.
+// CountOpenAlerts считает активные и подтверждённые оповещения, а также критические среди
+// активных.
 func (s *Store) CountOpenAlerts(ctx context.Context, serverID string) (open int, critical int, err error) {
 	query := `SELECT COUNT(*), SUM(CASE WHEN severity=? THEN 1 ELSE 0 END) FROM alerts WHERE state<>?`
 	args := []any{string(model.SeverityCritical), string(model.AlertResolved)}
@@ -294,7 +294,7 @@ func (s *Store) CountOpenAlerts(ctx context.Context, serverID string) (open int,
 	return open, int(crit.Int64), nil
 }
 
-// PurgeResolvedAlerts drops resolved alerts older than the cutoff.
+// PurgeResolvedAlerts оповещения о разрешенных падениях старше пороговой даты.
 //
 // Оповещения с пояснениями не трогает: их писал человек, чтобы потом можно
 // было прочитать, почему так случилось. Срок хранения истории опроса к этому
@@ -313,7 +313,7 @@ func (s *Store) PurgeResolvedAlerts(ctx context.Context, before time.Time) (int6
 const remediationColumns = `id, server_id, scope, object_id, object_name, action, reason, status,
 	attempt, error, triggered_by, created_at, ended_at`
 
-// RecordRemediation appends to the audit trail of the auto-revive engine.
+// RecordRemediation присоединя́ется к ревизионному следу самовозрождающегося движка.
 func (s *Store) RecordRemediation(ctx context.Context, r *model.RemediationRecord) error {
 	if r.ID == "" {
 		r.ID = uuid.NewString()
@@ -332,17 +332,17 @@ func (s *Store) RecordRemediation(ctx context.Context, r *model.RemediationRecor
 	return nil
 }
 
-// UpdateRemediation finalises a record once the action has been carried out.
+// UpdateRemediation заканчивает запись после того, как действие было выполнено.
 func (s *Store) UpdateRemediation(ctx context.Context, r *model.RemediationRecord) error {
 	_, err := s.db.Exec(ctx, `UPDATE remediation_records SET status=?, error=?, ended_at=? WHERE id=?`,
 		string(r.Status), r.Error, r.EndedAt, r.ID)
 	return err
 }
 
-// CountRecentRemediations reports how many times an action was actually
-// attempted against an object since the cutoff. Planned-but-skipped records do
-// not count against the rate limit, otherwise a permanently blocked action
-// would exhaust its own budget.
+// CountRecentRemediations отчеты о том, сколько раз действие было фактически предпринято
+// против объекта с пороговой даты. Запланированные, но пропущенные записи не учитываются
+// против лимита ставки, иначе постоянно заблокированное действие исчерпает свой собственный
+// бюджет.
 func (s *Store) CountRecentRemediations(ctx context.Context, serverID, objectID string, action model.RemediationAction, since time.Time) (int, error) {
 	var n int
 	err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM remediation_records
@@ -356,8 +356,8 @@ func (s *Store) CountRecentRemediations(ctx context.Context, serverID, objectID 
 	return n, nil
 }
 
-// LastRemediationAt returns when an action was last attempted, for cooldown
-// enforcement. A zero time means never.
+// LastRemediationAt возвращает, когда действие было предпринято в последний раз, для
+// принудительного восстановления. Нулевое время означает никогда.
 func (s *Store) LastRemediationAt(ctx context.Context, serverID, objectID string, action model.RemediationAction) (time.Time, error) {
 	var last sql.NullTime
 	err := s.db.QueryRow(ctx, `SELECT MAX(created_at) FROM remediation_records
@@ -373,7 +373,7 @@ func (s *Store) LastRemediationAt(ctx context.Context, serverID, objectID string
 	return utc(last.Time), nil
 }
 
-// ListRemediations returns the audit trail, newest first.
+// ListRemediations возвраща́ет ревизионный след, сначала новейший.
 func (s *Store) ListRemediations(ctx context.Context, serverID string, limit int) ([]*model.RemediationRecord, error) {
 	query := `SELECT ` + remediationColumns + ` FROM remediation_records`
 	args := []any{}
@@ -404,7 +404,7 @@ func (s *Store) ListRemediations(ctx context.Context, serverID string, limit int
 	return out, rows.Err()
 }
 
-// scanRemediationRecord decodes one row of remediationColumns.
+// scanRemediationRecord расшифровывается одна строка remediationColumns.
 func scanRemediationRecord(row rowScanner) (*model.RemediationRecord, error) {
 	var (
 		r                 model.RemediationRecord
@@ -427,7 +427,7 @@ func scanRemediationRecord(row rowScanner) (*model.RemediationRecord, error) {
 	return &r, nil
 }
 
-// AddHealthSamples appends a batch of observations.
+// AddHealthSamples прилагает партию наблюдений.
 func (s *Store) AddHealthSamples(ctx context.Context, samples []model.HealthSample) error {
 	if len(samples) == 0 {
 		return nil
@@ -440,8 +440,9 @@ func (s *Store) AddHealthSamples(ctx context.Context, samples []model.HealthSamp
 			if sample.At.IsZero() {
 				sample.At = time.Now().UTC()
 			}
-			// Monotonic-ish surrogate key: microsecond timestamp plus index,
-			// which keeps ordering without needing a sequence on either engine.
+			// Монотонный суррогатный ключ: микросекундная метка времени плюс индекс,
+			// который продолжает упорядочивать без необходимости последовательности на
+			// любом движке.
 			id := sample.At.UnixMicro()*100 + int64(i%100)
 			if _, err := tx.ExecContext(ctx, q, id, sample.ServerID, string(sample.Scope),
 				sample.ObjectID, sample.Status, sample.Healthy, sample.LatencyMS, sample.Detail,
@@ -453,7 +454,7 @@ func (s *Store) AddHealthSamples(ctx context.Context, samples []model.HealthSamp
 	})
 }
 
-// ListHealthSamples returns the observation history of one object.
+// ListHealthSamples возвращает историю наблюдений одного объекта.
 func (s *Store) ListHealthSamples(ctx context.Context, serverID string, scope model.Scope, objectID string, since time.Time, limit int) ([]model.HealthSample, error) {
 	query := `SELECT id, server_id, scope, object_id, status, healthy, latency_ms, detail, at
 		FROM health_samples WHERE server_id=? AND scope=? AND at >= ?`
@@ -492,7 +493,7 @@ func (s *Store) ListHealthSamples(ctx context.Context, serverID string, scope mo
 	return out, rows.Err()
 }
 
-// PurgeHealthSamples drops observations older than the cutoff.
+// PurgeHealthSamples сбрасывает наблюдения старше пороговой даты.
 func (s *Store) PurgeHealthSamples(ctx context.Context, before time.Time) (int64, error) {
 	res, err := s.db.Exec(ctx, `DELETE FROM health_samples WHERE at < ?`, before)
 	if err != nil {
@@ -502,8 +503,9 @@ func (s *Store) PurgeHealthSamples(ctx context.Context, before time.Time) (int64
 	return n, nil
 }
 
-// Audit appends an entry to the audit log. Failures are returned but callers
-// generally log and continue: losing an audit line must not fail a user action.
+// Audit приба́вливает запись в журнал ревизии. Сбои возвращаются, но клиенты этого
+// интерфейса обычно регистрируются и продолжают: потеря строки аудита не должна привести к
+// сбою в действии пользователя.
 func (s *Store) Audit(ctx context.Context, e model.AuditEntry) error {
 	if e.At.IsZero() {
 		e.At = time.Now().UTC()
@@ -515,7 +517,7 @@ func (s *Store) Audit(ctx context.Context, e model.AuditEntry) error {
 	return err
 }
 
-// ListAudit returns the audit log, newest first.
+// ListAudit возвраща́ть журналъ ревизіи, новѣйшій первый.
 func (s *Store) ListAudit(ctx context.Context, limit int) ([]model.AuditEntry, error) {
 	if limit <= 0 {
 		limit = 200

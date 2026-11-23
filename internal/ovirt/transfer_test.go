@@ -58,7 +58,7 @@ func TestCreateUploadForNewDiskRecoversLostResponseWithoutRepeatingPost(t *testi
 				}
 				if r.Method == http.MethodPost {
 					posts.Add(1)
-					// The engine created the session, but the POST response was lost.
+					// Движок создал сессию, но POST ответ был потерян.
 					time.Sleep(150 * time.Millisecond)
 					return
 				}
@@ -147,8 +147,8 @@ func TestCreateTransferFallsBackToOVirt43Request(t *testing.T) {
 		t.Fatalf("disk snapshot id is wrong: %#v", requests[1]["snapshot"])
 	}
 
-	// The compatibility result is cached: the next disk goes straight to the
-	// old request shape instead of producing another rejected POST.
+	// Результат совместимости кэшируется: следующий диск переходит прямо к старой форме
+	// запроса вместо того, чтобы производить другой отклоненный POST.
 	if _, err := client.CreateTransfer(context.Background(), request); err != nil {
 		t.Fatalf("second transfer: %v", err)
 	}
@@ -252,8 +252,8 @@ func TestCreateTransferWhenReadyDoesNotRetryBadRequest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("client: %v", err)
 	}
-	// Skip the deliberate modern-to-4.3 fallback: this test verifies that a
-	// genuine non-conflict from the selected request shape is not retried.
+	// Пропустить преднамеренный современный резервный вариант до 4,3: этот тест проверяет,
+	// что подлинное неконфликтное из выбранной формы запроса не было повторно проверено.
 	client.legacyImageTransfer.Store(true)
 
 	_, err = client.createTransferWhenReady(context.Background(),

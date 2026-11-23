@@ -28,10 +28,12 @@ import (
 // storageRootPrefix начинает идентификатор корня-хранилища.
 const storageRootPrefix = "storage:"
 
-// StorageRootID is the root id of a job that reads a connected storage.
+// StorageRootID является корневым идентификатором задания, которое считывает связанное
+// хранилище.
 func StorageRootID(targetID string) string { return storageRootPrefix + targetID }
 
-// StorageRootTarget returns the storage a root id points to, if it is one.
+// StorageRootTarget возвращает хранилище, на которое указывает корневой идентификатор, если
+// он один.
 func StorageRootTarget(rootID string) (string, bool) {
 	id, ok := strings.CutPrefix(rootID, storageRootPrefix)
 	return id, ok && id != ""
@@ -59,7 +61,7 @@ func emptySourceError(includes []string, storage bool) error {
 		"как успешная копия. %s", ErrEmptySource, where, hint)
 }
 
-// OpenStorageSource opens a connected storage for reading as a file source.
+// OpenStorageSource открывает подключенное хранилище для чтения в качестве источника файла.
 func (e *Engine) OpenStorageSource(ctx context.Context, targetID string) (repo.Backend, *model.StorageTarget, error) {
 	target, err := e.store.GetStorageTarget(ctx, targetID)
 	if err != nil {
@@ -79,8 +81,8 @@ func (e *Engine) OpenStorageSource(ctx context.Context, targetID string) (repo.B
 	return backend, target, nil
 }
 
-// RootExists reports whether a job root is usable: a configured named root or
-// a connected storage that can be read as directories.
+// RootExists сообщает, можно ли использовать корень задания: сконфигурированный по имени
+// корень или подключенное хранилище, которое можно читать как каталоги.
 func (e *Engine) RootExists(ctx context.Context, rootID string) error {
 	if targetID, ok := StorageRootTarget(rootID); ok {
 		target, err := e.store.GetStorageTarget(ctx, targetID)
@@ -101,7 +103,7 @@ func (e *Engine) RootExists(ctx context.Context, rootID string) error {
 	return nil
 }
 
-// RestoreRoots returns the directories a run of this root may be restored into.
+// RestoreRoots возвращает каталоги, в которые может быть восстановлен запуск этого корня.
 //
 // У хранилища-источника своих областей восстановления нет: файлы возвращаются
 // в области первого именованного корня, то есть в каталог восстановления
@@ -120,7 +122,7 @@ func (e *Engine) RestoreRoots(rootID string) []string {
 	return root.RestoreRoots
 }
 
-// storageWalk copies the selected directories of a storage into the run.
+// storageWalk копирует выбранные каталоги хранилища в запуск.
 type storageWalk struct {
 	e        *Engine
 	source   repo.Backend

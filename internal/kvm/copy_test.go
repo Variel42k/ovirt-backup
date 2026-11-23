@@ -148,10 +148,8 @@ func TestConfigDefaults(t *testing.T) {
 	}
 }
 
-// A raw disk cannot carry a persistent bitmap, so no checkpoint can be taken
-// for a VM that has one. Asking libvirt for one anyway fails the whole backup —
-// which is how a VM with raw disks ended up with no backup at all rather than a
-// full one.
+// Диск raw не может хранить постоянную битовую карту. Запрос checkpoint для всей ВМ с таким
+// диском сорвёт бэкап. Для него должен выполняться полный бэкап.
 func TestNoCheckpointForRawDisks(t *testing.T) {
 	plan := &Plan{
 		Type: model.BackupFull,
@@ -164,8 +162,8 @@ func TestNoCheckpointForRawDisks(t *testing.T) {
 	}
 }
 
-// A VM whose disks are all qcow2 keeps its checkpoint: that is what makes the
-// next run able to copy only what changed.
+// Виртуальная машина, все диски которой qcow2, сохраняет свои checkpoint: это то, что
+// делает следующий запуск способным копировать только то, что изменилось.
 func TestCheckpointForQcowDisks(t *testing.T) {
 	plan := &Plan{
 		Type: model.BackupFull,
@@ -183,9 +181,9 @@ func TestCheckpointForQcowDisks(t *testing.T) {
 	}
 }
 
-// Mixed VM: an increment could never cover it consistently, so no bitmaps are
-// created at all. Bitmapping only the qcow2 disks would grow structures in
-// their headers that no later run could use.
+// Смешанная ВМ: приращение никогда не может покрывать ее последовательно, поэтому растровые
+// образа вообще не создаются. Bitmapping только qcow2 диски будут расти структуры в их
+// заголовках, которые не могут быть использованы в дальнейшем.
 func TestMixedVMTakesNoCheckpoint(t *testing.T) {
 	plan := &Plan{
 		Type: model.BackupFull,
@@ -199,8 +197,8 @@ func TestMixedVMTakesNoCheckpoint(t *testing.T) {
 	}
 }
 
-// The raw disks still take part in the backup: they are read hot through the
-// same pull-mode export, just without a "what changed" shortcut.
+// Сырые диски по-прежнему принимают участие в резервной копии: они читаются в горячем
+// режиме через тот же экспорт в режиме извлечения, только без ярлыка "what changed".
 func TestRawDisksStayInThePlan(t *testing.T) {
 	disks := []libvirtx.Disk{
 		{Target: "vda", Format: "raw", Device: "disk", Source: "/images/vda.img"},

@@ -10,8 +10,8 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/store"
 )
 
-// ChainSet is everything needed to read one backup point: the chain of runs it
-// depends on, and the per-disk manifests in root-to-leaf order.
+// ChainSet все необходимое для прочтения одной точки резервного копирования: цепочка
+// запусков от нее зависит, и за диск манифестирует в порядке root-to-leaf.
 type ChainSet struct {
 	// Leaf — запрошенная точка восстановления.
 	Leaf *model.BackupRun
@@ -21,9 +21,8 @@ type ChainSet struct {
 	Manifests map[string][]*DiskManifest
 	// DiskOrder сохраняет порядок подключения дисков к ВМ.
 	DiskOrder []string
-	// RunManifest carries the portable VM profile for a real boot test. It is
-	// optional so backups created before profiles were introduced remain
-	// restorable.
+	// RunManifest содержит переносимый профиль ВМ для проверки запуска. Профиль необязателен,
+	// поэтому бэкапы старых версий по-прежнему можно восстановить.
 	RunManifest      *RunManifest
 	RunManifestError error
 	Target           *model.StorageTarget
@@ -31,14 +30,15 @@ type ChainSet struct {
 	Backend          repo.Backend
 }
 
-// Close releases the repository connection.
+// Close освобождает соединение репозитория.
 func (c *ChainSet) Close() {
 	if c.Backend != nil {
 		_ = c.Backend.Close()
 	}
 }
 
-// DiskAliases maps disk ids to their human names for presentation.
+// DiskAliases сопоставляет идентификаторы дисков с их человеческими именами для
+// представления.
 func (c *ChainSet) DiskAliases() map[string]string {
 	out := map[string]string{}
 	for id, chain := range c.Manifests {
@@ -49,31 +49,30 @@ func (c *ChainSet) DiskAliases() map[string]string {
 	return out
 }
 
-// LoadChain resolves a restore point.
+// LoadChain Решает точку восстановления.
 //
-// The chain is walked through parent links rather than through the chain id,
-// because a chain id groups runs while a parent link orders them — and order
-// is what decides which version of a chunk wins.
+// Обходим цепочку по ссылкам на родителей. Идентификатор цепочки группирует запуски, а
+// родительские ссылки задают порядок выбора версии чанка.
 func (e *Engine) LoadChain(ctx context.Context, runID string) (*ChainSet, error) {
 	return e.LoadChainCopy(ctx, runID, "")
 }
 
-// LoadChainCopy resolves every link from one physical storage target. An empty
-// copyID prefers a successful primary copy, then the first successful replica.
+// LoadChainCopy разрешает каждую линию связи из одного физического хранилища назначения.
+// Пустая copyID предпочитает удачную первичную копию, затем первую удачную копию.
 func (e *Engine) LoadChainCopy(ctx context.Context, runID, copyID string) (*ChainSet, error) {
 	return e.loadChainCopy(ctx, runID, copyID, false, false)
 }
 
-// LoadVMChainCopy resolves the data and configuration needed to assemble a
-// complete VM. Unlike a disk restore it admits config-only points: they have a
-// run manifest and a VM profile, but deliberately contain no disk chain.
+// LoadVMChainCopy определяет данные и конфигурацию, необходимые для сборки полной ВМ. В
+// отличие от восстановления диска, он допускает только точки конфигурации: они имеют
+// манифест запуска и профиль ВМ, но намеренно не содержат цепочку дисков.
 func (e *Engine) LoadVMChainCopy(ctx context.Context, runID, copyID string) (*ChainSet, error) {
 	return e.loadChainCopy(ctx, runID, copyID, false, true)
 }
 
-// loadChainCopy may admit the explicitly selected leaf while it is being
-// verified. That exception is private to VerifyCopy: restore and replication
-// continue to see only healthy copies.
+// loadChainCopy может допускать явно выбранный лист во время его проверки. Это исключение
+// является частным для VerifyCopy: восстановление и репликация продолжают видеть только
+// здоровые копии.
 func (e *Engine) loadChainCopy(ctx context.Context, runID, copyID string, allowVerifying, allowConfig bool) (*ChainSet, error) {
 	leaf, err := e.store.GetBackupRunFull(ctx, runID)
 	if err != nil {
@@ -93,8 +92,8 @@ func (e *Engine) loadChainCopy(ctx context.Context, runID, copyID string, allowV
 		return nil, err
 	}
 
-	// Walk up to the chain root, guarding against a cycle: a corrupted parent
-	// link must not turn a restore into an infinite loop.
+	// Подойдите к цепному корню, защищаясь от цикла: поврежденное родительское звено не
+	// должно превращать восстановление в бесконечный цикл.
 	var runs []*model.BackupRun
 	seen := map[string]bool{}
 	cur := leaf
@@ -161,8 +160,8 @@ func (e *Engine) loadChainCopy(ctx context.Context, runID, copyID string, allowV
 		set.RunManifestError = manifestErr
 	}
 
-	// Only disks present in the leaf are restorable: a disk detached before
-	// this point has no current version to restore.
+	// Восстановимыми являются только диски, присутствующие в листе: диск, отсоединенный до
+	// этого момента, не имеет текущей версии для восстановления.
 	for _, d := range leaf.Disks {
 		if d.Status != model.RunSucceeded {
 			continue
@@ -255,7 +254,7 @@ func (e *Engine) selectHealthyCopy(ctx context.Context, run *model.BackupRun, co
 	return nil, nil, fmt.Errorf("у бэкапа %s нет здоровой физической копии", run.ID)
 }
 
-// ReaderFor builds a chain reader for one disk of the restore point.
+// ReaderFor строит считыватель цепочки для одного диска точки восстановления.
 func (e *Engine) ReaderFor(set *ChainSet, diskID string) (*ChainReader, error) {
 	chain, ok := set.Manifests[diskID]
 	if !ok {

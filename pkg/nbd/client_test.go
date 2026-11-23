@@ -12,10 +12,8 @@ import (
 	"time"
 )
 
-// mockServer is a minimal NBD server used to prove the client speaks the
-// protocol. It is deliberately written from the specification rather than by
-// mirroring the client's code, so a misreading in the client does not hide
-// behind an identical misreading in the test.
+// mockServer проверяет совместимость клиента с протоколом NBD. Реализация тестового сервера
+// написана по спецификации, чтобы ошибка чтения протокола в клиенте не повторилась в тесте.
 type mockServer struct {
 	t *testing.T
 
@@ -58,15 +56,14 @@ func newMockServer(t *testing.T, size int64) *mockServer {
 	}
 }
 
-// start wires the server to a pipe and returns the client end.
+// start подключает сервер к каналу и возвращает клиентский конец.
 func (s *mockServer) start() net.Conn {
 	clientConn, serverConn := net.Pipe()
 	go func() {
 		defer serverConn.Close()
 		if err := s.serve(serverConn); err != nil && !errors.Is(err, io.EOF) &&
 			!errors.Is(err, io.ErrClosedPipe) {
-			// Reported through the test log rather than t.Fatal: this runs on
-			// another goroutine.
+			// Пишем в журнал теста. t.Fatal нельзя вызывать из другой горутины.
 			s.t.Logf("mock NBD server: %v", err)
 		}
 	}()
@@ -77,7 +74,7 @@ func (s *mockServer) serve(conn net.Conn) error {
 	w := conn
 	r := conn
 
-	// Greeting.
+	// Приветствие сервера.
 	if err := writeAll(w,
 		be64(magicNBD), be64(magicIHaveOpt), be16(flagFixedNewstyle)); err != nil {
 		return err
@@ -87,7 +84,7 @@ func (s *mockServer) serve(conn net.Conn) error {
 		return err
 	}
 
-	// Option haggling.
+	// Согласование параметров.
 	for {
 		var head struct {
 			Magic  uint64
@@ -142,7 +139,7 @@ func (s *mockServer) serve(conn net.Conn) error {
 }
 
 func (s *mockServer) handleSetMetaContext(w io.Writer, payload []byte) error {
-	// Format: export name, then a count of queries, then the queries.
+	// Сначала идёт имя экспорта, затем количество запросов и сами запросы.
 	if len(payload) < 4 {
 		return errors.New("short SET_META_CONTEXT")
 	}
@@ -277,8 +274,8 @@ func (s *mockServer) serveRead(conn net.Conn, cookie uint64, offset, length int6
 		return err
 	}
 
-	// Split the answer into data and hole chunks, which is what a real server
-	// does for a sparse image and what the client must reassemble.
+	// Как и настоящий сервер для разреженного образа, возвращаем отдельные фрагменты данных
+	// и невыделенных диапазонов. Клиент должен собрать их в один ответ.
 	type piece struct {
 		start, end int64
 		hole       bool
@@ -329,7 +326,7 @@ func (s *mockServer) serveBlockStatus(conn net.Conn, cookie uint64, offset, leng
 	for name := range s.assignedIDs {
 		names = append(names, name)
 	}
-	// Deterministic order so the test is reproducible.
+	// Фиксируем порядок для воспроизводимости теста.
 	for i := 0; i < len(names); i++ {
 		for j := i + 1; j < len(names); j++ {
 			if names[j] < names[i] {
@@ -341,7 +338,7 @@ func (s *mockServer) serveBlockStatus(conn net.Conn, cookie uint64, offset, leng
 	for i, name := range names {
 		descriptors := s.extents[name]
 		body := be32(s.assignedIDs[name])
-		// Answer only for the requested window, starting at offset.
+		// Возвращаем только запрошенный диапазон, начиная с offset.
 		var covered int64
 		var pos int64
 		for _, d := range descriptors {
@@ -403,7 +400,7 @@ func writeAll(w io.Writer, parts ...[]byte) error {
 	return err
 }
 
-// pattern fills a buffer with recognisable content.
+// pattern заполняет буфер узнаваемой последовательностью.
 func pattern(size int64) []byte {
 	buf := make([]byte, size)
 	for i := range buf {

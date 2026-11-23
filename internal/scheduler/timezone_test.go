@@ -35,8 +35,8 @@ func TestCronUsesIANADSTRules(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 02:30 does not exist on 2026-03-08: the next occurrence is the
-	// following day, not a manually shifted 03:30 run.
+	// 02:30 не существует на 2026-03-08: следующее появление на следующий день, а не
+	// сдвинутый вручную 03:30.
 	springNext := spring.Next(time.Date(2026, time.March, 8, 0, 0, 0, 0, loc))
 	if want := time.Date(2026, time.March, 9, 2, 30, 0, 0, loc); !springNext.Equal(want) {
 		t.Fatalf("spring DST next = %s, want %s", springNext, want)
@@ -92,9 +92,9 @@ func TestSetTimezoneRecalculatesNextRun(t *testing.T) {
 	if err != nil || yekaterinburgJob.NextRunAt == nil {
 		t.Fatalf("Yekaterinburg next run: job=%+v err=%v", yekaterinburgJob, err)
 	}
-	// Both schedules are daily. Depending on the wall-clock time, one of the
-	// nearest occurrences can already be on the next day, so compare the shift
-	// modulo one day instead of assuming both dates are equal.
+	// Оба графика ежедневные. В зависимости от времени настенных часов одно из ближайших
+	// событий может быть уже на следующий день, поэтому сравните изменение по модулю в один
+	// день вместо того, чтобы предполагать, что обе даты равны.
 	delta := utcJob.NextRunAt.Sub(*yekaterinburgJob.NextRunAt) % (24 * time.Hour)
 	if delta < 0 {
 		delta += 24 * time.Hour

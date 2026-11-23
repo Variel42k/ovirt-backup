@@ -13,8 +13,8 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/hosthelper"
 )
 
-// ConsoleAdmin creates or rotates only the helper-owned, realm-local console
-// account. It never changes master administrators, AD users or service secrets.
+// ConsoleAdmin создаёт или обновляет только временную учётную запись консоли в её области.
+// Администраторы master, пользователи AD и служебные секреты не затрагиваются.
 func (m *Manager) ConsoleAdmin(ctx context.Context, request hosthelper.ConsoleAdminRequest) (hosthelper.ConsoleAdminResponse, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -51,8 +51,9 @@ func (m *Manager) ConsoleAdmin(ctx context.Context, request hosthelper.ConsoleAd
 			return out, err
 		}
 		st.ConsoleAdminName = "jhvirt-console-" + strings.ToLower(suffix)
-		// Persist the intended unique name before the first network mutation so
-		// interrupted requests can safely resume without creating more accounts.
+		// Сохраняйте предполагаемое уникальное имя до первой мутации сети, поэтому
+		// прерванные запросы могут безопасно возобновляться без создания большего
+		// количества учётных записей.
 		if err := m.saveState(st); err != nil {
 			return out, err
 		}
@@ -136,7 +137,7 @@ func (a *adminAPI) rotateConsoleAdmin(ctx context.Context, realm, id, name, pass
 	if _, err := a.do(ctx, http.MethodPost, path+"/role-mappings/clients/"+url.PathEscape(clientID), []map[string]any{role}, http.StatusNoContent); err != nil {
 		return "", err
 	}
-	// Password change requires a new login; revoke old console sessions first.
+	// Для смены пароля требуется новый логин; Сначала отмените старые сеансы консоли.
 	if _, err := a.do(ctx, http.MethodPost, path+"/logout", nil, http.StatusNoContent); err != nil {
 		return "", err
 	}

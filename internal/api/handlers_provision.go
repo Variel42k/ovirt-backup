@@ -131,9 +131,9 @@ func (s *Server) handleProvisionServer(w http.ResponseWriter, r *http.Request) {
 	result.ServerID = server.ID
 	s.audit(r, "server.provision", model.ScopeServer, server.ID, true,
 		"тип "+string(req.Kind)+", роль "+req.RoleName+", учётная запись "+req.ServiceUsername)
-	// The first refresh imports the complete Engine inventory immediately. The
-	// operator should not have to wait for the monitor interval to see the
-	// clusters and hosts that were just connected.
+	// Первое обновление импортирует сразу весь Engine инвентарь. Оператор не должен ждать
+	// интервала монитора, чтобы увидеть кластеры и узлы, которые были только что
+	// подключены.
 	go s.refreshServer(context.WithoutCancel(r.Context()), server.ID)
 	writeJSON(w, http.StatusOK, result)
 }

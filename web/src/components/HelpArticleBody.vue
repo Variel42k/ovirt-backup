@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import type { HelpArticle } from '@/api/types'
 
-// Renders one reference article. The block kinds come from the backend, which
-// owns the wording — the UI only decides how each kind looks.
+// Отображает статью справки. Сервер передаёт текст и типы блоков, интерфейс выбирает их
+// оформление.
 
 defineProps<{ article: HelpArticle }>()
 </script>

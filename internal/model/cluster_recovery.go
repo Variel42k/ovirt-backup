@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-// ClusterRecoveryPolicy belongs to a provider cluster, not to the service HA cluster.
+// ClusterRecoveryPolicy принадлежит кластеру провайдеров, а не кластеру сервисов HA.
 type ClusterRecoveryPolicy struct {
 	ServerID   string                  `json:"server_id"`
 	ClusterID  string                  `json:"cluster_id"`

@@ -28,7 +28,7 @@ import (
 // уровням (объектное хранилище) либо бэкенд этого не умеет.
 var ErrNoDirectories = errors.New("хранилище не отдаёт каталоги по уровням")
 
-// DirEntry is one name inside a directory of a storage.
+// DirEntry — одно имя внутри каталога хранилища.
 type DirEntry struct {
 	Name     string
 	IsDir    bool
@@ -36,18 +36,18 @@ type DirEntry struct {
 	Modified time.Time
 }
 
-// DirLister is implemented by backends that expose a real directory tree.
+// DirLister реализуется бэкэндами, которые выставляют реальное дерево каталогов.
 type DirLister interface {
-	// ListDir returns the entries of one directory, without descending.
-	// dir is relative to the storage root; empty means the root itself.
+	// ListDir возвращает записи одного каталога, без спуска.
+	// dir относительно корня хранилища; пустой означает сам корень.
 	ListDir(ctx context.Context, dir string) ([]DirEntry, error)
 }
 
-// unwrapper is implemented by decorators so optional interfaces of the
-// wrapped backend stay reachable.
+// unwrapper реализовано декораторами таким образом, что необязательные интерфейсы
+// обернутого бэкэнда остаются достижимыми.
 type unwrapper interface{ unwrap() Backend }
 
-// ListDir lists one directory level of a storage, sorted by name.
+// ListDir перечисляет один уровень каталога хранилища, отсортированный по имени.
 func ListDir(ctx context.Context, b Backend, dir string) ([]DirEntry, error) {
 	for {
 		if lister, ok := b.(DirLister); ok {
@@ -66,8 +66,8 @@ func ListDir(ctx context.Context, b Backend, dir string) ([]DirEntry, error) {
 	}
 }
 
-// ListsDirs reports whether storages of this kind can be browsed and read as
-// a directory tree.
+// ListsDirs сообщает, могут ли хранилища такого рода быть просмотрены и прочитаны как
+// дерево каталогов.
 func ListsDirs(kind model.StorageKind) bool {
 	switch kind {
 	case model.StorageSMB, model.StorageSFTP, model.StorageLocal:
@@ -76,7 +76,7 @@ func ListsDirs(kind model.StorageKind) bool {
 	return false
 }
 
-// CleanDir normalises a directory path inside a storage: forward slashes, no
+// CleanDir нормализует путь к каталогу внутри хранилища: прямые косые черты, нет
 // leading or trailing separators, no "." and "..". Выход за корень хранилища
 // так не записать: path.Clean от корня съедает все "..".
 func CleanDir(dir string) string {

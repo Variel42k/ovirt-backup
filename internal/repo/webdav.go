@@ -21,7 +21,7 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
-// webdavBackend stores backups on a WebDAV collection: Nextcloud, ownCloud,
+// webdavBackend хранит резервные копии в коллекции WebDAV: Nextcloud, ownCloud,
 // сервис WebDAV на NAS, Apache с mod_dav.
 //
 // Реализовано на net/http, без отдельной библиотеки. Нужный набор — PUT, GET с
@@ -129,7 +129,7 @@ func (w *webdavBackend) urlFor(key string) *url.URL {
 	return &u
 }
 
-// dirURL adds the trailing slash collections are addressed with.
+// dirURL добавляет, что слеш-коллекции адресованы.
 func (w *webdavBackend) dirURL(dir string) *url.URL {
 	u := w.urlFor(dir)
 	if !strings.HasSuffix(u.Path, "/") {
@@ -149,7 +149,7 @@ func (w *webdavBackend) request(ctx context.Context, method string, u *url.URL, 
 	return req, nil
 }
 
-// do executes a request and rejects unexpected statuses.
+// do исполняет запрос и отклоняет неожиданные статусы.
 func (w *webdavBackend) do(req *http.Request, allowed ...int) (*http.Response, error) {
 	resp, err := w.client.Do(req)
 	if err != nil {
@@ -167,7 +167,7 @@ func (w *webdavBackend) do(req *http.Request, allowed ...int) (*http.Response, e
 	return nil, webdavError(req, resp)
 }
 
-// webdavError turns a status code into a message that says what to do.
+// webdavError превращает код состояния в сообщение, в котором говорится, что делать.
 //
 // Голое «401 Unauthorized» заставляет оператора угадывать, что не так: адрес,
 // логин или права. Разница между «не пустили» и «пустили, но писать нельзя»
@@ -241,7 +241,7 @@ func (w *webdavBackend) Put(ctx context.Context, key string, r io.Reader, size i
 	return counter.n, nil
 }
 
-// move publishes a temporary object under its final name.
+// move издает временный предмет под своим окончательным названием.
 func (w *webdavBackend) move(ctx context.Context, from, to string) error {
 	req, err := w.request(ctx, "MOVE", w.urlFor(from), nil)
 	if err != nil {
@@ -256,7 +256,7 @@ func (w *webdavBackend) move(ctx context.Context, from, to string) error {
 	return resp.Body.Close()
 }
 
-// mkcol creates one collection, treating "already exists" as success.
+// mkcol создаёт коллекцию и считает уже существующую коллекцию успешным результатом.
 func (w *webdavBackend) mkcol(ctx context.Context, u *url.URL) error {
 	req, err := w.request(ctx, "MKCOL", u, nil)
 	if err != nil {
@@ -277,7 +277,7 @@ func (w *webdavBackend) mkcol(ctx context.Context, u *url.URL) error {
 	}
 }
 
-// mkcolAll creates a collection and every missing parent above it.
+// mkcolAll созда́ть сборникъ и каждый недостающій родитель надъ нимъ.
 func (w *webdavBackend) mkcolAll(ctx context.Context, dir string) error {
 	dir = strings.Trim(dir, "/")
 	if dir == "" || dir == "." {
@@ -304,7 +304,7 @@ func (w *webdavBackend) mkcolAll(ctx context.Context, dir string) error {
 	return nil
 }
 
-// ensureRoot creates the storage directory under the endpoint.
+// ensureRoot создает каталог хранения под конечной точкой.
 //
 // Создаётся только своё: каталоги из настройки хранилища. Путь самого endpoint
 // принадлежит сервису — у Nextcloud это /remote.php/dav/files/имя, и пытаться
@@ -378,7 +378,7 @@ func (w *webdavBackend) GetRange(ctx context.Context, key string, offset, length
 	return &sectionCloser{Reader: io.LimitReader(resp.Body, length), closer: resp.Body}, nil
 }
 
-// rangeFromWhole extracts a range client-side when the server ignores Range.
+// rangeFromWhole извлекает клиентскую сторону диапазона, когда сервер игнорирует Range.
 func rangeFromWhole(body io.ReadCloser, offset, length int64) (io.ReadCloser, error) {
 	if offset > 0 {
 		if _, err := io.CopyN(io.Discard, body, offset); err != nil {
@@ -447,7 +447,7 @@ func (w *webdavBackend) DeletePrefix(ctx context.Context, prefix string) (int, e
 	return len(objects), nil
 }
 
-// pruneEmptyCollections removes the date tree left behind by retention.
+// pruneEmptyCollections Уда́лить дерево финиковъ, оставшееся отъ удержанія.
 //
 // Очистка удаляет точку восстановления, а каталоги года, месяца и дня над ней
 // остаются пустыми. Само по себе это безвредно, но за год их набирается по
@@ -630,7 +630,7 @@ const quotaProps = `<?xml version="1.0" encoding="utf-8"?>
 <quota-available-bytes/><quota-used-bytes/>
 </prop></propfind>`
 
-// davResponse is one entry of a multistatus body.
+// davResponse — один вход многостатусного тела.
 //
 // Пространство имён в тегах не указано намеренно: encoding/xml тогда сверяет
 // только локальное имя, а серверы присылают DAV: под разными префиксами — d:,
@@ -658,7 +658,7 @@ type davProp struct {
 	QuotaUsed      string    `xml:"quota-used-bytes"`
 }
 
-// prop returns the properties the server actually found.
+// prop возвращает свойства, фактически найденные сервером.
 func (d davResponse) prop() davProp {
 	for _, ps := range d.Propstats {
 		if strings.Contains(ps.Status, " 200") {
@@ -724,7 +724,7 @@ func objectInfo(entry davResponse) ObjectInfo {
 	return info
 }
 
-// keyOf turns an href from a multistatus body into an object key.
+// keyOf превращает href из многостатусного тела в объектный ключ.
 func (w *webdavBackend) keyOf(href string) string {
 	target := href
 	if parsed, err := url.Parse(href); err == nil {

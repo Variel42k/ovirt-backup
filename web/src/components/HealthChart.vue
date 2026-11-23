@@ -3,15 +3,11 @@ import { computed } from 'vue'
 import { dateTime } from '@/api/format'
 import type { HealthSample } from '@/api/types'
 
-// Two things matter about a monitored connection, and they answer different
-// questions: was it up, and how slowly did it answer. The strip shows the
-// first — every outage is visible even if it lasted one poll — and the line
-// shows the second, because a connection that degrades before it fails gives
-// the only warning anyone gets.
+// Полоса показывает доступность подключения, включая сбои длиной в один опрос. Линия
+// показывает задержку ответа. Рост задержки может предупредить о сбое.
 //
-// Drawn as inline SVG rather than with a chart library: the whole point of this
-// service is to keep working when other things are broken, and one static
-// binary with no CDN is part of that.
+// Рисуем встроенный SVG без библиотеки графиков и зависимости от CDN, чтобы страница
+// работала при внешних сбоях.
 
 const props = defineProps<{
   samples: HealthSample[]

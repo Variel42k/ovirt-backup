@@ -57,9 +57,9 @@ func (s *Store) GetBackupJobRun(ctx context.Context, id string) (*model.BackupJo
 	return scanJobRun(s.db.QueryRow(ctx, `SELECT `+jobRunColumns+` FROM backup_job_runs WHERE id=?`, id))
 }
 
-// ClaimBackupJobRunFinalization elects exactly one worker to aggregate a
-// completed persistent task group. waiting_copies doubles as the durable
-// finalization marker and is recoverable after a process restart.
+// ClaimBackupJobRunFinalization выбирает точно одного работника для агрегирования
+// завершенной постоянной целевой группы. waiting_copies удваивается в качестве маркера
+// прочной окончательной реализации и восстанавливается после перезапуска процесса.
 func (s *Store) ClaimBackupJobRunFinalization(ctx context.Context, id string) (bool, error) {
 	result, err := s.db.Exec(ctx, `UPDATE backup_job_runs SET status='waiting_copies'
 		WHERE id=? AND status='running'`, id)

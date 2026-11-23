@@ -14,11 +14,11 @@ func TestWebSectionsDefaultsAndPersistence(t *testing.T) {
 	if err != nil || value != model.DefaultWebSections() {
 		t.Fatal(value, err)
 	}
-	for _, expected := range []model.WebSections{{Discovery: false, GitlabClean: true}, {Discovery: true, GitlabClean: false}, {}, {Discovery: true, GitlabClean: true}} {
+	for _, expected := range []model.WebSections{{Discovery: false}, {Discovery: true}} {
 		if err := s.SetWebSections(ctx, expected, "admin"); err != nil {
 			t.Fatal(err)
 		}
-		// Another Store instance must observe the DB value without a process-local cache.
+		// Другой экземпляр Store должен наблюдать значение DB без локального кэша процесса.
 		reader := New(s.db, s.cipher)
 		actual, err := reader.WebSections(ctx)
 		if err != nil || actual != expected {

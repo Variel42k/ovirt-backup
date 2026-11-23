@@ -1,9 +1,8 @@
 #!/bin/sh
-# Host-side recovery of the permanent administrator in the bundled Keycloak.
-# The recovery credential exists only in a root-only temporary directory and
-# in one disposable Keycloak container. It is never written to .env or a
-# persistent volume and the temporary service account is removed before the
-# new permanent password is printed.
+# Восстановление постоянного администратора встроенного Keycloak на хосте.
+# Данные для восстановления доступны только во временном каталоге root
+# и в одноразовом контейнере Keycloak. Временная служебная учётная запись
+# удаляется до вывода нового постоянного пароля.
 set -eu
 
 SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
@@ -304,9 +303,9 @@ printf ']' >> "$RECOVERY_DIR/role-map.json"
     die "пароль изменён, но не удалось завершить прежние сессии $ADMIN_USER"
 api_status DELETE "/attack-detection/brute-force/users/$ADMIN_ID" >/dev/null 2>&1 || true
 
-# Password grants are disabled for admin-cli: testing a password-only login
-# here would bypass the mandatory browser MFA policy. Verify the role through
-# the temporary service credential and keep OTP credentials unchanged.
+# Для admin-cli отключён вход по паролю, чтобы проверка не обходила
+# обязательную MFA в браузере. Проверяем роль через временную служебную
+# учётную запись и сохраняем настройки OTP.
 api_get "/users/$ADMIN_ID/role-mappings/realm" > "$RECOVERY_DIR/verified-roles.json" ||
     die "не удалось проверить права восстановленного администратора"
 grep -Eq '"name"[[:space:]]*:[[:space:]]*"admin"' "$RECOVERY_DIR/verified-roles.json" ||

@@ -17,12 +17,11 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/store"
 )
 
-// maxBodyBytes bounds request bodies. Nothing this API accepts is large — the
-// biggest payload is a CA certificate — so a small cap costs nothing and
-// removes a trivial denial-of-service vector.
+// maxBodyBytes ограничивает размер тела запроса. Самый крупный объект,
+// который принимает API, — сертификат CA. Лимит защищает от чрезмерно больших запросов.
 const maxBodyBytes = 1 << 20
 
-// errorResponse is the single error shape the SPA has to understand.
+// errorResponse — единственная форма ошибки, которую SPA должен понять.
 type errorResponse struct {
 	Error  string `json:"error"`
 	Detail string `json:"detail,omitempty"`
@@ -30,8 +29,8 @@ type errorResponse struct {
 	Code string `json:"code,omitempty"`
 }
 
-// listResponse wraps collections so pagination can be added later without
-// changing the shape clients already parse.
+// listResponse обертывает коллекции таким образом, что пагинация может быть добавлена
+// позже, не изменяя форму клиентов, которые уже анализируют.
 type listResponse[T any] struct {
 	Items []T `json:"items"`
 	Total int `json:"total"`
@@ -46,7 +45,7 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 	enc := json.NewEncoder(w)
 	enc.SetEscapeHTML(false)
 	if err := enc.Encode(payload); err != nil {
-		// The status line is already out; all that is left is to record it.
+		// Статус ответа уже отправлен. Остаётся записать ошибку.
 		_ = err
 	}
 }
@@ -58,8 +57,8 @@ func writeList[T any](w http.ResponseWriter, items []T) {
 	writeJSON(w, http.StatusOK, listResponse[T]{Items: items, Total: len(items)})
 }
 
-// writeError maps domain errors onto HTTP statuses. Doing it in one place is
-// what keeps handlers from each inventing their own status for "not found".
+// writeError отображает ошибки домена на HTTP статусы. В одном месте это то, что удерживает
+// обработчиков от того, чтобы каждый придумал свой собственный статус для "not found".
 func (s *Server) writeError(w http.ResponseWriter, r *http.Request, err error) {
 	status := http.StatusInternalServerError
 	code := "internal"
@@ -82,9 +81,9 @@ func (s *Server) writeError(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.Is(err, errForbidden):
 		status, code = http.StatusForbidden, "forbidden"
 	case ovirt.IsAuthError(err):
-		// The engine rejected our credentials — that is the operator's
-		// configuration problem, not an unauthenticated API call, so it must
-		// not turn into a 401 that logs them out of this UI.
+		// Движок отклонил наши учётные данные аутентификации — это проблема конфигурации
+		// оператора, а не неаутентифицированный вызов API, поэтому он не должен
+		// превращаться в 401, который регистрирует их из этого UI.
 		status, code = http.StatusBadGateway, "engine_auth"
 	case ovirt.IsNotFound(err):
 		status, code = http.StatusNotFound, "engine_not_found"
@@ -101,8 +100,8 @@ func (s *Server) writeError(w http.ResponseWriter, r *http.Request, err error) {
 	writeJSON(w, status, errorResponse{Error: err.Error(), Code: code})
 }
 
-// Sentinel errors handlers use to signal an HTTP class without importing net/http
-// semantics into the domain packages.
+// Обработчики ошибок Sentinel используют для сигнализации класса HTTP без импорта семантики
+// net/http в пакеты домена.
 var (
 	errBadRequest = errors.New("некорректный запрос")
 	errForbidden  = errors.New("недостаточно прав")
@@ -116,7 +115,7 @@ func forbidden(format string, args ...any) error {
 	return fmt.Errorf("%w: %s", errForbidden, fmt.Sprintf(format, args...))
 }
 
-// decodeJSON reads and validates a JSON request body.
+// decodeJSON читает и проверяет содержание JSON запроса.
 func decodeJSON(r *http.Request, dst any) error {
 	if r.Body == nil {
 		return badRequest("пустое тело запроса")
@@ -131,15 +130,15 @@ func decodeJSON(r *http.Request, dst any) error {
 		}
 		return badRequest("не удалось разобрать JSON: %v", err)
 	}
-	// A second value in the stream almost always means the client built the
-	// body wrongly; accepting it silently would hide that.
+	// Второе значение указывает на неверное тело запроса. Отклоняем его, чтобы клиент
+	// получил явную ошибку.
 	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return badRequest("в теле запроса больше одного JSON-документа")
 	}
 	return nil
 }
 
-// queryInt reads an integer query parameter with a default.
+// queryInt считывает целочисленный параметр запроса по умолчанию.
 func queryInt(r *http.Request, name string, def int) int {
 	raw := r.URL.Query().Get(name)
 	if raw == "" {
@@ -152,14 +151,14 @@ func queryInt(r *http.Request, name string, def int) int {
 	return v
 }
 
-// queryBool reads a boolean query parameter.
+// queryBool считывает булевский параметр запроса.
 func queryBool(r *http.Request, name string) bool {
 	raw := strings.ToLower(strings.TrimSpace(r.URL.Query().Get(name)))
 	return raw == "1" || raw == "true" || raw == "yes"
 }
 
-// Walk from the socket peer towards the client, stopping at the first
-// untrusted hop. A client-supplied prefix must never become an audit identity.
+// Пройдите от узла сокета к клиенту, остановившись при первом ненадежном прыжке. Префикс,
+// поставляемый клиентом, никогда не должен становиться идентификатором аудита.
 func (s *Server) clientIP(r *http.Request) string {
 	peer, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {

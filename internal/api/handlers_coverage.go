@@ -11,18 +11,13 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/store"
 )
 
-// The "what is not protected" view.
+// Экран показывает, какие ВМ нельзя будет восстановить. Счётчик «Под защитой
+// 14 из 17» помогает только вместе со списком трёх ВМ без защиты.
 //
-// Every other screen answers "how did this backup go". This one answers the
-// question nobody thinks to ask until it matters: which machines would not come
-// back. A dashboard counter saying "под защитой 14 из 17" is worse than useless
-// on its own — the whole value is in naming the three.
-//
-// The gaps are ranked, because they are not equally bad. A VM nobody ever
-// backed up is a different problem from one whose last copy is two days old,
-// and presenting them as one list makes the first invisible among the second.
+// Сортируем пробелы в защите по важности. ВМ без единого бэкапа должна быть видна даже
+// среди множества ВМ с устаревшими копиями.
 
-// CoverageState ranks how well one VM is protected.
+// CoverageState ранжирует, насколько хорошо защищена одна ВМ.
 type CoverageState string
 
 const (
@@ -41,7 +36,7 @@ const (
 	CoverageOK CoverageState = "ok"
 )
 
-// Severity orders the states so the worst gaps come first.
+// Severity приказывает штатам, чтобы наихудшие пробелы были на первом месте.
 func (s CoverageState) Severity() int {
 	switch s {
 	case CoverageNone:
@@ -59,7 +54,7 @@ func (s CoverageState) Severity() int {
 	}
 }
 
-// Title renders the state for the interface.
+// Title отображает состояние интерфейса.
 func (s CoverageState) Title() string {
 	switch s {
 	case CoverageNone:
@@ -77,7 +72,7 @@ func (s CoverageState) Title() string {
 	}
 }
 
-// VMCoverage is the protection status of one virtual machine.
+// VMCoverage — статус защиты одной ВМ.
 type VMCoverage struct {
 	ServerID   string        `json:"server_id"`
 	ServerName string        `json:"server_name"`
@@ -100,7 +95,7 @@ type VMCoverage struct {
 	SkippedDisks []model.SkippedDisk `json:"skipped_disks,omitempty"`
 }
 
-// CoverageSummary is the whole picture plus its counters.
+// CoverageSummary объединяет сведения о покрытии и итоговые счётчики.
 type CoverageSummary struct {
 	Items []VMCoverage `json:"items"`
 	// StaleAfterHours — порог, по которому копия считается устаревшей.
@@ -158,7 +153,7 @@ func (s *Server) handleCoverage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, summary)
 }
 
-// coverageForServer evaluates every VM of one connection.
+// coverageForServer вычисляет каждую ВМ одного соединения.
 func (s *Server) coverageForServer(ctx context.Context, srv *model.Server, staleHours int) ([]VMCoverage, error) {
 	vms, err := s.store.ListVMs(ctx, srv.ID)
 	if err != nil {
@@ -221,7 +216,7 @@ func (s *Server) coverageForServer(ctx context.Context, srv *model.Server, stale
 	return out, nil
 }
 
-// classify decides how protected a VM is and says why in one sentence.
+// Классификация определяет, насколько защищена ВМ, и говорит почему в одном предложении.
 
 func classify(item VMCoverage, staleBefore time.Time, staleHours int, locations ...*time.Location) (CoverageState, string) {
 	loc := time.UTC
@@ -262,10 +257,10 @@ func classify(item VMCoverage, staleBefore time.Time, staleHours int, locations 
 	}
 }
 
-// jobsCovering returns the names of enabled jobs whose selector matches a VM.
+// jobsCovering возвращает имена включенных заданий, селектор которых соответствует ВМ.
 //
-// The rules mirror the job preview exactly; they have to, or an operator would
-// see a VM listed as covered on one screen and uncovered on another.
+// Используем те же правила, что и предпросмотр задания, чтобы оба экрана одинаково
+// определяли покрытие ВМ.
 func jobsCovering(jobs []*model.BackupJob, vm *model.VM) []string {
 	var names []string
 	for _, job := range jobs {

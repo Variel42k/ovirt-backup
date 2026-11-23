@@ -18,15 +18,11 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/store"
 )
 
-// Remediator performs the corrective actions — the "оживление" half of the
-// service.
+// Remediator выполняет действия по восстановлению.
 //
-// Every decision it makes is written down, including the ones it declines, so
-// that "why did nothing happen at 4am" has an answer. Three gates stand between
-// a detected problem and an action: the action class must be permitted, the
-// object must not have been acted on too recently (cooldown), and it must not
-// have exhausted its hourly attempt budget. Anything that fails a gate is
-// recorded as skipped with the reason.
+// Записываем каждое решение, в том числе пропущенные действия. Класс действия должен быть
+// разрешён, минимальная пауза после предыдущего действия должна истечь, а часовой лимит
+// попыток не должен быть исчерпан. При отказе указываем точную причину.
 type Remediator struct {
 	store   *store.Store
 	pool    *ovirt.Pool
@@ -36,17 +32,15 @@ type Remediator struct {
 	bus     *events.Bus
 	log     zerolog.Logger
 
-	// dryRun is switched at runtime, so it is read on every decision rather
-	// than taken from the config. Restarting the service to leave check mode
-	// would mean a gap in monitoring at exactly the moment the operator has
-	// decided the automation should start acting.
+	// dryRun меняется без перезапуска и считывается при каждом решении. Перезапуск при
+	// смене режима прервал бы мониторинг именно в момент включения реальных действий.
 	dryRun atomic.Bool
-	// periodID identifies the mode period the current decisions belong to; the
-	// archive built when the period closes is assembled from its time window.
+	// periodID идентифицирует период режима, к которому относятся текущие решения; архив,
+	// построенный при закрытии периода, собирается из его временного окна.
 	periodID atomic.Value
 }
 
-// NewRemediator builds the auto-revive engine.
+// NewRemediator постройте автоматический движок.
 func NewRemediator(st *store.Store, pool *ovirt.Pool, libvirtPool *libvirtx.Pool,
 	cfg config.RemediationConfig, bus *events.Bus, log zerolog.Logger) *Remediator {
 	r := &Remediator{store: st, pool: pool, libvirt: libvirtPool, cfg: cfg, bus: bus, log: log}
@@ -55,27 +49,26 @@ func NewRemediator(st *store.Store, pool *ovirt.Pool, libvirtPool *libvirtx.Pool
 	return r
 }
 
-// SetProxmoxPool adds the Proxmox management driver while preserving the
-// constructor used by existing integrations.
+// SetProxmoxPool добавляет драйвер Proxmox управления, сохраняя конструктор, используемый
+// существующими интеграциями.
 func (r *Remediator) SetProxmoxPool(pool *proxmox.Pool) { r.proxmox = pool }
 
-// SetMode switches between check and live mode at runtime.
+// SetMode переключается между проверочным и живым режимом во время выполнения.
 func (r *Remediator) SetMode(dryRun bool, periodID string) {
 	r.dryRun.Store(dryRun)
 	r.periodID.Store(periodID)
 }
 
-// DryRun reports whether decisions are currently being recorded instead of
-// performed.
+// DryRun показывает, включён ли режим записи решений без выполнения действий.
 func (r *Remediator) DryRun() bool { return r.dryRun.Load() }
 
-// PeriodID returns the mode period decisions are currently attributed to.
+// PeriodID возвращает время, в течение которого принимаются решения.
 func (r *Remediator) PeriodID() string {
 	id, _ := r.periodID.Load().(string)
 	return id
 }
 
-// Situation is a detected problem and the action proposed for it.
+// Situation — обнаруженная проблема и предлагаемое для нее действие.
 type Situation struct {
 	ServerID   string
 	Scope      model.Scope
@@ -90,8 +83,8 @@ type Situation struct {
 	Force bool
 }
 
-// Consider evaluates a situation and, if all gates pass, performs the action.
-// It returns the record written for this decision.
+// Рассматривает оценивает ситуацию и, если все ворота проходят, выполняет действие.
+// Он возвращает запись, написанную для этого решения.
 func (r *Remediator) Consider(ctx context.Context, sit Situation) (*model.RemediationRecord, error) {
 	if sit.TriggeredBy == "" {
 		sit.TriggeredBy = "monitor"
@@ -168,11 +161,9 @@ func (r *Remediator) Consider(ctx context.Context, sit Situation) (*model.Remedi
 		if err := r.store.RecordRemediation(ctx, record); err != nil {
 			r.log.Warn().Err(err).Msg("не удалось записать пропущенное действие")
 		}
-		// In check mode a skip is as interesting as an action: the operator is
-		// deciding whether to trust the automation, and "it wanted to act but
-		// the policy stopped it" is exactly the kind of thing that has to be
-		// visible. Outside check mode the same line would be noise at every
-		// poll, so it stays at debug level there.
+		// В режиме проверки оператору важно видеть, какие действия остановила политика. В
+		// рабочем режиме такое решение пишется на уровне debug, чтобы не засорять журнал
+		// при каждом опросе.
 		if dryRun {
 			r.decisionLog(sit, record).
 				Str("исход", "пропущено").
@@ -239,13 +230,11 @@ func (r *Remediator) Consider(ctx context.Context, sit Situation) (*model.Remedi
 	return record, execErr
 }
 
-// decisionLog builds the log entry for one decision in check mode.
+// decisionLog строит запись журнала для одного решения в режиме проверки.
 //
-// Check mode exists so an operator can judge the automation before letting it
-// act, and a judgement needs the whole picture: which object, on which
-// connection, what the automation saw, what it proposed, and which attempt this
-// would be against the hourly budget. The normal mode logs a shorter line
-// because it repeats at every poll; here the verbosity is the point.
+// Режим проверки записывает объект, подключение, наблюдаемое состояние, предложенное
+// действие и номер попытки относительно часового лимита. В рабочем режиме запись короче,
+// поскольку она появляется при каждом опросе.
 func (r *Remediator) decisionLog(sit Situation, record *model.RemediationRecord) *zerolog.Event {
 	event := r.log.Debug().
 		Str("режим", "проверка").
@@ -269,8 +258,8 @@ func (r *Remediator) decisionLog(sit Situation, record *model.RemediationRecord)
 	return event
 }
 
-// describeEffect spells out what the action would have done, so the log answers
-// "and what would that have meant" without the reader having to know the code.
+// describeEffect поясняет, что сделал бы монитор, чтобы оператор мог понять запись в журнале
+// без чтения кода.
 func (r *Remediator) describeEffect(sit Situation) string {
 	switch sit.Action {
 	case model.ActionVMStart:
@@ -290,13 +279,14 @@ func (r *Remediator) describeEffect(sit Situation) string {
 	}
 }
 
-// gate returns a non-empty reason when the action must not be performed.
+// gate возвращает непустую причину, когда действие не должно быть исполнено.
 func (r *Remediator) gate(ctx context.Context, sit Situation) (string, error) {
 	if (sit.TriggeredBy == "monitor" || sit.TriggeredBy == "cluster-recovery") && !r.cfg.Enabled {
 		return "автоматическое восстановление выключено в настройках", nil
 	}
 
-	// Cluster recovery has its own explicit, permission-checked reset opt-in.
+	// Восстановление кластера имеет свою собственную явную, проверенную разрешением опцию
+	// сброса.
 	if sit.TriggeredBy != "cluster-recovery" && !r.actionAllowed(sit) {
 		return fmt.Sprintf("действие «%s» не разрешено политикой", sit.Action.Title()), nil
 	}
@@ -334,8 +324,8 @@ func (r *Remediator) gate(ctx context.Context, sit Situation) (string, error) {
 		}
 	}
 
-	// Some connectors do not implement host maintenance or fencing. Recording
-	// that as a skip is more useful than letting the attempt fail later.
+	// Некоторые разъемы не реализуют режим обслуживания хоста или ограждения. Запись этого
+	// в качестве пропуска более полезна, чем позволить попытке потерпеть неудачу позже.
 	if srv, err := r.store.GetServer(ctx, sit.ServerID); err == nil && !srv.Kind.SupportsHostManagement() {
 		switch sit.Action {
 		case model.ActionHostActivate, model.ActionHostFence:
@@ -343,8 +333,8 @@ func (r *Remediator) gate(ctx context.Context, sit Situation) (string, error) {
 		}
 	}
 
-	// A human asking for an action explicitly has already made the judgement
-	// call that the rate limits exist to make on their behalf.
+	// Человек, который просит о действии, уже сделал суждение о том, что существуют пределы
+	// ставок, чтобы сделать от их имени.
 	if sit.Force {
 		return "", nil
 	}
@@ -367,9 +357,8 @@ func (r *Remediator) gate(ctx context.Context, sit Situation) (string, error) {
 			return "", err
 		}
 		if attempts >= r.cfg.MaxAttemptsPerHour {
-			// Something that needed reviving three times in an hour is broken
-			// in a way restarting will not fix; escalating to a human is the
-			// correct behaviour.
+			// Если объект пришлось восстанавливать трижды за час, перезапуск не решает
+			// проблему. Дальше нужно вмешательство оператора.
 			return fmt.Sprintf("исчерпан лимит попыток: %d за час", attempts), nil
 		}
 	}
@@ -387,8 +376,8 @@ func (r *Remediator) allowed(action model.RemediationAction) bool {
 	case model.ActionHostFence:
 		return r.cfg.AllowHostFence
 	case model.ActionVMReset:
-		// A reset is as destructive to the guest as a fence is to the host and
-		// is never taken automatically.
+		// Сброс прерывает работу гостя так же, как фенсинг прерывает работу хоста.
+		// Автоматически его не выполняем.
 		return false
 	case model.ActionReconnect:
 		return true
@@ -422,8 +411,8 @@ func (r *Remediator) execute(ctx context.Context, sit Situation) error {
 
 	switch sit.Action {
 	case model.ActionVMStart, model.ActionVMUnpause:
-		// oVirt resumes a paused VM through the same call that boots a stopped
-		// one, so both situations share an implementation.
+		// oVirt возобновляет приостановленную ВМ через тот же вызов, который загружает
+		// остановленную машину, так что обе ситуации разделяют реализацию.
 		if err := client.StartVM(opCtx, sit.ObjectID); err != nil {
 			return err
 		}

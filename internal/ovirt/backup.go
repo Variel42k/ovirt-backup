@@ -13,24 +13,23 @@ import (
 // случай от сетевых ошибок и 409.
 var ErrBackupFailed = errors.New("движок перевёл бэкап в состояние failed")
 
-// The oVirt Backup API (4.4+) is the mechanism behind hot, incremental
-// backups. The flow is:
+// Backup API в oVirt 4.4 и новее поддерживает горячие инкрементальные бэкапы.
+// Последовательность вызовов приведена ниже.
 //
-//  1. POST /vms/{vm}/backups with the disks and, for an incremental run, the
-//     checkpoint to diff against. The engine freezes a point in time.
-//  2. Poll until phase == "ready". At that point to_checkpoint_id names the
-//     checkpoint this backup establishes.
-//  3. For each disk, open an image transfer that references the backup, and
-//     read the data (all extents for a full run, only dirty ones otherwise).
-//  4. POST .../finalize. Until this happens the disks stay locked, so it must
-//     run even when the transfer failed.
+//   1. POST /vms/{vm}/backups передаёт список дисков и опорный checkpoint для инкремента.
+//      Движок фиксирует точку во времени.
+//   2. Ждём phase == "ready". В to_checkpoint_id находится идентификатор нового checkpoint.
+//   3. Открываем передачи со ссылкой на бэкап. Для полного бэкапа читаем все диапазоны, для
+//      инкремента — изменённые.
+//   4. POST .../finalize снимает блокировку дисков. Вызываем его и после ошибки передачи.
 
-// StartBackup asks the engine to open a backup for the given disks.
-// fromCheckpointID selects the incremental base; an empty value means full.
+// StartBackup запрашивает у движка открытие бэкапа выбранных дисков.
+// fromCheckpointID выбирает опорный checkpoint для инкремента. Пустое значение означает
+// полный бэкап.
 //
-// When the engine accepted the request but the answer did not decode cleanly,
-// the error comes back together with the backup whose ID is known: the engine
-// already holds the disks, and the caller must still finalize it.
+// Если движок принял запрос, но ответ не разобрался, возвращаем ошибку вместе с бэкапом,
+// чей идентификатор удалось прочитать. Диски уже могут быть заблокированы, поэтому бэкап
+// всё равно нужно завершить.
 //
 // requireConsistency передаёт движку require_consistency=true. Движок (4.4+)
 // замораживает гостя сам — только на момент фиксации точки, после подготовки
@@ -63,8 +62,8 @@ func (c *Client) StartBackup(ctx context.Context, vmID string, diskIDs []string,
 
 	var backup Backup
 	if err := c.post(ctx, "/vms/"+vmID+"/backups", body, &backup, opts...); err != nil {
-		// encoding/json fills every field it can before reporting a type
-		// mismatch, so the ID survives a single badly typed field.
+		// encoding/json заполняет доступные поля до сообщения о несовместимости типов.
+		// Ошибка типа в другом поле не мешает получить ID.
 		if backup.ID != "" {
 			return &backup, err
 		}
@@ -73,7 +72,7 @@ func (c *Client) StartBackup(ctx context.Context, vmID string, diskIDs []string,
 	return &backup, nil
 }
 
-// GetBackup reads the current state of a backup.
+// GetBackup читает текущее состояние бэкапа.
 func (c *Client) GetBackup(ctx context.Context, vmID, backupID string) (*Backup, error) {
 	var backup Backup
 	if err := c.get(ctx, "/vms/"+vmID+"/backups/"+backupID, &backup); err != nil {
@@ -99,8 +98,8 @@ func (c *Client) BackupDiskModes(ctx context.Context, vmID, backupID string) (ma
 	return modes, nil
 }
 
-// ListBackups returns the backups the engine still tracks for a VM. Leftovers
-// here are what a crashed run leaves behind.
+// ListBackups возвращает бэкапы ВМ, которые ещё учитывает движок, в том числе оставшиеся
+// после сбоя.
 func (c *Client) ListBackups(ctx context.Context, vmID string) ([]Backup, error) {
 	var list backupList
 	if err := c.get(ctx, "/vms/"+vmID+"/backups", &list); err != nil {
@@ -109,7 +108,8 @@ func (c *Client) ListBackups(ctx context.Context, vmID string) ([]Backup, error)
 	return list.Backup, nil
 }
 
-// WaitBackupReady polls until the backup is ready to be read, or fails.
+// WaitBackupReady опрашивает состояние, пока бэкап не станет доступен для чтения или не
+// завершится ошибкой.
 func (c *Client) WaitBackupReady(ctx context.Context, vmID, backupID string, timeout time.Duration) (*Backup, error) {
 	deadline := time.Now().Add(timeout)
 	for {
@@ -123,7 +123,7 @@ func (c *Client) WaitBackupReady(ctx context.Context, vmID, backupID string, tim
 		case "failed":
 			return backup, fmt.Errorf("бэкап %s: %w", backupID, ErrBackupFailed)
 		case "succeeded":
-			// Already finalised by someone else; nothing left to read.
+			// Бэкап уже завершён другим процессом, читать больше нечего.
 			return backup, fmt.Errorf("бэкап %s уже завершён движком", backupID)
 		}
 		if time.Now().After(deadline) {
@@ -138,20 +138,12 @@ func (c *Client) WaitBackupReady(ctx context.Context, vmID, backupID string, tim
 	}
 }
 
-// BackupMarkerPrefix начинает описание каждого бэкапа, открытого службой.
-// По нему уборка узнаёт свой бэкап, даже если запуск не успел записать его
-// идентификатор: чужие бэкапы (другой системы копирования) не трогаются.
-const BackupMarkerPrefix = "jhvirt run "
+// BackupMarker описывает бэкап и связывает его с локальным запуском на случай потери ответа
+// с идентификатором движка.
+func BackupMarker(runID string) string { return "Backup run " + runID }
 
-// BackupMarker — описание бэкапа движка для запуска runID.
-func BackupMarker(runID string) string { return BackupMarkerPrefix + runID }
-
-// SnapshotMarkerPrefix начинает описание временного снапшота службы. По нему
-// уборка узнаёт брошенные снапшоты; чужие снапшоты она не трогает.
-const SnapshotMarkerPrefix = "jhvirt backup "
-
-// SnapshotMarker — описание временного снапшота для запуска runID.
-func SnapshotMarker(runID string) string { return SnapshotMarkerPrefix + runID }
+// SnapshotMarker формирует описание снапшота, созданного для локального запуска.
+func SnapshotMarker(runID string) string { return "Backup snapshot " + runID }
 
 // Open сообщает, что движок ещё держит бэкап: диски ВМ заблокированы, пока он
 // не завершён.
@@ -175,22 +167,22 @@ func (c *Client) ListImageTransfers(ctx context.Context) ([]ImageTransfer, error
 	return list.ImageTransfer, nil
 }
 
-// FinalizeBackup closes a backup and commits its checkpoint. It must be called
-// for every backup that reached "ready", including failed runs, otherwise the
-// VM's disks stay locked and no further backup can start.
+// FinalizeBackup завершает бэкап и фиксирует его checkpoint. Вызываем для всех бэкапов,
+// достигших "ready", включая завершившиеся ошибкой. Пока бэкап открыт, диски ВМ
+// заблокированы и запустить следующий нельзя.
 func (c *Client) FinalizeBackup(ctx context.Context, vmID, backupID string) error {
 	return c.post(ctx, "/vms/"+vmID+"/backups/"+backupID+"/finalize", struct{}{}, nil)
 }
 
-// WaitBackupFinalized polls until a finalised backup leaves the finalizing
-// phase, so the caller knows the disks are unlocked.
+// WaitBackupFinalized ждёт выхода бэкапа из finalizing, чтобы подтвердить снятие блокировки
+// дисков.
 func (c *Client) WaitBackupFinalized(ctx context.Context, vmID, backupID string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for {
 		backup, err := c.GetBackup(ctx, vmID, backupID)
 		if err != nil {
-			// The engine drops finished backups from the collection on some
-			// builds; a 404 here means it is done.
+			// Некоторые версии движка убирают завершившиеся бэкапы из списка. Ответ 404
+			// здесь означает, что бэкап уже завершился.
 			if IsNotFound(err) {
 				return nil
 			}
@@ -214,7 +206,7 @@ func (c *Client) WaitBackupFinalized(ctx context.Context, vmID, backupID string,
 	}
 }
 
-// ListCheckpoints returns the CBT checkpoints the engine keeps for a VM.
+// ListCheckpoints возвращает checkpoint CBT, которые движок хранит для ВМ.
 func (c *Client) ListCheckpoints(ctx context.Context, vmID string) ([]Checkpoint, error) {
 	var list checkpointList
 	if err := c.get(ctx, "/vms/"+vmID+"/checkpoints", &list); err != nil {
@@ -223,9 +215,9 @@ func (c *Client) ListCheckpoints(ctx context.Context, vmID string) ([]Checkpoint
 	return list.Checkpoint, nil
 }
 
-// HasCheckpoint reports whether a checkpoint is still known to the engine.
-// A missing checkpoint is why an incremental backup has to fall back to full:
-// the engine can no longer compute the delta.
+// HasCheckpoint проверяет, остался ли checkpoint в движке.
+// При отсутствии checkpoint движок больше не может вычислить изменения, поэтому требуется
+// полный бэкап.
 func (c *Client) HasCheckpoint(ctx context.Context, vmID, checkpointID string) (bool, error) {
 	if checkpointID == "" {
 		return false, nil
@@ -242,18 +234,17 @@ func (c *Client) HasCheckpoint(ctx context.Context, vmID, checkpointID string) (
 	return false, nil
 }
 
-// DeleteCheckpoint removes a checkpoint. Deleting the root of a chain
-// invalidates every incremental that depends on it, so callers must only do
-// this for checkpoints whose backups have already been pruned.
+// DeleteCheckpoint удаляет checkpoint. Удаление начала цепочки делает недоступными
+// зависимые инкременты. Удаляем только checkpoint, чьи бэкапы уже удалены по правилам
+// хранения.
 func (c *Client) DeleteCheckpoint(ctx context.Context, vmID, checkpointID string) error {
 	return c.del(ctx, "/vms/"+vmID+"/checkpoints/"+checkpointID)
 }
 
-// Snapshot-based backup, for disks and engines without changed block tracking.
+// Бэкап через снапшот для дисков и движков без отслеживания изменённых блоков.
 
-// CreateSnapshot takes a VM snapshot. persistMemory=false keeps it disk-only,
-// which is what a backup wants: including memory makes the operation much
-// slower and is not needed to get a consistent disk image.
+// CreateSnapshot создаёт снапшот ВМ. При persistMemory=false сохраняются только диски.
+// Сохранение памяти занимает больше времени и для согласованного образа диска не требуется.
 func (c *Client) CreateSnapshot(ctx context.Context, vmID, description string, persistMemory bool, diskIDs []string) (*Snapshot, error) {
 	body := map[string]any{
 		"description":         description,
@@ -274,7 +265,7 @@ func (c *Client) CreateSnapshot(ctx context.Context, vmID, description string, p
 	return &snap, nil
 }
 
-// GetSnapshot reads one snapshot.
+// GetSnapshot читает сведения об одном снапшоте.
 func (c *Client) GetSnapshot(ctx context.Context, vmID, snapshotID string) (*Snapshot, error) {
 	var snap Snapshot
 	if err := c.get(ctx, "/vms/"+vmID+"/snapshots/"+snapshotID, &snap); err != nil {
@@ -283,7 +274,7 @@ func (c *Client) GetSnapshot(ctx context.Context, vmID, snapshotID string) (*Sna
 	return &snap, nil
 }
 
-// WaitSnapshotReady polls until a snapshot leaves the locked state.
+// WaitSnapshotReady опрашивает снапшот до выхода из состояния locked.
 func (c *Client) WaitSnapshotReady(ctx context.Context, vmID, snapshotID string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for {
@@ -306,8 +297,8 @@ func (c *Client) WaitSnapshotReady(ctx context.Context, vmID, snapshotID string,
 	}
 }
 
-// ListSnapshotDisks returns the disks captured in a snapshot. The image_id of
-// each entry identifies the disk snapshot an image transfer must reference.
+// ListSnapshotDisks возвращает диски снапшота. Поле image_id идентифицирует снапшот диска
+// для передачи образа.
 func (c *Client) ListSnapshotDisks(ctx context.Context, vmID, snapshotID string) ([]Disk, error) {
 	var list diskList
 	if err := c.get(ctx, "/vms/"+vmID+"/snapshots/"+snapshotID+"/disks", &list); err != nil {
@@ -316,8 +307,8 @@ func (c *Client) ListSnapshotDisks(ctx context.Context, vmID, snapshotID string)
 	return list.Disk, nil
 }
 
-// ListSnapshots returns the snapshots of a VM, including the implicit "Active
-// VM" one the engine always reports.
+// ListSnapshots возвращает снапшоты ВМ, включая "Active VM", который движок добавляет
+// всегда.
 func (c *Client) ListSnapshots(ctx context.Context, vmID string) ([]Snapshot, error) {
 	var list snapshotList
 	if err := c.get(ctx, "/vms/"+vmID+"/snapshots", &list); err != nil {
@@ -326,16 +317,15 @@ func (c *Client) ListSnapshots(ctx context.Context, vmID string) ([]Snapshot, er
 	return list.Snapshot, nil
 }
 
-// DeleteSnapshot removes a snapshot and merges its data back. This is the
-// slow part of a snapshot-based backup and it runs on the hypervisor, so the
-// call returns long before the merge completes.
+// DeleteSnapshot запрашивает удаление снапшота со слиянием слоёв. Слияние выполняется на
+// гипервизоре и может продолжаться после возврата из вызова.
 func (c *Client) DeleteSnapshot(ctx context.Context, vmID, snapshotID string) error {
 	return c.del(ctx, "/vms/"+vmID+"/snapshots/"+snapshotID)
 }
 
-// DeleteSnapshotWhenReady retries the transient 409 returned while the engine
-// is still unlocking the VM after an image transfer. Other errors are not
-// hidden: authentication, connectivity and invalid IDs require intervention.
+// DeleteSnapshotWhenReady повторяет запрос при временном 409, пока движок снимает
+// блокировку после передачи образа. Ошибки аутентификации, связи и идентификаторов
+// возвращаются сразу.
 func (c *Client) DeleteSnapshotWhenReady(ctx context.Context, vmID, snapshotID string, timeout time.Duration) error {
 	return c.deleteSnapshotWhenReady(ctx, vmID, snapshotID, timeout, 5*time.Second)
 }
@@ -367,7 +357,7 @@ func retryConflict(ctx context.Context, timeout, interval time.Duration, operati
 	}
 }
 
-// WaitSnapshotGone polls until a deleted snapshot disappears from the VM.
+// WaitSnapshotGone опрашивает ВМ, пока удалённый снапшот не исчезнет из списка.
 func (c *Client) WaitSnapshotGone(ctx context.Context, vmID, snapshotID string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for {
@@ -390,9 +380,9 @@ func (c *Client) WaitSnapshotGone(ctx context.Context, vmID, snapshotID string, 
 	}
 }
 
-// ExportVMToOVA asks the engine to write an OVA of the VM onto a host's local
-// filesystem. Unlike the other backup types this produces a self-contained
-// artefact but requires space on the host and is the slowest option.
+// ExportVMToOVA запрашивает у движка запись OVA ВМ на локальную файловую систему хоста.
+// Такой экспорт самодостаточен, требует свободного места на хосте и занимает больше
+// времени.
 func (c *Client) ExportVMToOVA(ctx context.Context, vmID, hostID, directory, filename string) error {
 	body := map[string]any{
 		"host":      map[string]string{"id": hostID},
@@ -402,8 +392,8 @@ func (c *Client) ExportVMToOVA(ctx context.Context, vmID, hostID, directory, fil
 	return c.post(ctx, "/vms/"+vmID+"/exporttopathonhost", body, nil)
 }
 
-// VMConfiguration returns the engine's own OVF description of a VM, which is
-// what a configuration-only backup stores.
+// VMConfiguration возвращает описание ВМ в формате OVF движка. Оно сохраняется при бэкапе
+// только конфигурации.
 func (c *Client) VMConfiguration(ctx context.Context, vmID string) (string, error) {
 	q := url.Values{}
 	q.Set("follow", "disk_attachments.disk,nics,tags,graphics_consoles")

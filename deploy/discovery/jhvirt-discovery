@@ -1,9 +1,8 @@
 #!/bin/sh
 set -eu
 
-# This helper is intended for ForceCommand in authorized_keys. It only reads
-# process/service metadata and never accepts a path or shell fragment from the
-# caller.
+# Хелпер запускается принудительной командой из authorized_keys. Он читает
+# метаданные процессов и служб. Пути и команды от вызывающего не принимает.
 case "${SSH_ORIGINAL_COMMAND:-$*}" in
   ""|"probe"|"/usr/local/sbin/jhvirt-discovery probe") ;;
   *) echo '{"error":"unsupported command"}' >&2; exit 64 ;;

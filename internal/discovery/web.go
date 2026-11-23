@@ -72,9 +72,10 @@ func probeWebTarget(ctx context.Context, target webTarget, timeout time.Duration
 			return (&net.Dialer{Timeout: connectTimeout}).DialContext(ctx, network, dialAddress)
 		},
 		TLSHandshakeTimeout: timeout,
-		// Discovery connects by inventory IP before it knows the certificate
-		// name. The certificate is evidence, not a trust decision; no secrets or
-		// state-changing request are sent on this connection.
+		// Discovery соединяется посредством инвентаризации IP до того, как он узнает имя
+		// сертификата. Сертификат является доказательством, а не доверительным решением;
+		// никакие секреты или запросы на изменение состояния не отправляются по этому
+		// соединению.
 		TLSClientConfig: tlsConfig,
 	}
 	client := &http.Client{Transport: transport, Timeout: timeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}

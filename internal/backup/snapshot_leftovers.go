@@ -14,7 +14,7 @@ import (
 
 // Уборка брошенных временных снапшотов.
 //
-// Бэкап через снапшот создаёт снапшот «jhvirt backup <id запуска>», читает из
+// Бэкап через снапшот создаёт снапшот «Backup snapshot <id запуска>», читает из
 // него диски и удаляет его. Если служба упала или удаление не прошло, снапшот
 // остаётся: цепочка томов растёт, диск замедляется, а оценки объёма
 // занижаются, потому что движок считает занятым только верхний том.
@@ -29,6 +29,8 @@ import (
 // только что создать запуск, ещё не записанный в базу, или другая установка
 // службы, которая копирует ту же ВМ.
 const unknownSnapshotAge = 6 * time.Hour
+
+const legacySnapshotMarkerPrefix = "jhvirt backup "
 
 // snapshotWaitLimit — сколько бэкап ждёт конца операции со снапшотом.
 const snapshotWaitLimit = time.Hour
@@ -70,10 +72,9 @@ func leftoverSnapshot(s ovirt.Snapshot, runs []*model.BackupRun, now time.Time) 
 		for _, child := range runs {
 			diskPoint := child.Type == model.BackupFull || child.Type == model.BackupIncremental ||
 				child.Type == model.BackupDifferential || child.Type == model.BackupSnapshot
-			// A successful newer point for the same repository supersedes this
-			// engine-side base even when it starts a fresh chain or switches to
-			// block comparison. Matching the target is important: two repositories
-			// may intentionally maintain independent chains for the same VM.
+			// Более новая успешная точка в том же репозитории заменяет базу на движке, в
+			// том числе при создании новой цепочки или переходе на сравнение блоков. Для
+			// разных репозиториев одной ВМ цепочки могут быть независимыми.
 			newerSameTarget := child.StorageTargetID == r.StorageTargetID && child.CreatedAt.After(r.CreatedAt)
 			if diskPoint && !child.Deleted && (child.Status == model.RunSucceeded || child.Status == model.RunPartial) &&
 				(child.ParentRunID == r.ID || newerSameTarget) {
@@ -82,12 +83,20 @@ func leftoverSnapshot(s ovirt.Snapshot, runs []*model.BackupRun, now time.Time) 
 		}
 		return true
 	}
-	// Снапшот записан за запуском — самый надёжный признак: так служба узнаёт
-	// и снапшот, который движок создал под бэкап со своим описанием.
+	// Записанный ID имеет приоритет. При потере ответа снапшот можно
+	// опознать по точному описанию известного запуска.
+	var matched *model.BackupRun
 	for _, r := range runs {
-		if r.SnapshotID == "" || r.SnapshotID != s.ID {
-			continue
+		if r.SnapshotID != "" && r.SnapshotID == s.ID {
+			matched = r
+			break
 		}
+		if s.Description == ovirt.SnapshotMarker(r.ID) {
+			matched = r
+		}
+	}
+	if matched != nil {
+		r := matched
 		switch {
 		case active(r):
 			return r.ID, snapshotLive, "запуск ещё идёт"
@@ -96,12 +105,13 @@ func leftoverSnapshot(s ovirt.Snapshot, runs []*model.BackupRun, now time.Time) 
 		case busy:
 			return r.ID, snapshotBusy, busyWhy
 		}
-		return r.ID, snapshotRemove, "снапшот записан за завершённым запуском"
+		return r.ID, snapshotRemove, "снапшот завершённого запуска"
 	}
-	if !strings.HasPrefix(s.Description, ovirt.SnapshotMarkerPrefix) {
+	suffix, ok := strings.CutPrefix(s.Description, legacySnapshotMarkerPrefix)
+	if !ok {
 		return "", snapshotNotOurs, "снапшот не службы"
 	}
-	owner = strings.TrimSpace(strings.TrimPrefix(s.Description, ovirt.SnapshotMarkerPrefix))
+	owner = strings.TrimSpace(suffix)
 	if owner == "" || strings.ContainsAny(owner, " 	") {
 		return "", snapshotNotOurs, "описание похоже на метку службы, но не содержит запуска"
 	}
@@ -129,11 +139,11 @@ func leftoverSnapshot(s ovirt.Snapshot, runs []*model.BackupRun, now time.Time) 
 	return owner, snapshotRemove, "запуска нет в базе, снапшот старше " + unknownSnapshotAge.String()
 }
 
-// transferRefsForSnapshot returns every identifier with which oVirt may link
-// an ImageTransfer to a VM snapshot. In 4.3 transfer.snapshot.id is usually
-// the image_id of a disk volume, not the UUID returned by /vms/.../snapshots.
-// Comparing only the latter used to hide our abandoned transfer from cleanup,
-// leaving the disk locked indefinitely.
+// transferRefsForSnapshot возвращает каждый идентификатор, с которым oVirt может
+// связываться ImageTransfer со снимком ВМ. В 4.3 transfer.snapshot.id обычно является
+// image_id дискового тома, а не UUID, возвращаемого /vms/.../snapshots.
+// Сравнивая только последний используется, чтобы скрыть наш заброшенный перевод от очистки,
+// оставляя диск заблокирован на неопределенный срок.
 func transferRefsForSnapshot(ctx context.Context, client *ovirt.Client, vmID string, s ovirt.Snapshot) map[string]struct{} {
 	refs := map[string]struct{}{s.ID: {}}
 	disks, err := client.ListSnapshotDisks(ctx, vmID, s.ID)
@@ -154,12 +164,10 @@ func transferMatchesRefs(t ovirt.ImageTransfer, refs map[string]struct{}) bool {
 	return bySnapshot || byImage
 }
 
-// releaseLegacyTransferLeftovers cancels imageio tickets left by completed
-// snapshot runs before a new snapshot is created. This is especially
-// important on oVirt 4.3: it does not support timeout_policy=cancel, and a
-// paused or half-open ticket can keep the disk locked after the service was
-// restarted. Only tickets tied to a snapshot that is provably ours are
-// touched; unknown transfers are left for the administrator.
+// releaseLegacyTransferLeftovers перед созданием снапшота отменяет передачи ImageIO,
+// оставшиеся от завершённых запусков. На oVirt 4.3 нет timeout_policy=cancel, поэтому
+// приостановленная или незакрытая передача может удерживать диск после перезапуска.
+// Отменяем только передачи, для которых подтверждена принадлежность снапшота.
 func (e *Engine) releaseLegacyTransferLeftovers(ctx context.Context, client *ovirt.Client,
 	srv *model.Server, vm *model.VM, run *model.BackupRun, diskIDs []string) error {
 

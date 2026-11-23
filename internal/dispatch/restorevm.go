@@ -18,8 +18,8 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/store"
 )
 
-// PlanRestoreVM routes full-VM planning to the target platform. The embedded
-// engine retains the oVirt path; libvirt adds live pool/network validation.
+// PlanRestoreVM маршрутизирует планирование полностью ВМ к целевой платформе. Встроенный
+// движок сохраняет путь oVirt; libvirt добавляет валидацию живого пула/сети.
 func (d *Dispatcher) PlanRestoreVM(ctx context.Context, req *model.RestoreVMRequest) (*model.RestoreVMPlan, error) {
 	target, err := d.restoreTargetServer(ctx, req)
 	if err != nil {
@@ -111,7 +111,7 @@ func (d *Dispatcher) planLibvirtRestoreVM(ctx context.Context, req *model.Restor
 	return plan, nil
 }
 
-// RestoreVM executes a full restore on the target platform.
+// RestoreVM выполняет полное восстановление на целевой платформе.
 func (d *Dispatcher) RestoreVM(ctx context.Context, req *model.RestoreVMRequest) (*backup.RestoreVMResult, error) {
 	target, err := d.restoreTargetServer(ctx, req)
 	if err != nil {

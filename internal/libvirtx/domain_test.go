@@ -200,9 +200,9 @@ func TestCheckpointXML(t *testing.T) {
 	}
 }
 
-// A raw disk cannot hold a persistent bitmap, and libvirt rejects the whole
-// checkpoint — and with it the whole backup — if asked for one. Every disk of
-// the backup has to be named explicitly, the raw ones as checkpoint='no'.
+// Диск raw не хранит постоянную битовую карту. libvirt отклонит попытку создать для него
+// checkpoint вместе с бэкапом. Все диски перечисляем явно, а для raw задаём
+// checkpoint='no'.
 func TestCheckpointExcludesDisksWithoutBitmaps(t *testing.T) {
 	spec := CheckpointSpec{
 		Name: "jhv-mixed",
@@ -226,9 +226,8 @@ func TestCheckpointExcludesDisksWithoutBitmaps(t *testing.T) {
 	}
 }
 
-// A checkpoint where nothing can be bitmapped is not a checkpoint. Asking
-// libvirt for one would fail; refusing early lets the caller fall back to a
-// plain full backup, which is what a raw-only VM needs.
+// Если ни один диск не поддерживает битовые карты, checkpoint не создаём. Ранний отказ
+// позволяет выполнить обычный полный бэкап ВМ с одними raw-дисками.
 func TestCheckpointWithoutAnyBitmapIsRejected(t *testing.T) {
 	spec := CheckpointSpec{
 		Name:  "jhv-raw",

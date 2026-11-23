@@ -19,7 +19,7 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/store"
 )
 
-// jobPayload is the write shape of a backup job.
+// jobPayload описывает поля запроса для записи задания бэкапа.
 type jobPayload struct {
 	Name     string `json:"name"`
 	Enabled  *bool  `json:"enabled"`
@@ -380,8 +380,7 @@ func (s *Server) handleRunJob(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handlePreviewJob shows which VMs a job's selector currently matches, so an
-// operator can see the effect of a filter before saving it.
+// handlePreviewJob показывает ВМ, отобранные фильтром задания, до его сохранения.
 func (s *Server) handlePreviewJob(w http.ResponseWriter, r *http.Request) {
 	job, err := s.store.GetBackupJob(r.Context(), r.PathValue("id"))
 	if err != nil {
@@ -417,7 +416,7 @@ func (s *Server) handlePreviewJob(w http.ResponseWriter, r *http.Request) {
 	writeList(w, out)
 }
 
-// adHocRequest starts one backup outside any job.
+// adHocRequest запускает разовый бэкап вне заданий.
 type adHocRequest struct {
 	ServerID              string `json:"server_id"`
 	VMID                  string `json:"vm_id"`
@@ -640,8 +639,8 @@ func (s *Server) handleAdHocBackup(w http.ResponseWriter, r *http.Request) {
 
 	s.audit(r, "backup.run", model.ScopeVM, req.VMID, true, req.Type)
 
-	// The run outlives this request: a full backup takes hours, and the client
-	// must not have to hold a connection open for it.
+	// Запуск переживает этот запрос: полная резервная копия занимает несколько часов, и
+	// клиент не должен держать соединение открытым для него.
 	//
 	// Через планировщик, а не напрямую в движок: он держит предел
 	// backup.workers, регистрирует запуск как отменяемый и сам выполняет
@@ -701,8 +700,8 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, run)
 }
 
-// handleRunChain returns the chain a restore point depends on, which is what
-// the UI shows before a restore so the operator can see what has to be intact.
+// handleRunChain возвращает цепь, от которой зависит точка восстановления, что и показывает
+// UI перед восстановлением, чтобы оператор мог видеть то, что должно быть неповрежденным.
 // handleRunEvents отдаёт хронологию запуска: что и когда делала служба.
 //
 // Отдельным запросом, а не полем точки: список копий читают все страницы, а
@@ -861,7 +860,7 @@ func (s *Server) handleCancelRun(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "cancelling"})
 }
 
-// verifyRequest picks how deeply to check a stored backup.
+// verifyRequest выбирает, насколько глубоко проверить сохраненную резервную копию.
 type verifyRequest struct {
 	Mode   string `json:"mode"`
 	CopyID string `json:"copy_id"`
@@ -920,9 +919,9 @@ func (s *Server) handleVerifyRun(w http.ResponseWriter, r *http.Request) {
 		TriggeredBy: model.VerifyTriggerManual,
 	}
 
-	// The boot test starts a copy of a real system. Refusing an unusable
-	// request now is better than reporting the failure ten minutes later,
-	// after the image has already been streamed to the hypervisor.
+	// Тест запуска ВМ запускает копию реальной системы. Отказаться от непригодного запроса
+	// сейчас лучше, чем сообщить о сбое через десять минут, после того, как образ уже было
+	// передано в гипервизор.
 	if mode.NeedsHypervisor() {
 		run, err := s.store.GetBackupRun(r.Context(), id)
 		if err != nil {
@@ -935,8 +934,8 @@ func (s *Server) handleVerifyRun(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Quick checks answer in a moment, so they run inline and the operator
-	// gets the verdict straight away. The heavy modes go to the background.
+	// Быстрые проверки отвечают через мгновение, поэтому они запускаются в линию, и
+	// оператор сразу же получает вердикт. Тяжёлые режимы отходят на второй план.
 	if mode == model.VerifyQuick || mode == model.VerifyChain {
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
 		defer cancel()
@@ -948,8 +947,8 @@ func (s *Server) handleVerifyRun(w http.ResponseWriter, r *http.Request) {
 		}
 		s.audit(r, "backup.verify", model.ScopeBackup, id, err == nil, string(mode))
 		if err != nil {
-			// A failed verification is a valid answer, not a broken request:
-			// return the record with its details.
+			// Неудачная проверка — правильный ответ, а не неработающий запрос: верните
+			// запись с ее деталями.
 			writeJSON(w, http.StatusOK, record)
 			return
 		}
@@ -984,13 +983,12 @@ func knownVerifyMode(want model.VerifyMode) bool {
 	return false
 }
 
-// validateBootOptions resolves and validates the hypervisor a boot test will
-// run on, filling opts.BootHostID when the operator did not name one.
+// validateBootOptions разрешает и проверяет гипервизор, на котором будет запущен тест
+// запуска ВМ, заполняя opts.BootHostID, когда оператор не назвал его.
 //
-// The default only applies when the backup itself came from a libvirt host:
-// then "boot it back where it came from" is what the operator means. For an
-// oVirt backup there is no such answer — the engine cannot start a foreign
-// image — so the request is refused with the list of hosts that would work.
+// Исходный хост выбирается по умолчанию только для бэкапа с libvirt. Движок oVirt не может
+// запустить произвольный образ на исходном хосте, поэтому для такого бэкапа возвращаем
+// ошибку со списком подходящих хостов.
 func (s *Server) validateBootOptions(ctx context.Context, sourceServerID string, backupType model.BackupType, opts *model.VerifyOptions) error {
 	if backupType == model.BackupConfig || backupType == model.BackupOVA {
 		return badRequest("пробный запуск недоступен для типа бэкапа %q: он не содержит восстанавливаемого образа диска", backupType)
@@ -1032,8 +1030,8 @@ func (s *Server) validateBootOptions(ctx context.Context, sourceServerID string,
 	return nil
 }
 
-// bootHostHint names the connections a boot test could use, so the error tells
-// the operator what to pick instead of only what went wrong.
+// bootHostHint называет соединения, которые может использовать тест запуска ВМ, поэтому
+// ошибка указывает оператору, что выбрать, а не только то, что пошло не так.
 func (s *Server) bootHostHint(ctx context.Context) string {
 	servers, err := s.store.ListServers(ctx)
 	if err != nil {
@@ -1070,7 +1068,7 @@ func (s *Server) handleGetVerification(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, item)
 }
 
-// restoreRequest describes a restore operation.
+// restoreRequest описывается операция восстановления.
 type restoreRequest struct {
 	CopyID         string   `json:"copy_id"`
 	Target         string   `json:"target"` // file | disk | new_disk
@@ -1101,8 +1099,8 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, badRequest("неизвестная цель восстановления: %q", req.Target))
 		return
 	}
-	// Writing into an existing disk destroys whatever is on it, including a
-	// running VM's data.
+	// Запись на существующий диск уничтожает все, что на нем находится, включая данные
+	// запущенной ВМ.
 	if target == model.RestoreToDisk && !req.Confirm {
 		s.writeError(w, r, badRequest(
 			"восстановление в существующий диск затрёт его содержимое и требует подтверждения (confirm=true)"))
@@ -1142,8 +1140,8 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		TriggeredBy:    actor,
 	}
 
-	// Validate the restore point before answering, so an impossible request
-	// fails immediately instead of in a background goroutine nobody watches.
+	// Перед ответом проверьте точку восстановления, так что невозможный запрос не
+	// выполняется немедленно, а не в фоне goroutine никто не смотрит.
 	set, err := s.engine.LoadChainCopy(r.Context(), id, req.CopyID)
 	if err != nil {
 		s.writeError(w, r, err)
@@ -1223,7 +1221,7 @@ func (s *Server) handleListRestores(w http.ResponseWriter, r *http.Request) {
 	writeList(w, items)
 }
 
-// queryList reads a comma-separated query parameter, dropping empty items.
+// queryList считывает разделенный запятой параметр запроса, сбрасывая пустые элементы.
 func queryList(r *http.Request, name string) []string {
 	var out []string
 	for _, value := range strings.Split(r.URL.Query().Get(name), ",") {
@@ -1243,7 +1241,7 @@ func (s *Server) handleGetRestore(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, item)
 }
 
-// retentionRequest evaluates a policy against a VM's stored backups.
+// retentionRequest оценивает политику в отношении хранимых резервных копий ВМ.
 type retentionRequest struct {
 	ServerID        string                `json:"server_id"`
 	VMID            string                `json:"vm_id"`
@@ -1328,9 +1326,8 @@ func (s *Server) evaluateRetention(r *http.Request, dryRun bool) (retention.Plan
 		req.ServerID, req.VMID, req.StorageTargetID, req.Policy, dryRun)
 }
 
-// handleBackupOptions returns the offered strategies for one VM, with the
-// reasoning behind each. This is the screen an operator lands on before
-// creating a job.
+// handleBackupOptions возвращает предлагаемые стратегии для одной ВМ с обоснованием каждой
+// из них. Это экран, на который приземляется оператор перед созданием задания.
 func (s *Server) handleBackupOptions(w http.ResponseWriter, r *http.Request) {
 	srv, err := s.store.GetServer(r.Context(), r.PathValue("id"))
 	if err != nil {
@@ -1359,7 +1356,7 @@ func (s *Server) handleBackupOptions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, rec)
 }
 
-// fillBackupStats adds the backup counters to a server summary.
+// fillBackupStats добавляет счётчики бэкапов в сводку сервера.
 func (s *Server) fillBackupStats(ctx context.Context, serverID string, summary *model.ServerSummary) error {
 	since := time.Now().Add(-24 * time.Hour)
 	runs, err := s.store.ListBackupRuns(ctx, store.RunFilter{
@@ -1378,8 +1375,8 @@ func (s *Server) fillBackupStats(ctx context.Context, serverID string, summary *
 		}
 	}
 
-	// "Protected" means a VM with at least one usable backup — the number an
-	// operator actually cares about when asked "are we covered".
+	// Статус "Protected" означает, что у ВМ есть хотя бы один пригодный бэкап. Считаем именно
+	// такие ВМ для оценки защищённости.
 	protected, err := s.store.ListBackupRuns(ctx, store.RunFilter{
 		ServerID: serverID,
 		Statuses: []model.RunStatus{model.RunSucceeded, model.RunPartial},

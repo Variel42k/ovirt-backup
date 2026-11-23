@@ -215,8 +215,8 @@ func (s *Service) recoveryAlert(t *model.VMTransfer, message string) {
 	_ = s.st.RaiseAlert(ctx, &model.Alert{ServerID: t.Request.SourceServerID, Scope: model.ScopeVM, ObjectID: t.Request.SourceVMID, ObjectName: t.SourceName, Kind: model.AlertMigrationRecovery, Severity: model.SeverityCritical, Message: message, Details: "Миграция " + t.ID})
 }
 
-// ReconcileRecovery runs only from the enabled management service. The session
-// lock and revision check also serialize it with other replicas and API actions.
+// ReconcileRecovery работает только при включённом управлении. Блокировка сеанса и проверка
+// ревизии согласуют её с другими репликами и действиями API.
 func (s *Service) ReconcileRecovery(ctx context.Context) error {
 	items, err := s.st.ListVMTransfers(ctx)
 	if err != nil {
@@ -269,7 +269,8 @@ func (s *Service) ReconcileRecovery(ctx context.Context) error {
 					t.RecoveryAttempts++
 				}
 				recoveryEvent(t, "attempt", fmt.Sprintf("Выполняется %s; повтор %d, откат %d", action, t.RecoveryAttempts, t.RollbackAttempts))
-				// startLocked checks the lease again after this short control lease.
+				// startLocked После этой короткой контрольной аренды вновь проверяется
+				// аренда.
 				lock.Release()
 				lock = nil
 				e = s.startLocked(t, action)
@@ -448,7 +449,7 @@ func (s *Service) recoverTarget(ctx context.Context, t *model.VMTransfer) error 
 	if err != nil {
 		return err
 	}
-	if v.Description != "jhvirt-transfer:"+t.ID || v.Cluster.ID != t.Request.ClusterID {
+	if !transferTargetOwned(t, v) || v.Cluster.ID != t.Request.ClusterID {
 		return fmt.Errorf("%w: не подтверждена принадлежность целевой ВМ", errUnsafeRecovery)
 	}
 	if v.Status == "down" {
@@ -476,7 +477,12 @@ func (s *Service) recoverTarget(ctx context.Context, t *model.VMTransfer) error 
 	return s.save(t)
 }
 
-// Used by rollback before any destructive request, including after a lost POST response.
+func transferTargetDescription(id string) string {
+	return "VM transfer " + id
+}
+
+// Используется методом отката перед любым деструктивным запросом, в том числе после
+// потерянного POST ответа.
 func transferTargetOwned(t *model.VMTransfer, v *ovirt.VM) bool {
-	return v.Description == "jhvirt-transfer:"+t.ID
+	return v.Description == transferTargetDescription(t.ID) || v.Description == "jhvirt-transfer:"+t.ID
 }

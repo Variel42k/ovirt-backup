@@ -38,7 +38,8 @@ const (
 	scopeRestore = "restore"
 )
 
-// scopeRule ties a purpose to the permission it needs and the roots it may show.
+// scopeRule привязывает цель к тому разрешению, которое ей нужно, и к тем корням, которые
+// она может показать.
 type scopeRule struct {
 	permission model.Permission
 	// roots получает запрос: у восстановления файлов набор областей зависит от
@@ -134,7 +135,7 @@ type browseResponse struct {
 	Hint  string `json:"hint,omitempty"`
 }
 
-// handleBrowse lists the directories inside one allowed root.
+// handleBrowse перечисляет каталоги внутри одного разрешенного корня.
 func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 	scope := r.URL.Query().Get("scope")
 	rule, ok := browseScopes()[scope]
@@ -186,8 +187,7 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 // выбора не должно висеть, пока сетевая папка не отвечает.
 const storageBrowseTimeout = 45 * time.Second
 
-// browseStorageRoot lists the directories of one level of a connected storage
-// for the picker.
+// browseStorageRoot перечисляет каталоги одного уровня подключенного хранилища для пикера.
 //
 // Каталоги читает само хранилище, теми же учётными данными, что и проверка
 // его доступности. Выйти за его корень путём нельзя: путь нормализуется от
@@ -234,8 +234,8 @@ func (s *Server) browseStorageRoot(ctx context.Context, roots []fsbrowse.Root, t
 	return listing, nil
 }
 
-// resolveBrowsable reports where a chosen path really is, refusing anything
-// outside the roots of its scope.
+// resolveBrowsable сообщает, где на самом деле находится избранный путь, отказываясь от
+// всего, что выходит за пределы его корней.
 //
 // Нужна затем, что выбор мышью не отменяет проверки при сохранении: форма — это
 // обычный HTTP-запрос, и отправить её можно с любым путём.

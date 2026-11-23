@@ -18,9 +18,8 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
-// local stores backups on a filesystem path. Anything mounted there works the
-// same way, which is how NFS and CIFS targets are supported without a separate
-// backend.
+// Локальное хранилище пишет копии в каталог файловой системы. На том же пути могут быть
+// смонтированы NFS или CIFS, и отдельная реализация для них не нужна.
 type local struct {
 	name string
 	root string
@@ -49,7 +48,7 @@ func newLocal(target *model.StorageTarget) (Backend, error) {
 	return &local{name: target.Name, root: root, dir: dir}, nil
 }
 
-// pathHint explains the most common mistake in a local storage path.
+// pathHint объясняет наиболее распространенную ошибку в локальном пути хранения.
 //
 // Путь трактуется внутри службы, а в установке из контейнера хостовый каталог
 // виден под другим именем: /srv/backups снаружи — это /backups внутри. Оператор
@@ -67,20 +66,16 @@ func pathHint(root string) string {
 		"Служба может писать в: %s", root, strings.Join(writable, ", "))
 }
 
-// WritableMounts lists mount roots that are writable themselves. It is kept
-// for validation hints and callers that really need to create an object at the
-// mount root.
+// WritableMounts перечислим горные корни, которые сами записывают. Он хранится для
+// подсказок проверки и клиентов этого интерфейса, которым действительно нужно создать
+// объект у корня монтирования.
 func WritableMounts() []string { return writableMounts() }
 
-// BrowsableStorageMounts lists non-system mount roots visible to the service.
+// BrowsableStorageMounts перечисляет несистемные корни монтирования, видимые службе.
 //
-// A storage mount root does not have to be writable itself. A common layout is
-// /storage owned by the storage subsystem with writable children such as
-// /storage/backups. Requiring a successful mkdir directly in /storage hides
-// exactly those useful mounts from the web picker. The picker already probes
-// every opened directory and only enables "choose" for writable paths, so it
-// is both safer and more useful to expose the readable mount root and let the
-// operator descend to a writable child.
+// Корень точки монтирования может быть доступен только на чтение. Например, каталог /storage
+// принадлежит подсистеме хранения, а копии можно писать в /storage/backups. Диалог
+// показывает читаемый корень и выбирает каталоги только после проверки записи.
 func BrowsableStorageMounts() []string {
 	raw, err := os.ReadFile("/proc/self/mountinfo")
 	if err != nil {
@@ -89,7 +84,8 @@ func BrowsableStorageMounts() []string {
 	return mountPointsFrom(raw, browsableDirectory)
 }
 
-// writableMounts lists mounted directories the service can actually write to.
+// writableMounts списки смонтированных каталогов, в которые служба может фактически
+// записывать.
 func writableMounts() []string {
 	raw, err := os.ReadFile("/proc/self/mountinfo")
 	if err != nil {
@@ -98,14 +94,14 @@ func writableMounts() []string {
 	return mountPointsFrom(raw, writableDirectory)
 }
 
-// mountPointsFrom parses Linux mountinfo and returns a deterministic, bounded
-// set of non-system mount points accepted by probe. Keeping parsing separate
-// makes the policy testable without depending on the test runner's mounts.
+// mountPointsFrom анализирует Linux mountinfo и возвращает детерминированный, ограниченный
+// набор несистемных точек монтирования, принятых зондом. Сохранение разбора отдельно делает
+// политику проверяемой без зависимости от креплений тестируемого бегуна.
 func mountPointsFrom(raw []byte, probe func(string) bool) []string {
 	seen := map[string]bool{}
 	var out []string
 	for _, line := range strings.Split(string(raw), "\n") {
-		// Fields before " - " describe the mount; field 5 is mount point.
+		// " - " Описаніе горныхъ полей. Поле 5 — точка монтирования.
 		parts := strings.SplitN(line, " - ", 2)
 		if len(parts) != 2 {
 			continue
@@ -125,9 +121,9 @@ func mountPointsFrom(raw []byte, probe func(string) bool) []string {
 		out = append(out, point)
 	}
 	sort.Strings(out)
-	// A container can have hundreds of implementation mounts. The system-path
-	// filter removes the usual noise; this final bound protects the API/UI from
-	// pathological mount namespaces without the old order-dependent "first 8".
+	// Контейнер может иметь сотни креплений реализации. Системно-патовый фильтр удаляет
+	// привычный шум; Эта конечная граница защищает API/UI от патологических пространств
+	// имен без зависимости от старого порядка "first 8".
 	if len(out) > 32 {
 		out = out[:32]
 	}
@@ -135,8 +131,9 @@ func mountPointsFrom(raw []byte, probe func(string) bool) []string {
 }
 
 func unescapeMountInfoField(value string) string {
-	// mountinfo escapes whitespace and backslash as octal sequences. strconv
-	// can decode those sequences when the field is treated as a quoted string.
+	// mountinfo удаляет пробелы и обратные слэши как восьмеричные последовательности.
+	// strconv может декодировать эти последовательности, когда поле обрабатывается как
+	// цитируемая строка.
 	unquoted, err := strconv.Unquote(`"` + strings.ReplaceAll(value, `"`, `\"`) + `"`)
 	if err != nil {
 		return value
@@ -167,8 +164,9 @@ func writableDirectory(path string) bool {
 	return true
 }
 
-// isSystemPath reports whether a mount point is a kernel/OS filesystem or one of
-// the service's own internal mounts — neither is a place to store backups.
+// isSystemPath сообщает, является ли точка монтирования файловой системой ядра/OS или одним
+// из собственных внутренних монтирований службы — ни то, ни другое не является местом для
+// хранения резервных копий.
 //
 // /app держит данные, конфигурацию и staging самой службы (secret.key, пароль
 // БД, каталоги восстановления): показывать его в выборе хранилища — это шум, а
@@ -191,8 +189,8 @@ func (l *local) Kind() model.StorageKind { return model.StorageLocal }
 func (l *local) Name() string            { return l.name }
 func (l *local) Close() error            { return l.dir.Close() }
 
-// key maps an object key to a relative OS path. os.Root performs the actual
-// traversal and keeps every operation beneath the opened repository root.
+// key сопоставляетъ предметъ key съ относительнымъ OS путемъ. os.Root выполняет фактический
+// обход и сохраняет каждую операцию под открытым корнем хранилища.
 func (l *local) key(key string) (string, error) {
 	raw := filepath.FromSlash(key)
 	if filepath.IsAbs(raw) || filepath.VolumeName(raw) != "" {
@@ -237,9 +235,8 @@ func (l *local) Put(ctx context.Context, key string, r io.Reader, size int64) (i
 		return 0, fmt.Errorf("создание каталога для %s: %w", key, err)
 	}
 
-	// Write to a temporary file and rename: a crash mid-write then leaves no
-	// object at all rather than a truncated one that verification would have
-	// to discover later.
+	// Запишите в временный файл и переименуйте: при сбое в середине записи не остается
+	// никакого объекта, а не усеченного, который проверка должна будет обнаружить позже.
 	tmpKey := filepath.Join(dir, ".jhv-"+uuid.NewString()+".tmp")
 	tmp, err := l.dir.OpenFile(tmpKey, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
@@ -404,7 +401,7 @@ func (l *local) List(ctx context.Context, prefix string) ([]ObjectInfo, error) {
 	}
 	base := clean
 	if fi, err := l.dir.Stat(clean); err != nil || !fi.IsDir() {
-		// The prefix may be a partial name rather than a directory.
+		// Префикс может быть частичным именем, а не каталогом.
 		base = filepath.Dir(clean)
 	}
 	if _, err := l.dir.Stat(base); errors.Is(err, fs.ErrNotExist) {
@@ -453,8 +450,8 @@ func (l *local) Usage(ctx context.Context) (int64, int64, error) {
 
 func (l *local) Check(ctx context.Context) error { return runCheck(ctx, l) }
 
-// pruneEmptyDirs walks up from dir removing empty directories, so a repository
-// does not accumulate an empty date tree after retention runs.
+// pruneEmptyDirs выходит из каталога, удаляя пустые каталоги, поэтому хранилище не
+// накапливает пустое дерево дат после запуска сохранения.
 func (l *local) pruneEmptyDirs(dir string) {
 	for {
 		if dir == "." || dir == "" {
@@ -471,7 +468,7 @@ func (l *local) pruneEmptyDirs(dir string) {
 	}
 }
 
-// sectionCloser bounds a reader while still closing the underlying file.
+// sectionCloser ограничивает читателя, все еще закрывая базовый файл.
 type sectionCloser struct {
 	io.Reader
 	closer io.Closer
@@ -481,8 +478,8 @@ func (s *sectionCloser) Close() error { return s.closer.Close() }
 
 func bytesReader(b []byte) io.Reader { return bytes.NewReader(b) }
 
-// contextReader aborts a copy when the context is cancelled, so a cancelled
-// backup does not keep writing to the repository.
+// contextReader прерывает копирование при отмене контекста, поэтому отмененная резервная
+// копия не продолжает запись в хранилище.
 func contextReader(ctx context.Context, r io.Reader) io.Reader {
 	return &ctxReader{ctx: ctx, r: r}
 }

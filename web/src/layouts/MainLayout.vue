@@ -61,7 +61,6 @@ const allLinks = [
   { name: 'backups', label: 'Точки восстановления', icon: 'backup', perm: 'backups.read', group: 'Защита данных' },
   { name: 'verify', label: 'Проверка ВМ', icon: 'fact_check', perm: 'backups.read', group: 'Защита данных' },
   { name: 'image-import', label: 'ВМ из образа', icon: 'upload_file', perm: 'backups.read', group: 'Защита данных' },
-  { name: 'gitlab-clean', label: 'Очистка GitLab', icon: 'cleaning_services', perm: 'servers.read', group: 'Защита данных' },
   { name: 'coverage', label: 'Покрытие защитой', icon: 'shield', perm: 'monitoring.read', group: 'Защита данных' },
   { name: 'retention', label: 'Правила хранения', icon: 'auto_delete', perm: 'backups.read', group: 'Защита данных' },
   { name: 'engine-config', label: 'Конфигурация Engine', icon: 'account_tree', perm: 'engine_config.read', group: 'Защита данных' },
@@ -140,8 +139,8 @@ function connectLive() {
     void app.reloadMeta()
   }
   source.addEventListener('settings.changed', reloadRuntimeSettings)
-  // Accept events from servers predating the public settings.changed name
-  // while a rolling update still has mixed application versions.
+  // Во время поэтапного обновления принимаем и события от серверов, выпущенных до появления
+  // имени settings.changed.
   source.addEventListener('settings', reloadRuntimeSettings)
 }
 

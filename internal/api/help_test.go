@@ -7,9 +7,7 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
-// A reference that quietly falls behind the code is worse than none: it teaches
-// the operator to distrust it. Adding a backup type without explaining it is
-// exactly how that starts, so the test fails instead.
+// Тест требует описать каждый тип бэкапа, чтобы справочник не отставал от кода.
 func TestEveryBackupTypeIsDocumented(t *testing.T) {
 	documented := map[string]backupTypeHelp{}
 	for _, entry := range backupTypeHelpEntries() {
@@ -45,7 +43,7 @@ func TestEveryBackupTypeIsDocumented(t *testing.T) {
 	}
 }
 
-// A "see also" pointing at nothing is a dead end in the UI.
+// А "see also" указывая ни на что, — тупик в UI.
 func TestRelatedArticlesExist(t *testing.T) {
 	known := map[string]bool{}
 	for _, a := range helpArticles() {
@@ -61,7 +59,7 @@ func TestRelatedArticlesExist(t *testing.T) {
 	}
 }
 
-// Blocks are rendered by kind; an unknown kind would silently disappear.
+// Блоки выдаются натурой; Неизвестный вид тихо исчезнет.
 func TestArticleBlocksAreRenderable(t *testing.T) {
 	renderable := map[string]bool{
 		"text": true, "list": true, "table": true, "flow": true, "layers": true, "note": true, "warning": true,
@@ -104,8 +102,8 @@ func TestArticleBlocksAreRenderable(t *testing.T) {
 	}
 }
 
-// The three questions this reference exists to answer must have an address the
-// UI can link to.
+// Три вопроса, на которые существует эта ссылка, должны иметь адрес, на который UI можно
+// ссылаться.
 func TestKeyTopicsArePresent(t *testing.T) {
 	known := map[string]bool{}
 	for _, a := range helpArticles() {

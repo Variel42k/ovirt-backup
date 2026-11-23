@@ -103,7 +103,8 @@ const adGroupsDNHint = computed(() => `База поиска групп. Нап�
 
 function roleMapping(): Record<string, string> {
   if (!useRoleGroups.value) return {}
-  // Keep additional/custom mappings that the three standard fields do not edit.
+  // Сохраняем пользовательские сопоставления, которые нельзя изменить в трёх стандартных
+  // полях.
   const mapping = { ...settings.value?.role_mapping }
   for (const role of ['admin', 'operator', 'viewer']) {
     const previous = groupFor(role, settings.value?.role_mapping ?? {})

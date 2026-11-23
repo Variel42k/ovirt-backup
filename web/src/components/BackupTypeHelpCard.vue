@@ -3,11 +3,10 @@ import { onMounted, watch } from 'vue'
 import { useAppStore } from '@/stores/app'
 import HelpButton from './HelpButton.vue'
 
-// The selected strategy, explained where it is selected.
+// Описание стратегии показывается рядом с полем выбора.
 //
-// Four things decide whether a type is the right one, and an operator should
-// not have to infer any of them from a name: does the VM keep running, what the
-// type needs to work, what a restore from it costs, and what it will not do.
+// Для каждого типа описываем требования, работу ВМ во время бэкапа, затраты на
+// восстановление и ограничения.
 
 const props = defineProps<{ type?: string }>()
 const app = useAppStore()

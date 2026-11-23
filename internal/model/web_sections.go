@@ -1,12 +1,11 @@
 package model
 
-// WebSections controls navigation for every web session, independently of RBAC.
-// It does not stop background jobs or revoke API permissions.
+// WebSections управляет навигацией для каждой веб-сессии, независимо от RBAC.
+// Он не останавливает фоновые задания и не отменяет разрешения API.
 type WebSections struct {
-	Discovery   bool `json:"discovery"`
-	GitlabClean bool `json:"gitlab_clean"`
+	Discovery bool `json:"discovery"`
 }
 
 func DefaultWebSections() WebSections {
-	return WebSections{Discovery: true, GitlabClean: true}
+	return WebSections{Discovery: true}
 }

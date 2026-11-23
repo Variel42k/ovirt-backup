@@ -14,24 +14,24 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/store"
 )
 
-// ErrRetentionPlanChanged means the repository changed after the operator
-// reviewed the preview. The caller must build and confirm a fresh plan.
+// ErrRetentionPlanChanged означает, что репозиторий изменился после того, как оператор
+// рассмотрел предварительный просмотр. код вызова должен создать и подтвердить новый план.
 var ErrRetentionPlanChanged = errors.New("план хранения изменился после предпросмотра")
 
-// ApplyRetention evaluates a policy over one VM's backups in one repository
-// and, unless dryRun, deletes what it selects.
+// ApplyRetention оценивает политику над резервными копиями одной ВМ в одном репозитории и,
+// если только dryRun не удаляет то, что выбирает.
 //
-// The dry run is not a nicety: retention is the one routine operation that
-// destroys data, and an operator should be able to see the consequences of a
-// policy before it runs unattended at 3am.
+// Сухой пробег — это не мелочь: удержание — это рутинная операция, которая уничтожает
+// данные, и оператор должен быть в состоянии увидеть последствия политики, прежде чем она
+// будет запущена без присмотра в 3 часа ночи.
 func (e *Engine) ApplyRetention(ctx context.Context, serverID, vmID, targetID string,
 	policy model.RetentionPolicy, dryRun bool) (retention.Plan, error) {
 	return e.applyRetention(ctx, serverID, vmID, targetID, policy, dryRun, "")
 }
 
-// ApplyRetentionConfirmed applies only the exact plan previously returned by
-// preview. Scheduled retention uses ApplyRetention because it has no human
-// confirmation step and evaluates the current repository atomically itself.
+// ApplyRetentionConfirmed применяется только точный план, ранее возвращенный путем
+// предварительного просмотра. Запланированное сохранение использует ApplyRetention, потому
+// что оно не имеет этапа подтверждения человеком и оценивает текущее хранилище атомарно.
 func (e *Engine) ApplyRetentionConfirmed(ctx context.Context, serverID, vmID, targetID string,
 	policy model.RetentionPolicy, planToken string) (retention.Plan, error) {
 	if planToken == "" {
@@ -82,8 +82,8 @@ func (e *Engine) applyRetention(ctx context.Context, serverID, vmID, targetID st
 	var firstDeleteErr error
 	for _, note := range plan.Delete {
 		if err := e.DeleteRunData(ctx, note.RunID, retentionDeleteReason(note.Reason)); err != nil {
-			// Keep going: one unreachable object should not stop the whole
-			// retention pass, and the failure is reported per run.
+			// Продолжайте: один недостижимый объект не должен останавливать весь проход
+			// удержания, и о сбое сообщается за один запуск.
 			e.log.Error().Err(err).Str("run", note.RunID).Msg("не удалось удалить бэкап по политике хранения")
 			if firstDeleteErr == nil {
 				firstDeleteErr = err
@@ -116,13 +116,13 @@ func retentionDeleteReason(why string) string {
 	return "политика хранения: " + why
 }
 
-// DeleteRunData removes a backup's objects from its repository and flags the
-// record as deleted, keeping the history row for the audit trail. reason says
-// why the copy goes away; it is stored with the run.
+// DeleteRunData удаляет объекты резервной копии из ее хранилища и отмечает запись как
+// удаленную, сохраняя строку истории для ревизионного следа. причина говорит, почему копия
+// уходит; Он хранится вместе с пробегом.
 //
-// It refuses to delete a backup another live backup still depends on: an
-// incremental without its base is unrestorable, and discovering that during a
-// real incident is the worst possible time.
+// Он отказывается удалять резервную копию, еще одна резервная копия все еще зависит от:
+// инкремент без его базы невосстановим, и обнаружение того, что во время реального
+// инцидента — наихудшее возможное время.
 func (e *Engine) DeleteRunData(ctx context.Context, runID, reason string) error {
 	run, err := e.store.GetBackupRun(ctx, runID)
 	if err != nil {
@@ -238,8 +238,8 @@ func (e *Engine) PurgeRunData(ctx context.Context, runID, reason string) error {
 	return e.store.NoteRunErased(ctx, runID, reason, time.Now().UTC())
 }
 
-// checkRunDeletionAccess also runs before quarantine: read-only repositories
-// must not lose catalog entries simply because no object is erased yet.
+// checkRunDeletionAccess также выполняется перед карантином: репозитории только для чтения
+// не должны терять записи каталога просто потому, что ни один объект еще не стирается.
 func (e *Engine) checkRunDeletionAccess(ctx context.Context, run *model.BackupRun) error {
 	if err := e.store.VMTransferProtectsRun(ctx, run); err != nil {
 		return err
@@ -273,7 +273,7 @@ func (e *Engine) checkRunDeletionAccess(ctx context.Context, run *model.BackupRu
 	return nil
 }
 
-// purgeRunData keeps failed physical deletion visible outside the server log.
+// purgeRunData сохраняет неудавшееся физическое удаление видимым вне журнала сервера.
 func (e *Engine) purgeRunData(ctx context.Context, run *model.BackupRun) error {
 	err := e.checkRunDeletionAccess(ctx, run)
 	if err == nil {
@@ -306,8 +306,8 @@ func (e *Engine) purgeRunObjects(ctx context.Context, run *model.BackupRun) erro
 	}
 
 	if run.Type == model.BackupOVA {
-		// The artefact lives on a hypervisor host, outside any repository we
-		// control; only the record can be retired here.
+		// Артефакт живет на хосте гипервизора, вне любого хранилища, которое мы
+		// контролируем; На пенсию можно выйти только здесь.
 		return e.store.MarkRunDeleted(ctx, runID)
 	}
 	if run.RepoPath == "" {
@@ -325,8 +325,9 @@ func (e *Engine) purgeRunObjects(ctx context.Context, run *model.BackupRun) erro
 				runID, copy.StorageTargetName, copy.Status)
 		}
 	}
-	// Replicas go first. If immutable storage refuses deletion, the primary is
-	// intentionally retained as a second recovery source until a later pass.
+	// Реплики идут первыми. Если неизменное хранилище отказывается от удаления, первичное
+	// намеренно сохраняется в качестве второго источника восстановления до более позднего
+	// прохождения.
 	slices.SortStableFunc(copies, func(a, b *model.BackupCopy) int {
 		if a.Role == b.Role {
 			return 0
@@ -379,7 +380,8 @@ func (e *Engine) purgeRunObjects(ctx context.Context, run *model.BackupRun) erro
 	return e.store.MarkRunDeleted(ctx, runID)
 }
 
-// dependents returns live backups whose restore path goes through run.
+// dependents возвращает живые резервные копии, путь восстановления которых проходит через
+// запуск.
 func (e *Engine) dependents(ctx context.Context, run *model.BackupRun) ([]string, error) {
 	chain, err := e.store.ListBackupRuns(ctx, store.RunFilter{ChainID: run.ChainID})
 	if err != nil {
@@ -406,9 +408,8 @@ func (e *Engine) dependents(ctx context.Context, run *model.BackupRun) ([]string
 	return out, nil
 }
 
-// PruneExpired deletes backups whose explicit expiry has passed. It is the
-// safety net for runs created outside a job, which have no retention policy of
-// their own to be evaluated against.
+// PruneExpired удаляет копии с истёкшим сроком хранения. Это нужно для разовых запусков без
+// собственной политики хранения.
 func (e *Engine) PruneExpired(ctx context.Context) (int, error) {
 	now := time.Now().UTC()
 	runs, err := e.store.ListBackupRuns(ctx, store.RunFilter{
@@ -432,9 +433,9 @@ func (e *Engine) PruneExpired(ctx context.Context) (int, error) {
 	return deleted, nil
 }
 
-// ReconcileStaleRuns finishes off runs that were executing when the process
-// died. Their engine-side backups may still hold locks on VM disks, which
-// blocks every later backup of that VM until somebody clears them.
+// ReconcileStaleRuns заканчивает запуски, которые выполнялись, когда процесс умер. Их
+// резервные копии могут по-прежнему содержать блокировки на дисках ВМ, которые блокируют
+// каждую последующую резервную копию этой ВМ, пока кто-то не очистит их.
 func (e *Engine) ReconcileStaleRuns(ctx context.Context) error {
 	stale, err := e.store.ListStaleRunningRuns(ctx)
 	if err != nil {

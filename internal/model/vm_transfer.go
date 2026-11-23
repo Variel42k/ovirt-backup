@@ -2,7 +2,7 @@ package model
 
 import "time"
 
-// CancellationState is a live observation, never a reservation or an action.
+// CancellationState — живое наблюдение, никогда не оговорка и не действие.
 type VMTransferCancellationState struct {
 	ObservedAt   time.Time `json:"observed_at"`
 	SourceStatus string    `json:"source_status"`
@@ -24,7 +24,7 @@ type VMTransferSample struct {
 	Speed     int64     `json:"speed"`
 }
 
-// VMTransferRequest describes a move between independent oVirt managers.
+// VMTransferRequest описывает движение между независимыми oVirt менеджерами.
 type VMTransferRequest struct {
 	SourceServerID  string `json:"source_server_id"`
 	SourceVMID      string `json:"source_vm_id"`
@@ -34,8 +34,9 @@ type VMTransferRequest struct {
 	StorageDomainID string `json:"storage_domain_id"`
 	StorageTargetID string `json:"storage_target_id"`
 	Name            string `json:"name"`
-	Mode            string `json:"mode"` // cold or warm
-	// Zero preserves the legacy two-minute period; -1 disables periodic sync.
+	Mode            string `json:"mode"` // холодный или теплый
+	// Ноль сохраняет унаследованный двухминутный период; -1 отключает периодическую
+	// синхронизацию.
 	AutoSyncIntervalSeconds int                       `json:"auto_sync_interval_seconds,omitempty"`
 	NetworkMappings         []RestoreVMNetworkMapping `json:"network_mappings"`
 	PreserveMAC             bool                      `json:"preserve_mac"`
@@ -117,7 +118,7 @@ type VMTransfer struct {
 
 type VMTransferBatchRequest struct {
 	Items       []VMTransferRequest `json:"items"`
-	Execution   string              `json:"execution"` // sequential or parallel
+	Execution   string              `json:"execution"` // последовательный или параллельный
 	Parallelism int                 `json:"parallelism"`
 	Confirm     bool                `json:"confirm"`
 }

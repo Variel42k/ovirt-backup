@@ -1,6 +1,5 @@
-// Package embeddedkeycloak owns the host-side lifecycle of the bundled
-// Keycloak. It is used only by the root helper and never by the application
-// process directly.
+// Пакет embeddedkeycloak управляет встроенным Keycloak на хосте. Его вызывает только
+// root-хелпер.
 package embeddedkeycloak
 
 import (
@@ -262,10 +261,9 @@ func (m *Manager) Bootstrap(ctx context.Context, request hosthelper.BootstrapReq
 	if _, err := m.composeOutput(ctx, "up", "-d", "--build", "--no-deps", "--force-recreate", "keycloak", "keycloak-backup"); err != nil {
 		return out, fmt.Errorf("запуск контейнеров Keycloak: %w", err)
 	}
-	// Repair permissions of an already persisted LDAP bind secret as part of
-	// every Keycloak bootstrap/update. Older releases could leave the host file
-	// owned by the application UID/GID, while the Keycloak image runs with a
-	// different UID and therefore could not read the file-vault credential.
+	// При настройке или обновлении Keycloak исправляем права сохранённого секрета LDAP
+	// bind. В старых версиях файл мог принадлежать UID/GID приложения, а пользователь
+	// контейнера Keycloak не мог прочитать его.
 	if err := m.ensureVaultSecretReadable(ctx, st.Realm, "ad-bind"); err != nil {
 		return out, err
 	}
@@ -329,10 +327,10 @@ func (m *Manager) Bootstrap(ctx context.Context, request hosthelper.BootstrapReq
 		}
 		admin = helperAdmin
 	} else if !st.RealmScoped {
-		// Older web-bootstrap versions left the persistent helper as a global
-		// master administrator. Use that one last time to repair the explicit
-		// target-realm mapping, remove stale bootstrap identities, and revoke
-		// the global role.
+		// Старые версии веб-загрузки оставили постоянного помощника в качестве глобального
+		// главного администратора. Используйте это в последний раз, чтобы исправить явное
+		// отображение целевой области, удалить устаревшие идентификаторы загрузок и
+		// отменить глобальную роль.
 		if err := admin.ensureRealm(ctx, request.Realm); err != nil {
 			return out, err
 		}
@@ -525,11 +523,9 @@ func (m *Manager) ConfigureDomain(ctx context.Context, request hosthelper.Domain
 		return out, err
 	}
 
-	// The live LDAP test above uses the raw password, while the persisted
-	// provider deliberately stores only a file-vault expression. A domain
-	// setup is therefore not complete until that persisted credential is
-	// proven to survive the same Keycloak restart that previously exposed
-	// broken post-install/domain-join configurations.
+	// Проверка LDAP выше использует пароль напрямую, а провайдер хранит только ссылку на
+	// файл секрета. Считаем настройку домена завершённой после проверки сохранённого
+	// секрета с перезапуском Keycloak, который ранее выявлял неверную конфигурацию.
 	if _, err := m.composeOutput(ctx, "restart", "keycloak"); err != nil {
 		return out, fmt.Errorf("перезапуск Keycloak для проверки сохранённого bind-секрета: %w", err)
 	}
@@ -742,9 +738,9 @@ chmod 0400 /target/ovirt-backup/server.key`
 	return nil
 }
 
-// startRecoveryClient adopts a Keycloak database created by an older
-// installer. The one-time service client is created offline, used to mint the
-// persistent helper client, and deleted before Bootstrap returns.
+// startRecoveryClient принимает базу данных Keycloak, созданную более старым установщиком.
+// Одноразовый клиент службы создается в автономном режиме, используется для поиска
+// постоянного клиента-помощника и удаляется до возвращения Bootstrap.
 func (m *Manager) startRecoveryClient(ctx context.Context, admin *adminAPI, baseURL string, tlsConfig *tls.Config) (string, error) {
 	suffix, err := randomSecret(6)
 	if err != nil {
@@ -1129,10 +1125,9 @@ func writeSecret(path, value string) error {
 	return atomicWrite(path, []byte(value), 0o440)
 }
 
-// ensureVaultSecretReadable normalizes ownership/mode of a host-mounted
-// file-vault secret and proves that the actual Keycloak container user can
-// read it. The helper itself may create the file with its own host UID/GID,
-// which is not necessarily the UID/GID used by the Keycloak image.
+// ensureVaultSecretReadable настраивает владельца и права файла секрета на хосте и
+// проверяет чтение от имени пользователя контейнера Keycloak. UID/GID хелпера на хосте и
+// пользователя образа могут различаться.
 func (m *Manager) ensureVaultSecretReadable(ctx context.Context, realm, key string) error {
 	name := vaultFileName(realm, key)
 	hostPath := filepath.Join(m.cfg.VaultDir, name)
@@ -1147,9 +1142,8 @@ func (m *Manager) ensureVaultSecretReadable(ctx context.Context, realm, key stri
 		return errors.New("bind-секрет Keycloak имеет недопустимый тип")
 	}
 
-	// The vault is bind-mounted read-only into Keycloak. Ownership and mode
-	// must therefore be repaired on the host path. chown/chmod through
-	// docker exec would correctly fail with EROFS on the read-only mount.
+	// Хранилище секретов смонтировано в Keycloak только для чтения. Владельца и права
+	// меняем на хосте, поскольку chown и chmod через docker exec вернут EROFS.
 	gidOut, err := m.composeOutput(ctx, "exec", "-T", "keycloak", "id", "-g")
 	if err != nil {
 		return fmt.Errorf("определение группы процесса Keycloak: %w", err)
@@ -1303,9 +1297,9 @@ func (a *adminAPI) ensureRealm(ctx context.Context, realm string) error {
 	if err != nil {
 		return err
 	}
-	// Repair the visible name and locale for realms created by an earlier
-	// installer. Preserve the complete representation so an update never resets
-	// an administrator's unrelated realm policy.
+	// Восстановите видимое имя и локаль для сфер, созданных более ранним установщиком.
+	// Сохранить полное представление, чтобы обновление никогда не сбрасывало несвязанную
+	// политику администратора.
 	path := "/admin/realms/" + url.PathEscape(realm)
 	raw, err := a.do(ctx, http.MethodGet, path, nil, http.StatusOK)
 	if err != nil {
@@ -1360,8 +1354,8 @@ func (a *adminAPI) ensureServiceClient(ctx context.Context, clientID, secret str
 	if clientUUID == "" {
 		return errors.New("служебный клиент helper не найден после создания")
 	}
-	// PUT also repairs or deliberately rotates the secret if a previous first
-	// attempt stopped between creating the client and saving root-only state.
+	// PUT также восстанавливает или намеренно поворачивает секрет, если предыдущая первая
+	// попытка остановилась между созданием клиента и сохранением состояния только root.
 	body["id"] = clientUUID
 	if _, err := a.do(ctx, http.MethodPut, path+"/"+url.PathEscape(clientUUID), body, http.StatusNoContent); err != nil {
 		return err
@@ -1452,10 +1446,8 @@ func (a *adminAPI) verifyMasterAdminRevoked(ctx context.Context, existingRealm s
 }
 
 func (a *adminAPI) cleanupTemporaryPrincipals(ctx context.Context, currentBootstrapUser, currentRecoveryClient string) error {
-	// The access token belongs either to the temporary bootstrap user or to the
-	// temporary recovery service client. Deleting the principal that issued the
-	// token invalidates it immediately, so the current principal must be the
-	// very last administrative request in the cleanup sequence.
+	// Токен принадлежит временному пользователю или временному клиенту восстановления.
+	// Удаление владельца сразу отзывает токен, поэтому этот запрос выполняем последним.
 	if currentBootstrapUser != "" {
 		if err := a.deleteClientsWithPrefix(ctx, "master", "kc-web-recovery-", ""); err != nil {
 			return err

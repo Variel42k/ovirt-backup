@@ -2,28 +2,24 @@ package model
 
 import "time"
 
-// Disk and storage-path metrics.
+// Метрика дисковых и накопительных путей.
 //
-// Two different questions hide behind "диск тормозит", and they need different
-// measurements:
+// Чтобы определить, почему диск работает медленно, проверяем две разные группы метрик.
 //
-//   - Is the guest's virtual disk slow? That shows up as latency per operation
-//     inside QEMU — the time between the guest asking and the answer arriving.
-//     Throughput alone does not answer it: a disk doing 5 MB/s might be idle or
-//     might be crawling.
-//   - Is the path to the storage broken? For NFS and iSCSI that is not a disk
-//     problem at all, it is a network one, and it shows up as retransmitted RPC
-//     calls, timeouts and dropped sessions — never as a disk error.
+//   - Задержка виртуального диска измеряется в QEMU от запроса гостя до ответа. Пропускная
+//     способность в 5 МБ/с может означать и простой, и медленную обработку.
+//   - Сбои доступа к хранилищу NFS или iSCSI видны как повторы RPC, таймауты и разрывы
+//     сеанса. Счётчик ошибок диска их не показывает.
 //
-// Both are collected as counters and turned into rates, because a counter that
-// only goes up says nothing about now.
+// Обе метрики собираются как счётчики. Текущие скорости вычисляем по разнице замеров.
 
-// DiskSample is one observation of a virtual disk's input/output.
+// DiskSample является одним наблюдением за входом/выходом виртуального диска.
 type DiskSample struct {
 	ID       int64  `json:"id"`
 	ServerID string `json:"server_id"`
-	// RunID is set for high-frequency samples collected during one backup.
-	// General infrastructure monitoring leaves it empty.
+	// RunID устанавливается для высокочастотных образцов, собранных во время одного
+	// резервного копирования.
+	// Общий мониторинг инфраструктуры оставляет его пустым.
 	RunID string `json:"run_id,omitempty"`
 	// VMID и Disk — чья это нагрузка; Disk — целевое имя (vda) или id диска.
 	VMID   string `json:"vm_id"`
@@ -50,12 +46,12 @@ type DiskSample struct {
 	At time.Time `json:"at"`
 }
 
-// Busy reports whether the disk did anything measurable in this interval.
+// Busy сообщает, делал ли диск что-либо измеримое в этом интервале.
 func (s DiskSample) Busy() bool {
 	return s.ReadOpsPerSec > 0 || s.WriteOpsPerSec > 0
 }
 
-// MountKind distinguishes the transport a storage path uses.
+// MountKind отличает транспорт, который использует путь хранения.
 type MountKind string
 
 const (
@@ -64,13 +60,10 @@ const (
 	MountLocal MountKind = "local"
 )
 
-// MountSample is one observation of a storage path's health on a hypervisor.
+// MountSample содержит один замер состояния пути к хранилищу на гипервизоре.
 //
-// The fields deliberately mirror what actually diagnoses a flaky storage
-// network. "Потеря пакетов" is not something NFS reports: the client reports
-// that it had to send a call again (retransmission) or gave up waiting
-// (timeout). Those are the observable consequence, and they move long before a
-// mount goes fully dead.
+// Клиент NFS сообщает не о потере пакетов, а о её последствиях: повторах
+// запросов и таймаутах. Эти счётчики растут ещё до полной потери доступа.
 type MountSample struct {
 	ID       int64     `json:"id"`
 	ServerID string    `json:"server_id"`
@@ -99,11 +92,10 @@ type MountSample struct {
 	At     time.Time `json:"at"`
 }
 
-// RetransmitRate returns retransmissions per hundred operations.
+// RetransmitRate возвращает ретрансляции на сто операций.
 //
-// The ratio matters more than the count: fifty retries out of a million calls
-// is a healthy network having a bad second, fifty out of two hundred is a
-// network that is losing traffic.
+// Важна доля повторных запросов. Пятьдесят повторов на миллион обычно означают краткий
+// сбой, а пятьдесят на двести указывают на потерю трафика.
 func (s MountSample) RetransmitRate() float64 {
 	if s.Operations <= 0 {
 		return 0
@@ -111,12 +103,11 @@ func (s MountSample) RetransmitRate() float64 {
 	return float64(s.Retransmits) * 100 / float64(s.Operations)
 }
 
-// Degraded reports whether this sample looks like a storage path in trouble.
+// Ухудшенные отчеты о том, выглядит ли этот образец как путь хранения в беде.
 //
-// The thresholds are deliberately conservative. A single retransmission is
-// normal on any network; sustained retries above a percent, or any major
-// timeout at all, are not — a major timeout means the client waited out its
-// entire retry schedule, which the guest sees as a stalled disk.
+// Один повтор запроса допустим. Длительная доля повторов выше процента или хотя бы один
+// крупный таймаут требуют внимания. При крупном таймауте клиент исчерпал все попытки, а
+// гостевая система видит недоступный диск.
 func (s MountSample) Degraded() bool {
 	if !s.Healthy {
 		return true

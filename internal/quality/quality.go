@@ -1,5 +1,5 @@
-// Package quality turns backup history and repository probes into one
-// consistent protection view used by the UI, alerts and Prometheus.
+// Пакет quality превращает историю резервного копирования и репозиторий зондов в один
+// последовательный вид защиты, используемый UI, оповещения и Прометей.
 package quality
 
 import (
@@ -129,7 +129,8 @@ func New(st *store.Store, settings model.BackupQualitySettings, loc *time.Locati
 	return s
 }
 
-// SetLocation changes the timezone used for schedule-aware quality checks.
+// SetLocation изменяет часовой пояс, используемый для проверки качества с учетом
+// расписания.
 func (s *Service) SetLocation(loc *time.Location) {
 	if loc == nil {
 		loc = time.UTC
@@ -288,9 +289,8 @@ func (s *Service) Evaluate(ctx context.Context, serverID string) (*Summary, erro
 			}
 		}
 	}
-	// Inventory without an enabled scheduled policy is part of protection
-	// quality too. Omitting these VMs would make an empty installation appear
-	// perfectly healthy.
+	// Инвентаризация без включенной плановой политики также является частью качества
+	// защиты. Отсутствие этих ВМ сделало бы пустую установку совершенно здоровой.
 	for _, server := range servers {
 		if serverID != "" && server.ID != serverID {
 			continue
@@ -646,8 +646,8 @@ func capacityFor(target *model.StorageTarget, samples []*model.StorageUsageSampl
 	}
 	days := map[time.Time]*daily{}
 	for _, sample := range samples {
-		// Failed probes carry zero counters, not a real drop in usage.
-		// Treating them as observations distorts the growth trend.
+		// Неудачные зонды несут нулевые счётчики, а не реальное падение использования.
+		// Отношение к ним как к наблюдениям искажает тенденцию роста.
 		if !sample.CheckOK {
 			continue
 		}
@@ -728,7 +728,7 @@ func capacityFor(target *model.StorageTarget, samples []*model.StorageUsageSampl
 	return item
 }
 
-// staleMessage describes a missing or overdue copy.
+// staleMessage описывается отсутствующая или просроченная копия.
 //
 // Оценка заводится и на машины, которых не покрывает ни одно задание: у такой
 // записи нет ни задания, ни хранилища, и общий текст выходил с пустыми

@@ -13,13 +13,13 @@ export const systemTimezone = computed(() => configuredTimezone.value)
 export const displayTimezone = computed(() => effectiveTimezone.value)
 export const displayTimezoneWarning = computed(() => timezoneError.value)
 
-/** Configure the single application timezone used by every absolute date. */
+/** Устанавливает общий часовой пояс для отображения абсолютных дат. */
 export function setSystemTimezone(timezone?: string | null): void {
   const wanted = timezone?.trim() || 'UTC'
   configuredTimezone.value = wanted
   try {
-    // Some older browsers have an incomplete ICU database. Validate before
-    // replacing the current formatter so they fail visibly and safely.
+    // В некоторых старых браузерах база ICU неполная. Сначала проверяем новый часовой пояс,
+    // чтобы при ошибке сохранить рабочий формат.
     new Intl.DateTimeFormat('ru-RU', { timeZone: wanted }).format(new Date(0))
     effectiveTimezone.value = wanted
     timezoneError.value = ''

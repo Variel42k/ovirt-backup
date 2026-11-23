@@ -77,8 +77,8 @@ services:
       #
       # Меняйте вместе с JHV_DATABASE_URL, когда база вынесена наружу: со
       # значением disable служба туда просто не подключится и скажет почему.
-      # The bundled DB is reachable only on the private backend network and
-      # does not expose a TCP port. External databases must use TLS instead.
+      # Встроенная БД доступна по внутренней сети, её TCP-порт наружу не публикуется.
+      # Для внешних БД требуется TLS.
       JHV_DATABASE_POSTGRES_SSLMODE: "${JHV_DATABASE_SSLMODE:-disable}"
       JHV_DATABASE_POSTGRES_TRUSTED_PLAINTEXT_HOST: "postgres"
       # Внешняя база вместо поднятой рядом: если задан, перекрывает всё выше.
@@ -265,9 +265,8 @@ services:
         POSTGRES_BASE_IMAGE: ${POSTGRES_IMAGE:-docker.io/library/postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73}
     image: ovirt-backup-postgres:${POSTGRES_VERSION:-17-alpine-hardened}
     restart: unless-stopped
-    # The official entrypoint needs root only while it prepares a fresh volume;
-    # it then switches to UID 70. Capabilities below are the minimum verified
-    # on both an empty and an initialized volume.
+    # Скрипт входа запускается от root для подготовки тома, затем переходит на UID 70.
+    # Минимальный набор capabilities проверен на новом и инициализированном томах.
     user: "0:0"
     # См. выше: у json-file без опций предела нет, а база на каждой контрольной
     # точке пишет строку.

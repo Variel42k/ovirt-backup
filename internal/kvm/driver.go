@@ -1,6 +1,6 @@
-// Package kvm performs hot backups of libvirt/KVM domains through the
-// pull-mode backup API and a direct NBD read, with no agent inside the guest
-// and nothing installed on the hypervisor.
+// Пакет kvm выполняет горячее резервное копирование доменов libvirt / KVM через резервное
+// копирование в режиме тяги API и прямое чтение NBD, без агента внутри гостя и ничего,
+// установленного на гипервизоре.
 package kvm
 
 import (
@@ -20,7 +20,7 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/secret"
 )
 
-// Config tunes the driver.
+// Config настраивает водителя.
 type Config struct {
 	// ScratchDir — каталог на гипервизоре под scratch-файлы и сокет NBD.
 	// Должен быть доступен qemu на запись и лежать на томе с запасом места:
@@ -69,7 +69,7 @@ func (c Config) withDefaults() Config {
 	return c
 }
 
-// Driver runs backups against one hypervisor.
+// Driver запускает резервные копии против одного гипервизора.
 type Driver struct {
 	conn   *libvirtx.Conn
 	cfg    Config
@@ -77,12 +77,12 @@ type Driver struct {
 	log    zerolog.Logger
 }
 
-// NewDriver builds a driver over an established libvirt connection.
+// NewDriver постро́ка ж. об. дѣйствіе по строенію libvirt соединенія.
 func NewDriver(conn *libvirtx.Conn, cfg Config, cipher *secret.Cipher, log zerolog.Logger) *Driver {
 	return &Driver{conn: conn, cfg: cfg.withDefaults(), cipher: cipher, log: log}
 }
 
-// Request describes one backup to perform.
+// Request описывается одна резервная копия для выполнения.
 type Request struct {
 	// DomainName — имя домена на гипервизоре.
 	DomainName string
@@ -128,7 +128,7 @@ type Request struct {
 	OnProgress func(diskTarget string, logicalDone, logicalTotal int64)
 }
 
-// Result reports what a backup produced.
+// Result сообщить о том, что произвела резервная копия.
 type Result struct {
 	Type      model.BackupType
 	Manifests []*backup.DiskManifest
@@ -153,8 +153,9 @@ type Result struct {
 	// SkippedDisks перечисляет диски, не попавшие в копию, с причиной.
 	SkippedDisks map[string]string
 
-	// DomainXML is the complete source description kept as a recovery
-	// artefact. Profile is the sanitised subset safe to replay for a test.
+	// DomainXML — полное описание источника, хранящееся в качестве артефакта
+	// восстановления. Профиль — дезинфицированное подмножество, безопасное для повторения
+	// теста.
 	DomainXML string
 	Profile   *backup.VMProfile
 	ConfigKey string
@@ -178,7 +179,7 @@ func (r *Result) mark(kind model.RunEventKind, took time.Duration, detail string
 	})
 }
 
-// Plan is the resolved strategy for a request.
+// Plan — решённая стратегия запроса.
 type Plan struct {
 	Type             model.BackupType
 	ParentCheckpoint string
@@ -187,12 +188,11 @@ type Plan struct {
 	Note             string
 }
 
-// Resolve decides what can actually be done for this domain right now.
+// Решить решает, что на самом деле можно сделать для этого домена прямо сейчас.
 //
-// Three things force a full backup where an incremental was asked for: the
-// disks may not support changed block tracking, there may be no parent to diff
-// against, or libvirt may have forgotten the parent checkpoint. Each is normal
-// and each is reported rather than hidden.
+// Вместо инкремента выполняем полный бэкап, если диски не поддерживают отслеживание
+// изменений, нет родительской копии или libvirt больше не видит её checkpoint. Причина
+// перехода записывается.
 func (d *Driver) Resolve(ctx context.Context, req Request) (*Plan, error) {
 	dom, info, err := d.conn.LookupDomain(ctx, req.DomainName)
 	if err != nil {
@@ -252,13 +252,12 @@ func (d *Driver) Resolve(ctx context.Context, req Request) (*Plan, error) {
 	return plan, nil
 }
 
-// buildCheckpoint prepares the checkpoint for a backup, or nil when this VM
-// cannot have one.
+// buildCheckpoint готовит checkpoint резервную копию, или nil когда эта ВМ не может иметь
+// ее.
 //
-// The all-or-nothing rule matches how increments work: a backup covers the
-// whole VM, so an increment is only meaningful when every disk can report what
-// changed. Bitmapping just the qcow2 disks of a mixed VM would leave bitmaps
-// growing in their headers that no later run could ever use.
+// Инкремент всей ВМ возможен, когда каждый диск сообщает изменённые блоки. Если для
+// смешанной ВМ включить битовые карты только на qcow2, они будут занимать место в
+// заголовках без возможности использовать их в последующих бэкапах.
 func buildCheckpoint(name, runID string, plan *Plan) *libvirtx.CheckpointSpec {
 	ready, _ := diskSetCBTReady(plan.Disks)
 	if !ready {
@@ -286,7 +285,7 @@ func diskSetCBTReady(disks []libvirtx.Disk) (bool, []string) {
 	return len(blockers) == 0, blockers
 }
 
-// Backup performs a hot backup of one domain.
+// Backup выполняет горячее резервное копирование одного домена.
 func (d *Driver) Backup(ctx context.Context, req Request) (*Result, error) {
 	if req.RunID == "" {
 		return nil, fmt.Errorf("не задан идентификатор запуска")
@@ -319,8 +318,9 @@ func (d *Driver) Backup(ctx context.Context, req Request) (*Result, error) {
 		log.Info().Msg(plan.Note)
 	}
 
-	// A backup left open from a crashed run holds a scratch file that grows
-	// until the host fills up, and libvirt refuses to start a second one.
+	// Резервная копия, оставленная открытой после аварийного запуска, содержит временный
+	// файл данных, который растет до тех пор, пока хост не заполнится, и libvirt
+	// отказывается запускать второй.
 	if open, _ := d.conn.BackupInProgress(ctx, dom); open {
 		log.Warn().Msg("на домене уже открыт бэкап от предыдущего запуска — закрываю его")
 		if err := d.conn.EndBackup(ctx, dom); err != nil {
@@ -343,7 +343,7 @@ func (d *Driver) Backup(ctx context.Context, req Request) (*Result, error) {
 	}
 
 	socketPath := libvirtx.SocketPath(d.cfg.ScratchDir, req.RunID)
-	// libvirt refuses to bind a socket path that already exists.
+	// libvirt отказывается связывать путь сокета, который уже существует.
 	_ = d.conn.RemoveSocket(ctx, socketPath)
 
 	spec := libvirtx.BackupSpec{
@@ -362,15 +362,12 @@ func (d *Driver) Backup(ctx context.Context, req Request) (*Result, error) {
 		})
 	}
 
-	// The checkpoint is established at the same instant as the backup, which
-	// is what makes the next run able to diff against exactly this point.
+	// checkpoint устанавливается в тот же момент, что и резервная копия, что делает
+	// следующий запуск способным различаться именно по этой точке.
 	//
-	// It is only attempted when every disk can carry a bitmap. A persistent
-	// bitmap lives in the qcow2 header, so a raw disk cannot have one, and
-	// libvirt rejects the whole checkpoint — and with it the whole backup — if
-	// asked for one anyway. A raw disk is still copied here; it is copied in
-	// full, hot, through the same pull-mode export. Only the "what changed
-	// since last time" part is unavailable to it.
+	// Checkpoint создаётся, только если каждый диск поддерживает битовую карту. Она
+	// хранится в заголовке qcow2. Для raw libvirt отклонит checkpoint вместе со всем
+	// бэкапом. Raw-диск копируется целиком в горячем режиме через тот же pull-экспорт.
 	checkpointName := libvirtx.CheckpointName(req.RunID)
 	checkpoint := buildCheckpoint(checkpointName, req.RunID, plan)
 
@@ -431,8 +428,8 @@ func (d *Driver) Backup(ctx context.Context, req Request) (*Result, error) {
 	result.mark(model.RunEventCheckpoint, time.Since(backupAsked),
 		"с этого момента данные читаются из зафиксированной точки")
 
-	// From here the hypervisor holds a scratch file and an open job. Both must
-	// be released no matter how this function exits, including cancellation.
+	// Отсюда гипервизор держит временный файл данных и открытое задание. Оба должны быть
+	// освобождены независимо от того, как эта функция выходит, включая отмену.
 	defer func() {
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
 		defer cancel()
@@ -446,12 +443,12 @@ func (d *Driver) Backup(ctx context.Context, req Request) (*Result, error) {
 		}
 		_ = d.conn.RemoveSocket(cleanupCtx, socketPath)
 	}()
-	// Registered after backup cleanup so a failed first thaw is retried before
-	// closing a potentially slow hypervisor job during unwinding.
+	// Обработчик регистрируется после уборки бэкапа, чтобы разморозку при ошибке можно было
+	// повторить до долгого завершения задания на гипервизоре.
 	defer func() { _ = window.Thaw() }()
 
-	// The point in time is fixed once the backup has begun; the guest can run
-	// normally again while we read the frozen view.
+	// Точка времени фиксируется после начала резервного копирования; Гость может снова
+	// нормально работать, пока мы читаем замороженный вид.
 	if err := window.Thaw(); err != nil {
 		return result, err
 	}
@@ -509,9 +506,9 @@ func (d *Driver) Backup(ctx context.Context, req Request) (*Result, error) {
 	return result, nil
 }
 
-// quiesce freezes the guest filesystems when the requested level needs it and
-// reports the level reached. An error means the job demands a level that could
-// not be reached; nothing has been started on the hypervisor at that point.
+// quiesce замораживает файловые системы гостя, если этого требует уровень согласованности,
+// и возвращает достигнутый уровень. При ошибке требуемый уровень не достигнут и бэкап на
+// гипервизоре ещё не начат.
 //
 // agentLimited отмечает, что служба ограничила домену ожидание агента и
 // должна вернуть его по окончании.
@@ -528,9 +525,9 @@ func (d *Driver) quiesce(ctx context.Context, dom golibvirt.Domain, info *libvir
 	q, err := backup.QuiesceGuest(ctx, target, req.RequireConsistency,
 		backup.GuestState{Running: info.State.Running(), Agent: info.GuestAgent},
 		func(ctx context.Context) error {
-			// The agent runs the guest's fsfreeze hooks before the freeze
-			// itself; a database flush has to fit into the same minute. The
-			// limit is set on the domain: go-libvirt calls take no context.
+			// Агент запускает fsfreeze-хуки до заморозки. Сброс буферов базы должен
+			// уложиться в ту же минуту. Таймаут задаём на домене, поскольку вызовы
+			// go-libvirt не принимают контекст.
 			if d.conn.LimitAgentTimeout(ctx, dom, libvirtx.AgentFreezeTimeout) {
 				*agentLimited = true
 			} else {
@@ -670,8 +667,8 @@ func (d *Driver) thaw(ctx context.Context, dom golibvirt.Domain, frozenAt *time.
 		return nil
 	}
 	held := time.Since(*frozenAt)
-	// Detached context: a guest must be thawed even if the backup was
-	// cancelled, or it stops serving anything at all.
+	// Отдельный контекст: гость должен быть оттаян, даже если резервная копия была
+	// отменена, или она вообще перестает обслуживать что-либо.
 	thawCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 60*time.Second)
 	defer cancel()
 

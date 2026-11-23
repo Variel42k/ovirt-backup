@@ -14,20 +14,17 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
-// The inventory tables are a cache of what the engine reports. Sync* methods
-// upsert the observed rows and then drop everything that was not touched in
-// this pass, which is how objects deleted in oVirt disappear here too.
+// Таблицы инвентаря кэшируют сведения движка. Sync* обновляют полученные записи и удаляют
+// объекты, которых нет в текущем опросе. Так из кэша исчезают объекты, удалённые в oVirt.
 //
-// The "not touched in this pass" marker is a per-pass random generation id
-// rather than the sync timestamp: two passes can land in the same millisecond,
-// and a timestamp comparison then silently keeps rows that should have been
-// pruned.
+// Каждый опрос маркируется случайным идентификатором поколения. При двух опросах в одну
+// миллисекунду сравнение времени могло бы оставить устаревшие записи в кэше.
 //
-// Fields owned by this service (desired_state, remediation_opt_out,
-// failure_count) are deliberately excluded from the DO UPDATE lists so a
-// refresh never clobbers operator intent.
+// Поля, принадлежащие этой услуге (desired_state, remediation_opt_out, failure_count),
+// намеренно исключаются из списков DO UPDATE, поэтому обновление никогда не блокирует
+// намерения оператора.
 
-// SyncClusters replaces the cached clusters of one server.
+// SyncClusters заменяет кэшированные кластеры одного сервера.
 func (s *Store) SyncClusters(ctx context.Context, serverID string, items []*model.Cluster) error {
 	at, gen := time.Now().UTC(), uuid.NewString()
 	err := s.db.InTx(ctx, func(tx *sql.Tx) error {
@@ -53,7 +50,7 @@ func (s *Store) SyncClusters(ctx context.Context, serverID string, items []*mode
 	return nil
 }
 
-// SyncHosts replaces the cached hosts of one server.
+// SyncHosts заменяет кэшированные узлы одного сервера.
 func (s *Store) SyncHosts(ctx context.Context, serverID string, items []*model.Host) error {
 	at, gen := time.Now().UTC(), uuid.NewString()
 	err := s.db.InTx(ctx, func(tx *sql.Tx) error {
@@ -86,8 +83,8 @@ func (s *Store) SyncHosts(ctx context.Context, serverID string, items []*model.H
 	return nil
 }
 
-// SyncVMs replaces the cached VMs of one server, preserving desired_state and
-// the remediation opt-out flag.
+// SyncVMs заменяет кэшированные ВМ одного сервера, сохраняя desired_state и флаг отказа от
+// восстановления.
 func (s *Store) SyncVMs(ctx context.Context, serverID string, items []*model.VM) error {
 	at, gen := time.Now().UTC(), uuid.NewString()
 	err := s.db.InTx(ctx, func(tx *sql.Tx) error {
@@ -129,7 +126,7 @@ func (s *Store) SyncVMs(ctx context.Context, serverID string, items []*model.VM)
 	return nil
 }
 
-// SyncDisks replaces the cached disks of one server.
+// SyncDisks заменяет кэшированные диски одного сервера.
 func (s *Store) SyncDisks(ctx context.Context, serverID string, items []*model.Disk) error {
 	at, gen := time.Now().UTC(), uuid.NewString()
 	err := s.db.InTx(ctx, func(tx *sql.Tx) error {
@@ -164,7 +161,7 @@ func (s *Store) SyncDisks(ctx context.Context, serverID string, items []*model.D
 	return nil
 }
 
-// SyncStorageDomains replaces the cached storage domains of one server.
+// SyncStorageDomains заменяет кэшированные домены хранения одного сервера.
 func (s *Store) SyncStorageDomains(ctx context.Context, serverID string, items []*model.StorageDomain) error {
 	at, gen := time.Now().UTC(), uuid.NewString()
 	err := s.db.InTx(ctx, func(tx *sql.Tx) error {
@@ -193,8 +190,8 @@ func (s *Store) SyncStorageDomains(ctx context.Context, serverID string, items [
 	return s.SyncDomainRepositories(ctx, serverID)
 }
 
-// SetVMDesiredState records what the operator wants the VM to be doing. This is
-// the input the remediation engine compares observed state against.
+// SetVMDesiredState записывает, что оператор хочет, чтобы делала ВМ. Это вход, с которым
+// движок восстановления сравнивает наблюдаемое состояние.
 func (s *Store) SetVMDesiredState(ctx context.Context, serverID, vmID string, state model.VMDesiredState, optOut bool) error {
 	res, err := s.db.Exec(ctx, `UPDATE vms SET desired_state=?, remediation_opt_out=? WHERE server_id=? AND id=?`,
 		string(state), optOut, serverID, vmID)
@@ -207,8 +204,8 @@ func (s *Store) SetVMDesiredState(ctx context.Context, serverID, vmID string, st
 	return nil
 }
 
-// BumpVMFailure increments (or with delta<0 resets) the consecutive failure
-// counter used to debounce alerts and remediation.
+// BumpVMFailure инкременты (или с delta<0 сбрасывает) последовательный счётчик отказов,
+// используемый для снятия предупреждений и исправления.
 func (s *Store) BumpVMFailure(ctx context.Context, serverID, vmID string, reset bool) (int, error) {
 	if reset {
 		_, err := s.db.Exec(ctx, `UPDATE vms SET failure_count=0 WHERE server_id=? AND id=?`, serverID, vmID)
@@ -223,7 +220,7 @@ func (s *Store) BumpVMFailure(ctx context.Context, serverID, vmID string, reset 
 	return n, err
 }
 
-// BumpHostFailure is the host-scoped counterpart of BumpVMFailure.
+// BumpHostFailure является аналогом BumpVMFailure.
 func (s *Store) BumpHostFailure(ctx context.Context, serverID, hostID string, reset bool) (int, error) {
 	if reset {
 		_, err := s.db.Exec(ctx, `UPDATE hosts SET failure_count=0 WHERE server_id=? AND id=?`, serverID, hostID)
@@ -242,8 +239,7 @@ const hostColumns = `id, server_id, name, address, cluster_id, cluster_name, sta
 	cpu_cores, cpu_sockets, memory_bytes, memory_used, ksm_enabled, os_version, power_mgmt_enabled,
 	failure_count, seen_at`
 
-// ListHosts returns the cached hosts of a server, or of every server when
-// serverID is empty.
+// ListHosts возвращает кэшированные узлы сервера или каждого сервера, когда serverID пуст.
 func (s *Store) ListHosts(ctx context.Context, serverID string) ([]*model.Host, error) {
 	query := `SELECT ` + hostColumns + ` FROM hosts`
 	args := []any{}
@@ -284,8 +280,8 @@ const vmFrom = ` FROM vms v
 	LEFT JOIN hosts ON hosts.server_id=v.server_id AND hosts.id=v.host_id
 	LEFT JOIN clusters ON clusters.server_id=v.server_id AND clusters.id=v.cluster_id`
 
-// ListVMs returns the cached VMs of a server, or of every server when serverID
-// is empty.
+// ListVMs возвращает кэшированные ВМ сервера или каждого сервера, когда serverID является
+// пустым.
 func (s *Store) ListVMs(ctx context.Context, serverID string) ([]*model.VM, error) {
 	query := `SELECT ` + vmColumns + vmFrom
 	args := []any{}
@@ -312,7 +308,7 @@ func (s *Store) ListVMs(ctx context.Context, serverID string) ([]*model.VM, erro
 	return out, rows.Err()
 }
 
-// GetVM loads one cached VM.
+// GetVM загружает одну кэшированную ВМ.
 func (s *Store) GetVM(ctx context.Context, serverID, id string) (*model.VM, error) {
 	row := s.db.QueryRow(ctx, `SELECT `+vmColumns+vmFrom+` WHERE v.server_id=? AND v.id=?`, serverID, id)
 	return scanVM(row)
@@ -346,7 +342,7 @@ func scanVM(row rowScanner) (*model.VM, error) {
 	return &vm, nil
 }
 
-// SetVMLocalTags stores operator-owned labels without modifying provider tags.
+// SetVMLocalTags хранит метки, принадлежащие оператору, без изменения тегов провайдера.
 func (s *Store) SetVMLocalTags(ctx context.Context, serverID, vmID string, tags []string) error {
 	res, err := s.db.Exec(ctx, `UPDATE vms SET local_tags=? WHERE server_id=? AND id=?`,
 		encodeJSON(normalizeTags(tags)), serverID, vmID)
@@ -381,7 +377,7 @@ const diskColumns = `id, server_id, alias, description, vm_ids, provisioned_size
 	format, sparse, shareable, bootable, backup_mode, status, storage_domain_id, storage_domain,
 	storage_type, content_type, seen_at`
 
-// ListDisks returns the cached disks of a server.
+// ListDisks возвращает кэшированные диски сервера.
 func (s *Store) ListDisks(ctx context.Context, serverID string) ([]*model.Disk, error) {
 	query := `SELECT ` + diskColumns + ` FROM disks`
 	args := []any{}
@@ -408,10 +404,9 @@ func (s *Store) ListDisks(ctx context.Context, serverID string) ([]*model.Disk, 
 	return out, rows.Err()
 }
 
-// ListDisksForVM filters the cached disks by VM attachment. The attachment list
-// lives in a JSON column, so the filter is applied in Go rather than in SQL —
-// the inventory is small enough that this is cheaper than a portable JSON
-// query across two engines.
+// ListDisksForVM отбирает кэшированные диски по их подключениям к ВМ. Список подключений
+// хранится в JSON. Для небольшого инвентаря проще фильтровать в Go, чем выполнять
+// переносимый JSON-запрос.
 func (s *Store) ListDisksForVM(ctx context.Context, serverID, vmID string) ([]*model.Disk, error) {
 	all, err := s.ListDisks(ctx, serverID)
 	if err != nil {
@@ -426,7 +421,7 @@ func (s *Store) ListDisksForVM(ctx context.Context, serverID, vmID string) ([]*m
 	return out, nil
 }
 
-// GetDisk loads one cached disk.
+// GetDisk загружает один кэшированный диск.
 func (s *Store) GetDisk(ctx context.Context, serverID, id string) (*model.Disk, error) {
 	row := s.db.QueryRow(ctx, `SELECT `+diskColumns+` FROM disks WHERE server_id=? AND id=?`, serverID, id)
 	return scanDisk(row)
@@ -452,7 +447,7 @@ func scanDisk(row rowScanner) (*model.Disk, error) {
 	return &d, nil
 }
 
-// ListStorageDomains returns the cached storage domains of a server.
+// ListStorageDomains возвращает кэшированные домены хранения сервера.
 func (s *Store) ListStorageDomains(ctx context.Context, serverID string) ([]*model.StorageDomain, error) {
 	query := `SELECT id, server_id, name, type, storage, status, master, available_size, used_size,
 		committed_size, seen_at FROM storage_domains`
@@ -483,7 +478,7 @@ func (s *Store) ListStorageDomains(ctx context.Context, serverID string) ([]*mod
 	return out, rows.Err()
 }
 
-// ListClusters returns the cached clusters of a server.
+// ListClusters возвращает кэшированные кластеры сервера.
 func (s *Store) ListClusters(ctx context.Context, serverID string) ([]*model.Cluster, error) {
 	query := `SELECT id, server_id, name, description, cpu_type, data_center, seen_at FROM clusters`
 	args := []any{}

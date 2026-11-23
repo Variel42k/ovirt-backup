@@ -3,9 +3,8 @@ import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { quasar, transformAssetUrls } from '@quasar/vite-plugin'
 
-// Quasar is used through its Vite plugin rather than the Quasar CLI: the app is
-// served by the Go binary from a plain `dist/`, so an extra build framework
-// would only add moving parts.
+// Подключаем Quasar через плагин Vite. Бинарник Go раздаёт готовый dist/ без
+// дополнительного фреймворка сборки.
 export default defineConfig({
   plugins: [
     vue({ template: { transformAssetUrls } }),
@@ -18,8 +17,8 @@ export default defineConfig({
   },
   server: {
     port: 9000,
-    // In development the SPA runs on its own port and talks to the Go server;
-    // the proxy keeps cookies same-origin so sessions work without CORS games.
+    // При разработке SPA использует отдельный порт. Прокси сохраняет единый источник для
+    // cookie и запросов к серверу Go.
     proxy: {
       '/api': {
         target: process.env.JHV_API_TARGET ?? 'http://localhost:8080',

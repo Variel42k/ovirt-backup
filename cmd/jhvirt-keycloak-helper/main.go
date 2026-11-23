@@ -1,6 +1,6 @@
-// jhvirt-keycloak-helper exposes fixed Keycloak lifecycle operations over
-// a systemd-owned Unix socket. It intentionally has no generic command or file
-// execution endpoint.
+// jhvirt-keycloak-helper предоставляет фиксированные Keycloak операции жизненного цикла
+// через сокет Unix, принадлежащий systemd. Он намеренно не имеет общей команды или конечной
+// точки выполнения файла.
 package main
 
 import (

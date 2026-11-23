@@ -7,14 +7,14 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
-// Reading and steering the log from the interface.
+// Чтение и управление журналом с интерфейса.
 //
-// Admin-only, and not because the log holds secrets — it deliberately never
-// does — but because it names every VM, host and operator of the installation.
-// That is a map of the infrastructure, and a viewer account exists precisely so
-// that not everyone gets one.
+// Только администрирование, и не потому, что журнал содержит секреты — он намеренно никогда
+// этого не делает — а потому, что он называет каждую ВМ, хост и оператора установки.
+// Это карта инфраструктуры, и учётная запись зрителя существует именно для того, чтобы не
+// все ее получили.
 
-// logLevelRequest changes the verbosity at runtime.
+// logLevelRequest изменя́ть многословие во время выполнения.
 type logLevelRequest struct {
 	Level string `json:"level"`
 }
@@ -56,8 +56,8 @@ func (s *Server) handleSetLogLevel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The change is worth a line in the log it changes: otherwise a log that
-	// suddenly goes quiet — or floods — has no explanation in itself.
+	// Изменение стоит строки в журнале, который он меняет: в противном случае журнал,
+	// который внезапно затихает — или наводнения — не имеет объяснения сам по себе.
 	s.log.Warn().Str("было", previous).Str("стало", level.String()).
 		Msg("уровень журналирования изменён через интерфейс")
 	s.audit(r, "logging.level", model.ScopeServer, "", true, previous+" → "+level.String())

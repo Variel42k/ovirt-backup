@@ -2,6 +2,7 @@ package libvirtx
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/xml"
 	"fmt"
 	"path"
@@ -12,21 +13,20 @@ import (
 	"github.com/digitalocean/go-libvirt"
 )
 
-// The pull-mode backup flow, which is what makes a hot backup possible:
+// Поток резервного копирования в режиме тяги, который делает горячее резервное копирование
+// возможным:
 //
-//  1. DomainBackupBegin freezes a point in time and opens an NBD server on the
-//     hypervisor. The guest keeps running and keeps writing; QEMU preserves the
-//     old contents of any block the guest overwrites into a scratch file.
-//  2. We read from that NBD export at our own pace. base:allocation tells us
-//     which blocks hold data; for an incremental run a dirty bitmap tells us
-//     which changed since the parent checkpoint.
-//  3. DomainAbortJob ends the backup and releases the scratch file.
+//   1. DomainBackupBegin фиксирует точку и открывает сервер NBD на гипервизоре. Гость
+//      продолжает работать, а QEMU сохраняет перезаписываемые старые блоки во временный
+//      файл.
+//   2. Читаем экспорт NBD. base:allocation показывает выделенные блоки, а карта изменений
+//      для инкремента показывает блоки, изменённые после родительского checkpoint.
+//   3. DomainAbortJob завершает бэкап и освобождает временный файл.
 //
-// Step 3 is not optional. A backup left open keeps growing the scratch file
-// until the host runs out of space, so it is always issued from a deferred
-// call with a context that survives cancellation.
+// Шаг 3 обязателен. Пока бэкап открыт, временный файл растёт и может занять весь диск
+// хоста. Завершаем бэкап в отложенном вызове с контекстом, который переживает отмену.
 
-// CheckpointDisk says whether a disk takes part in a checkpoint.
+// CheckpointDisk говорит, принимает ли диск участие в checkpoint.
 type CheckpointDisk struct {
 	// Target — имя устройства в домене (vda).
 	Target string
@@ -34,7 +34,7 @@ type CheckpointDisk struct {
 	Bitmap bool
 }
 
-// CheckpointSpec describes a checkpoint to establish alongside a backup.
+// CheckpointSpec описывает checkpoint для создания резервной копии.
 type CheckpointSpec struct {
 	Name        string
 	Description string
@@ -45,7 +45,7 @@ type CheckpointSpec struct {
 	Disks []CheckpointDisk
 }
 
-// BitmapDisks returns the disks that will actually get a bitmap.
+// BitmapDisks возвращает диски, которые на самом деле получат растровую карту.
 func (s CheckpointSpec) BitmapDisks() []string {
 	var out []string
 	for _, disk := range s.Disks {
@@ -56,7 +56,7 @@ func (s CheckpointSpec) BitmapDisks() []string {
 	return out
 }
 
-// XML renders the checkpoint description libvirt expects.
+// XML формирует описание checkpoint в формате libvirt.
 func (s CheckpointSpec) XML() (string, error) {
 	if s.Name == "" {
 		return "", fmt.Errorf("у checkpoint должно быть имя")
@@ -86,7 +86,7 @@ func (s CheckpointSpec) XML() (string, error) {
 	return b.String(), nil
 }
 
-// BackupDiskSpec describes one disk inside a pull-mode backup.
+// BackupDiskSpec описывает один диск внутри резервной копии режима вытягивания.
 type BackupDiskSpec struct {
 	// Target — имя устройства в домене (vda).
 	Target string
@@ -101,7 +101,7 @@ type BackupDiskSpec struct {
 	ScratchFile string
 }
 
-// BackupSpec describes a pull-mode backup.
+// BackupSpec описывает резервное копирование режима тяги.
 type BackupSpec struct {
 	// SocketPath — unix-сокет, на котором libvirt поднимет NBD-сервер.
 	SocketPath string
@@ -110,7 +110,7 @@ type BackupSpec struct {
 	Disks       []BackupDiskSpec
 }
 
-// XML renders the backup description libvirt expects.
+// XML отображает описание резервной копии libvirt ожидает.
 func (s BackupSpec) XML() (string, error) {
 	if s.SocketPath == "" {
 		return "", fmt.Errorf("не задан путь сокета NBD")
@@ -133,7 +133,8 @@ func (s BackupSpec) XML() (string, error) {
 		}
 		b.WriteString(fmt.Sprintf("    <disk name='%s' backup='yes' type='file' exportname='%s'",
 			escapeXML(disk.Target), escapeXML(disk.ExportName)))
-		// The bitmap is only meaningful when there is a parent to diff against.
+		// Растровая карта имеет смысл только тогда, когда есть родитель, против которого
+		// нужно дифференцировать.
 		if s.Incremental != "" && disk.ExportBitmap != "" {
 			b.WriteString(fmt.Sprintf(" exportbitmap='%s'", escapeXML(disk.ExportBitmap)))
 		}
@@ -147,7 +148,7 @@ func (s BackupSpec) XML() (string, error) {
 	return b.String(), nil
 }
 
-// CheckpointInfo is a stored checkpoint.
+// CheckpointInfo — хранимый checkpoint.
 type CheckpointInfo struct {
 	Name        string
 	Description string
@@ -174,7 +175,7 @@ type checkpointXML struct {
 	} `xml:"disks"`
 }
 
-// ListCheckpoints returns the domain's checkpoints, oldest first.
+// ListCheckpoints возвращает checkpoint домена от старых к новым.
 func (c *Conn) ListCheckpoints(ctx context.Context, dom libvirt.Domain) ([]CheckpointInfo, error) {
 	checkpoints, _, err := c.lv.DomainListAllCheckpoints(dom, 1, 0)
 	if err != nil {
@@ -215,9 +216,9 @@ func (c *Conn) ListCheckpoints(ctx context.Context, dom libvirt.Domain) ([]Check
 	return out, nil
 }
 
-// HasCheckpoint reports whether a checkpoint still exists. An incremental
-// backup whose parent checkpoint is gone cannot be computed, and the only
-// correct answer then is to fall back to a full backup.
+// HasCheckpoint сообщает, существует ли checkpoint по-прежнему. Дополнительная резервная
+// копия, чья родительская копия checkpoint исчезла, не может быть вычислена, и единственный
+// правильный ответ тогда — вернуться к полной резервной копии.
 func (c *Conn) HasCheckpoint(ctx context.Context, dom libvirt.Domain, name string) (bool, error) {
 	if name == "" {
 		return false, nil
@@ -231,9 +232,9 @@ func (c *Conn) HasCheckpoint(ctx context.Context, dom libvirt.Domain, name strin
 	return true, nil
 }
 
-// DeleteCheckpoint removes a checkpoint. Deleting one in the middle of a chain
-// makes libvirt merge its bitmap into the child, so the remaining chain stays
-// usable — but the backups that referenced it no longer have a base.
+// DeleteCheckpoint удаляет checkpoint. При удалении из середины цепочки libvirt сливает
+// битовую карту с дочерней. Оставшаяся цепочка работоспособна, а бэкапы со ссылкой на
+// удалённый checkpoint теряют базу.
 func (c *Conn) DeleteCheckpoint(ctx context.Context, dom libvirt.Domain, name string) error {
 	cp, err := c.lv.DomainCheckpointLookupByName(dom, name, 0)
 	if err != nil {
@@ -245,8 +246,8 @@ func (c *Conn) DeleteCheckpoint(ctx context.Context, dom libvirt.Domain, name st
 	return c.lv.DomainCheckpointDelete(cp, 0)
 }
 
-// BeginBackup starts a pull-mode backup, optionally establishing a checkpoint
-// at the same instant so the next run can be incremental.
+// BeginBackup начинает резервное копирование в режиме вытягивания, необязательно
+// устанавливая checkpoint в тот же момент, чтобы следующий запуск мог быть инкрементным.
 func (c *Conn) BeginBackup(ctx context.Context, dom libvirt.Domain, spec BackupSpec, checkpoint *CheckpointSpec) error {
 	backupXML, err := spec.XML()
 	if err != nil {
@@ -268,14 +269,13 @@ func (c *Conn) BeginBackup(ctx context.Context, dom libvirt.Domain, spec BackupS
 	return nil
 }
 
-// EndBackup finishes an active backup and releases its scratch files.
+// EndBackup завершает активную резервную копию и выпускает свои временные файлы данных.
 //
-// libvirt has no dedicated "end backup" call: the backup is a job, and ending
-// the job ends the backup. Aborting a pull-mode backup is not a failure — the
-// data has already been read by then.
+// В libvirt бэкап реализован заданием и отдельного вызова завершения нет. Остановка
+// pull-задания после чтения данных считается штатным завершением.
 func (c *Conn) EndBackup(ctx context.Context, dom libvirt.Domain) error {
 	if err := c.lv.DomainAbortJob(dom); err != nil {
-		// "no job" means somebody already ended it, which is the state we want.
+		// Сообщение "no job" означает, что задание уже завершено.
 		if strings.Contains(strings.ToLower(err.Error()), "no job") {
 			return nil
 		}
@@ -284,8 +284,8 @@ func (c *Conn) EndBackup(ctx context.Context, dom libvirt.Domain) error {
 	return nil
 }
 
-// BackupInProgress reports whether the domain already has an open backup, which
-// is how a leftover from a crashed run is detected at startup.
+// BackupInProgress сообщает, есть ли у домена уже открытая резервная копия, которая
+// определяет, как остаток от аварийного запуска обнаруживается при запуске.
 func (c *Conn) BackupInProgress(ctx context.Context, dom libvirt.Domain) (bool, string) {
 	raw, err := c.lv.DomainBackupGetXMLDesc(dom, 0)
 	if err != nil {
@@ -294,33 +294,73 @@ func (c *Conn) BackupInProgress(ctx context.Context, dom libvirt.Domain) (bool, 
 	return raw != "", raw
 }
 
-// PrepareScratchDir makes sure the directory for scratch files exists and is
-// writable by qemu, and reports how much space is free there.
+// CompressionBackupXML сохраняет транспортные ошибки: очистка не должна ошибочно принимать
+// недоступный гипервизор за остановленную работу и удалять живые временные файлы данных.
+func (c *Conn) CompressionBackupXML(ctx context.Context, dom libvirt.Domain) (string, error) {
+	raw, err := c.lv.DomainBackupGetXMLDesc(dom, 0)
+	if err != nil {
+		message := strings.ToLower(err.Error())
+		if strings.Contains(message, "no current backup") || strings.Contains(message, "no backup job") {
+			return "", nil
+		}
+		if state, _, stateErr := c.lv.DomainGetState(dom, 0); stateErr == nil && (stateFromCode(state) == StateShutOff || stateFromCode(state) == StateCrashed) {
+			return "", nil
+		}
+		return "", err
+	}
+	return raw, nil
+}
+
+func (c *Conn) CompressionDomain(ctx context.Context, name, id string) (libvirt.Domain, error) {
+	if id == "" {
+		dom, _, err := c.LookupDomain(ctx, name)
+		return dom, err
+	}
+	raw, err := hex.DecodeString(strings.ReplaceAll(id, "-", ""))
+	if err != nil || len(raw) != 16 {
+		return libvirt.Domain{}, fmt.Errorf("некорректный UUID владельца оценки")
+	}
+	var value libvirt.UUID
+	copy(value[:], raw)
+	return c.lv.DomainLookupByUUID(value)
+}
+
+// Точный XML идентификатор, а не соответствие подстроки, защищает несвязанные задания.
+func CompressionBackupOwned(raw, socket string) bool {
+	var doc struct {
+		Server struct {
+			Socket string `xml:"socket,attr"`
+		} `xml:"server"`
+	}
+	return socket != "" && xml.Unmarshal([]byte(raw), &doc) == nil && doc.Server.Socket == socket
+}
+
+// PrepareScratchDir убеждается, что каталог для временных файлов данных существует и
+// записывается qemu, и сообщает, сколько места там свободно.
 //
-// Space matters: the scratch file grows with every block the guest overwrites
-// while the backup is being read. A busy database during a slow backup can
-// need a surprising amount, and running out aborts the backup.
+// Во время чтения бэкапа временный файл растёт с каждым перезаписанным гостем блоком. При
+// высокой нагрузке и медленном чтении может понадобиться много места. Когда оно
+// заканчивается, бэкап прерывается.
 func (c *Conn) PrepareScratchDir(ctx context.Context, dir string) (freeBytes int64, err error) {
 	if dir == "" {
 		return 0, fmt.Errorf("не задан каталог для scratch-файлов")
 	}
-	// qemu runs as its own user, so the directory has to be group-writable by
-	// the qemu group rather than owned by the SSH user.
+	// QEMU работает от отдельного пользователя. Каталог должен быть доступен на запись
+	// группе QEMU.
 	cmd := fmt.Sprintf("mkdir -p %s && chmod 0771 %s && stat -f -c '%%a %%S' %s",
 		shellQuote(dir), shellQuote(dir), shellQuote(dir))
 	out, err := c.Run(ctx, cmd)
 	if err != nil {
 		return 0, fmt.Errorf("подготовка каталога %s на %s: %w", dir, c.cfg.Host, err)
 	}
-	// Space is a nice-to-have diagnostic, not a reason to refuse the backup.
+	// Пространство — хорошая диагностика, а не причина отказаться от резервного
+	// копирования.
 	free, _ := parseStatFree(out)
 	return free, nil
 }
 
-// ScratchFree reports how much space is left on the volume holding the
-// scratch directory. It is sampled while a backup runs: the scratch file grows
-// with every block the guest overwrites, and so does anything else sharing
-// that volume.
+// ScratchFree возвращает свободное место на томе с рабочим каталогом. Значение измеряется
+// во время бэкапа, когда его временный файл и другие файлы на томе могут расти.
 func (c *Conn) ScratchFree(ctx context.Context, dir string) (int64, error) {
 	out, err := c.Run(ctx, fmt.Sprintf("stat -f -c '%%a %%S' %s", shellQuote(dir)))
 	if err != nil {
@@ -342,9 +382,9 @@ func parseStatFree(out string) (int64, bool) {
 	return blocks * blockSize, true
 }
 
-// BackupScratchUsage reports how many bytes the running backup job keeps in
-// its scratch files. ok is false when libvirt does not report it: the job has
-// ended or the hypervisor is too old to count temporary space.
+// BackupScratchUsage возвращает размер временных файлов текущего бэкапа в байтах. ok равно
+// false, если libvirt не передал значение, например после завершения задания или на старом
+// гипервизоре.
 func (c *Conn) BackupScratchUsage(ctx context.Context, dom libvirt.Domain) (used int64, ok bool) {
 	_, params, err := c.lv.DomainGetJobStats(dom, 0)
 	if err != nil {
@@ -374,7 +414,7 @@ func typedParamInt(params []libvirt.TypedParam, field string) (int64, bool) {
 	return 0, false
 }
 
-// RemoveScratch deletes scratch files left behind by a backup.
+// RemoveScratch удаляет временные файлы данных, оставленные резервной копией.
 func (c *Conn) RemoveScratch(ctx context.Context, files ...string) error {
 	if len(files) == 0 {
 		return nil
@@ -393,8 +433,8 @@ func (c *Conn) RemoveScratch(ctx context.Context, files ...string) error {
 	return err
 }
 
-// RemoveSocket deletes a stale NBD socket file. libvirt refuses to start a
-// backup when the socket path already exists.
+// RemoveSocket удаляет устаревший NBD файл сокета. libvirt отказывается запускать резервную
+// копию, когда путь сокета уже существует.
 func (c *Conn) RemoveSocket(ctx context.Context, socketPath string) error {
 	if socketPath == "" {
 		return nil
@@ -403,27 +443,28 @@ func (c *Conn) RemoveSocket(ctx context.Context, socketPath string) error {
 	return err
 }
 
-// ScratchPath builds a scratch file path for one disk of one run.
+// ScratchPath строит временный путь к файлу данных для одного диска из одного запуска.
 func ScratchPath(dir, runID, target string) string {
 	return path.Join(dir, fmt.Sprintf("jhv-%s-%s.scratch", shortID(runID), target))
 }
 
-// SocketPath builds the NBD socket path for one run.
+// SocketPath формирует путь к сокету NBD запуска.
 func SocketPath(dir, runID string) string {
 	return path.Join(dir, fmt.Sprintf("jhv-%s.sock", shortID(runID)))
 }
 
-// ExportName builds the NBD export name for one disk.
+// ExportName строит NBD имя экспорта для одного диска.
 func ExportName(target string) string { return target }
 
-// BitmapName builds the exported dirty bitmap name for one disk.
+// BitmapName создает экспортированную растровую карту имени измененных блоков для одного
+// диска.
 func BitmapName(target string) string { return "jhv-" + target }
 
 // checkpointPrefix отличает checkpoint-ы службы от чужих: ротация трогает
 // только свои.
 const checkpointPrefix = "jhv-"
 
-// CheckpointName builds a checkpoint name from a run identifier.
+// CheckpointName строит имя checkpoint из идентификатора запуска.
 func CheckpointName(runID string) string { return checkpointPrefix + shortID(runID) }
 
 // IsOwnCheckpoint сообщает, что checkpoint создан бэкапом службы.

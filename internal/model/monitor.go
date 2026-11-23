@@ -2,8 +2,8 @@ package model
 
 import "time"
 
-// Scope names the kind of object an alert, health sample or remediation action
-// refers to.
+// Scope называет тип объекта, к которому относится предупреждение, образец здоровья или
+// действие по восстановлению.
 type Scope string
 
 const (
@@ -16,7 +16,7 @@ const (
 	ScopeSettings      Scope = "settings"
 )
 
-// Severity ranks an alert.
+// Severity поосторожнича́ть.
 type Severity string
 
 const (
@@ -25,7 +25,7 @@ const (
 	SeverityCritical Severity = "critical"
 )
 
-// AlertState is the lifecycle of an alert.
+// AlertState жизненный цикл предупреждений.
 type AlertState string
 
 const (
@@ -34,8 +34,8 @@ const (
 	AlertResolved AlertState = "resolved"
 )
 
-// Alert kinds. Kept as constants so the UI can localise and the remediation
-// engine can match on them without parsing free text.
+// Типы тревоги. Хранятся как константы, поэтому UI может локализоваться, и механизм
+// восстановления может соответствовать им без разбора свободного текста.
 const (
 	AlertEngineUnreachable    = "engine_unreachable"
 	AlertClusterNoQuorum      = "cluster_no_quorum"
@@ -96,8 +96,8 @@ const (
 	AlertBreakGlassUsed = "break_glass_used"
 )
 
-// Alert is a deduplicated problem statement about one object. Repeated
-// detections bump Count and LastSeen instead of creating new rows.
+// Alert является дедуплицированной постановкой задачи об одном объекте. Повторные
+// обнаружения bump Count и LastSeen вместо создания новых строк.
 type Alert struct {
 	ID         string   `json:"id"`
 	ServerID   string   `json:"server_id,omitempty"`
@@ -119,8 +119,9 @@ type Alert struct {
 	ResolvedAt *time.Time    `json:"resolved_at,omitempty"`
 	AckedBy    string        `json:"acked_by,omitempty"`
 	AckedAt    *time.Time    `json:"acked_at,omitempty"`
-	// Notification fields describe external delivery, independently from the
-	// alert lifecycle shown in the UI. Muting an email must not hide the alert.
+	// Поля уведомлений описывают внешнюю доставку, независимо от жизненного цикла
+	// оповещения, показанного в UI. Мутирование электронной почты не должно скрывать
+	// предупреждение.
 	NotificationsMuted      bool       `json:"notifications_muted"`
 	NotificationsMutedUntil *time.Time `json:"notifications_muted_until,omitempty"`
 	NotificationCount       int        `json:"notification_count"`
@@ -144,7 +145,7 @@ type AlertComment struct {
 // AlertCommentMaxLength — предел длины одного пояснения, в символах.
 const AlertCommentMaxLength = 4000
 
-// RemediationAction names a corrective operation the service can perform.
+// RemediationAction называет корректирующую операцию, которую может выполнить служба.
 type RemediationAction string
 
 const (
@@ -157,7 +158,7 @@ const (
 	ActionReconnect    RemediationAction = "engine_reconnect"
 )
 
-// Title returns a Russian label for the UI.
+// Title возвращает русскую метку для UI.
 func (a RemediationAction) Title() string {
 	switch a {
 	case ActionVMStart:
@@ -179,15 +180,14 @@ func (a RemediationAction) Title() string {
 	}
 }
 
-// Disruptive reports whether the action can interrupt a running workload and
-// therefore needs an explicit opt-in.
+// Disruptive сообщает, может ли действие прерывать нагрузку и, следовательно, нуждается в
+// явной подписке.
 func (a RemediationAction) Disruptive() bool {
 	return a == ActionHostFence || a == ActionVMReset
 }
 
-// ValidForScope prevents sending a VM operation to a host (or the other way
-// around). Apart from clearer API errors, this stops a connector with a loose
-// implementation from interpreting an object ID in the wrong namespace.
+// ValidForScope проверяет, подходит ли действие объекту. Помимо понятной ошибки API, это
+// защищает от использования идентификатора ВМ как идентификатора хоста и наоборот.
 func (a RemediationAction) ValidForScope(scope Scope) bool {
 	switch a {
 	case ActionVMStart, ActionVMUnpause, ActionVMReset, ActionVMReboot:
@@ -221,7 +221,7 @@ func DisruptiveHostAction(action, fenceType string) bool {
 	return action == "fence" && fenceType != "status"
 }
 
-// RemediationStatus is the outcome of an attempted corrective action.
+// RemediationStatus является результатом попытки коррекции.
 type RemediationStatus string
 
 const (
@@ -233,8 +233,8 @@ const (
 	RemFailed    RemediationStatus = "failed"
 )
 
-// RemediationRecord is the audit trail of the auto-revive engine. Every
-// decision is recorded, including the ones that were deliberately not taken.
+// RemediationRecord — ревизионный след автовозов. Каждое решение записывается, в том числе
+// и то, которое было намеренно не принято.
 type RemediationRecord struct {
 	ID          string            `json:"id"`
 	ServerID    string            `json:"server_id"`
@@ -251,14 +251,12 @@ type RemediationRecord struct {
 	EndedAt     *time.Time        `json:"ended_at,omitempty"`
 }
 
-// RemediationPeriod is one stretch of time during which auto-remediation ran
-// in a single mode.
+// RemediationPeriod — это один отрезок времени, в течение которого автовосстановление
+// выполняется в одном режиме.
 //
-// The mode is modelled as a period rather than a flag because the point of the
-// check mode is observation: the operator turns it on, watches what the
-// automation proposes, and turns it off when the decisions look right. Without
-// a start and an end there is nothing to collect the observed decisions from,
-// and nothing to show as the grounds for going live.
+// Режим проверки хранится как период. Оператор наблюдает за решениями автоматизации от
+// начала до конца периода и использует этот набор наблюдений, чтобы решить, когда включить
+// реальные действия.
 type RemediationPeriod struct {
 	ID string `json:"id"`
 	// DryRun — в этом периоде действия только записывались.
@@ -273,10 +271,10 @@ type RemediationPeriod struct {
 	CreatedAt   time.Time          `json:"created_at"`
 }
 
-// Open reports whether this is the period in force right now.
+// Open сообщает, является ли это периодом, действующим сейчас.
 func (p *RemediationPeriod) Open() bool { return p.EndedAt == nil }
 
-// Duration returns how long the period lasted, or has lasted so far.
+// Duration возвраща́етъ, какъ долго длился срокъ, или до сихъ поръ.
 func (p *RemediationPeriod) Duration() time.Duration {
 	if p.EndedAt == nil {
 		return time.Since(p.StartedAt)
@@ -284,7 +282,7 @@ func (p *RemediationPeriod) Duration() time.Duration {
 	return p.EndedAt.Sub(p.StartedAt)
 }
 
-// RemediationDigest counts what happened during a period.
+// RemediationDigest подсчитано, что произошло в тот или иной период.
 type RemediationDigest struct {
 	Total int `json:"total"`
 	// Suppressed — решения, принятые, но не выполненные из-за режима проверки.
@@ -300,8 +298,8 @@ type RemediationDigest struct {
 	Objects int `json:"objects"`
 }
 
-// HealthSample is one observation of an object's state, kept for history and
-// for the availability charts in the UI.
+// HealthSample является одним наблюдением состояния объекта, сохраненным для истории и для
+// диаграмм доступности в UI.
 type HealthSample struct {
 	ID        int64     `json:"id"`
 	ServerID  string    `json:"server_id"`
@@ -314,7 +312,8 @@ type HealthSample struct {
 	At        time.Time `json:"at"`
 }
 
-// ServerSummary is the aggregate the dashboard renders per engine.
+// ServerSummary представляет собой агрегат, который приборная панель рендерит на каждый
+// движок.
 type ServerSummary struct {
 	Server           *Server `json:"server"`
 	HostsTotal       int     `json:"hosts_total"`

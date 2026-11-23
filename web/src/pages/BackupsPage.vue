@@ -5,6 +5,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { api, errorMessage, notify, notifyError, notifyOk } from '@/api/client'
 import DirectoryPicker from '@/components/DirectoryPicker.vue'
 import ManualSteps from '@/components/ManualSteps.vue'
+import { diskCompressionSaving, compressionPercent } from '@/api/backupCompression'
 import EngineLeftovers from '@/components/EngineLeftovers.vue'
 import { ago, bootTargetReady, bytes, consistencyColor, consistencyLabel, dateTime, elapsed, fsUsage, runStatus, staleFor, statusColor, transferPauseHint, transferRatio, transferSummary, usesOVirtAPI } from '@/api/format'
 import BootTargetPicker from '@/components/BootTargetPicker.vue'
@@ -718,7 +719,7 @@ const bootHosts = computed(() => app.servers.filter((s) => s.kind === 'kvm' && s
 async function verify(run: BackupRun) {
 	let selected = run
 	if (!run.copies?.length) {
-		try { selected = await api.getRun(run.id) } catch { /* details are loaded below */ }
+		try { selected = await api.getRun(run.id) } catch { /* подробности загружаются ниже */ }
 	}
 	verifyTarget.value = selected
   verifyForm.value.mode = 'manifest'
@@ -1081,8 +1082,8 @@ function connectLiveUpdates() {
 			liveSource.addEventListener(kind, queueLiveRefresh)
 		}
 	}
-	// Polling remains active as a fallback for a proxy which buffers SSE and
-	// for intermediate phase updates that are deliberately not broadcast.
+	// Опрос остаётся запасным вариантом, если прокси буферизует SSE. Он также получает
+	// промежуточные этапы, которые сервер не рассылает.
 	fallbackPollTimer = window.setInterval(() => void refreshLiveState(), 10_000)
 }
 
@@ -2002,6 +2003,14 @@ const replicationColumns = [
             </div>
           </div>
 
+          <q-banner v-if="detail && diskCompressionSaving(detail.disks || []) !== null" dense class="bg-blue-1 q-mb-md" data-testid="backup-compression-actual">
+            <div class="text-subtitle2">{{ detail.compression?.toUpperCase() || 'Без сжатия' }} ·
+              {{ (diskCompressionSaving(detail.disks || []) ?? 0) >= 0 ? 'Фактическое сокращение' : 'Увеличение объёма' }}
+              {{ compressionPercent(Math.abs(diskCompressionSaving(detail.disks || []) ?? 0)) }}</div>
+            <div class="text-caption">По данным успешно записанных дисков этого запуска: охвачено → сохранено, с учётом шифрования.
+              Пропуск пустых областей, неизменённые данные, метаданные, реплики и дополнительные артефакты не входят в этот процент.
+              Во время выполнения учитываются только завершённые диски.</div>
+          </q-banner>
           <q-banner v-if="detail?.purge_after" dense class="bg-orange-1 q-mb-md" data-testid="run-detail-quarantine">
             <template #avatar><q-icon name="hourglass_top" color="warning" /></template>
             <div class="jhv-wrap">
@@ -2071,6 +2080,7 @@ const replicationColumns = [
                 <th class="text-left">Размер</th>
                 <th class="text-left">Охвачено</th>
                 <th class="text-left">Записано</th>
+                <th class="text-left">Сокращение</th>
                 <th class="text-left">Чанков</th>
                 <th class="text-left">Статус</th>
               </tr>
@@ -2081,6 +2091,7 @@ const replicationColumns = [
                 <td>{{ bytes(disk.virtual_size) }}</td>
                 <td>{{ bytes(disk.logical_bytes) }}</td>
                 <td>{{ bytes(disk.stored_bytes) }}</td>
+                <td>{{ diskCompressionSaving([disk]) === null ? '—' : compressionPercent(diskCompressionSaving([disk])!) }}</td>
                 <td>{{ disk.chunk_count }}</td>
                 <td>
                   <q-chip dense :color="statusColor(disk.status)" text-color="white">

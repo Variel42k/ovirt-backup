@@ -763,7 +763,9 @@ ovirt-aaa-jdbc-tool user password-reset jhvirt-backup
 | `GET` | `/servers/{id}/hosts?live=true` | свежие хосты включённого подключения oVirt / RHV / РЕД Виртуализация |
 | `GET` | `/servers/{id}/hosts/{hostID}/storage-domains` | активные домены данных дата-центра работающего хоста; имена хоста, кластера и дата-центра, свободное место |
 | `GET` | `/servers/{id}/vms/{vmID}` | одна ВМ |
+| `GET` | `/vm-duplicates` | одноимённые ВМ в разных кластерах по кэшу включённых подключений; право `servers.read` |
 | `GET` | `/servers/{id}/vms/{vmID}/disks` | диски ВМ |
+| `POST` | `/servers/{id}/vms/{vmID}/compression-preview` | сравнение сжатия по ограниченной выборке текущих дисков до первой копии; требуется подтверждение чтения источника |
 | `GET` | `/servers/{id}/vms/{vmID}/filesystems` | тома гостя KVM по данным агента — для выборочной заморозки; гость не замораживается |
 | `GET` | `/servers/{id}/restore-networks` | доступные vNIC profiles oVirt или сети KVM для восстановления |
 | `POST` | `/servers/{id}/vms/{vmID}/action` | питание ВМ |
@@ -1011,41 +1013,6 @@ S3 endpoint не передаёт данные через сервис и пот
 служба ждёт его до трёх минут (этап `reading_guest`). Если агент список не
 сообщил, проверка всё равно пройдена, а в `notes` об этом сказано. Те же поля
 `filesystems` и `kept` отдаёт журнал `GET /verify/checks`.
-
-### Очистка истории репозиториев GitLab
-
-Хелпер `jhvirt-gitlab-clean` на ВМ с GitLab выполняет анализ и очистку, служба
-вызывает его по SSH. Чтение — `servers.read`, всё остальное — `servers.admin`.
-
-| Метод | Путь | Описание |
-|---|---|---|
-| `GET` | `/gitlab-clean/defaults` | правила по умолчанию: каталоги, расширения, порог большого файла |
-| `GET` `POST` | `/gitlab-clean/hosts` | подключения к ВМ с хелпером; приватный ключ обратно не отдаётся |
-| `PUT` `DELETE` | `/gitlab-clean/hosts/{id}` | изменить или удалить подключение вместе с историей запусков |
-| `POST` | `/gitlab-clean/hosts/{id}/probe` | проверить хелпер: версия GitLab, `clean_allowed`, работающие службы |
-| `POST` | `/gitlab-clean/hosts/{id}/analyze` | анализ всех репозиториев, ничего не меняет; ответ `202` с запуском |
-| `POST` | `/gitlab-clean/hosts/{id}/clean` | переписать историю выбранных репозиториев; ответ `202` |
-| `GET` | `/gitlab-clean/runs?host_id=` | история запусков без отчётов |
-| `GET` | `/gitlab-clean/runs/{id}` | запуск с отчётом по репозиториям |
-| `POST` | `/gitlab-clean/runs/{id}/cancel` | остановить: анализ — сразу, очистку — после текущего репозитория |
-
-```jsonc
-// POST /gitlab-clean/hosts/{id}/analyze
-{ "rules": { "dirs": ["node_modules", "venv"], "extensions": ["pyc"], "big_file_bytes": 10485760 } }
-
-// POST /gitlab-clean/hosts/{id}/clean
-{ "repos": [{ "path": "@hashed/aa/bb/….git", "full_path": "web/frontend" }],
-  "rules": { "dirs": ["node_modules", "venv"], "extensions": ["pyc"], "big_file_bytes": 10485760 },
-  "strip_big_files": false,     // true — удалить и файлы не меньше big_file_bytes
-  "confirm": "gitlab-copy" }    // имя подключения
-```
-
-Имена каталогов и расширения — только буквы, цифры, точка, подчёркивание и
-дефис. Очистка отклоняется, если хелпер не сообщил `clean_allowed`, на хосте
-работают `puma` или `sidekiq` либо не установлен `git filter-repo`: разрешение
-проверяется по ответу хелпера и ещё раз самим хелпером перед каждым
-репозиторием. В отчёте анализа — только репозитории с находками или ошибкой;
-`reclaim_bytes` — занятое в репозитории место после сжатия.
 
 ### Импорт образа диска из хранилища
 
@@ -1496,10 +1463,10 @@ Mute/snooze не скрывает alert в web и не меняет его state
 | `PUT` | `/settings/runtime/backup-quality` | сохранить полный набор порогов в PostgreSQL |
 | `DELETE` | `/settings/runtime/backup-quality` | сбросить к YAML/окружению |
 
-`PUT /settings/runtime/web-sections` принимает оба обязательных логических поля
-`{"discovery":false,"gitlab_clean":true}` и возвращает сохранённый объект.
-Отсутствующие, `null` и нелогические значения отклоняются. По умолчанию оба
-раздела включены. Значение `web_sections` также возвращается в `/meta` и
+`PUT /settings/runtime/web-sections` принимает обязательное логическое поле
+`{"discovery":false}` и возвращает сохранённый объект.
+Отсутствующие, `null` и нелогические значения отклоняются. По умолчанию
+поиск сервисов включён. Значение `web_sections` также возвращается в `/meta` и
 `/settings/runtime`, поэтому доступно web-пользователям без административного
 права чтения настроек. Изменение публикует `settings.changed`.
 Настройка скрывает меню и закрывает прямые маршруты web; права API и расписание

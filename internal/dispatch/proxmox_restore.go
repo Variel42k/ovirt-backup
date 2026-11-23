@@ -230,9 +230,9 @@ func (d *Dispatcher) restoreProxmoxVM(ctx context.Context, req *model.RestoreVMR
 		return fail(err)
 	}
 
-	// nextid is not a reservation. Serialising restores prevents two workers of
-	// this service from choosing the same id; Proxmox still rejects a collision
-	// caused by an external creator without overwriting anything.
+	// Next не является резервированием. Последовательное восстановление не позволяет двум
+	// работникам этой службы выбрать один и тот же идентификатор; Proxmox По-прежнему
+	// отвергает столкновение, вызванное внешним творцом, ничего не переписывая.
 	d.proxmoxRestore.Lock()
 	defer d.proxmoxRestore.Unlock()
 	vmID, err := client.NextVMID(ctx)

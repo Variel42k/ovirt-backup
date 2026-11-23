@@ -1,5 +1,5 @@
-# The chart intentionally does not install PostgreSQL. Use a managed cluster or
-# an operator-managed PostgreSQL and keep its DSN in an existing Secret.
+# Чарт использует внешнюю PostgreSQL. Управляйте ей отдельно или через оператор
+# и храните DSN в существующем Secret.
 replicaCount: 1
 
 image:
@@ -11,7 +11,7 @@ imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""
 
-# Public browser URL. TLS is normally terminated by Ingress.
+# Публичный URL для браузера. Обычно TLS завершается на Ingress.
 externalURL: ""
 timezone: UTC
 
@@ -19,8 +19,8 @@ database:
   existingSecret: ""
   urlKey: url
 
-# This Secret must contain the stable AES key used to encrypt credentials and
-# backup chunks. Its value is a base64-encoded 32-byte key (openssl rand -base64 32).
+# Secret должен содержать постоянный ключ AES для шифрования учётных данных
+# и чанков бэкапов. Ключ из 32 байтов кодируется в base64 (openssl rand -base64 32).
 appSecret:
   existingSecret: ""
   keyKey: secret.key
@@ -28,8 +28,8 @@ appSecret:
   oidcClientSecretKey: ""
   metricsTokenKey: ""
 
-# Merged with built-in application defaults. Maps can be extended from a
-# separate values file, including auth.oidc.role_mapping and trusted proxies.
+# Объединяется со встроенными настройками приложения. Дополняйте словари,
+# в том числе auth.oidc.role_mapping и доверенные прокси, отдельным файлом values.
 config:
   server:
     serve_spa: true
@@ -97,8 +97,8 @@ resources:
     memory: 256Mi
   limits: {}
 
-# Local storage is disabled by default. For more than one replica the claim
-# must be ReadWriteMany and shared=true must explicitly acknowledge that fact.
+# Локальное хранилище по умолчанию выключено. Для нескольких реплик
+# у PVC должен быть режим ReadWriteMany, подтверждённый значением shared=true.
 backupStorage:
   enabled: false
   shared: false

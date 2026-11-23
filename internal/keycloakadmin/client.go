@@ -1,6 +1,7 @@
-// Package keycloakadmin contains the small, bounded part of the Keycloak
-// Admin REST API needed by the identity settings page. Administrative and LDAP
-// credentials live only in request memory; callers must never persist them.
+// Пакет keycloakadmin содержит небольшую ограниченную часть Keycloak администратора REST
+// API, необходимую странице настроек идентификатора. Учетные данные администратора и LDAP
+// аутентификации живут только в памяти запроса; Клиенты этого интерфейса никогда не должны
+// настаивать на них.
 package keycloakadmin
 
 import (
@@ -26,7 +27,7 @@ const (
 	componentLDAPMapper  = "org.keycloak.storage.ldap.mappers.LDAPStorageMapper"
 )
 
-// Client authenticates with a short-lived service-account token.
+// Client аутентифицируется с помощью кратковременного маркера учётной записи службы.
 type Client struct {
 	baseURL    string
 	issuer     string
@@ -38,7 +39,7 @@ type Client struct {
 	http       *http.Client
 }
 
-// Domain describes an Active Directory federation. Only LDAPS is accepted.
+// Domain описывает федерацию Active Directory. Только LDAPS принято.
 type Domain struct {
 	Name         string
 	ProviderName string
@@ -47,10 +48,10 @@ type Domain struct {
 	GroupsDN     string
 	BindDN       string
 	BindPassword string
-	// StoredBindCredential is written to the LDAP component after the live
-	// connection checks have used BindPassword. The bundled Keycloak helper
-	// sets it to a file-vault reference, so the password itself never becomes
-	// durable Keycloak component data.
+	// StoredBindCredential записывается в компонент LDAP после того, как использовались
+	// проверки соединения в реальном времени BindPassword. Связанный Keycloak помощник
+	// устанавливает его в файл-хранилище ссылки, так что сам пароль никогда не становится
+	// прочным Keycloak данные компонента.
 	StoredBindCredential string
 	AdminGroup           string
 	OperatorGroup        string
@@ -65,22 +66,21 @@ type Result struct {
 	GroupsChecked int    `json:"groups_checked"`
 }
 
-// New derives every administrative endpoint from the public issuer.
+// New получает каждую административную конечную точку от публичного эмитента.
 func New(issuer, adminRealm, clientID, secret string) (*Client, error) {
 	return NewWithBackchannel(issuer, "", adminRealm, clientID, secret)
 }
 
-// NewWithBackchannel derives paths from the public issuer and optionally
-// replaces only its origin with the already-validated OIDC backchannel. This
-// keeps the public realm and any Keycloak path prefix authoritative while
-// allowing the application to use its internal route to Keycloak.
+// NewWithBackchannel берёт пути из публичного issuer и при необходимости заменяет только
+// origin проверенным OIDC backchannel. Область и префикс пути остаются публичными, а
+// запросы идут по внутреннему маршруту.
 func NewWithBackchannel(issuer, backchannel, adminRealm, clientID, secret string) (*Client, error) {
 	return NewWithBackchannelTransport(issuer, backchannel, adminRealm, clientID, secret, nil)
 }
 
-// NewWithBackchannelTransport is the same client with a caller-supplied
-// transport. The embedded host helper uses it to trust the exact certificate
-// copied into Keycloak while connecting to its loopback-published TLS port.
+// NewWithBackchannelTransport использует транспорт, переданный вызывающим кодом. Хостовый
+// хелпер доверяет сертификату, установленному в Keycloak, при подключении к локальному
+// TLS-порту.
 func NewWithBackchannelTransport(issuer, backchannel, adminRealm, clientID, secret string, transport http.RoundTripper) (*Client, error) {
 	base, realm, normalized, err := parseIssuer(issuer)
 	if err != nil {
@@ -289,7 +289,7 @@ func redactError(err error, secrets ...string) error {
 	return errors.New(safeMessage([]byte(err.Error()), secrets...))
 }
 
-// VerifyAccess confirms both the service account and the target realm.
+// VerifyAccess подтверждает как учётную запись службы, так и целевую область.
 func (c *Client) VerifyAccess(ctx context.Context) (string, error) {
 	if err := c.Authenticate(ctx); err != nil {
 		return "", err
@@ -307,8 +307,8 @@ func (c *Client) VerifyAccess(ctx context.Context) (string, error) {
 	return realm.ID, nil
 }
 
-// EnsureApplicationClient creates or repairs the OIDC client while preserving
-// unrelated client settings and mappers.
+// EnsureApplicationClient создает или восстанавливает клиент OIDC, сохраняя при этом
+// несвязанные настройки клиента и картографы.
 func (c *Client) EnsureApplicationClient(ctx context.Context, clientID, clientSecret, redirectURL string) (err error) {
 	defer func() { err = redactError(err, c.secret, clientSecret) }()
 	if strings.TrimSpace(clientID) == "" || clientSecret == "" {
@@ -381,7 +381,7 @@ func (c *Client) EnsureApplicationClient(ctx context.Context, clientID, clientSe
 	if subtle.ConstantTimeCompare([]byte(storedSecret.Value), []byte(clientSecret)) != 1 {
 		return errors.New("секрет OIDC-клиента в приложении не совпадает с секретом существующего клиента Keycloak")
 	}
-	delete(client, "secret") // an update must not accidentally rotate it
+	delete(client, "secret") // обновление не должно случайно вращать его
 	_, _, err = c.do(ctx, http.MethodPut, "/clients/"+url.PathEscape(id), client, http.StatusNoContent)
 	return err
 }
@@ -409,8 +409,8 @@ func upsertGroupsMapper(value any) []any {
 	return append(mappers, wanted)
 }
 
-// ConfigureDomain verifies LDAPS from Keycloak, updates one named federation,
-// runs a full sync, and checks that all mapped groups arrived.
+// ConfigureDomain проверяет LDAPS из Keycloak, обновляет одну поименованную федерацию,
+// запускает полную синхронизацию и проверяет, что все сопоставленные группы прибыли.
 func (c *Client) ConfigureDomain(ctx context.Context, d Domain) (Result, error) {
 	out, err := c.configureDomain(ctx, d)
 	return out, redactError(err, c.secret, d.BindPassword)
@@ -519,10 +519,9 @@ func storedBindCredential(d Domain) string {
 	return d.BindPassword
 }
 
-// VerifyStoredDomain checks the persisted LDAP provider without accepting a raw
-// password. It is intended for the embedded-Keycloak lifecycle check after a
-// container restart, so a configuration is not marked healthy merely because
-// the one-shot testAuthentication call succeeded before restart.
+// VerifyStoredDomain проверяет сохранённого провайдера LDAP без ввода исходного пароля. Она
+// выполняется после перезапуска встроенного Keycloak. Успех разового testAuthentication до
+// перезапуска для этой проверки недостаточен.
 func (c *Client) VerifyStoredDomain(ctx context.Context, d Domain) (string, error) {
 	realmID, err := c.VerifyAccess(ctx)
 	if err != nil {
@@ -554,10 +553,9 @@ func (c *Client) VerifyStoredDomain(ctx context.Context, d Domain) (string, erro
 	if len(credentials) != 1 {
 		return "", errors.New("Keycloak не сохранил bind-секрет LDAP provider")
 	}
-	// Some Keycloak builds redact secret component values in Admin REST. If
-	// the value is visible, enforce the vault expression; if it is redacted,
-	// the full sync below is the authoritative proof that the persisted
-	// credential resolves after restart.
+	// Некоторые сборки Keycloak скрывают секреты компонентов в Admin REST. Видимое значение
+	// проверяем на ссылку на файл секрета. Если значение скрыто, полная синхронизация ниже
+	// подтверждает доступность секрета после перезапуска.
 	visibleCredential := strings.TrimSpace(credentials[0])
 	redacted := visibleCredential != "" && strings.Trim(visibleCredential, "*") == ""
 	if !redacted && visibleCredential != d.StoredBindCredential {
@@ -654,8 +652,8 @@ func validateDomain(d Domain) error {
 	return nil
 }
 
-// Remove only the mapper owned by this wizard; preserve unrelated federation
-// mappers and local groups configured by the Keycloak administrator.
+// Удалить только маппер, принадлежащий этому мастеру; сохранить несвязанные картографы
+// федерации и локальные группы, настроенные администратором Keycloak.
 func (c *Client) removeManagedGroupMapper(ctx context.Context, providerID string) error {
 	query := "?parent=" + url.QueryEscape(providerID) + "&type=" + url.QueryEscape(componentLDAPMapper) + "&name=jhvirt-groups"
 	raw, _, err := c.do(ctx, http.MethodGet, "/components"+query, nil, http.StatusOK)
@@ -749,7 +747,7 @@ func (c *Client) upsertComponent(ctx context.Context, wanted component) (string,
 			}
 		}
 	}
-	// Some proxies remove Location; read the exact component back.
+	// Некоторые прокси удаляют местоположение; Прочитайте точный компонент обратно.
 	raw, _, err = c.do(ctx, http.MethodGet, "/components"+query, nil, http.StatusOK)
 	if err != nil {
 		return "", err

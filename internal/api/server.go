@@ -1,5 +1,4 @@
-// Package api exposes the REST interface the web UI and any integration
-// speaks to.
+// Пакет api отображает интерфейс REST сети UI, и любая интеграция говорит.
 package api
 
 import (
@@ -24,7 +23,6 @@ import (
 	drcheck "github.com/Variel42k/ovirt-backup/internal/dr"
 	"github.com/Variel42k/ovirt-backup/internal/events"
 	"github.com/Variel42k/ovirt-backup/internal/filebackup"
-	"github.com/Variel42k/ovirt-backup/internal/gitclean"
 	"github.com/Variel42k/ovirt-backup/internal/hosthelper"
 	"github.com/Variel42k/ovirt-backup/internal/libvirtx"
 	"github.com/Variel42k/ovirt-backup/internal/logging"
@@ -41,7 +39,7 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/vmtransfer"
 )
 
-// Server holds the API dependencies.
+// Server содержитъ въ себѣ API зависимости.
 type Server struct {
 	vmTransfers   *vmtransfer.Service
 	cfg           config.Config
@@ -64,7 +62,6 @@ type Server struct {
 	dr            *drcheck.Checker
 	fileBackup    *filebackup.Engine
 	dbDump        *dbdump.Engine
-	gitClean      *gitclean.Engine
 	discovery     *discovery.Engine
 	hostHelper    *hosthelper.Client
 	metricsToken  []byte
@@ -76,12 +73,12 @@ type Server struct {
 	// oidc пуст, когда внешний вход выключен: по этому полю обработчики и
 	// страница входа узнают, есть ли вторая дверь.
 	oidc *oidcClient
-	// identityMu protects hot replacement of the OIDC client from the settings
-	// page while login callbacks and session checks are running.
+	// identityMu защищает горячую замену клиента OIDC со страницы настроек, пока
+	// выполняются обратные вызовы и проверки сеанса.
 	identityMu sync.RWMutex
-	// identityChangeMu serializes Keycloak and domain changes. A detached
-	// deployment survives a browser refresh, so a second request must fail fast
-	// instead of racing the first one against the same realm and stored secret.
+	// identityChangeMu сериализует Keycloak и доменные изменения. Отдельное развертывание
+	// выдерживает обновление браузера, поэтому второй запрос должен быстро провалиться,
+	// вместо того, чтобы соревноваться с первым в той же области и храниться в секрете.
 	identityChangeMu sync.Mutex
 	// oidcLogins помнит начатые внешние входы до возврата от провайдера.
 	oidcLogins  *oidcPending
@@ -93,13 +90,13 @@ type Server struct {
 	auditFile *auditlog.Writer
 }
 
-// Deps bundles what the API needs, so adding a dependency does not change
-// every call site.
+// Deps комплектует то, что нужно API, поэтому добавление зависимости не меняет каждый сайт
+// вызова.
 type Deps struct {
 	VMTransfers *vmtransfer.Service
 	Config      config.Config
-	// BaseConfig is the YAML/environment value before database overrides. It
-	// is the target of the runtime-settings reset endpoints.
+	// BaseConfig — значение YAML/окружающей среды до переопределения базы данных. Он
+	// является целью настроек времени выполнения сброса конечных точек.
 	BaseConfig    config.Config
 	Store         *store.Store
 	Pool          *ovirt.Pool
@@ -119,16 +116,16 @@ type Deps struct {
 	DR            *drcheck.Checker
 	FileBackup    *filebackup.Engine
 	DBDump        *dbdump.Engine
-	GitClean      *gitclean.Engine
 	Discovery     *discovery.Engine
-	// StorageMounts supplies browsable mount roots for local repositories. Production
-	// uses repo.BrowsableStorageMounts; tests may provide isolated temporary roots.
+	// StorageMounts Поставляетъ рѣзкіе монтировочные корни для местныхъ хранилищъ.
+	// Использование в производстве repo.BrowsableStorageMounts; Тесты могут дать
+	// изолированные временные корни.
 	StorageMounts func() []string
 	// AuditFile — журнал аудита для внешнего сборщика. Может быть nil.
 	AuditFile *auditlog.Writer
 }
 
-// New builds the API server.
+// New строит сервер API.
 func New(d Deps) *Server {
 	base := d.BaseConfig
 	if base.Backup.Compression == "" {
@@ -155,7 +152,6 @@ func New(d Deps) *Server {
 		dr:            d.DR, metricsToken: metricsToken,
 		fileBackup:    d.FileBackup,
 		dbDump:        d.DBDump,
-		gitClean:      d.GitClean,
 		discovery:     d.Discovery,
 		hostHelper:    hosthelper.New(os.Getenv("JHV_HOST_HELPER_SOCKET")),
 		storageMounts: d.StorageMounts,
@@ -182,12 +178,12 @@ func New(d Deps) *Server {
 	return srv
 }
 
-// Handler builds the complete HTTP handler: API routes, then the SPA.
+// Handler строитъ полный HTTP обработчикъ: API маршруты, потомъ SPA.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
-	// Health endpoints stay outside authentication so a load balancer can
-	// reach them without credentials.
+	// Конечные точки здоровья остаются за пределами аутентификации, поэтому балансировщик
+	// нагрузки может достичь их без учётных данных аутентификации.
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /readyz", s.handleReadyz)
 	mux.Handle("GET /metrics", s.metricsHandler())
@@ -196,7 +192,7 @@ func (s *Server) Handler() http.Handler {
 	s.routes(api)
 
 	mux.Handle("/api/v1/", http.StripPrefix("/api/v1", s.requireAuth(api)))
-	// Login must be reachable without a session.
+	// Логин должен быть доступен без сеанса.
 	mux.Handle("POST /api/v1/auth/login", http.HandlerFunc(s.handleLogin))
 	mux.Handle("POST /api/v1/auth/logout", http.HandlerFunc(s.handleLogout))
 	// Внешний вход — тоже до всякой сессии, ради неё он и затевается. Info
@@ -212,7 +208,7 @@ func (s *Server) Handler() http.Handler {
 	return s.recoverer(s.securityHeaders(s.requestLogger(s.cors(s.csrf(s.authenticate(mux))))))
 }
 
-// routes registers the API surface. Paths here are relative to /api/v1.
+// routes регистрируетъ API поверхность. Пути здесь относительны /api/v1.
 func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /vm-transfers", s.perm(model.PermServersRead, s.perm(model.PermBackupsRead, s.handleListVMTransfers)))
 	mux.HandleFunc("GET /vm-transfers/source", s.perm(model.PermServersRead, s.handleVMTransferSource))
@@ -267,8 +263,10 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /servers/{id}/clusters/{clusterID}/recovery", s.perm(model.PermServersWrite, s.management(s.handleClusterRecoveryPolicy)))
 	mux.HandleFunc("GET /servers/{id}/hosts", s.perm(model.PermServersRead, s.handleListHosts))
 	mux.HandleFunc("GET /servers/{id}/vms", s.perm(model.PermServersRead, s.handleListVMs))
+	mux.HandleFunc("GET /vm-duplicates", s.perm(model.PermServersRead, s.handleVMDuplicates))
 	mux.HandleFunc("GET /servers/{id}/vms/{vmID}", s.perm(model.PermServersRead, s.handleGetVM))
 	mux.HandleFunc("GET /servers/{id}/vms/{vmID}/disks", s.perm(model.PermServersRead, s.handleListVMDisks))
+	mux.HandleFunc("POST /servers/{id}/vms/{vmID}/compression-preview", s.perm(model.PermServersRead, s.perm(model.PermBackupsWrite, s.handleCompressionPreview)))
 	mux.HandleFunc("GET /servers/{id}/vms/{vmID}/filesystems", s.perm(model.PermServersRead, s.handleGuestFilesystems))
 	mux.HandleFunc("GET /servers/{id}/disks", s.perm(model.PermServersRead, s.handleListDisks))
 	mux.HandleFunc("GET /servers/{id}/storage-domains", s.perm(model.PermServersRead, s.handleListStorageDomains))
@@ -466,7 +464,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /engine-config/runs/{id}/download", s.perm(model.PermEngineConfigRead, s.handleDownloadEngineConfig))
 	mux.HandleFunc("GET /engine-config/compare", s.perm(model.PermEngineConfigRead, s.handleCompareEngineConfig))
 
-	// Native file backups are isolated from VM jobs and guarded by the
+	// Нативные резервные копии файлов изолированы от заданий ВМ и охраняются
 	// Файловые бэкапы доступны всегда; корни ограничивают видимую файловую систему.
 	mux.HandleFunc("GET /file-backup/roots", s.perm(model.PermFileBackupsRead, s.handleListFileBackupRoots))
 	mux.HandleFunc("GET /file-backup/jobs", s.perm(model.PermFileBackupsRead, s.handleListFileBackupJobs))
@@ -483,18 +481,6 @@ func (s *Server) routes(mux *http.ServeMux) {
 
 	// Логические дампы СУБД: хост — как подключение гипервизора, задания и
 	// точки — теми же правами, что задания и копии ВМ.
-	// Очистка истории репозиториев GitLab через хелпер на ВМ.
-	mux.HandleFunc("GET /gitlab-clean/defaults", s.perm(model.PermServersRead, s.handleGitCleanDefaults))
-	mux.HandleFunc("GET /gitlab-clean/hosts", s.perm(model.PermServersRead, s.handleListGitlabHosts))
-	mux.HandleFunc("POST /gitlab-clean/hosts", s.perm(model.PermServersAdmin, s.handleCreateGitlabHost))
-	mux.HandleFunc("PUT /gitlab-clean/hosts/{id}", s.perm(model.PermServersAdmin, s.handleUpdateGitlabHost))
-	mux.HandleFunc("DELETE /gitlab-clean/hosts/{id}", s.perm(model.PermServersAdmin, s.handleDeleteGitlabHost))
-	mux.HandleFunc("POST /gitlab-clean/hosts/{id}/probe", s.perm(model.PermServersAdmin, s.handleProbeGitlabHost))
-	mux.HandleFunc("POST /gitlab-clean/hosts/{id}/analyze", s.perm(model.PermServersAdmin, s.handleStartGitAnalyze))
-	mux.HandleFunc("POST /gitlab-clean/hosts/{id}/clean", s.perm(model.PermServersAdmin, s.handleStartGitClean))
-	mux.HandleFunc("GET /gitlab-clean/runs", s.perm(model.PermServersRead, s.handleListGitCleanRuns))
-	mux.HandleFunc("GET /gitlab-clean/runs/{id}", s.perm(model.PermServersRead, s.handleGetGitCleanRun))
-	mux.HandleFunc("POST /gitlab-clean/runs/{id}/cancel", s.perm(model.PermServersAdmin, s.handleCancelGitCleanRun))
 
 	mux.HandleFunc("GET /db-dump/hosts", s.perm(model.PermServersRead, s.handleListDBHosts))
 	mux.HandleFunc("POST /db-dump/hosts", s.perm(model.PermServersAdmin, s.handleCreateDBHost))
@@ -566,8 +552,8 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /users/{id}", s.perm(model.PermUsersAdmin, s.handleDeleteUser))
 }
 
-// spaHandler serves the built single-page app, falling back to index.html so
-// client-side routes survive a page reload.
+// spaHandler обслуживает встроенное одностраничное приложение, возвращаясь к index.html,
+// поэтому маршруты на стороне клиента выдерживают перезагрузку страницы.
 func (s *Server) spaHandler() http.Handler {
 	dir := s.cfg.Server.SPADir
 	fileServer := http.FileServer(http.Dir(dir))
@@ -615,14 +601,11 @@ func (s *Server) spaHandler() http.Handler {
 			return
 		}
 
-		// A missing static file must be a 404, not the application shell.
+		// Недостающий статический файл должен быть 404, а не оболочка приложения.
 		//
-		// The fallback exists so that /backups reloads into the SPA instead of
-		// 404ing. Applying it to a missing script instead hands the browser
-		// HTML with a JavaScript content type, and the page dies with
-		// "Unexpected token '<'" — which says nothing about the actual problem.
-		// That happens for real after an update: a cached index.html asks for a
-		// chunk that the new build no longer contains.
+		// Для маршрутов SPA вроде /backups при перезагрузке возвращаем index.html. Если
+		// отсутствует скрипт из старой сборки, ответ HTML вместо JavaScript вызвал бы ошибку
+		// "Unexpected token '<'". Поэтому для отсутствующего скрипта возвращаем 404.
 		if isStaticAsset(clean) {
 			http.NotFound(w, r)
 			return
@@ -631,12 +614,12 @@ func (s *Server) spaHandler() http.Handler {
 	})
 }
 
-// isStaticAsset reports whether a path was meant to be a file rather than a
-// client-side route.
+// isStaticAsset сообщает, должен ли путь быть файлом, а не маршрутом на стороне клиента.
 //
-// Client routes of this app carry no extension (/backups, /servers/<id>), while
-// every built asset does. That is a heuristic, but the failure it prevents is
-// far more confusing than the one it could cause.
+// Клиентские маршруты этого приложения не имеют расширения (/backups,
+// /servers/<идентификатор>), в то время как каждый встроенный актив имеет. Это эвристика,
+// но неудача, которую она предотвращает, гораздо более запутанна, чем та, которую она может
+// вызвать.
 func isStaticAsset(clean string) bool {
 	if strings.HasPrefix(clean, "assets"+string(filepath.Separator)) || strings.HasPrefix(clean, "assets/") {
 		return true
@@ -644,14 +627,14 @@ func isStaticAsset(clean string) bool {
 	return filepath.Ext(clean) != ""
 }
 
-// cors allows the dev-mode SPA, which runs on its own port, to call the API.
+// cors позволяет dev-режиму SPA, который работает на своем собственном порту, вызывать API.
 func (s *Server) cors(next http.Handler) http.Handler {
 	allowed := s.cfg.Server.CORSOrigins
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
-		// Only echo back an origin from the allow list: a wildcard would be
-		// incompatible with cookie credentials anyway.
+		// Только отголосок источника из списка разрешений: подстановочный знак в любом
+		// случае будет несовместим с учётными данными аутентификации cookie.
 		if origin != "" && slices.Contains(allowed, origin) {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
@@ -667,7 +650,7 @@ func (s *Server) cors(next http.Handler) http.Handler {
 	})
 }
 
-// requestLogger records API calls at debug level, and slow ones at info.
+// requestLogger записи API вызовов на уровне отладки, и медленные на уровне info.
 func (s *Server) requestLogger(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(r.URL.Path, "/api/") {
@@ -688,7 +671,7 @@ func (s *Server) requestLogger(next http.Handler) http.Handler {
 	})
 }
 
-// recoverer turns a handler panic into a 500 instead of killing the process.
+// recoverer превращает панику обработчика в 500 вместо того, чтобы убить процесс.
 func (s *Server) recoverer(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
@@ -724,8 +707,8 @@ func (r *statusRecorder) Write(b []byte) (int, error) {
 	return r.ResponseWriter.Write(b)
 }
 
-// Flush forwards to the underlying writer so server-sent events keep working
-// through this wrapper.
+// Flush пересылается основному писателю, поэтому события, отправленные сервером, продолжают
+// работать через эту обертку.
 func (r *statusRecorder) Flush() {
 	if f, ok := r.ResponseWriter.(http.Flusher); ok {
 		f.Flush()

@@ -13,7 +13,7 @@ import (
 // в него образ, но собрать из дисков работающую машину до сих пор приходилось
 // оператору руками.
 
-// CreateVMRequest describes the VM to create.
+// CreateVMRequest описывает создаваемую ВМ.
 type CreateVMRequest struct {
 	BIOSType                string
 	Cores, Sockets, Threads int
@@ -44,9 +44,9 @@ type CreateNICRequest struct {
 	Connected     bool
 }
 
-// CreateNIC adds a NIC without copying the source MAC. Omitting mac lets
-// oVirt allocate a fresh address and prevents the restored VM from colliding
-// with the production machine.
+// CreateNIC добавляет NIC без копирования источника MAC. Опущенный mac позволяет oVirt
+// выделить новый адрес и предотвращает столкновение восстановленной ВМ с производственной
+// машиной.
 func (c *Client) CreateNIC(ctx context.Context, vmID string, req CreateNICRequest) error {
 	if strings.TrimSpace(vmID) == "" {
 		return errors.New("не указана ВМ для сетевого интерфейса")
@@ -73,10 +73,10 @@ func (c *Client) CreateNIC(ctx context.Context, vmID string, req CreateNICReques
 	return c.post(ctx, fmt.Sprintf("/vms/%s/nics", vmID), body, nil)
 }
 
-// blankTemplateID is the built-in empty template of every oVirt installation.
+// blankTemplateID — встроенный пустой шаблон каждой oVirt установки.
 const blankTemplateID = "00000000-0000-0000-0000-000000000000"
 
-// CreateVM creates a virtual machine without disks.
+// CreateVM создает ВМ без дисков.
 //
 // Диски подключаются отдельно: их сначала надо создать и залить, а машина
 // нужна уже на этом шаге — диск подключается к ней. Разделение заодно
@@ -192,7 +192,7 @@ func DiskInterfaceForBus(bus string) string {
 	}
 }
 
-// DeleteVM removes a virtual machine.
+// DeleteVM Удаляет ВМ.
 //
 // Нужна не сама по себе, а для уборки за неудавшимся восстановлением: машина,
 // созданная и брошенная на середине заливки дисков, выглядит в списке как

@@ -11,9 +11,9 @@ import (
 	"time"
 )
 
-// FetchCertificateChain retrieves the certificates presented by pveproxy.
-// The caller must show the fingerprint for out-of-band verification before
-// trusting this bootstrap result.
+// FetchCertificateChain Извлекает сертификаты, представленные pveproxy.
+// Код вызова должен показывать отпечаток пальца для внеполосной проверки, прежде чем
+// доверять этому результату загрузки.
 func FetchCertificateChain(ctx context.Context, baseURL string, timeout time.Duration) (string, error) {
 	u, err := url.Parse(strings.TrimSpace(baseURL))
 	if err != nil || !u.IsAbs() || u.Hostname() == "" {
@@ -32,7 +32,7 @@ func FetchCertificateChain(ctx context.Context, baseURL string, timeout time.Dur
 	dialer := &net.Dialer{Timeout: timeout}
 	conn, err := (&tls.Dialer{NetDialer: dialer, Config: &tls.Config{
 		ServerName: u.Hostname(), MinVersion: tls.VersionTLS12,
-		// The certificate is exactly what this bootstrap operation retrieves.
+		// Сертификат — именно то, что извлекает эта операция загрузки.
 		InsecureSkipVerify: true,
 	}}).DialContext(ctx, "tcp", net.JoinHostPort(u.Hostname(), port))
 	if err != nil {

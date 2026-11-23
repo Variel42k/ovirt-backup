@@ -88,7 +88,8 @@ func newSMB(target *model.StorageTarget) (Backend, error) {
 func (s *smbBackend) Kind() model.StorageKind { return model.StorageSMB }
 func (s *smbBackend) Name() string            { return s.name }
 
-// mount returns a live share bound to ctx, dialing or redialing as needed.
+// mount возвращает живой раздел, связанный с ctx, набором или повторным набором по мере
+// необходимости.
 //
 // Контекст привязывается к каждой операции, а не к сессии: сессия переживает
 // множество запросов, и отмена одного восстановления не должна рвать
@@ -382,7 +383,7 @@ func (s *smbBackend) List(ctx context.Context, prefix string) ([]ObjectInfo, err
 	return out, nil
 }
 
-// keyOf turns a path inside the share back into an object key.
+// keyOf превращает путь внутри общего ресурса обратно в объектный ключ.
 func (s *smbBackend) keyOf(full string) string {
 	if s.basePath == "" {
 		return strings.TrimLeft(full, "/")

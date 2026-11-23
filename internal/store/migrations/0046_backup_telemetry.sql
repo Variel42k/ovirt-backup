@@ -6,9 +6,9 @@ ALTER TABLE db_hosts ADD COLUMN monitor_engine TEXT NOT NULL DEFAULT ''
     CHECK (monitor_engine IN ('', 'postgresql', 'mysql'));
 CREATE INDEX idx_db_hosts_monitor_vm ON db_hosts(server_id, vm_id) WHERE vm_id <> '';
 
--- General monitoring and backup monitoring share the compact disk sample
--- table. Only backup samples have a run_id, which prevents overlapping runs of
--- the same VM from appearing on each other's charts.
+-- Общий мониторинг и мониторинг бэкапов используют одну таблицу метрик дисков.
+-- run_id есть только у измерений бэкапа, поэтому графики одновременных запусков
+-- для одной ВМ не смешиваются.
 ALTER TABLE disk_samples ADD COLUMN run_id TEXT REFERENCES backup_runs(id) ON DELETE CASCADE;
 CREATE INDEX idx_disk_samples_run ON disk_samples(run_id, at) WHERE run_id IS NOT NULL;
 

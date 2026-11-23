@@ -9,8 +9,8 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
-// Upgrades and disabled monitoring must not hide already discovered domains.
-// Uses the saved inventory only, without contacting any engine.
+// Обновления и отключение мониторинга не должны скрывать уже обнаруженные домены.
+// Использует только сохраненный инвентарь, не связываясь с каким-либо движком.
 func (s *Store) SyncKnownDomainRepositories(ctx context.Context) error {
 	servers, err := s.ListServers(ctx)
 	if err != nil {
@@ -24,8 +24,9 @@ func (s *Store) SyncKnownDomainRepositories(ctx context.Context) error {
 	return nil
 }
 
-// Inventory exposes active oVirt data domains as backup destinations. This
-// registers metadata only; no disk is allocated until somebody writes a backup.
+// Инвентаризация предоставляет активные oVirt домены данных в качестве резервных адресатов.
+// При этом регистрируются только метаданные; диск не выделяется до тех пор, пока кто-то не
+// запишет резервную копию.
 func (s *Store) SyncDomainRepositories(ctx context.Context, serverID string) error {
 	return s.db.InTx(ctx, func(tx *sql.Tx) error {
 		var name, kind string
@@ -87,8 +88,9 @@ func (s *Store) SyncDomainRepositories(ctx context.Context, serverID string) err
 			return err
 		}
 		for _, d := range domains {
-			// Reuse existing default repositories without changing their IDs,
-			// namespaces or the user's choice to disable a manual repository.
+			// Повторное использование существующих репозиториев по умолчанию без изменения
+			// их идентификаторов, пространств имен или выбора пользователя для отключения
+			// ручного хранилища.
 			if manualDefaults[d.id] {
 				continue
 			}

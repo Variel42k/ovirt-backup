@@ -15,16 +15,17 @@ import (
 
 const maxRecoveryTokenBytes = 4096
 
-// RecoveryResult reports credentials invalidated by a host-side recovery.
+// RecoveryResult сообщает, что учётные данные аутентификации были аннулированы
+// восстановлением на стороне узла.
 type RecoveryResult struct {
 	Sessions    int64
 	APITokens   int64
 	Delegations int64
 }
 
-// VerifyRecoveryToken proves that recovery was started by someone who can
-// read the host-only token. Only its SHA-256 verifier is visible to the normal
-// service process.
+// VerifyRecoveryToken доказывает, что восстановление было начато кем-то, кто может читать
+// токен только для хоста. Для обычного процесса обслуживания виден только его SHA-256
+// верификатор.
 func VerifyRecoveryToken(expectedHash string, reader io.Reader) error {
 	expectedHash = strings.TrimSpace(expectedHash)
 	if expectedHash == "" {
@@ -53,8 +54,8 @@ func VerifyRecoveryToken(expectedHash string, reader io.Reader) error {
 	return nil
 }
 
-// RecoverLocalAccess resets one local password and, for an incident recovery,
-// invalidates every credential that can be revoked in PostgreSQL.
+// RecoverLocalAccess меняет локальный пароль. При восстановлении после инцидента также
+// отзывает все учётные данные, которые можно отозвать в PostgreSQL.
 func RecoverLocalAccess(ctx context.Context, st *store.Store, username, password string,
 	revokeAll bool) (string, RecoveryResult, error) {
 	password, revoked, err := resetPassword(ctx, st, username, password, revokeAll)

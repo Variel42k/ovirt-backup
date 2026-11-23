@@ -78,9 +78,9 @@ auth:
     # Должен совпадать с зарегистрированным у провайдера точно, вплоть до схемы:
     # https://virt.example.org/api/v1/auth/oidc/callback
     redirect_url: ""
-    # groups is normally a token claim populated by the provider mapper, not
-    # a standard scope. Add a provider-specific group scope here only when it
-    # is registered by that provider; otherwise Keycloak returns invalid_scope.
+    # groups обычно приходит в токене через сопоставление на стороне провайдера.
+    # Запрашивайте область доступа групп, только если провайдер её зарегистрировал.
+    # Если область доступа неизвестна, Keycloak возвращает invalid_scope.
     scopes: ["openid", "profile", "email"]
     # Надпись на кнопке страницы входа. Пусто — «Войти через провайдера».
     button_label: ""

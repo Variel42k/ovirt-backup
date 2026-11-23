@@ -73,6 +73,6 @@ func (s *Store) VMRecoveryBudget(ctx context.Context, serverID, vmID string, sin
 
 func (s *Store) VMRecoveryBackupBusy(ctx context.Context, serverID, vmID string) (bool, error) {
 	var n int
-	err := s.db.QueryRow(ctx, `SELECT count(*) FROM backup_runs WHERE server_id=? AND vm_id=? AND status IN ('pending','running')`, serverID, vmID).Scan(&n)
+	err := s.db.QueryRow(ctx, `SELECT (SELECT count(*) FROM backup_runs WHERE server_id=? AND vm_id=? AND status IN ('pending','running')) + (SELECT count(*) FROM compression_previews WHERE server_id=? AND vm_id=? AND status IN ('running','cleanup_failed'))`, serverID, vmID, serverID, vmID).Scan(&n)
 	return n > 0, err
 }

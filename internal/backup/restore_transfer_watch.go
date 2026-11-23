@@ -8,9 +8,9 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// restoreTransferWatch makes an apparently frozen restore diagnosable while
-// it is still running. Progress alone cannot tell whether the service is
-// waiting for the backup repository, imageio, or the storage-domain flush.
+// restoreTransferWatch делает явно замороженное восстановление диагностируемым, пока оно
+// еще работает. Прогресс сам по себе не может сказать, ожидает ли служба резервного
+// хранилища, imageio или флеш-домена хранилища.
 type restoreTransferWatch struct {
 	log  zerolog.Logger
 	stop chan struct{}

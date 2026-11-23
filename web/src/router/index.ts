@@ -17,6 +17,7 @@ const routes = [
       { path: '', name: 'dashboard', component: () => import('@/pages/DashboardPage.vue'), meta: { perm: 'monitoring.read' } },
       { path: 'vm-transfers', name: 'vm-transfers', component: () => import('@/pages/VMTransfersPage.vue'), meta: { perm: 'servers.read' } },
       { path: 'servers', name: 'servers', component: () => import('@/pages/ServersPage.vue'), meta: { perm: 'servers.read' } },
+      { path: 'servers/vm-duplicates', name: 'vm-duplicates', component: () => import('@/pages/VMDuplicatesPage.vue'), meta: { perm: 'servers.read' } },
       {
         path: 'servers/:serverId',
         name: 'server',
@@ -37,7 +38,6 @@ const routes = [
 			{ path: 'file-backups', name: 'file-backups', component: () => import('@/pages/FileBackupsPage.vue'), meta: { perm: 'file_backups.read' } },
       { path: 'verify', name: 'verify', component: () => import('@/pages/VerifyPage.vue'), meta: { perm: 'backups.read' } },
       { path: 'image-import', name: 'image-import', component: () => import('@/pages/ImageImportPage.vue'), meta: { perm: 'backups.read' } },
-      { path: 'gitlab-clean', name: 'gitlab-clean', component: () => import('@/pages/GitlabCleanPage.vue'), meta: { perm: 'servers.read', webSection: 'gitlab-clean' } },
       { path: 'db-dumps', name: 'db-dumps', component: () => import('@/pages/DbDumpsPage.vue'), meta: { perm: 'jobs.read' } },
       { path: 'coverage', name: 'coverage', component: () => import('@/pages/CoveragePage.vue'), meta: { perm: 'monitoring.read' } },
       { path: 'discovery', name: 'discovery', component: () => import('@/pages/DiscoveryPage.vue'), meta: { perm: 'monitoring.read', webSection: 'discovery' } },
@@ -88,8 +88,7 @@ const landingRoutes = [
 router.beforeEach(async (to) => {
   const auth = useAuthStore()
 
-  // The session is server-side, so the only way to know whether we are logged
-  // in is to ask — once, on the first navigation.
+  // Состояние сеанса хранится на сервере. Проверяем его один раз при первом переходе.
   if (!auth.checked) {
     await auth.check()
   }

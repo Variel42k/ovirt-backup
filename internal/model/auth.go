@@ -2,7 +2,7 @@ package model
 
 import "time"
 
-// Role controls what an authenticated principal may do.
+// Role контролирует, что может делать аутентифицированный принципал.
 type Role string
 
 const (
@@ -26,7 +26,8 @@ const (
 	ProviderOIDC = "oidc"
 )
 
-// User is an account, local or backed by an external identity provider.
+// User является учётной записью, локальной или поддерживаемой внешним поставщиком
+// идентификационных данных.
 type User struct {
 	ID       string `json:"id"`
 	Username string `json:"username"`
@@ -46,10 +47,10 @@ type User struct {
 	UpdatedAt   time.Time  `json:"updated_at"`
 }
 
-// IsExternal reports whether the identity belongs to an external provider.
+// IsExternal сообщает, принадлежит ли идентификатор внешнему поставщику.
 func (u *User) IsExternal() bool { return u.ExternalID != "" }
 
-// Session is a server-side session referenced by an opaque cookie token.
+// Session — сеанс на стороне сервера, на который ссылается непрозрачный маркер cookie.
 type Session struct {
 	Token     string    `json:"-"`
 	UserID    string    `json:"user_id"`
@@ -70,7 +71,7 @@ type Session struct {
 	OIDCCheckedAt    time.Time `json:"-"`
 }
 
-// Expired reports whether the session is no longer valid at t.
+// Expired сообщает о том, что сессия более не действительна при t.
 func (s *Session) Expired(t time.Time) bool { return t.After(s.ExpiresAt) }
 
 // APIToken — доступ к API для того, кто не может держать куку: скрипта,
@@ -98,17 +99,17 @@ type APIToken struct {
 	SecretHash []byte `json:"-"`
 }
 
-// Expired reports whether the token is past its expiry at t.
+// Expired сообщает, истек ли срок действия токена в t.
 func (t APIToken) Expired(at time.Time) bool {
 	return t.ExpiresAt != nil && at.After(*t.ExpiresAt)
 }
 
-// Usable reports whether the token may authenticate a request at t.
+// Usable сообщает, может ли токен аутентифицировать запрос в t.
 func (t APIToken) Usable(at time.Time) bool {
 	return !t.Disabled && !t.Expired(at)
 }
 
-// AuditEntry records a state-changing API call for traceability.
+// AuditEntry запись изменяющего состояние API вызова прослеживаемости.
 type AuditEntry struct {
 	ID       int64     `json:"id"`
 	Actor    string    `json:"actor"`

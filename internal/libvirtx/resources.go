@@ -9,8 +9,8 @@ import (
 	golibvirt "github.com/digitalocean/go-libvirt"
 )
 
-// StoragePoolInfo is the subset of a live libvirt pool needed by restore
-// planning and by the existing storage-domain picker in the web client.
+// StoragePoolInfo является подмножеством живого libvirt пула, необходимого для планирования
+// восстановления и существующего выбора домена хранения в веб-клиенте.
 type StoragePoolInfo struct {
 	Name       string
 	Kind       string
@@ -20,13 +20,13 @@ type StoragePoolInfo struct {
 	Active     bool
 }
 
-// NetworkInfo is a live libvirt virtual network.
+// NetworkInfo — живая libvirt виртуальная сеть.
 type NetworkInfo struct {
 	Name   string
 	Active bool
 }
 
-// ManagedVolume is a volume created specifically for a restored VM.
+// ManagedVolume — том, созданный специально для восстановленной ВМ.
 type ManagedVolume struct {
 	Handle     golibvirt.StorageVol
 	Name       string
@@ -34,8 +34,8 @@ type ManagedVolume struct {
 	DeviceType string // file | block
 }
 
-// ListStoragePools returns active pools. Inactive pools cannot accept a
-// volume and therefore are deliberately not offered as restore targets.
+// ListStoragePools возвращает активные пулы. Неактивные пулы не могут принять объем и
+// поэтому намеренно не предлагаются в качестве целей восстановления.
 func (c *Conn) ListStoragePools(ctx context.Context) ([]StoragePoolInfo, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -68,7 +68,7 @@ func (c *Conn) ListStoragePools(ctx context.Context) ([]StoragePoolInfo, error) 
 	return out, nil
 }
 
-// StoragePool looks up an active pool by name and reports its current space.
+// StoragePool ищет активный пул по имени и сообщает о его текущем пространстве.
 func (c *Conn) StoragePool(ctx context.Context, name string) (golibvirt.StoragePool, StoragePoolInfo, error) {
 	if err := ctx.Err(); err != nil {
 		return golibvirt.StoragePool{}, StoragePoolInfo{}, err
@@ -94,9 +94,8 @@ func (c *Conn) StoragePool(ctx context.Context, name string) (golibvirt.StorageP
 	return pool, info, nil
 }
 
-// CreateStorageVolume allocates a sparse raw volume. The returned path comes
-// from libvirt; caller-provided source paths are never inserted into domain
-// XML or a remote shell command.
+// CreateStorageVolume создаёт разреженный том raw. Путь возвращает libvirt. Пути от
+// вызывающего кода не вставляются в XML домена или удалённую команду.
 func (c *Conn) CreateStorageVolume(ctx context.Context, poolName, name string, capacity int64) (*ManagedVolume, error) {
 	if capacity <= 0 {
 		return nil, fmt.Errorf("размер тома должен быть больше нуля")

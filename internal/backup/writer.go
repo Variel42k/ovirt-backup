@@ -13,7 +13,7 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/secret"
 )
 
-// WriterOptions configures a disk writer.
+// WriterOptions настраивает запись диска.
 type WriterOptions struct {
 	Backend     repo.Backend
 	DataKey     string
@@ -23,12 +23,11 @@ type WriterOptions struct {
 	Cipher      *secret.Cipher // nil — без шифрования
 }
 
-// DiskWriter streams chunks into a repository object while building the
-// manifest.
+// DiskWriter записывает чанки потоком в объект репозитория и формирует манифест.
 //
-// The blob is produced through a pipe rather than staged on local disk: a
-// backup server does not necessarily have a spare terabyte, and buffering
-// would double the write volume for no benefit.
+// Blob производится через трубу, а не на локальном диске: резервный сервер не обязательно
+// имеет запасной терабайт, а буферизация удвоит громкость записи без каких-либо
+// преимуществ.
 type DiskWriter struct {
 	manifest *DiskManifest
 	codec    *codec
@@ -46,7 +45,7 @@ type putResult struct {
 	err     error
 }
 
-// NewDiskWriter opens the data object and starts the uploader goroutine.
+// NewDiskWriter открывает объект данных и запускает загрузчик goroutine.
 func NewDiskWriter(ctx context.Context, manifest *DiskManifest, opts WriterOptions) (*DiskWriter, error) {
 	if opts.ChunkSize <= 0 {
 		opts.ChunkSize = DefaultChunkSize
@@ -77,11 +76,11 @@ func NewDiskWriter(ctx context.Context, manifest *DiskManifest, opts WriterOptio
 	done := make(chan putResult, 1)
 
 	go func() {
-		// Size is unknown up front because compression ratio is unknown; the
-		// backends handle -1 by streaming (multipart on S3).
+		// Размер неизвестен заранее, потому что степень сжатия неизвестна; backends handle
+		// -1 посредством потоковой передачи (multipart on S3).
 		n, err := opts.Backend.Put(ctx, opts.DataKey, pr, -1)
-		// Closing with the error unblocks a writer that is still pushing
-		// chunks into a pipe nobody will read.
+		// Закрытие с ошибкой разблокирует автора, который все еще толкает чанки в трубу,
+		// которую никто не будет читать.
 		if err != nil {
 			_ = pr.CloseWithError(err)
 		} else {
@@ -99,8 +98,7 @@ func NewDiskWriter(ctx context.Context, manifest *DiskManifest, opts WriterOptio
 	}, nil
 }
 
-// WriteChunk appends one grid cell. Chunks must be supplied in increasing
-// index order, which is what the extent walk naturally produces.
+// WriteChunk добавляет один чанк. Индексы должны возрастать, как при обходе диапазонов.
 func (w *DiskWriter) WriteChunk(index int64, plain []byte) error {
 	if w.closed {
 		return fmt.Errorf("запись в уже закрытый объект %s", w.manifest.DataKey)
@@ -119,7 +117,7 @@ func (w *DiskWriter) WriteChunk(index int64, plain []byte) error {
 	}
 
 	if _, err := w.pw.Write(stored); err != nil {
-		// The uploader failed; surface its error rather than the pipe's.
+		// Загрузчик не справился; Погрешность больше, чем у трубы.
 		return w.uploadError(err)
 	}
 	w.blobHash.Write(stored)
@@ -136,14 +134,14 @@ func (w *DiskWriter) WriteChunk(index int64, plain []byte) error {
 	return nil
 }
 
-// LogicalBytes reports how much guest data has been captured so far, which the
-// runner turns into a progress percentage.
+// LogicalBytes сообщает, сколько данных о гостях было захвачено до сих пор, которые бегун
+// превращает в процент прогресса.
 func (w *DiskWriter) LogicalBytes() int64 { return w.manifest.LogicalBytes }
 
-// StoredBytes reports how much has been written to the repository so far.
+// StoredBytes сообщает, сколько до сих пор было написано в репозиторий.
 func (w *DiskWriter) StoredBytes() int64 { return w.blobOffset }
 
-// Close finishes the upload and returns the completed manifest.
+// Close заканчивает загрузку и возвращает заполненный манифест.
 func (w *DiskWriter) Close() (*DiskManifest, error) {
 	if w.closed {
 		return w.manifest, nil
@@ -163,15 +161,15 @@ func (w *DiskWriter) Close() (*DiskManifest, error) {
 	w.manifest.DataSHA256 = hex.EncodeToString(w.blobHash.Sum(nil))
 
 	if res.written != w.blobOffset {
-		// The backend accepted a different number of bytes than we produced:
-		// the object is not what the manifest describes, so it is unusable.
+		// Backend принял другое количество байтов, чем мы произвели: объект не то, что
+		// описывает манифест, поэтому он не пригоден для использования.
 		return nil, fmt.Errorf("хранилище приняло %d байт вместо %d для %s",
 			res.written, w.blobOffset, w.manifest.DataKey)
 	}
 	return w.manifest, nil
 }
 
-// Abort tears the upload down after a failure and removes the partial object.
+// Abort срывает загрузку вниз после сбоя и удаляет частичный объект.
 func (w *DiskWriter) Abort(ctx context.Context, backend repo.Backend, err error) {
 	if w.closed {
 		return
@@ -180,13 +178,13 @@ func (w *DiskWriter) Abort(ctx context.Context, backend repo.Backend, err error)
 	_ = w.pw.CloseWithError(err)
 	<-w.putDone
 	w.codec.close()
-	// A partial blob would be indistinguishable from a good one for anything
-	// that only looks at object listings.
+	// Частичная капля будет неотличима от хорошей для всего, что смотрит только на списки
+	// объектов.
 	_ = backend.Delete(ctx, w.manifest.DataKey)
 }
 
-// uploadError prefers the uploader's error over the generic io.ErrClosedPipe
-// the writer side sees.
+// uploadError предпочитает ошибку загрузчика над общей io.ErrClosedPipe видимой пишущей
+// стороной.
 func (w *DiskWriter) uploadError(pipeErr error) error {
 	select {
 	case res := <-w.putDone:

@@ -30,7 +30,7 @@ const storageColumns = `id, name, kind, enabled, base_path, endpoint, region, bu
 const storageSelectColumns = storageColumns + `,
 	immutability_state, immutability_detail, immutability_checked_at`
 
-// CreateStorageTarget stores a new backup repository definition.
+// CreateStorageTarget сохраняет новое определение резервного хранилища.
 func (s *Store) CreateStorageTarget(ctx context.Context, t *model.StorageTarget) error {
 	if t.ID == "" {
 		t.ID = uuid.NewString()
@@ -74,8 +74,8 @@ func (s *Store) CreateStorageTarget(ctx context.Context, t *model.StorageTarget)
 	return nil
 }
 
-// UpdateStorageTarget rewrites a repository definition. Empty secret fields
-// keep the stored values unless their explicit clear flag is set.
+// UpdateStorageTarget переписывает определение репозитория. Пустые секретные поля сохраняют
+// сохраненные значения, если не установлен их явный четкий флаг.
 func (s *Store) UpdateStorageTarget(ctx context.Context, t *model.StorageTarget) error {
 	existing, err := s.GetStorageTarget(ctx, t.ID)
 	if err != nil {
@@ -139,7 +139,7 @@ func (s *Store) UpdateStorageTarget(ctx context.Context, t *model.StorageTarget)
 	return nil
 }
 
-// UpdateStorageTargetHealth records the outcome of a reachability probe.
+// UpdateStorageTargetHealth регистрирует результат зонда достижимости.
 func (s *Store) UpdateStorageTargetHealth(ctx context.Context, id string, ok bool, msg string, free, used int64) error {
 	_, err := s.db.Exec(ctx, `UPDATE storage_targets SET
 		last_check_at=?, last_check_ok=?, last_check_msg=?, free_bytes=?, used_bytes=? WHERE id=?`,
@@ -147,9 +147,9 @@ func (s *Store) UpdateStorageTargetHealth(ctx context.Context, id string, ok boo
 	return err
 }
 
-// DeleteStorageTarget removes a repository definition. Refusing to delete a
-// target that still holds backups is enforced at the service layer, which can
-// explain the situation; the store stays mechanical.
+// DeleteStorageTarget удаляет определение хранилища. Отказ удалить цель, которая все еще
+// хранит резервные копии, обеспечивается на уровне обслуживания, что может объяснить
+// ситуацию; Магазин остается механическим.
 func (s *Store) DeleteStorageTarget(ctx context.Context, id string) error {
 	res, err := s.db.Exec(ctx, `DELETE FROM storage_targets WHERE id=?`, id)
 	if err != nil {
@@ -161,13 +161,14 @@ func (s *Store) DeleteStorageTarget(ctx context.Context, id string) error {
 	return nil
 }
 
-// GetStorageTarget loads a repository definition with decrypted credentials.
+// GetStorageTarget загружает определение хранилища с расшифрованными учётными данными
+// аутентификации.
 func (s *Store) GetStorageTarget(ctx context.Context, id string) (*model.StorageTarget, error) {
 	row := s.db.QueryRow(ctx, `SELECT `+storageSelectColumns+` FROM storage_targets WHERE id=?`, id)
 	return s.scanStorageTarget(row)
 }
 
-// ListStorageTargets returns every repository definition ordered by name.
+// ListStorageTargets возвращает каждое определение хранилища, упорядоченное по имени.
 func (s *Store) ListStorageTargets(ctx context.Context) ([]*model.StorageTarget, error) {
 	rows, err := s.db.Query(ctx, `SELECT `+storageSelectColumns+` FROM storage_targets ORDER BY name`)
 	if err != nil {
@@ -186,7 +187,7 @@ func (s *Store) ListStorageTargets(ctx context.Context) ([]*model.StorageTarget,
 	return out, rows.Err()
 }
 
-// CountRunsOnTarget reports how many live backup runs still reference a target.
+// CountRunsOnTarget сообщает, сколько живых резервных запусков все еще ссылаются на цель.
 func (s *Store) CountRunsOnTarget(ctx context.Context, targetID string) (int, error) {
 	var n int
 	err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM backup_copies c
@@ -195,13 +196,11 @@ func (s *Store) CountRunsOnTarget(ctx context.Context, targetID string) (int, er
 	return n, err
 }
 
-// JobsOnTarget names the backup jobs that write to a target.
+// JobsOnTarget называет резервные задания, которые записываются в цель.
 //
-// Runs are not the whole story: a target with no backups yet can still be the
-// destination of a nightly job, and deleting it would turn that job into a
-// scheduled failure at two in the morning. The check is done in Go rather than
-// SQL because the target list is a JSON array in a TEXT column — matching it
-// with LIKE would also match a target whose id is a prefix of another.
+// Хранилище без готовых копий может быть целью задания. Удаление привело бы к сбою
+// следующего запуска. Список целей хранится в JSON-строке, поэтому проверяем его в Go. LIKE
+// также нашёл бы совпадение по префиксу идентификатора.
 func (s *Store) JobsOnTarget(ctx context.Context, targetID string) ([]string, error) {
 	jobs, err := s.ListBackupJobs(ctx, "")
 	if err != nil {

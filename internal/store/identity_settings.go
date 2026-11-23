@@ -10,8 +10,8 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
-// IdentitySettings returns the optional database override. found=false means
-// the YAML/environment configuration remains authoritative.
+// IdentitySettings читает настройки из БД. При found=false действуют настройки из YAML и
+// окружения.
 func (s *Store) IdentitySettings(ctx context.Context) (out model.IdentitySettings, found bool, err error) {
 	var (
 		secretEnc, mapping, subjects  string
@@ -52,9 +52,9 @@ func (s *Store) IdentitySettings(ctx context.Context) (out model.IdentitySetting
 	return out, true, nil
 }
 
-// SetIdentitySettings persists the complete OIDC configuration. Keycloak
-// administration credentials and the LDAP bind password never reach this
-// method and therefore cannot accidentally become durable application data.
+// SetIdentitySettings сохраняется полная OIDC конфигурация. Keycloak учётные данные
+// аутентификации администрирования и пароль LDAP связывания никогда не достигают этого
+// метода и, следовательно, не могут случайно стать долговременными данными приложения.
 func (s *Store) SetIdentitySettings(ctx context.Context, value model.IdentitySettings) error {
 	secretEnc, err := s.cipher.Encrypt(value.ClientSecret)
 	if err != nil {

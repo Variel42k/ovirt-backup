@@ -9,12 +9,12 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/imageio"
 )
 
-// maxReadBatch caps how much is pulled from ovirt-imageio in one ranged GET.
-// Bigger requests amortise TLS and HTTP overhead; too big and a mid-transfer
-// failure costs a lot of re-reading.
+// maxReadBatch Ка́пка ж. сколько вытаскивается из ovirt-imageio в одном диапазоне GET.
+// Повышенные требования амортизируются TLS и HTTP накладные расходы; Слишком большой и
+// средний отказ перевода стоит много перечитывать.
 const maxReadBatch = 32 << 20
 
-// copyParams describes one disk copy from imageio into a repository object.
+// copyParams описывает одну копию диска из imageio в объект репозитория.
 type copyParams struct {
 	Source *imageio.Client
 	Writer *DiskWriter
@@ -45,8 +45,9 @@ type copyParams struct {
 	// карты экстентов это больше сохранённого, а прогресс должен идти по
 	// прочитанному.
 	OnProgress func(readDone int64)
-	// Compare keeps only chunks that differ from a parent image. It is used by
-	// oVirt compatibility mode when no dirty bitmap exists.
+	// Сравнение сохраняет только фрагменты, которые отличаются от родительского образа. Он
+	// используется режимом совместимости oVirt, когда не существует растрового образа
+	// измененных блоков.
 	Compare func(ctx context.Context, index int64, current []byte) (bool, error)
 }
 
@@ -67,7 +68,7 @@ var (
 // повторяющаяся означает, что что-то не так с движком или хостом.
 const maxReopens = 3
 
-// copyResult reports what a disk copy transferred.
+// copyResult сообщает, что передана копия диска.
 type copyResult struct {
 	LogicalBytes int64
 	// ReadBytes — сколько прочитано с источника; больше LogicalBytes, когда
@@ -86,12 +87,11 @@ type copyResult struct {
 	GridChunks int64
 }
 
-// copyDisk reads the extents that matter and writes them into the repository.
+// copyDisk читает выбранные диапазоны и записывает их в репозиторий.
 //
-// Chunk boundaries are aligned to the chain's grid, so a dirty extent of one
-// byte pulls the whole chunk containing it. That over-reads a little, and in
-// exchange restore never has to reconcile partially overlapping writes from
-// different runs.
+// Округляем диапазоны до границ чанков цепочки. Изменение одного байта требует чтения
+// целого чанка, зато при восстановлении не нужно согласовывать частично перекрывающиеся
+// записи.
 func copyDisk(ctx context.Context, p copyParams) (copyResult, error) {
 	var res copyResult
 	if p.ChunkSize <= 0 {
@@ -145,8 +145,8 @@ func copyDisk(ctx context.Context, p copyParams) (copyResult, error) {
 	var extents []imageio.Extent
 	var err error
 	if p.Compare != nil {
-		// Old engines have no dirty map. Read the entire logical image and let
-		// Compare decide which chunks carry new information.
+		// У старых движков нет карты изменённых блоков. Читаем весь логический образ, а
+		// Compare определяет изменившиеся чанки.
 		extents = []imageio.Extent{{Start: 0, Length: p.VirtualSize, Dirty: true}}
 	} else {
 		extents, err = src.Extents(ctx, p.ExtentContext)
@@ -189,8 +189,8 @@ func copyDisk(ctx context.Context, p copyParams) (copyResult, error) {
 
 	wanted := selectChunks(extents, p.ExtentContext, p.ChunkSize, p.VirtualSize)
 	if len(wanted) == 0 {
-		// Nothing changed since the parent checkpoint, or the disk is empty.
-		// That is a valid, and common, outcome for an incremental run.
+		// Ничего не изменилось, так как родитель checkpoint или диск пуст.
+		// Это действительный и общий результат для постепенного пробега.
 		return res, nil
 	}
 	sort.Slice(wanted, func(i, j int) bool { return wanted[i] < wanted[j] })
@@ -248,8 +248,8 @@ func copyDisk(ctx context.Context, p copyParams) (copyResult, error) {
 			p.OnProgress(res.ReadBytes)
 		}
 		if p.Keepalive != nil && time.Since(lastKeepalive) > 20*time.Second {
-			// Ignore keepalive failures: the transfer may simply have moved on,
-			// and the next read will report the real problem.
+			// Игнорируйте сбои: передача может просто двигаться дальше, и в следующем
+			// чтении будет сообщено о реальной проблеме.
 			_ = p.Keepalive(ctx)
 			lastKeepalive = time.Now()
 		}
@@ -257,9 +257,9 @@ func copyDisk(ctx context.Context, p copyParams) (copyResult, error) {
 	return res, nil
 }
 
-// selectChunks turns an ovirt-imageio extent map into the set of grid cells to
-// copy. The grid arithmetic itself lives in grid.go, shared with the KVM
-// driver, which receives the same information over NBD in a different shape.
+// selectChunks преобразует карту диапазонов ovirt-imageio в список чанков для копирования.
+// Разметка чанков находится в grid.go и используется также драйвером KVM, который получает
+// диапазоны через NBD.
 func selectChunks(extents []imageio.Extent, extentContext string, chunkSize, virtualSize int64) []int64 {
 	selector := NewChunkSelector(chunkSize, virtualSize)
 
@@ -273,8 +273,8 @@ func selectChunks(extents []imageio.Extent, extentContext string, chunkSize, vir
 				continue
 			}
 		default:
-			// A zero or unallocated extent carries no information: the restore
-			// side already treats absent chunks as zero.
+			// Нулевая или нераспределенная степень не несет никакой информации: сторона
+			// восстановления уже рассматривает отсутствующие чанки как ноль.
 			if e.Zero || e.Hole {
 				continue
 			}
@@ -284,14 +284,14 @@ func selectChunks(extents []imageio.Extent, extentContext string, chunkSize, vir
 	return selector.Indices()
 }
 
-// groupChunks merges consecutive chunk indices into batched reads.
+// groupChunks объединяет последовательные индексы блоков в пакетные чтения.
 func groupChunks(indices []int64, chunkSize, virtualSize int64) []ChunkGroup {
 	return GroupChunks(indices, chunkSize, virtualSize, maxReadBatch)
 }
 
-// readWithRetry pulls a byte range, retrying transient failures.
-// A backup that dies because one TCP connection was reset would be a poor
-// trade for the hours it takes to restart it.
+// readWithRetry вытягивает диапазон байтов, повторяя переходные отказы.
+// Резервная копия, которая умирает, потому что одно TCP соединение было сброшено, будет
+// плохой торговлей в течение часов, необходимых для его перезапуска.
 //
 // Ответ HTTP с ошибкой повторяется retries раз: демон ответил, и если он
 // отвечает ошибкой снова и снова, ждать дольше незачем. Сетевая ошибка —
@@ -346,8 +346,8 @@ func readWithRetry(ctx context.Context, src *imageio.Client, offset, length int6
 	return nil, fmt.Errorf("чтение диапазона %d+%d после %d попыток: %w", offset, length, httpFailures+1, lastErr)
 }
 
-// fixedBuffer accumulates into a preallocated slice, avoiding the repeated
-// reallocation bytes.Buffer would do for multi-megabyte reads.
+// fixedBuffer накапливается в предварительно выделенном срезе, избегая повторного
+// перераспределения bytes.Buffer для многомегабайтных чтений.
 type fixedBuffer struct{ data []byte }
 
 func (b *fixedBuffer) Write(p []byte) (int, error) {

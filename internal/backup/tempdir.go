@@ -12,10 +12,9 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/repo"
 )
 
-// ensureTempBase returns the effective scratch directory and makes sure it
-// exists. The explicit error names backup.temp_dir because a bare mkdir error
-// after a snapshot has been created is too late and gives the operator no clue
-// which host mount needs fixing.
+// ensureTempBase возвращает фактический рабочий каталог и создаёт его при необходимости.
+// Ошибка заранее называет backup.temp_dir, чтобы оператор мог исправить нужное подключение,
+// пока снапшот ещё не создан.
 func ensureTempBase(configured string) (string, error) {
 	base := strings.TrimSpace(configured)
 	if base == "" {
@@ -27,9 +26,9 @@ func ensureTempBase(configured string) (string, error) {
 	return base, nil
 }
 
-// checkTempWorkspace verifies actual write access by creating a directory.
-// Mode bits alone are insufficient for bind mounts, NFS, SELinux and a
-// container running under a numeric UID.
+// checkTempWorkspace проверяет фактический доступ к записи, создавая каталог.
+// Одних битов режима недостаточно для креплений NFS, SELinux и контейнера, работающего под
+// числовым UID.
 func checkTempWorkspace(configured string) error {
 	base, err := ensureTempBase(configured)
 	if err != nil {

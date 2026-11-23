@@ -28,7 +28,7 @@ type RestoreVMInput struct {
 	Now       time.Time
 }
 
-// BuildRestoreVMPlan describes what a full VM restore would do.
+// BuildRestoreVMPlan описывает, что будет делать полное восстановление ВМ.
 func BuildRestoreVMPlan(in RestoreVMInput) (*model.RestoreVMPlan, error) {
 	if in.Run == nil {
 		return nil, fmt.Errorf("нет точки восстановления")
@@ -83,9 +83,9 @@ func BuildRestoreVMPlan(in RestoreVMInput) (*model.RestoreVMPlan, error) {
 				TargetID: mapping.TargetID, TargetKind: mapping.TargetKind,
 				Excluded: mapping.Exclude,
 			}
-			// Network is detached by default. The legacy attached mode remains
-			// accepted for old clients and reuses the saved oVirt profile only
-			// when no explicit mapping was supplied.
+			// Сеть по умолчанию отключена. Старые клиенты могут использовать режим
+			// attached. Сохранённый профиль oVirt используется только при отсутствии явного
+			// сопоставления.
 			if !mapped && plan.ServerID == in.Run.ServerID {
 				entry.TargetID, entry.TargetKind = nic.SourceProfile, sourceKind
 			}

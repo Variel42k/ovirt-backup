@@ -64,8 +64,16 @@ func (s *Store) CreateVMTransfer(ctx context.Context, t *model.VMTransfer) error
 	return s.CreateVMTransfers(ctx, []*model.VMTransfer{t})
 }
 
-// CreateVMTransfers reserves every source atomically before any worker starts.
+// CreateVMTransfers зарезервировать каждый источник атомарно, прежде чем какой-либо рабочий
+// начинает.
 func (s *Store) CreateVMTransfers(ctx context.Context, items []*model.VMTransfer) error {
+	for _, item := range items {
+		if busy, err := s.VMCompressionPreviewBusy(ctx, item.Request.SourceServerID, item.Request.SourceVMID); err != nil {
+			return err
+		} else if busy {
+			return fmt.Errorf("ВМ занята оценкой сжатия или очисткой её ресурсов")
+		}
+	}
 	ordered := append([]*model.VMTransfer(nil), items...)
 	sort.Slice(ordered, func(i, j int) bool {
 		a, b := ordered[i].Request, ordered[j].Request
@@ -82,6 +90,12 @@ func (s *Store) CreateVMTransfers(ctx context.Context, items []*model.VMTransfer
 		for _, t := range items {
 			t.Revision = 0
 			var n int
+			if err := tx.QueryRowContext(ctx, s.db.Rebind(`SELECT count(*) FROM compression_previews WHERE server_id=? AND vm_id=? AND status IN ('running','cleanup_failed')`), t.Request.SourceServerID, t.Request.SourceVMID).Scan(&n); err != nil {
+				return err
+			}
+			if n > 0 {
+				return fmt.Errorf("ВМ занята оценкой сжатия или очисткой её ресурсов")
+			}
 			if err := tx.QueryRowContext(ctx, s.db.Rebind(`SELECT count(*) FROM backup_runs WHERE server_id=? AND vm_id=? AND status IN ('pending','running')`), t.Request.SourceServerID, t.Request.SourceVMID).Scan(&n); err != nil {
 				return err
 			}
@@ -131,8 +145,9 @@ func (s *Store) UpdateVMTransfer(ctx context.Context, t *model.VMTransfer) error
 	return err
 }
 
-// ClaimVMTransfer makes duplicate action requests fail before either worker
-// contacts a hypervisor, including requests handled by another API process.
+// ClaimVMTransfer делает дублирующие запросы действий неудачными до того, как один из
+// работников связывается с гипервизором, включая запросы, обработанные другим API
+// процессом.
 func (s *Store) ClaimVMTransfer(ctx context.Context, t *model.VMTransfer, expected string) error {
 	t.UpdatedAt = time.Now().UTC()
 	previous := t.Revision
@@ -168,8 +183,8 @@ func (s *Store) SetVMTransferRecoveryNotice(ctx context.Context, id, notice stri
 	return err
 }
 
-// VMTransferOwner locks source VMs until cancellation/rollback. Completed source
-// VMs must stay off while their replacement is serving traffic.
+// VMTransferOwner блокирует исходные ВМ до отмены/отката. Завершенные исходные ВМ должны
+// оставаться отключенными, пока их замена обслуживает трафик.
 func (s *Store) VMTransferOwner(ctx context.Context, serverID, vmID string) (string, error) {
 	var id string
 	err := s.db.QueryRow(ctx, `SELECT id FROM vm_transfers WHERE
@@ -196,7 +211,7 @@ func (s *Store) VMTransferProtectsRun(ctx context.Context, run *model.BackupRun)
 
 func (s *Store) VMTransferServerBusy(ctx context.Context, serverID string) (bool, error) {
 	var n int
-	err := s.db.QueryRow(ctx, `SELECT count(*) FROM vm_transfers WHERE (source_server_id=? OR target_server_id=?) AND status NOT IN ('canceled','rolled_back','completed')`, serverID, serverID).Scan(&n)
+	err := s.db.QueryRow(ctx, `SELECT (SELECT count(*) FROM vm_transfers WHERE (source_server_id=? OR target_server_id=?) AND status NOT IN ('canceled','rolled_back','completed')) + (SELECT count(*) FROM compression_previews WHERE server_id=? AND status IN ('running','cleanup_failed'))`, serverID, serverID, serverID).Scan(&n)
 	return n > 0, err
 }
 

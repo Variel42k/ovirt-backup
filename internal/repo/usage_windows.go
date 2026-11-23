@@ -4,7 +4,7 @@ package repo
 
 import "golang.org/x/sys/windows"
 
-// diskUsage reports free and total bytes of the volume holding path.
+// diskUsage сообщает о свободных и полных байтах пути удержания тома.
 func diskUsage(path string) (free, total int64, err error) {
 	p, err := windows.UTF16PtrFromString(path)
 	if err != nil {

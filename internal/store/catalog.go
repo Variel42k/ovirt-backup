@@ -171,10 +171,9 @@ func (s *Store) MarkCatalogEntryImported(ctx context.Context, id string) error {
 	return err
 }
 
-// ImportCatalogRun registers repository metadata without rewriting any
-// object. The run, disks, managed artifacts, physical copy and catalog marker
-// commit together so an interrupted import never leaves a half-visible
-// restore point.
+// ImportCatalogRun регистрирует метаданные хранилища без перезаписи какого-либо объекта.
+// Запуск, диски, управляемые артефакты, физическая копия и маркер каталога объединяются,
+// поэтому прерванный импорт никогда не покидает наполовину видимую точку восстановления.
 func (s *Store) ImportCatalogRun(ctx context.Context, entryID string, run *model.BackupRun,
 	disks []model.BackupDisk, artifacts []model.RepositoryArtifact) error {
 	return s.db.InTx(ctx, func(tx *sql.Tx) error {

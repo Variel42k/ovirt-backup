@@ -12,7 +12,7 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/testdb"
 )
 
-// newTestStore opens a throwaway database with the full schema applied.
+// newTestStore открывает одноразовую базу данных с примененной полной схемой.
 //
 // Нужна настоящая PostgreSQL. Подставлять вместо неё что-то попроще было бы
 // самообманом: именно так и появился дефект, из-за которого служба не
@@ -85,7 +85,7 @@ func TestServerRoundTripEncryptsPassword(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 
-	// The password must not be readable straight from the column.
+	// Пароль не должен быть читаем прямо из столбца.
 	var stored string
 	if err := s.db.QueryRow(ctx, `SELECT password_enc FROM servers WHERE id=?`, srv.ID).Scan(&stored); err != nil {
 		t.Fatalf("read column: %v", err)
@@ -105,7 +105,7 @@ func TestServerRoundTripEncryptsPassword(t *testing.T) {
 		t.Errorf("tags = %v", got.Tags)
 	}
 
-	// An update with an empty password keeps the stored one.
+	// Обновление с пустым паролем сохраняет сохраненный.
 	got.Password = ""
 	got.Notes = "обновлено"
 	if err := s.UpdateServer(ctx, got); err != nil {
@@ -297,8 +297,8 @@ func TestSyncVMsPreservesOperatorIntent(t *testing.T) {
 		t.Fatalf("set desired: %v", err)
 	}
 
-	// A later poll reports a new status; the operator's intent must survive and
-	// the VM that disappeared upstream must be dropped.
+	// Позже опрос сообщает о новом статусе; намерение оператора должно выжить, и ВМ,
+	// которая исчезла вверх по течению, должна быть отброшена.
 	vms = []*model.VM{{ID: "vm-1", Name: "db-01", Status: "paused", PauseStatus: "eio"}}
 	if err := s.SyncVMs(ctx, srv.ID, vms); err != nil {
 		t.Fatalf("second sync: %v", err)
@@ -427,8 +427,8 @@ func TestAlertDeduplication(t *testing.T) {
 		t.Errorf("state = %q, want firing", alerts[0].State)
 	}
 
-	// Acknowledging must survive a re-raise, otherwise a flapping object would
-	// keep un-acking itself and drown the operator.
+	// Признание должно пережить повторное поднятие, в противном случае хлопающий объект
+	// будет продолжать разбирать себя и утопить оператора.
 	if err := s.AckAlert(ctx, alerts[0].ID, "operator", ""); err != nil {
 		t.Fatalf("ack: %v", err)
 	}
@@ -449,7 +449,7 @@ func TestAlertDeduplication(t *testing.T) {
 		t.Error("resolved_at was not set")
 	}
 
-	// Re-raising a resolved alert reopens it.
+	// Повторное поднятие сигнала тревоги снова открывает его.
 	raise()
 	alerts, _ = s.ListAlerts(ctx, AlertFilter{ServerID: "srv"})
 	if alerts[0].State != model.AlertFiring {
@@ -529,7 +529,7 @@ func TestBackupRunChainLookup(t *testing.T) {
 	}
 	mk(model.BackupIncremental, full.ID, 1, "cp-inc1", model.RunSucceeded)
 	inc2 := mk(model.BackupIncremental, full.ID, 2, "cp-inc2", model.RunSucceeded)
-	// A failed run must never be picked as a base.
+	// Неудачный запуск никогда не должен быть выбран в качестве базы.
 	mk(model.BackupIncremental, full.ID, 3, "", model.RunFailed)
 
 	base, err := s.LatestUsableRun(ctx, "srv", "vm-1", "tgt-1", false)
@@ -632,8 +632,8 @@ func TestRemediationRateLimitCounters(t *testing.T) {
 			t.Fatalf("record: %v", err)
 		}
 	}
-	// A skipped decision is recorded for the audit trail but must not consume
-	// the rate-limit budget.
+	// Пропущенное решение регистрируется для аудиторского следа, но не должно потреблять
+	// бюджет лимита ставки.
 	if err := s.RecordRemediation(ctx, &model.RemediationRecord{
 		ServerID: "srv", Scope: model.ScopeVM, ObjectID: "vm-1", Action: model.ActionVMStart,
 		Status: model.RemSkipped, TriggeredBy: "monitor",

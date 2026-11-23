@@ -105,8 +105,8 @@ func TestEvaluateUsesWorstReplicaAndIncludesUnscheduledVMs(t *testing.T) {
 		t.Fatalf("unexpected states: %+v", summary.ByState)
 	}
 
-	// Repeated evaluation deduplicates each kind on the job/VM/replica key.
-	// The healthy primary must not resolve the failed secondary replica.
+	// Повторная оценка дублирует каждый вид на работе/ВМ/ключе реплики.
+	// Здоровая первичная не должна разрешать неудавшуюся вторичную реплику.
 	if err := service.EvaluateAlerts(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +191,7 @@ func TestCapacityForecastAndUnknownObjectStorageQuota(t *testing.T) {
 	if capacity.ForecastDays == nil || capacity.GrowthBytesDay != 10 || capacity.State != "critical" {
 		t.Fatalf("unexpected forecast: %+v", capacity)
 	}
-	// Several failed checks on every day must not dilute real measurements.
+	// Несколько неудачных проверок каждый день не должны разбавлять реальные измерения.
 	var withFailures []*model.StorageUsageSample
 	for _, sample := range samples {
 		withFailures = append(withFailures, sample)

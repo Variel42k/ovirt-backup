@@ -11,8 +11,9 @@ import (
 	"strings"
 )
 
-// NativeMetadata is the non-secret subset needed to plan a native restore.
-// The full guest configuration remains inside the encrypted vzdump archive.
+// NativeMetadata — несекретное подмножество, необходимое для планирования нативного
+// восстановления.
+// Полная конфигурация гостя остается внутри зашифрованного архива vzdump.
 type NativeMetadata struct {
 	GuestKind       string
 	SourceNode      string
@@ -22,9 +23,9 @@ type NativeMetadata struct {
 
 var configSize = regexp.MustCompile(`(?:^|,)size=([0-9]+(?:\.[0-9]+)?[KMGT]?)`)
 
-// BackupMetadata reads the live guest configuration and keeps only capacity
-// information. It never stores cloud-init values, hooks or arbitrary args in
-// the unencrypted run manifest.
+// BackupMetadata считывает конфигурацию живого гостя и сохраняет только информацию о
+// емкости. Он никогда не хранит cloud-init значения, крюки или произвольные арги в
+// незашифрованном манифесте запуска.
 func (c *Client) BackupMetadata(ctx context.Context, vmID, node string) (NativeMetadata, error) {
 	kind, numericID, err := ParseVMID(vmID)
 	if err != nil {

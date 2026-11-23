@@ -15,7 +15,7 @@ import (
 // подключить в нужном порядке. В аварии это самая дорогая часть работы, и
 // делается она по памяти — а память в аварии подводит.
 
-// RestoreVMNetwork decides what happens to the network of the restored VM.
+// RestoreVMNetwork решает, что происходит с сетью восстановленной ВМ.
 type RestoreVMNetwork string
 
 const (
@@ -36,14 +36,14 @@ const (
 	RestoreNetworkAttached RestoreVMNetwork = "attached"
 )
 
-// RestoreVMRequest describes a full VM restore.
+// RestoreVMRequest описывает полное восстановление ВМ.
 type RestoreVMRequest struct {
 	TransferID     string                     `json:"-"`
 	PreserveMAC    bool                       `json:"-"`
 	OnVMCreated    func(string) error         `json:"-"`
 	OnDiskRestored func(string, string) error `json:"-"`
-	// RestoreID is assigned by the API before background execution so clients
-	// can subscribe to progress immediately. It is not part of the wire input.
+	// RestoreID назначается API перед фоновым исполнением, чтобы клиенты могли немедленно
+	// подписаться на прогресс. Она не является частью проводного ввода.
 	RestoreID string `json:"-"`
 	RunID     string `json:"run_id"`
 	CopyID    string `json:"copy_id,omitempty"`
@@ -54,8 +54,8 @@ type RestoreVMRequest struct {
 	// ClusterID и StorageDomainID нужны движку oVirt; для KVM не применяются.
 	ClusterID       string `json:"cluster_id,omitempty"`
 	StorageDomainID string `json:"storage_domain_id,omitempty"`
-	// HostID selects a concrete Proxmox node. For shared storage the service
-	// chooses the first healthy node when this field is empty.
+	// HostID Выделяют конкретный Proxmox узел. Для общего хранилища служба выбирает первый
+	// здоровый узел, когда это поле пусто.
 	HostID string `json:"host_id,omitempty"`
 
 	Network         RestoreVMNetwork          `json:"network,omitempty"`
@@ -95,9 +95,8 @@ const VerifyVMMarker = "jhv-verify:"
 // VerifyVMPrefix начинает имя любой проверочной ВМ, домена и образа.
 const VerifyVMPrefix = "jhv-verify-"
 
-// RestoreVMNetworkMapping maps one saved NIC to an oVirt vNIC profile or a
-// libvirt network/bridge. MAC is intentionally not accepted: the target
-// platform generates a fresh address.
+// RestoreVMNetworkMapping отображает сохраненный NIC профиль oVirt vNIC или libvirt
+// сеть/мост. MAC намеренно не принимается: целевая платформа генерирует новый адрес.
 type RestoreVMNetworkMapping struct {
 	NICID      string `json:"nic_id"`
 	TargetID   string `json:"target_id,omitempty"`
@@ -106,7 +105,7 @@ type RestoreVMNetworkMapping struct {
 	Connected  bool   `json:"connected,omitempty"`
 }
 
-// RestoreNetworkTarget is a live network choice offered for full VM restore.
+// RestoreNetworkTarget — это выбор живой сети, предлагаемый для полного восстановления ВМ.
 type RestoreNetworkTarget struct {
 	ID       string `json:"id"`
 	ServerID string `json:"server_id"`
@@ -116,7 +115,7 @@ type RestoreNetworkTarget struct {
 	Status   string `json:"status,omitempty"`
 }
 
-// RestoreVMPlan is what the service intends to do, shown before it starts.
+// RestoreVMPlan описывает действия службы до начала восстановления.
 //
 // План существует ради одного: чтобы оператор увидел объём и последствия до
 // того, как они наступят. Сколько дисков и какого размера, хватает ли места в
@@ -161,7 +160,7 @@ type RestoreVMPlanNIC struct {
 	Connected  bool   `json:"connected,omitempty"`
 }
 
-// RestoreVMPlanDisk is one disk of the future VM.
+// RestoreVMPlanDisk — один диск будущей ВМ.
 type RestoreVMPlanDisk struct {
 	DiskID      string `json:"disk_id"`
 	Alias       string `json:"alias"`
@@ -172,7 +171,7 @@ type RestoreVMPlanDisk struct {
 	VirtualSize int64  `json:"virtual_size"`
 }
 
-// Ready reports whether the plan can be executed.
+// Ready сообщает, может ли план быть выполнен.
 func (p *RestoreVMPlan) Ready() bool { return len(p.Blockers) == 0 }
 
 // RestoredVMName предлагает имя, которое нельзя спутать с оригиналом.

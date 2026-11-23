@@ -2,16 +2,14 @@ package backup
 
 import "sort"
 
-// The chunk grid is what both backup drivers agree on: oVirt reports extents
-// through ovirt-imageio, libvirt reports them through NBD, and the two formats
-// have nothing in common — but once a region of interest is expressed as
-// (offset, length), the rest of the pipeline is identical.
+// oVirt получает диапазоны через ovirt-imageio, а libvirt через NBD. Оба драйвера
+// преобразуют их в пары «смещение и длина». После этого данные обрабатываются по общей
+// сетке чанков.
 //
-// Keeping the alignment arithmetic here rather than in each driver means a
-// mistake in it is a single mistake, findable by a single test.
+// Соблюдение арифметики выравнивания здесь, а не у каждого водителя означает, что ошибка в
+// ней является единственной ошибкой, которую можно обнаружить с помощью одного теста.
 
-// ChunkSelector turns arbitrary byte ranges into the set of grid cells that
-// cover them.
+// ChunkSelector преобразует произвольные диапазоны байтов в покрывающие их чанки.
 type ChunkSelector struct {
 	chunkSize   int64
 	virtualSize int64
@@ -20,7 +18,7 @@ type ChunkSelector struct {
 	count       int
 }
 
-// NewChunkSelector prepares a selector for one disk.
+// NewChunkSelector готовит селектор для одного диска.
 func NewChunkSelector(chunkSize, virtualSize int64) *ChunkSelector {
 	if chunkSize <= 0 {
 		chunkSize = DefaultChunkSize
@@ -37,11 +35,10 @@ func NewChunkSelector(chunkSize, virtualSize int64) *ChunkSelector {
 	}
 }
 
-// Add marks every chunk overlapping [start, start+length).
+// Добавить пометки каждого чанка, перекрывающего [start, start+length].
 //
-// A one-byte range pulls in the whole chunk containing it. That over-reads a
-// little and in exchange restore never has to reconcile partially overlapping
-// writes from different runs.
+// Диапазон в один байт заставляет прочитать весь содержащий его чанк. Дополнительное чтение
+// позволяет восстанавливать данные без слияния перекрывающихся диапазонов разных запусков.
 func (s *ChunkSelector) Add(start, length int64) {
 	if length <= 0 || s.gridChunks == 0 {
 		return
@@ -67,7 +64,7 @@ func (s *ChunkSelector) Add(start, length int64) {
 	}
 }
 
-// Indices returns the selected chunk numbers in ascending order.
+// Indices возвращает выбранные номера блоков в порядке возрастания.
 func (s *ChunkSelector) Indices() []int64 {
 	out := make([]int64, 0, s.count)
 	for i, m := range s.marked {
@@ -78,14 +75,13 @@ func (s *ChunkSelector) Indices() []int64 {
 	return out
 }
 
-// Count reports how many chunks were selected.
+// Count сообщает, сколько фрагментов было выбрано.
 func (s *ChunkSelector) Count() int { return s.count }
 
-// GridChunks reports how many chunks the whole image spans.
+// GridChunks сообщает, сколько фрагментов охватывает все образ.
 func (s *ChunkSelector) GridChunks() int64 { return s.gridChunks }
 
-// ChunkLength returns the logical length of one grid cell, accounting for a
-// final short chunk.
+// ChunkLength возвращает логическую длину чанка с учётом укороченного последнего чанка.
 func ChunkLength(index, chunkSize, virtualSize int64) int64 {
 	offset := index * chunkSize
 	if offset >= virtualSize {
@@ -97,8 +93,7 @@ func ChunkLength(index, chunkSize, virtualSize int64) int64 {
 	return chunkSize
 }
 
-// ChunkGroup is a run of chunks that can be fetched from the source in one
-// request because they are adjacent in the image.
+// ChunkGroup объединяет соседние чанки образа, которые можно загрузить одним запросом.
 type ChunkGroup struct {
 	Offset  int64
 	Length  int64
@@ -107,11 +102,11 @@ type ChunkGroup struct {
 	Lengths []int64
 }
 
-// GroupChunks merges consecutive chunk indices into batched reads of at most
-// maxBatch bytes.
+// GroupChunks объединяет последовательные чанки в чтения объёмом не более maxBatch байт.
 //
-// Batching is the difference between one HTTP or NBD round trip per 4 MiB and
-// one per 32 MiB; on a high-latency link that is most of the transfer time.
+// Пакетирование — разница между одним HTTP или NBD циклом запроса и ответа на 4 МБ и одним
+// на 32 МБ; на линии связи с высокой задержкой, которая составляет большую часть времени
+// передачи.
 func GroupChunks(indices []int64, chunkSize, virtualSize, maxBatch int64) []ChunkGroup {
 	if maxBatch <= 0 {
 		maxBatch = 32 << 20

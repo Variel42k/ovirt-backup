@@ -24,15 +24,15 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/store"
 )
 
-// Engine executes backup runs.
+// Engine выполняет бэкапы.
 type Engine struct {
 	store  *store.Store
 	pool   *ovirt.Pool
 	cfg    config.BackupConfig
 	cipher *secret.Cipher
 	log    zerolog.Logger
-	// compression is sampled at the beginning of each run. Runtime changes
-	// therefore affect future runs without mixing algorithms inside one run.
+	// Алгоритм сжатия выбирается при запуске и действует до его завершения. Изменения
+	// настройки применяются к следующим запускам.
 	compression atomic.Value
 
 	// external хранит режимы проверки, которые движок выполнить не может,
@@ -57,7 +57,7 @@ type Engine struct {
 	// работы вытеснять другой.
 	heavy chan struct{}
 	// places — очередь горячих бэкапов на домены хранения oVirt и каталоги
-	// scratch KVM (backup.max_runs_per_storage).
+	// царапать KVM (backup.max_runs_per_storage).
 	places *PlaceLimiter
 
 	// sweeping — ВМ, у которых сейчас идёт фоновая уборка.
@@ -67,7 +67,7 @@ type Engine struct {
 	snapshotFailures sync.Map
 }
 
-// NewEngine builds the backup engine.
+// NewEngine строит резервный движок.
 func NewEngine(st *store.Store, pool *ovirt.Pool, cfg config.BackupConfig, cipher *secret.Cipher, log zerolog.Logger) *Engine {
 	heavy := cfg.HeavyWorkers
 	if heavy < 1 {
@@ -87,13 +87,14 @@ func NewEngine(st *store.Store, pool *ovirt.Pool, cfg config.BackupConfig, ciphe
 	return e
 }
 
-// Compression returns the algorithm that the next backup run will use.
+// Compression возвращает алгоритм, который будет использоваться при следующем резервном
+// запуске.
 func (e *Engine) Compression() string {
 	value, _ := e.compression.Load().(string)
 	return value
 }
 
-// SetCompression changes the algorithm for future backup runs.
+// SetCompression изменяет алгоритм будущих резервных запусков.
 func (e *Engine) SetCompression(name string) error {
 	if !KnownCompression(name) {
 		return fmt.Errorf("неизвестное сжатие %q", name)
@@ -102,12 +103,13 @@ func (e *Engine) SetCompression(name string) error {
 	return nil
 }
 
-// ResolveCompression snapshots the effective algorithm for one run. Empty
-// means inherit; "none" is an explicit choice and must not inherit.
+// ResolveCompression снимки эффективного алгоритма для одного запуска. Пустой означает
+// наследование; "none" является явным выбором и не должен наследовать.
 func (e *Engine) ResolveCompression(name string) (string, error) {
 	if name == "" {
 		name = e.Compression()
-		// Embedded callers historically used an empty config for no compression.
+		// Встроенные клиенты этого интерфейса исторически использовали пустую конфигурацию
+		// без сжатия.
 		if name == "" {
 			name = CompressionNone
 		}
@@ -133,7 +135,7 @@ func (e *Engine) acquireHeavy(ctx context.Context) error {
 
 func (e *Engine) releaseHeavy() { <-e.heavy }
 
-// RunRequest describes one backup to execute.
+// RunRequest описывает одну резервную копию для выполнения.
 type RunRequest struct {
 	TransferID string `json:"-"`
 	ServerID   string
@@ -147,8 +149,8 @@ type RunRequest struct {
 	FullEvery int
 	// FallbackType используется, когда выбранный тип недоступен для этой ВМ.
 	FallbackType model.BackupType
-	// LegacyIncrementalMode selects a compatibility path for oVirt engines
-	// without native CBT. Empty preserves the historical snapshot fallback.
+	// LegacyIncrementalMode выбирает путь совместимости для oVirt движков без родного CBT.
+	// Пустой сохраняет исторический резервный снапшот.
 	LegacyIncrementalMode model.LegacyIncrementalMode
 
 	StorageTargetID string
@@ -197,10 +199,10 @@ type RunRequest struct {
 	OnRunCreated func(*model.BackupRun) `json:"-"`
 }
 
-// Execute performs one backup and returns the completed run record.
+// Выполнить выполняет одну резервную копию и возвращает завершенную запись выполнения.
 //
-// Errors are recorded on the run before being returned, so a caller that only
-// logs still leaves a full explanation visible in the UI.
+// Перед возвратом ошибка записывается в запуск, чтобы интерфейс показывал полную причину
+// даже при записи ошибки вызывающим кодом только в журнал.
 func (e *Engine) Execute(ctx context.Context, req RunRequest) (*model.BackupRun, error) {
 	compression, err := e.ResolveCompression(req.Compression)
 	if err != nil {
@@ -430,8 +432,8 @@ func (e *Engine) Execute(ctx context.Context, req RunRequest) (*model.BackupRun,
 		return e.failRun(ctx, run, err)
 	}
 
-	// The VM configuration is stored with every run: restoring a disk image is
-	// only half the job if nobody remembers how many NICs the machine had.
+	// Для каждого запуска сохраняем конфигурацию ВМ, чтобы при восстановлении знать, как
+	// были подключены диски и сетевые адаптеры.
 	if run.Type != model.BackupConfig && run.Type != model.BackupOVA {
 		if vmConfig, err = e.storeVMConfig(execCtx, client, backend, vm.ID, run); err != nil {
 			log.Warn().Err(err).Msg("не удалось сохранить конфигурацию ВМ (данные дисков сохранены)")
@@ -495,9 +497,9 @@ func (e *Engine) Execute(ctx context.Context, req RunRequest) (*model.BackupRun,
 	return run, nil
 }
 
-// executeOVA handles the external oVirt artifact separately so an OVA job
-// does not need a fake repository and cannot accidentally enter retention,
-// replication or verification workflows meant for managed repository data.
+// executeOVA обрабатывает внешний oVirt артефакт отдельно, поэтому задача OVA не нуждается
+// в поддельном репозитории и не может случайно войти в рабочие процессы хранения,
+// репликации или проверки, предназначенные для управляемых данных репозитория.
 func (e *Engine) executeOVA(ctx context.Context, client *ovirt.Client, srv *model.Server,
 	vm *model.VM, req RunRequest) (*model.BackupRun, error) {
 	run := &model.BackupRun{
@@ -583,7 +585,7 @@ func (e *Engine) registerMirrorCopies(ctx context.Context, run *model.BackupRun,
 	}
 }
 
-// plan is the resolved strategy for one run.
+// plan — решённая стратегия для одного пробега.
 type plan struct {
 	Type             model.BackupType
 	ParentRunID      string
@@ -618,11 +620,10 @@ func (p *plan) markFullDisk(id, reason string) {
 	}
 }
 
-// resolvePlan turns the requested type into one that can actually run here.
+// resolvePlan превращает запрошенный тип в тот, который действительно может здесь работать.
 //
-// Three things can force a change: the engine or the disks may not support
-// changed block tracking, there may be no usable parent to diff against, or
-// the chain may have grown past the configured full-backup interval.
+// План меняется, если движок или диск не поддерживает отслеживание блоков, если нет
+// подходящей родительской копии или если цепочка достигла интервала полного бэкапа.
 func (e *Engine) resolvePlan(ctx context.Context, client *ovirt.Client, srv *model.Server, run *model.BackupRun, req RunRequest, disks []ovirt.Disk) (plan, error) {
 	p := plan{Type: req.Type, ChunkSize: int64(e.cfg.ChunkSize)}
 	if p.ChunkSize <= 0 {
@@ -674,8 +675,8 @@ func (e *Engine) resolvePlan(ctx context.Context, client *ovirt.Client, srv *mod
 		return p, nil
 	}
 
-	// Every N links the chain restarts with a full backup, so a restore never
-	// has to replay an unbounded number of increments.
+	// Каждое соединение N перезапускает цепочку с полной резервной копией, поэтому
+	// восстановление никогда не должно воспроизводить неограниченное количество приращений.
 	onlyFull := req.Type == model.BackupDifferential
 	parent, err := e.store.LatestUsableRun(ctx, req.ServerID, req.VMID, req.StorageTargetID, onlyFull)
 	if errors.Is(err, store.ErrNotFound) {
@@ -709,8 +710,8 @@ func (e *Engine) resolvePlan(ctx context.Context, client *ovirt.Client, srv *mod
 		return p, nil
 	}
 
-	// The engine expires checkpoints; without the parent's checkpoint it
-	// cannot compute a delta and the only correct answer is a full backup.
+	// Движок истекает checkpoints; Без родительского checkpoint он не может вычислить
+	// дельту, и единственным правильным ответом является полная резервная копия.
 	ok, err := client.HasCheckpoint(ctx, req.VMID, parent.ToCheckpointID)
 	if err != nil {
 		return p, fmt.Errorf("проверка checkpoint: %w", err)
@@ -864,8 +865,8 @@ func (e *Engine) disksMissingIn(ctx context.Context, parent *model.BackupRun, di
 	return missing, nil
 }
 
-// chainChunkSize keeps the whole chain on one grid: an incremental written on
-// a different grid could not be merged with its parent.
+// chainChunkSize держит всю цепочку на одной сетке: инкремент, записанный на другой сетке,
+// не может быть объединен с его родителем.
 func (e *Engine) chainChunkSize(ctx context.Context, parent *model.BackupRun, fallback int64) int64 {
 	disks, err := e.store.ListBackupDisks(ctx, parent.ID)
 	if err != nil || len(disks) == 0 {
@@ -888,9 +889,9 @@ func (e *Engine) chainChunkSize(ctx context.Context, parent *model.BackupRun, fa
 	return m.ChunkSize
 }
 
-// parentDiskReader opens the effective disk image at a previous restore point.
-// Compatibility incrementals use it as their source of truth because oVirt
-// 4.3 cannot provide an engine checkpoint or a dirty-block map.
+// parentDiskReader открывает эффективный образ диска в предыдущей точке восстановления.
+// Совместимые инкременты опираются на этот источник, поскольку oVirt 4.3 не предоставляет
+// checkpoint движка или карту изменённых блоков.
 func (e *Engine) parentDiskReader(ctx context.Context, backend repo.Backend, parentID, diskID string) (*ChainReader, error) {
 	var runs []*model.BackupRun
 	seen := map[string]bool{}
@@ -929,13 +930,10 @@ func (e *Engine) parentDiskReader(ctx context.Context, backend repo.Backend, par
 	return NewChainReader(backend, e.cipher, manifests)
 }
 
-// selectDisks returns the data disks of a VM that should be backed up, together
-// with the ones left out and why.
+// selectDisks возвращает список дисков для бэкапа и причины пропуска остальных.
 //
-// The reasons used to live only in these comments: a disk was dropped and the
-// operator saw "успешно, 2 диска" without ever learning that a third exists.
-// A failed backup is at least visible as failed; a successful one with a hole
-// looks like protection that is not there.
+// Раньше при пропуске диска интерфейс мог показать «успешно, 2 диска»,
+// а оператор не узнавал, что третий диск остался без защиты.
 func (e *Engine) selectDisks(ctx context.Context, client *ovirt.Client, vmID string,
 	exclude []string) ([]ovirt.Disk, []model.SkippedDisk, error) {
 
@@ -962,8 +960,8 @@ func (e *Engine) selectDisks(ctx context.Context, client *ovirt.Client, vmID str
 				DiskID: d.ID, Name: name, Excluded: true,
 				Reason: "исключён настройкой задания",
 			})
-		// ISO and memory volumes are not guest data; backing them up wastes
-		// space and cannot be restored into anything meaningful.
+		// ISO и тома памяти не являются гостевыми данными; Подкрепление их растрачивает
+		// пространство и не может быть восстановлено во что-либо значимое.
 		case d.ContentType != "" && d.ContentType != "data":
 			skipped = append(skipped, model.SkippedDisk{
 				DiskID: d.ID, Name: name,
@@ -979,8 +977,8 @@ func (e *Engine) selectDisks(ctx context.Context, client *ovirt.Client, vmID str
 					"LUN СХД в копию ВМ не попадает — защищайте его средствами СХД или изнутри гостя",
 			})
 		case d.Shareable.Bool():
-			// A shared disk belongs to several VMs; backing it up once per VM
-			// would multiply the data and make restore ambiguous.
+			// Общий диск принадлежит нескольким ВМ; Резервное копирование один раз на ВМ
+			// умножит данные и сделает восстановление неоднозначным.
 			skipped = append(skipped, model.SkippedDisk{
 				DiskID: d.ID, Name: name,
 				Reason: "общий (shareable) диск: принадлежит нескольким ВМ, " +
@@ -1072,7 +1070,7 @@ func (e *Engine) imageioTimeouts(size int64) imageio.Timeouts {
 	return limits
 }
 
-// runCBT performs a hot backup through the oVirt Backup API.
+// runCBT выполняет горячее резервное копирование через oVirt Резервное копирование API.
 func (e *Engine) runCBT(ctx context.Context, client *ovirt.Client, backend repo.Backend,
 	srv *model.Server, vm *model.VM, run *model.BackupRun, req RunRequest,
 	disks []ovirt.Disk, p plan) ([]*DiskManifest, error) {
@@ -1120,9 +1118,9 @@ func (e *Engine) runCBT(ctx context.Context, client *ovirt.Client, backend repo.
 		e.downgradeToFull(ctx, run, &p)
 		backup, err = open()
 	}
-	// From here on the engine holds a lock on the disks; it must be released
-	// no matter how this function exits — including when the engine opened the
-	// backup but its answer did not decode.
+	// Отсюда движок держит замок на дисках; Он должен быть выпущен независимо от того, как
+	// эта функция выходит — в том числе, когда движок открыл резервную копию, но его ответ
+	// не декодировался.
 	if backup != nil {
 		defer e.finalizeEngineBackup(ctx, client, vm, backup.ID)
 	}
@@ -1230,8 +1228,8 @@ func (e *Engine) openBackupServiceFreeze(ctx context.Context, client *ovirt.Clie
 	if err != nil {
 		return backup, err
 	}
-	// The point in time is fixed once the backup is ready; the guest can run
-	// again while we read the frozen image.
+	// Точка времени фиксируется, как только резервная копия готова; гость может бежать
+	// снова, пока мы читаем замороженное образ.
 	if err := window.Thaw(); err != nil {
 		return backup, err
 	}
@@ -1453,9 +1451,9 @@ func (e *Engine) finalizeEngineBackup(ctx context.Context, client *ovirt.Client,
 	}
 }
 
-// quiesce prepares the guest for the point in time and records the level the
-// run actually reaches. A non-zero time means the guest is frozen since that
-// moment and must be thawed; the caller reports the window when it thaws.
+// quiesce подготавливает гостевую систему к фиксации точки и записывает достигнутый уровень
+// согласованности. Ненулевое время означает начало заморозки. Вызывающий код должен
+// разморозить систему и записать длительность заморозки.
 func (e *Engine) quiesce(ctx context.Context, client *ovirt.Client, vm *model.VM,
 	run *model.BackupRun, req RunRequest) (time.Time, error) {
 	target := req.ConsistencyTarget()
@@ -1519,8 +1517,8 @@ func (e *Engine) guardFreeze(ctx context.Context, client *ovirt.Client, vm *mode
 			return nil
 		}
 		held := time.Since(frozenAt)
-		// Use a detached context: the guest must be thawed even if the backup
-		// was cancelled.
+		// Используйте отдельный контекст: гость должен быть оттаян, даже если резервная
+		// копия была отменена.
 		thawCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 60*time.Second)
 		defer cancel()
 		if err := client.ThawFilesystems(thawCtx, vm.ID); err != nil {
@@ -1575,8 +1573,8 @@ func (e *Engine) event(ctx context.Context, run *model.BackupRun, kind model.Run
 	}
 }
 
-// runSnapshot performs a hot backup through a temporary snapshot, for disks or
-// engines without changed block tracking.
+// runSnapshot выполняет горячее резервное копирование через временный снапшот, для дисков
+// или движков без измененного отслеживания блоков.
 func (e *Engine) runSnapshot(ctx context.Context, client *ovirt.Client, backend repo.Backend,
 	srv *model.Server, vm *model.VM, run *model.BackupRun, req RunRequest,
 	disks []ovirt.Disk, p plan) ([]*DiskManifest, error) {
@@ -1684,8 +1682,8 @@ func (e *Engine) runSnapshot(ctx context.Context, client *ovirt.Client, backend 
 	retainedSuccess := false
 	if !retain {
 		defer func() {
-			// Removing the snapshot triggers a merge on the hypervisor; leaving it
-			// behind grows the disk chain until the VM eventually stalls.
+			// Удаление снапшота вызывает слияние на гипервизоре; оставляя его позади,
+			// растет цепочка дисков, пока ВМ в конечном итоге не остановится.
 			cleanCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Minute)
 			defer cancel()
 			if err := client.DeleteSnapshotWhenReady(cleanCtx, vm.ID, snap.ID, 10*time.Minute); err != nil {
@@ -1708,8 +1706,9 @@ func (e *Engine) runSnapshot(ctx context.Context, client *ovirt.Client, backend 
 			_ = client.DeleteSnapshotWhenReady(cleanCtx, vm.ID, snap.ID, 10*time.Minute)
 		}()
 	}
-	// Register after snapshot cleanup so a failed first thaw is retried before
-	// a potentially long snapshot merge starts during unwinding.
+	// Зарегистрируйтесь после очистки снапшота, чтобы неудачная первая оттепель была
+	// повторена до того, как начнется потенциально длинное слияние снапшота во время
+	// раскручивания.
 	defer func() { _ = window.Thaw() }()
 	if err := window.Thaw(); err != nil {
 		return nil, err
@@ -1726,7 +1725,7 @@ func (e *Engine) runSnapshot(ctx context.Context, client *ovirt.Client, backend 
 	// сколько прошло между заморозкой гостя и самим снапшотом.
 	e.event(ctx, run, model.RunEventSnapshot, time.Since(snapshotAsked), "временный снапшот готов")
 
-	// The transfer must reference the disk *snapshot* (image_id), not the disk.
+	// Передача должна ссылаться на диск *snapshot* (image_id), а не на диск.
 	snapDisks, err := client.ListSnapshotDisks(ctx, vm.ID, snap.ID)
 	if err != nil {
 		return nil, fmt.Errorf("список дисков снапшота: %w", err)
@@ -1826,11 +1825,10 @@ func (e *Engine) runSnapshot(ctx context.Context, client *ovirt.Client, backend 
 	return manifests, err
 }
 
-// transferFactory builds the transfer request for one disk.
+// transferFactory строит запрос на передачу для одного диска.
 type transferFactory func(ovirt.Disk) ovirt.TransferRequest
 
-// copyDisks moves every disk of a run into the repository, with bounded
-// parallelism.
+// copyDisks переносит диски запуска в репозиторий с ограничением параллелизма.
 func (e *Engine) copyDisks(ctx context.Context, client *ovirt.Client, backend repo.Backend,
 	srv *model.Server, vm *model.VM, run *model.BackupRun, req RunRequest,
 	disks []ovirt.Disk, p plan, factory transferFactory, extentContext string) ([]*DiskManifest, error) {
@@ -1941,8 +1939,8 @@ func (e *Engine) copyDisks(ctx context.Context, client *ovirt.Client, backend re
 	case failed == len(disks):
 		return nil, fmt.Errorf("ни один диск не сохранён: %w", firstErr)
 	case failed > 0:
-		// Some disks made it. The run is usable for those, and hiding that
-		// behind a blanket failure would throw away good data.
+		// Некоторые диски сделали это. Бегство полезно для тех, и, скрываясь за полным
+		// провалом, выбрасывает хорошие данные.
 		run.Status = model.RunPartial
 		run.Error = fmt.Sprintf("не сохранено дисков: %d из %d; первая ошибка: %v",
 			failed, len(disks), firstErr)
@@ -1950,8 +1948,7 @@ func (e *Engine) copyDisks(ctx context.Context, client *ovirt.Client, backend re
 	return out, nil
 }
 
-// copyOneDisk opens a transfer, copies the relevant extents and writes the
-// manifest.
+// copyOneDisk открывает передачу, копирует нужные диапазоны и записывает манифест.
 func (e *Engine) copyOneDisk(ctx context.Context, client *ovirt.Client, backend repo.Backend,
 	srv *model.Server, vm *model.VM, run *model.BackupRun, req RunRequest,
 	disk ovirt.Disk, index int, chunkSize int64, transferReq ovirt.TransferRequest,
@@ -2163,8 +2160,9 @@ func (e *Engine) copyOneDisk(ctx context.Context, client *ovirt.Client, backend 
 			Msg("карта экстентов недоступна — диск прочитан целиком")
 	}
 
-	// The daemon-side checksum is expensive — it re-reads the whole disk — so
-	// it is only requested when the operator asked for source verification.
+	// Контрольная сумма на стороне демона стоит дорого — она пересчитывает весь диск,
+	// поэтому она запрашивается только тогда, когда оператор запрашивает проверку
+	// источника.
 	if req.VerifyAfter == model.VerifySource {
 		if sum, err := src.ChecksumOf(ctx, "sha1", 0); err == nil {
 			manifest.SourceChecksum = sum.Checksum
@@ -2236,12 +2234,10 @@ func (e *Engine) storeVMConfig(ctx context.Context, client *ovirt.Client, backen
 	return raw, nil
 }
 
-// runOVA asks the engine to export the VM as an OVA onto a host's filesystem.
+// runOVA просит движок экспортировать ВМ как OVA в файловую систему хоста.
 //
-// Unlike the other types this artefact does not land in our repository: oVirt
-// writes it on the chosen host and offers no way to stream it out. The run
-// therefore records where the file was written, and moving it further is the
-// operator's decision.
+// oVirt пишет артефакт на выбранном хосте и не отдаёт его потоком в репозиторий. В запуске
+// сохраняется путь к файлу, а дальнейший перенос выполняет оператор.
 func (e *Engine) runOVA(ctx context.Context, client *ovirt.Client, vm *model.VM,
 	run *model.BackupRun, req RunRequest) error {
 	if req.OVAHostID == "" || req.OVADirectory == "" {
@@ -2256,9 +2252,9 @@ func (e *Engine) runOVA(ctx context.Context, client *ovirt.Client, vm *model.VM,
 	return nil
 }
 
-// writeRunManifest publishes the run-level document. Its presence in the
-// repository is what makes a backup self-describing: the repository can be
-// read back even if this service's database is lost.
+// writeRunManifest опубликован документ run-level. Его присутствие в репозитории делает
+// резервное копирование самоописанием: хранилище может быть прочитано с диска снова, даже
+// если база данных этого сервиса потеряна.
 func (e *Engine) writeRunManifest(ctx context.Context, backend repo.Backend, srv *model.Server,
 	vm *model.VM, run *model.BackupRun, manifests []*DiskManifest, vmConfig []byte) error {
 	if run.Type == model.BackupOVA {
@@ -2332,8 +2328,8 @@ func (e *Engine) writeRunManifest(ctx context.Context, backend repo.Backend, srv
 	return err
 }
 
-// failRun records the failure and returns it, so callers have one place that
-// both persists and propagates.
+// failRun записывает сбой и возвращает его, так что клиенты этого интерфейса имеют одно
+// место, которое сохраняется и распространяется.
 func (e *Engine) failRun(ctx context.Context, run *model.BackupRun, err error) (*model.BackupRun, error) {
 	ended := time.Now().UTC()
 	run.Status = model.RunFailed
@@ -2342,8 +2338,8 @@ func (e *Engine) failRun(ctx context.Context, run *model.BackupRun, err error) (
 		run.Error = err.Error()
 	}
 
-	// Use a context that survives cancellation: a run killed by shutdown still
-	// needs its state written down.
+	// Используйте контекст, который выдерживает отмену: запуск, убитый отключением,
+	// по-прежнему нуждается в записи состояния.
 	saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 	defer cancel()
 	if _, getErr := e.store.GetBackupRun(saveCtx, run.ID); getErr == nil {
@@ -2357,7 +2353,7 @@ func (e *Engine) failRun(ctx context.Context, run *model.BackupRun, err error) (
 	return run, err
 }
 
-// loadDiskManifest reads and decodes a stored disk manifest.
+// loadDiskManifest считывает и декодирует хранимый манифест диска.
 func loadDiskManifest(ctx context.Context, backend repo.Backend, key string) (*DiskManifest, error) {
 	rc, err := backend.Get(ctx, key)
 	if err != nil {

@@ -31,17 +31,15 @@ func EffectiveChain(manifests []*DiskManifest) []*DiskManifest {
 	return manifests
 }
 
-// maxBatchBytes caps how much of a data object is pulled in one request when
-// serving a run of adjacent chunks. Large enough to amortise S3 round trips,
-// small enough that a restore does not need gigabytes of RAM.
+// maxBatchBytes ограничивает объём смежных чанков, загружаемых одним запросом. Пакет
+// сокращает число запросов S3 и удерживает расход памяти при восстановлении в разумных
+// пределах.
 const maxBatchBytes = 32 << 20
 
-// ChainReader resolves a chain of manifests (full → incrementals) into a single
-// readable image.
+// ChainReader представляет полную копию и последующие инкременты как единый читаемый образ.
 //
-// Resolution is "newest run that stored a given chunk wins". Any chunk no run
-// stored is zero: a full backup captures every non-zero extent, so absence
-// across the whole chain can only mean the region was never written.
+// Для каждого чанка берём данные самого свежего запуска, который его сохранил. Если чанк
+// отсутствует во всей цепочке, он читается как нули.
 type ChainReader struct {
 	backend repo.Backend
 	// manifests в порядке от полного бэкапа к последнему инкременту.
@@ -74,8 +72,8 @@ type loadedBatch struct {
 	data []byte
 }
 
-// StreamStage distinguishes a slow repository read from a slow destination
-// write. Without it both look like a frozen percentage to an operator.
+// StreamStage позволяет различить медленное чтение из репозитория и медленную запись в
+// назначение. В обоих случаях прогресс может выглядеть остановившимся.
 type StreamStage string
 
 const (
@@ -83,12 +81,13 @@ const (
 	StreamWritingTarget StreamStage = "writing_target"
 )
 
-// StreamObserver is called immediately before a potentially slow operation.
-// It must return quickly and must not retain data owned by the reader.
+// StreamObserver вызывается непосредственно перед потенциально долгой операцией.
+// Обработчик должен быстро возвращать управление. Данные, принадлежащие читателю, сохранять
+// нельзя.
 type StreamObserver func(stage StreamStage, offset, length int64)
 
-// NewChainReader prepares a reader over an ordered chain. manifests must run
-// from the chain root (a full or snapshot backup) to the newest link.
+// NewChainReader подготавливает чтение цепочки. Манифесты передаются по порядку от полной
+// копии или снапшота до последнего звена.
 func NewChainReader(backend repo.Backend, cipher *secret.Cipher, manifests []*DiskManifest) (*ChainReader, error) {
 	if len(manifests) == 0 {
 		return nil, fmt.Errorf("пустая цепочка бэкапов")
@@ -110,12 +109,13 @@ func NewChainReader(backend repo.Backend, cipher *secret.Cipher, manifests []*Di
 		if i == 0 {
 			r.chunkSize = m.ChunkSize
 		} else if m.ChunkSize != r.chunkSize {
-			// The grid is fixed per chain precisely so that merging is exact;
-			// a mismatch means the chain was assembled wrongly.
+			// Сетка чанков фиксирована для точного объединения. Если параметры сетки
+			// расходятся, цепочка собрана неверно.
 			return nil, fmt.Errorf("в цепочке разный размер чанка: %d у %s против %d у %s",
 				m.ChunkSize, m.RunID, r.chunkSize, manifests[0].RunID)
 		}
-		// A disk can be extended between runs; the newest size wins.
+		// Размер диска мог вырасти между запусками. Используем размер из последнего
+		// манифеста.
 		if m.VirtualSize > r.virtualSize {
 			r.virtualSize = m.VirtualSize
 		}
@@ -138,8 +138,8 @@ func NewChainReader(backend repo.Backend, cipher *secret.Cipher, manifests []*Di
 		byIndex := make(map[int64]Chunk, len(m.Chunks))
 		for _, ch := range m.Chunks {
 			byIndex[ch.Index] = ch
-			// Later manifests overwrite earlier ones, which is exactly the
-			// "newest wins" rule.
+			// Более поздние манифесты перекрывают ранние. При восстановлении берём последнюю
+			// сохранённую версию чанка.
 			r.owner[ch.Index] = i
 		}
 		r.chunkAt = append(r.chunkAt, byIndex)
@@ -149,20 +149,20 @@ func NewChainReader(backend repo.Backend, cipher *secret.Cipher, manifests []*Di
 	return r, nil
 }
 
-// Close releases codec resources.
+// Close освобождает ресурсы кодека.
 func (r *ChainReader) Close() {
 	for _, c := range r.codecs {
 		c.close()
 	}
 }
 
-// ChunkSize returns the grid step of the chain.
+// ChunkSize возвращает размер чанка цепочки.
 func (r *ChainReader) ChunkSize() int64 { return r.chunkSize }
 
-// VirtualSize returns the logical size of the restored image.
+// VirtualSize возвращает логический размер восстановленного образа.
 func (r *ChainReader) VirtualSize() int64 { return r.virtualSize }
 
-// GridChunks returns how many chunks the full image spans.
+// GridChunks возвращает число чанков во всём образе.
 func (r *ChainReader) GridChunks() int64 {
 	if r.chunkSize <= 0 {
 		return 0
@@ -170,12 +170,12 @@ func (r *ChainReader) GridChunks() int64 {
 	return (r.virtualSize + r.chunkSize - 1) / r.chunkSize
 }
 
-// PresentChunks returns how many chunks the merged image actually stores; the
-// rest are zero.
+// PresentChunks возвращает число чанков с данными в объединённом образе. Остальные читаются
+// как нули.
 func (r *ChainReader) PresentChunks() int { return len(r.owner) }
 
-// PresentBytes returns the amount of non-zero image data that a fresh sparse
-// destination actually receives. Unlike virtual size it excludes holes.
+// PresentBytes возвращает объём данных, которые получит новый разреженный образ.
+// Невыделенные диапазоны в этот объём не входят.
 func (r *ChainReader) PresentBytes() int64 {
 	var total int64
 	for index := range r.owner {
@@ -184,13 +184,12 @@ func (r *ChainReader) PresentBytes() int64 {
 	return total
 }
 
-// buildBatches groups chunks that are both needed from the same manifest and
-// adjacent in its data object.
+// buildBatches объединяет чанки из одного манифеста, смежные в его объекте данных.
 func (r *ChainReader) buildBatches() {
 	r.batches = make([]map[int64]*batch, len(r.manifests))
 
-	// Which chunk indices each manifest is actually responsible for after
-	// merging. Chunks shadowed by a newer run are never read.
+	// Вычисляем, какие чанки остаются за каждым манифестом после объединения. Чанки,
+	// перекрытые более свежим запуском, не читаем.
 	needed := make([][]Chunk, len(r.manifests))
 	for index, mi := range r.owner {
 		needed[mi] = append(needed[mi], r.chunkAt[mi][index])
@@ -215,9 +214,8 @@ func (r *ChainReader) buildBatches() {
 	}
 }
 
-// ReadChunk returns the plaintext of one grid cell, or nil when the region is
-// zero. The returned slice must not be retained: it may point into a batch
-// buffer that the next call reuses.
+// ReadChunk возвращает расшифрованные данные чанка или nil для нулевого диапазона. Срез
+// может ссылаться на буфер, который повторно используется при следующем вызове.
 func (r *ChainReader) ReadChunk(ctx context.Context, index int64) ([]byte, error) {
 	mi, ok := r.owner[index]
 	if !ok {
@@ -239,7 +237,7 @@ func (r *ChainReader) ReadChunk(ctx context.Context, index int64) ([]byte, error
 	return plain, nil
 }
 
-// storedBytes returns the raw stored bytes of a chunk, using the batch cache.
+// storedBytes возвращает сохранённые байты чанка из кэша пакетов.
 func (r *ChainReader) storedBytes(ctx context.Context, mi int, ch Chunk) ([]byte, error) {
 	b := r.batches[mi][ch.Index]
 	if b == nil {
@@ -280,8 +278,7 @@ func (r *ChainReader) fetch(ctx context.Context, mi int, offset, length int64) (
 	return buf, nil
 }
 
-// ChunkLength returns the logical length of a grid cell, accounting for a
-// final short chunk.
+// ChunkLength возвращает логическую длину чанка с учётом укороченного последнего чанка.
 func (r *ChainReader) ChunkLength(index int64) int64 {
 	offset := index * r.chunkSize
 	if offset >= r.virtualSize {
@@ -293,18 +290,18 @@ func (r *ChainReader) ChunkLength(index int64) int64 {
 	return r.chunkSize
 }
 
-// ImageSink receives the reconstructed image. offset is the logical position;
-// data is nil for a zero region of the given length.
+// ImageSink получает восстановленный образ. offset задаёт логическое смещение. Значение
+// data равно nil для нулевого диапазона указанной длины.
 type ImageSink func(ctx context.Context, offset int64, data []byte, zeroLength int64) error
 
-// Stream walks the whole image in order, handing data or zero ranges to sink.
-// Consecutive zero chunks are coalesced into one call so a sparse image costs
-// a handful of calls rather than one per chunk.
+// Stream обходит весь образ по порядку и передаёт данные и нулевые диапазоны в sink.
+// Соседние нулевые чанки объединяются, чтобы восстановить разреженный образ меньшим числом
+// вызовов.
 func (r *ChainReader) Stream(ctx context.Context, sink ImageSink, progress func(done int64)) error {
 	return r.stream(ctx, sink, progress, nil)
 }
 
-// StreamObserved is Stream with diagnostics for long-running restores.
+// StreamObserved добавляет к Stream диагностику долгих операций восстановления.
 func (r *ChainReader) StreamObserved(ctx context.Context, sink ImageSink, progress func(done int64),
 	observe StreamObserver) error {
 	return r.stream(ctx, sink, progress, observe)
@@ -367,13 +364,12 @@ func (r *ChainReader) stream(ctx context.Context, sink ImageSink, progress func(
 	return flushZeros()
 }
 
-// ReaderAt adapts the merged chain to io.ReaderAt so structural inspection can
-// read a few kilobytes at scattered offsets without reconstructing the whole
-// image first. Reading a 64 KiB superblock from a terabyte backup costs one
-// chunk, not a terabyte.
+// ReaderAt предоставляет объединённую цепочку через io.ReaderAt. Это позволяет читать
+// отдельные участки без разворачивания образа. Например, для суперблока размером 64 КиБ из
+// терабайтной копии достаточно одного чанка.
 //
-// The returned reader is not safe for concurrent use: it shares the chain's
-// batch cache.
+// Возвращённый читатель использует общий кэш пакетов цепочки и не поддерживает
+// одновременные вызовы.
 func (r *ChainReader) ReaderAt(ctx context.Context) io.ReaderAt {
 	return &chainReaderAt{ctx: ctx, chain: r}
 }
@@ -391,8 +387,8 @@ func (a *chainReaderAt) ReadAt(p []byte, off int64) (int, error) {
 		return 0, io.EOF
 	}
 
-	// Clip to the image; a short read at the tail is io.EOF, as the contract
-	// requires.
+	// Ограничиваем чтение размером образа. При неполном чтении в конце возвращаем io.EOF по
+	// контракту io.ReaderAt.
 	want := int64(len(p))
 	truncated := false
 	if off+want > a.chain.virtualSize {
@@ -423,8 +419,8 @@ func (a *chainReaderAt) ReadAt(p []byte, off int64) (int, error) {
 			return int(filled), err
 		}
 		if data == nil {
-			// Absent chunk: the region is zero, and p is already zeroed there
-			// only if the caller zeroed it, so do it explicitly.
+			// Отсутствующий чанк означает нулевой диапазон. Явно обнуляем участок p,
+			// поскольку вызывающий код мог передать заполненный буфер.
 			for i := int64(0); i < take; i++ {
 				p[filled+i] = 0
 			}
@@ -443,9 +439,9 @@ func (a *chainReaderAt) ReadAt(p []byte, off int64) (int, error) {
 	return int(filled), nil
 }
 
-// VerifyDataObject streams a whole data object and compares its digest with
-// the manifest. This catches truncation and bit rot in a single pass without
-// decoding anything, which makes it cheap enough to run on every backup.
+// VerifyDataObject читает объект целиком и сверяет его хеш с манифестом. Один проход
+// выявляет усечение и повреждение данных без декодирования, поэтому проверку можно
+// выполнять для каждого бэкапа.
 func VerifyDataObject(ctx context.Context, backend repo.Backend, m *DiskManifest) error {
 	if m.DataSHA256 == "" {
 		return fmt.Errorf("в манифесте %s нет контрольной суммы объекта данных", m.RunID)

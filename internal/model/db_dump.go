@@ -121,8 +121,8 @@ type DBStatsSample struct {
 	HostName string    `json:"host_name"`
 	Engine   DBEngine  `json:"engine"`
 	At       time.Time `json:"at"`
-	// Cumulative counters are encoded as decimal strings: WAL/redo can exceed
-	// JavaScript's exact integer range on a long-lived database host.
+	// Накопительные счётчики передаются десятичными строками. На долго работающем хосте
+	// СУБД WAL и redo могут выйти за диапазон точных целых JavaScript.
 	Commits   int64  `json:"commits,string"`
 	Rollbacks int64  `json:"rollbacks,string"`
 	Active    int64  `json:"active"`

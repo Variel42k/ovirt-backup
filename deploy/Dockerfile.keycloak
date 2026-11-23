@@ -1,13 +1,13 @@
-# Keycloak performs a Quarkus augmentation on the first ordinary `start` and
-# writes into /opt/keycloak/lib. Build it once here so the runtime container
-# can use an immutable root filesystem with `start --optimized`.
+# При первом обычном `start` Keycloak выполняет сборку Quarkus и пишет
+# в /opt/keycloak/lib. Собираем образ здесь, чтобы контейнер мог выполнять
+# `start --optimized` с корневой файловой системой только для чтения.
 ARG KEYCLOAK_BASE_IMAGE=quay.io/keycloak/keycloak:26.7.2@sha256:9d1f1b2b7261ff53c66cb1092dfcdc34a5fb77e81f9e6a6e75b8b6a795de8067
 FROM ${KEYCLOAK_BASE_IMAGE} AS builder
 
 ENV KC_DB=postgres \
     KC_HEALTH_ENABLED=true
-# LDAP bind credentials are referenced as ${vault.<key>} and read from a
-# dedicated read-only mount instead of being stored in component JSON/DB.
+# Учётные данные для LDAP bind доступны по ссылке ${vault.<key>} и читаются
+# из отдельного тома только для чтения. В JSON компонента и БД хранится ссылка.
 RUN /opt/keycloak/bin/kc.sh build --vault=file
 
 ARG KEYCLOAK_BASE_IMAGE

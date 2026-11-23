@@ -43,7 +43,6 @@ export const useAppStore = defineStore('app', () => {
 
   function sectionEnabled(name: string): boolean {
     if (name === 'discovery') return meta.value?.web_sections?.discovery !== false
-    if (name === 'gitlab-clean') return meta.value?.web_sections?.gitlab_clean !== false
     return true
   }
 

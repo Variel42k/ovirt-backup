@@ -1,5 +1,5 @@
-// Package model holds the domain entities shared by the store, the API and the
-// background workers.
+// Пакет model содержит доменные сущности, совместно используемые магазином, API и фоновыми
+// рабочими.
 package model
 
 import (
@@ -8,15 +8,15 @@ import (
 	"time"
 )
 
-// ServerKind distinguishes upstream oVirt from its downstream forks. The REST
-// API is compatible, but forks differ in product name, supported API version
-// and — importantly — whether incremental backup (CBT) is available.
+// ServerKind отличается вверх по течению oVirt от своих нижележащих развилок. REST API
+// совместим, но вилки различаются по названию продукта, поддерживаемой API версии и — что
+// важно — доступно ли инкрементное резервное копирование (CBT).
 type ServerKind string
 
 const (
 	KindOVirt   ServerKind = "ovirt"
 	KindRedVirt ServerKind = "redvirt" // РЕД Виртуализация
-	KindOLVM    ServerKind = "olvm"    // Oracle Linux Virtualization Manager
+	KindOLVM    ServerKind = "olvm"    // Oracle Linux Менеджер виртуализации
 	KindRHV     ServerKind = "rhv"
 	KindProxmox ServerKind = "proxmox"
 
@@ -26,23 +26,22 @@ const (
 	KindKVM ServerKind = "kvm"
 )
 
-// AllServerKinds is the authoritative list of virtualization connectors built
-// into this binary. The API publishes it to the UI, so adding a driver does
-// not require maintaining a second list in TypeScript.
+// AllServerKinds перечисляет платформы виртуализации, поддерживаемые этой
+// сборкой. Интерфейс получает список через API, поэтому не дублирует его в TypeScript.
 func AllServerKinds() []ServerKind {
 	return []ServerKind{KindOVirt, KindRedVirt, KindOLVM, KindRHV, KindProxmox, KindKVM}
 }
 
-// Valid reports whether this binary has a driver for the connection kind.
-// Unknown values must never fall through to the oVirt client: a future
-// connector can use a different authentication protocol and endpoint shape.
+// Действительный сообщает, есть ли у этого двоичного файла драйвер для типа соединения.
+// Неизвестные значения никогда не должны доходить до клиента oVirt: будущий разъем может
+// использовать другой протокол аутентификации и форму конечной точки.
 func (k ServerKind) Valid() bool {
 	return k.UsesOVirtAPI() || k.UsesProxmoxAPI() || k.UsesLibvirt()
 }
 
-// UsesOVirtAPI groups upstream oVirt and its API-compatible downstream
-// products. One such connection always represents the complete Engine scope,
-// including every cluster and host managed by it.
+// UsesOVirtAPI группирует вверх по течению oVirt и его API-совместимые продукты вниз по
+// течению. Одно такое соединение всегда представляет полную Engine область, включая каждый
+// кластер и хост, управляемый им.
 func (k ServerKind) UsesOVirtAPI() bool {
 	switch k {
 	case KindOVirt, KindRedVirt, KindOLVM, KindRHV:
@@ -52,17 +51,16 @@ func (k ServerKind) UsesOVirtAPI() bool {
 	}
 }
 
-// UsesProxmoxAPI reports whether the connection talks to the Proxmox VE
-// cluster-wide REST API.
+// UsesProxmoxAPI проверяет, использует ли подключение REST API кластера Proxmox VE.
 func (k ServerKind) UsesProxmoxAPI() bool { return k == KindProxmox }
 
-// UsesLibvirt reports whether the connection talks to libvirt directly rather
-// than to an oVirt-style engine REST API.
+// UsesLibvirt сообщает, говорит ли соединение с libvirt непосредственно, а не с движком в
+// стиле oVirt REST API.
 func (k ServerKind) UsesLibvirt() bool { return k == KindKVM }
 
-// SupportsBackup reports whether this build has a data-plane implementation
-// for the connector. A concrete Proxmox connection may still be management
-// only until its per-node SSH channel is configured.
+// SupportsBackup сообщает, имеет ли эта сборка реализацию плоскости данных для соединителя.
+// Конкретное Proxmox соединение может по-прежнему управляться только до тех пор, пока не
+// будет сконфигурирован его канал SSH узла.
 func (k ServerKind) SupportsBackup() bool {
 	return k.UsesOVirtAPI() || k.UsesProxmoxAPI() || k.UsesLibvirt()
 }
@@ -75,8 +73,8 @@ func (k ServerKind) SupportsVMManagement() bool { return k.Valid() }
 
 func (k ServerKind) SupportsHostManagement() bool { return k.UsesOVirtAPI() }
 
-// ManagedScope tells the UI whether one connection imports a manager's full
-// inventory or one standalone hypervisor.
+// ManagedScope сообщает UI импортирует ли одно соединение полный инвентарь менеджера или
+// один автономный гипервизор.
 func (k ServerKind) ManagedScope() string {
 	if k.UsesOVirtAPI() || k.UsesProxmoxAPI() {
 		return "engine"
@@ -84,7 +82,7 @@ func (k ServerKind) ManagedScope() string {
 	return "host"
 }
 
-// Title renders a Russian label for the UI.
+// Title отдаетъ русскій ярлыкъ на UI.
 func (k ServerKind) Title() string {
 	switch k {
 	case KindOVirt:
@@ -104,10 +102,10 @@ func (k ServerKind) Title() string {
 	}
 }
 
-// RefineOVirtProduct upgrades a generic oVirt connection to a known
-// API-compatible downstream product. Explicitly selected fork kinds are kept:
-// some engines expose an upstream-compatible product name even though the
-// operator deliberately selected the vendor connector.
+// RefineOVirtProduct обновляет генерическое oVirt соединение с известным API-совместимым
+// нижестоящим продуктом. Сохраняются явно выбранные типы вилок: некоторые движки выставляют
+// имя продукта, совместимое с восходящим потоком, даже если оператор намеренно выбрал
+// разъем поставщика.
 func (k ServerKind) RefineOVirtProduct(productName, vendor string) ServerKind {
 	if k != KindOVirt {
 		return k
@@ -125,7 +123,7 @@ func (k ServerKind) RefineOVirtProduct(productName, vendor string) ServerKind {
 	}
 }
 
-// ConnState is the reachability of a managed engine.
+// ConnState достижимость управляемого движка.
 type ConnState string
 
 const (
@@ -135,8 +133,8 @@ const (
 	ConnOffline  ConnState = "offline"
 )
 
-// Server is a managed oVirt engine (a cluster manager or a single standalone
-// host running a self-hosted engine).
+// Server — управляемый oVirt движок (управляющий кластером или одиночный автономный хост,
+// работающий на саморазмещенном движке).
 type Server struct {
 	ID        string     `json:"id"`
 	Name      string     `json:"name"`
@@ -148,9 +146,9 @@ type Server struct {
 	// KVM-подключений по нему интерфейс предлагает удалить пароль после миграции.
 	PasswordStored bool `json:"password_stored"`
 	ClearPassword  bool `json:"-"`
-	// CACert is trust material used by the backend. Returning it from list/get
-	// made every browser session and browser extension able to read the full
-	// bundle even though the UI only needs to know whether it is configured.
+	// CACert содержит сертификаты доверия, которые использует сервер. Раньше list/get
+	// отдавали сертификаты браузеру и его расширениям. Интерфейсу достаточно признака, что
+	// сертификаты настроены.
 	CACert       string `json:"-"`
 	CACertStored bool   `json:"ca_cert_stored"`
 	InsecureTLS  bool   `json:"insecure_tls"`
@@ -178,9 +176,9 @@ type Server struct {
 	SSHUsername string `json:"ssh_username,omitempty"`
 	// SSHPrivateKey хранится зашифрованным и наружу не отдаётся.
 	SSHPrivateKey string `json:"-"`
-	// ClearSSHPrivateKey distinguishes an intentional removal from the empty
-	// write-only field submitted by an edit form. It is an API/store command,
-	// never persisted or returned to a client.
+	// ClearSSHPrivateKey отличает намеренное удаление от пустого принятого на входе только
+	// поля, представленного формой редактирования. Это команда API/магазина, никогда не
+	// сохранявшаяся и не возвращавшаяся клиенту.
 	ClearSSHPrivateKey bool `json:"-"`
 	// SSHKeyStored говорит интерфейсу, что ключ есть, не показывая самого
 	// ключа. Нужно, чтобы в списке было видно подключения, всё ещё входящие по
@@ -223,15 +221,15 @@ type Server struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
-// HasPassword reports whether credentials are stored, without exposing them.
+// HasPassword сообщает, хранятся ли учётные данные аутентификации, не выставляя их.
 func (s *Server) HasPassword() bool { return s.Password != "" }
 
-// HasSSHKey reports whether a private key is stored, without exposing it.
+// HasSSHKey сообщает, хранится ли закрытый ключ, не выставляя его.
 func (s *Server) HasSSHKey() bool { return s.SSHPrivateKey != "" }
 
-// HasProxmoxDataPlane reports whether the optional cluster data channel is
-// configured. Management-only Proxmox connections remain valid, but cannot be
-// selected for backup until this channel is complete.
+// HasProxmoxDataPlane проверяет настройки дополнительного канала данных. Подключение
+// Proxmox может использоваться только для управления. Бэкапы доступны после полной
+// настройки канала.
 func (s *Server) HasProxmoxDataPlane() bool {
 	return s.Kind.UsesProxmoxAPI() && strings.TrimSpace(s.SSHUsername) != "" &&
 		strings.TrimSpace(s.SSHPrivateKey) != "" &&
@@ -249,7 +247,7 @@ func (s *Server) ScratchDirOrDefault() string {
 	return DefaultScratchDir
 }
 
-// Target renders where this connection points, for logs and the UI.
+// Target отдает, где эта точка соединения, для бревен и UI.
 func (s *Server) Target() string {
 	if s.Kind.UsesLibvirt() {
 		port := s.SSHPort
@@ -261,7 +259,7 @@ func (s *Server) Target() string {
 	return s.EngineURL
 }
 
-// Validate checks the fields that must hold for this kind of connection.
+// Validate проверяет поля, которые должны удерживаться для такого рода связи.
 func (s *Server) Validate() error {
 	if !s.Kind.Valid() {
 		return fmt.Errorf("неподдерживаемый тип системы виртуализации %q", s.Kind)
@@ -294,10 +292,9 @@ func (s *Server) Validate() error {
 	}
 
 	if s.Kind.UsesProxmoxAPI() {
-		// The REST-only connection is deliberately allowed: inventory and power
-		// management are useful before the data plane is rolled out to every
-		// node. Once any SSH field is set, however, accepting a half-configured
-		// channel would only postpone the failure until the nightly job.
+		// Для инвентаря и управления питанием достаточно REST, пока SSH ещё не настроен на
+		// всех узлах. Если заполнено хотя бы одно поле SSH, проверяем весь канал, чтобы
+		// обнаружить ошибку до ночного задания.
 		started := strings.TrimSpace(s.SSHUsername) != "" || strings.TrimSpace(s.SSHPrivateKey) != "" ||
 			strings.TrimSpace(s.SSHHostKey) != "" || s.SSHTrustAnyHostKey
 		if started {
@@ -325,7 +322,7 @@ func (s *Server) Validate() error {
 	return nil
 }
 
-// Cluster is a cached oVirt cluster.
+// Cluster — кэшированный oVirt кластер.
 type Cluster struct {
 	ID          string    `json:"id"`
 	ServerID    string    `json:"server_id"`
@@ -336,7 +333,7 @@ type Cluster struct {
 	SeenAt      time.Time `json:"seen_at"`
 }
 
-// Host is a hypervisor node.
+// Host — гипервизорный узел.
 type Host struct {
 	ID           string    `json:"id"`
 	ServerID     string    `json:"server_id"`
@@ -344,7 +341,7 @@ type Host struct {
 	Address      string    `json:"address"`
 	ClusterID    string    `json:"cluster_id,omitempty"`
 	ClusterName  string    `json:"cluster_name,omitempty"`
-	Status       string    `json:"status"` // up, down, non_responsive, maintenance, connecting, error, ...
+	Status       string    `json:"status"` // вверх, вниз, non_responsive, режим обслуживания, подключение, ошибка,...
 	SPM          bool      `json:"spm"`
 	ActiveVMs    int       `json:"active_vms"`
 	CPUCores     int       `json:"cpu_cores"`
@@ -358,11 +355,12 @@ type Host struct {
 	SeenAt       time.Time `json:"seen_at"`
 }
 
-// HostHealthy reports whether the host is in a state that serves workloads.
+// HostHealthy сообщает, находится ли хост в состоянии, которое обслуживает рабочие
+// нагрузки.
 func (h *Host) HostHealthy() bool { return h.Status == "up" }
 
-// VMDesiredState lets an operator declare what the VM should be doing, which is
-// what the remediation engine compares the observed state against.
+// VMDesiredState позволяет оператору объявлять, что должна делать ВМ, с чем движок
+// восстановления сравнивает наблюдаемое состояние.
 type VMDesiredState string
 
 const (
@@ -372,7 +370,7 @@ const (
 	DesiredDown VMDesiredState = "down"
 )
 
-// VM is a cached virtual machine.
+// VM — кэшированная ВМ.
 type VM struct {
 	ID          string `json:"id"`
 	ServerID    string `json:"server_id"`
@@ -392,7 +390,7 @@ type VM struct {
 	HAEnabled   bool     `json:"ha_enabled"`
 	GuestAgent  bool     `json:"guest_agent"` // доступен ли ovirt-guest-agent/qemu-ga для quiesce
 	IPAddresses []string `json:"ip_addresses,omitempty"`
-	// Tags is the union of provider tags and labels maintained in this service.
+	// Теги — объединение тегов и меток провайдера, поддерживаемых в этом сервисе.
 	Tags      []string `json:"tags,omitempty"`
 	LocalTags []string `json:"local_tags,omitempty"`
 	DiskCount int      `json:"disk_count"`
@@ -405,7 +403,7 @@ type VM struct {
 	SeenAt time.Time `json:"seen_at"`
 }
 
-// Running reports whether the VM is currently executing.
+// Running сообщает, выполняется ли ВМ в настоящее время.
 func (v *VM) Running() bool {
 	switch v.Status {
 	case "up", "migrating", "powering_up", "reboot_in_progress", "wait_for_launch", "restoring_state":
@@ -414,7 +412,7 @@ func (v *VM) Running() bool {
 	return false
 }
 
-// Disk is a cached oVirt disk.
+// Disk — кэшированный oVirt диск.
 type Disk struct {
 	ID              string   `json:"id"`
 	ServerID        string   `json:"server_id"`
@@ -433,31 +431,31 @@ type Disk struct {
 	StorageDomainID string    `json:"storage_domain_id,omitempty"`
 	StorageDomain   string    `json:"storage_domain,omitempty"`
 	StorageType     string    `json:"storage_type,omitempty"` // nfs, iscsi, fcp, glusterfs, posixfs, local
-	ContentType     string    `json:"content_type,omitempty"` // data, iso, memory, ...
+	ContentType     string    `json:"content_type,omitempty"` // данные, ISO, память,...
 	SeenAt          time.Time `json:"seen_at"`
 }
 
-// SupportsIncremental reports whether CBT-based incremental backup can be used
-// for this disk as it is currently configured.
+// SupportsIncremental сообщает, может ли инкрементное резервное копирование на основе CBT
+// использоваться для этого диска в том виде, в каком он настроен в данный момент.
 func (d *Disk) SupportsIncremental() bool {
 	return d.BackupMode == "incremental" && d.Format == "cow"
 }
 
-// CanEnableIncremental reports whether incremental mode could be turned on.
-// oVirt only allows it for qcow2 disks.
+// CanEnableIncremental сообщает, можно ли включить инкрементальный режим.
+// oVirt допускается только для дисков qcow2.
 func (d *Disk) CanEnableIncremental() bool {
 	return d.BackupMode != "incremental" && d.Format == "cow"
 }
 
-// StorageDomain is a cached oVirt storage domain, used for capacity alerts and
-// for choosing where a restored disk lands.
+// StorageDomain — это кэшируемый oVirt домен хранения, используемый для оповещений о
+// емкости и для выбора места приземления восстановленного диска.
 type StorageDomain struct {
 	ID            string    `json:"id"`
 	ServerID      string    `json:"server_id"`
 	Name          string    `json:"name"`
 	Type          string    `json:"type"`    // data, iso, export
-	Storage       string    `json:"storage"` // nfs, iscsi, fcp, glusterfs, ...
-	Status        string    `json:"status"`  // active, inactive, maintenance, unattached, ...
+	Storage       string    `json:"storage"` // nfs, iscsi, fcp, glusterfs,... (неопр.).
+	Status        string    `json:"status"`  // активный, неактивный, режим обслуживания, без привязки,...
 	Master        bool      `json:"master"`
 	AvailableSize int64     `json:"available_size"`
 	UsedSize      int64     `json:"used_size"`
@@ -465,7 +463,7 @@ type StorageDomain struct {
 	SeenAt        time.Time `json:"seen_at"`
 }
 
-// FreeRatio returns the free fraction of the domain, or -1 when unknown.
+// FreeRatio возвращает свободную дробь домена, или -1 при неизвестности.
 func (s *StorageDomain) FreeRatio() float64 {
 	total := s.AvailableSize + s.UsedSize
 	if total <= 0 {
@@ -474,13 +472,12 @@ func (s *StorageDomain) FreeRatio() float64 {
 	return float64(s.AvailableSize) / float64(total)
 }
 
-// InsecureTLSOverdue reports whether verification has been off longer than the
-// grace period allows.
+// InsecureTLSOverdue сообщает, была ли проверка отключена дольше, чем позволяет льготный
+// период.
 //
-// A zero grace means "do not remind", which is the escape hatch for
-// installations that genuinely cannot fix their certificates and would
-// otherwise learn to ignore a permanently firing alert — the worst outcome,
-// because it teaches them to ignore the other ones too.
+// Нулевой льготный период отключает напоминание. Это позволяет убрать постоянное оповещение
+// там, где исправить сертификат невозможно, чтобы оператор продолжал замечать остальные
+// оповещения.
 func InsecureTLSOverdue(insecure bool, since *time.Time, grace time.Duration) bool {
 	if !insecure || grace <= 0 || since == nil {
 		return false

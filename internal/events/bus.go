@@ -1,5 +1,5 @@
-// Package events is an in-process fan-out of state changes, used to push live
-// updates to connected browsers over server-sent events.
+// Пакет events представляет собой внутрипроцессный вентилятор изменений состояния,
+// используемый для отправки обновлений подключенным браузерам через сервер events.
 package events
 
 import (
@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// Kind names an event type so the UI can decide what to refresh.
+// Kind называет тип события, чтобы UI мог решить, что обновлять.
 type Kind string
 
 const (
@@ -24,7 +24,7 @@ const (
 	KindSettings      Kind = "settings.changed"
 )
 
-// Event is one notification.
+// Event уведомление.
 type Event struct {
 	Kind     Kind      `json:"kind"`
 	ServerID string    `json:"server_id,omitempty"`
@@ -34,11 +34,10 @@ type Event struct {
 	At       time.Time `json:"at"`
 }
 
-// Bus fans events out to subscribers.
+// Поклонники автобусов вышли к подписчикам.
 //
-// Delivery is deliberately lossy: a browser that stopped reading must not be
-// able to stall the monitor loop, so a full subscriber queue drops the event
-// rather than blocking. The UI refetches on reconnect anyway.
+// Переполненная очередь подписчика пропускает событие, чтобы отключившийся браузер не
+// задерживал монитор. При переподключении интерфейс снова запрашивает данные.
 type Bus struct {
 	mu     sync.RWMutex
 	nextID int
@@ -46,7 +45,7 @@ type Bus struct {
 	buffer int
 }
 
-// NewBus builds a bus. buffer is the per-subscriber queue depth.
+// NewBus строит шину. буфер — глубина очереди для подписчика.
 func NewBus(buffer int) *Bus {
 	if buffer <= 0 {
 		buffer = 64
@@ -54,7 +53,7 @@ func NewBus(buffer int) *Bus {
 	return &Bus{subs: map[int]chan Event{}, buffer: buffer}
 }
 
-// Subscribe registers a listener and returns its channel and a cancel func.
+// Subscribe регистрирует слушателя и возвращает его канал и отменяет функт.
 func (b *Bus) Subscribe() (<-chan Event, func()) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -74,7 +73,7 @@ func (b *Bus) Subscribe() (<-chan Event, func()) {
 	}
 }
 
-// Publish delivers an event to every current subscriber.
+// Publish доставляет событие всем текущим подписчикам.
 func (b *Bus) Publish(e Event) {
 	if e.At.IsZero() {
 		e.At = time.Now().UTC()
@@ -86,12 +85,12 @@ func (b *Bus) Publish(e Event) {
 		select {
 		case ch <- e:
 		default:
-			// Subscriber is behind; skip it rather than slowing everyone down.
+			// Подписчик остался позади; Пропустить его, а не замедлять всех вниз.
 		}
 	}
 }
 
-// Subscribers reports how many listeners are attached, for diagnostics.
+// Subscribers отчита́тель м. —ница ж. кто отчитывается, для диагностики.
 func (b *Bus) Subscribers() int {
 	b.mu.RLock()
 	defer b.mu.RUnlock()

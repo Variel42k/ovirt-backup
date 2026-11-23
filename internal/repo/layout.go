@@ -7,7 +7,7 @@ import (
 	"unicode"
 )
 
-// Object layout inside a repository:
+// Расположение объекта внутри хранилища:
 //
 //	jhvirt/<server>/<vm>/<YYYY>/<MM>/<DD>/<run-id>/
 //	    run.json                     — метаданные запуска и список дисков
@@ -15,15 +15,15 @@ import (
 //	    disk-00-<disk-id>.manifest   — карта экстентов и хэши чанков
 //	    disk-00-<disk-id>.data       — сами данные
 //
-// The date levels are what makes a repository browsable by a human with `ls`
-// or an S3 console, and they let retention enumerate a day without listing the
-// whole bucket.
+// Уровни даты - это то, что делает хранилище доступным для просмотра человеком с `ls` или
+// S3 консолью, и они позволяют перечислению удержания в день без перечисления всего ведра.
 
-// Root is the top-level namespace inside a target, so a bucket or directory
-// can be shared with other tools.
+// Root — это пространство имен верхнего уровня внутри цели, поэтому ведро или каталог могут
+// использоваться совместно с другими инструментами.
 const Root = "jhvirt"
 
-// RunPrefix builds the key prefix of one backup run. It always ends with "/".
+// RunPrefix строит ключевой префикс одного резервного запуска. Она всегда заканчивается
+// цифрой "/".
 func RunPrefix(serverName, vmID, vmName string, at time.Time, runID string) string {
 	at = at.UTC()
 	return fmt.Sprintf("%s/%s/%s/%04d/%02d/%02d/%s/",
@@ -35,34 +35,34 @@ func RunPrefix(serverName, vmID, vmName string, at time.Time, runID string) stri
 	)
 }
 
-// VMPrefix is the prefix covering every backup of one VM, used by retention
-// and by the "show me everything for this VM" view.
+// VMPrefix задаёт общий префикс всех копий одной ВМ для правил хранения
+// и просмотра списка её бэкапов.
 func VMPrefix(serverName, vmID, vmName string) string {
 	return fmt.Sprintf("%s/%s/%s/", Root, Segment(serverName), vmSegment(vmID, vmName))
 }
 
-// ServerPrefix covers every backup of one engine.
+// ServerPrefix покрывает каждую резервную копию одного движка.
 func ServerPrefix(serverName string) string {
 	return fmt.Sprintf("%s/%s/", Root, Segment(serverName))
 }
 
-// RunManifestKey is the run-level metadata object.
+// RunManifestKey является объектом метаданных уровня выполнения.
 func RunManifestKey(runPrefix string) string { return runPrefix + "run.json" }
 
-// VMConfigKey is the stored VM configuration.
+// VMConfigKey — конфигурация хранимой ВМ.
 func VMConfigKey(runPrefix string) string { return runPrefix + "vm-config.json" }
 
-// LibvirtConfigKey is the source domain XML stored with a KVM backup. The
-// verifier uses the portable profile in run.json; the original XML remains an
-// audit and disaster-recovery artefact.
+// LibvirtConfigKey является исходным доменом XML, хранящимся с резервной копией KVM.
+// Проверяющий использует портативный профиль в run.json; Оригиналъ XML остается ревизскимъ
+// и стихійно-восстановительнымъ.
 func LibvirtConfigKey(runPrefix string) string { return runPrefix + "vm-config.xml" }
 
-// DiskManifestKey is the extent map and chunk digests of one disk.
+// DiskManifestKey — это карта протяженности и дайджесты чанков одного диска.
 func DiskManifestKey(runPrefix string, index int, diskID string) string {
 	return fmt.Sprintf("%sdisk-%02d-%s.manifest", runPrefix, index, Segment(diskID))
 }
 
-// DiskDataKey is the chunk blob of one disk.
+// DiskDataKey — чанк сгустка одного диска.
 func DiskDataKey(runPrefix string, index int, diskID string) string {
 	return fmt.Sprintf("%sdisk-%02d-%s.data", runPrefix, index, Segment(diskID))
 }
@@ -75,13 +75,13 @@ func ArtifactDataKey(runPrefix string, index int, diskID, kind string) string {
 	return fmt.Sprintf("%sartifact-%02d-%s.%s.data", runPrefix, index, Segment(diskID), Segment(kind))
 }
 
-// OVAKey is the exported appliance of an OVA-type backup.
+// OVAKey является экспортируемым устройством резервного копирования типа OVA.
 func OVAKey(runPrefix, vmName string) string {
 	return fmt.Sprintf("%s%s.ova", runPrefix, Segment(vmName))
 }
 
-// vmSegment prefers "<name>-<short-id>" so a human can recognise the directory,
-// while the id keeps it unique across renames.
+// vmSegment предпочитает "<name>-<short-id>", чтобы человек мог распознать каталог, в то
+// время как идентификатор сохраняет его уникальным по всем переименованиям.
 func vmSegment(vmID, vmName string) string {
 	short := vmID
 	if len(short) > 8 {
@@ -93,9 +93,9 @@ func vmSegment(vmID, vmName string) string {
 	return Segment(vmName) + "-" + Segment(short)
 }
 
-// Segment makes an arbitrary string safe for use as one path/key component on
-// every backend: no separators, no spaces, no characters that Windows, S3 or a
-// shell would treat specially.
+// Segment делает произвольную строку безопасной для использования в качестве одного
+// компонента пути/ключа на каждом сервере: нет разделителей, нет пробелов, нет символов,
+// которые Windows, S3 или оболочка будет обрабатывать специально.
 func Segment(s string) string {
 	if s == "" {
 		return "unnamed"
@@ -114,8 +114,8 @@ func Segment(s string) string {
 			}
 			lastDash = false
 		case unicode.IsLetter(r) || unicode.IsDigit(r):
-			// Non-ASCII letters (Cyrillic VM names are the norm here) are
-			// transliterated rather than dropped, so directories stay readable.
+			// Не-ASCII буквы (кириллические имена ВМ здесь являются нормой)
+			// транслитерируются, а не отбрасываются, поэтому каталоги остаются читаемыми.
 			if tr, ok := translit[unicode.ToLower(r)]; ok {
 				b.WriteString(tr)
 				lastDash = false
@@ -143,7 +143,7 @@ func Segment(s string) string {
 }
 
 // translit maps Cyrillic to ASCII so that VM names like "БД-Продакшн" produce
-// a directory an operator can still read and type.
+// каталог, который оператор может читать и вводить.
 var translit = map[rune]string{
 	'а': "a", 'б': "b", 'в': "v", 'г': "g", 'д': "d", 'е': "e", 'ё': "e",
 	'ж': "zh", 'з': "z", 'и': "i", 'й': "y", 'к': "k", 'л': "l", 'м': "m",

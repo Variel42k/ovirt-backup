@@ -1,5 +1,6 @@
-// Package replication copies published restore points between repositories.
-// It never contacts a hypervisor: the primary run is the only source read.
+// Пакет replication копий опубликованных точек восстановления между репозиториями.
+// Он никогда не контактирует с гипервизором: первичный запуск является единственным
+// источником чтения.
 package replication
 
 import (
@@ -110,8 +111,8 @@ func (r *Replicator) Wake() {
 	}
 }
 
-// QueueRun creates required destination copies. Ancestors are queued first so
-// an incremental restore never appears before its chain root.
+// QueueRun создает требуемые копии назначения. Предки стоят в очереди первыми, поэтому
+// инкрементное восстановление никогда не появляется до его цепного корня.
 func (r *Replicator) QueueRun(ctx context.Context, runID string, targetIDs []string) ([]*model.BackupCopy, error) {
 	run, err := r.store.GetBackupRun(ctx, runID)
 	if err != nil {
@@ -320,8 +321,9 @@ func (r *Replicator) process(copy *model.BackupCopy) {
 			_ = r.store.UpdateBackupCopy(context.WithoutCancel(ctx), copy)
 			return
 		}
-		// A missing parent is a structural error. Keep the copy visible as
-		// blocked until an administrator repairs the chain and retries it.
+		// Недостающий родитель — структурная ошибка. Держите копию видимой как
+		// заблокированную, пока администратор не восстановит цепочку и не попробует ее
+		// повторно.
 		copy.Status, copy.LastError, copy.NextRetryAt = model.CopyLocked, err.Error(), nil
 		_ = r.store.UpdateBackupCopy(context.WithoutCancel(ctx), copy)
 		r.raiseAlert(context.WithoutCancel(ctx), copy, err)
@@ -343,8 +345,9 @@ func (r *Replicator) process(copy *model.BackupCopy) {
 
 	err := r.copy(ctx, copy, attempt)
 	if err == nil && r.verify != nil {
-		// The verifier can read this explicitly selected copy while it remains in
-		// verifying state. Restore and further replication still require success.
+		// Проверяющий может прочитать эту явно выбранную копию, пока она находится в
+		// состоянии проверки. Восстановление и дальнейшая репликация все еще требуют
+		// успеха.
 		if run, runErr := r.store.GetBackupRun(ctx, copy.RunID); runErr == nil && run.JobID != "" {
 			if job, jobErr := r.store.GetBackupJob(ctx, run.JobID); jobErr == nil && job.VerifyAfter != "" {
 				err = r.verify(ctx, run.ID, copy.ID, job.VerifyAfter, job.VerifyOptions)
@@ -497,8 +500,8 @@ func (r *Replicator) copy(ctx context.Context, copy *model.BackupCopy, attempt *
 	return nil
 }
 
-// ensureParentCopyReady prevents an incremental run.json from becoming
-// visible in a repository before every parent restore point is published.
+// ensureParentCopyReady предотвращает инкрементную run.json видимость в репозитории до
+// публикации каждой родительской точки восстановления.
 func (r *Replicator) ensureParentCopyReady(ctx context.Context, copy *model.BackupCopy) error {
 	run, err := r.store.GetBackupRun(ctx, copy.RunID)
 	if err != nil {
@@ -526,7 +529,7 @@ func (r *Replicator) ensureParentCopyReady(ctx context.Context, copy *model.Back
 }
 
 func copyOne(ctx context.Context, source, destination repo.Backend, obj repo.ObjectInfo) (string, error) {
-	// The source hash is evidence for generic and storage-native copies alike.
+	// Исходный хэш является доказательством как общих, так и хранимых копий.
 	src, err := source.Get(ctx, obj.Key)
 	if err != nil {
 		return "", err

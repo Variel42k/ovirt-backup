@@ -33,8 +33,8 @@ func TestPoolKeepsClientWhenOnlyRuntimeStateChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Monitoring updates this timestamp every poll. It is not a connection
-	// change and must not discard the SSO token held by the client.
+	// Мониторинг обновляет эту метку времени каждый опрос. Это не изменение соединения и не
+	// должно отбрасывать SSO токен, хранящийся у клиента.
 	srv.UpdatedAt = srv.UpdatedAt.Add(30 * time.Second)
 	srv.LastCheckedAt = &srv.UpdatedAt
 	second, err := pool.ForServer(srv)
@@ -45,8 +45,8 @@ func TestPoolKeepsClientWhenOnlyRuntimeStateChanges(t *testing.T) {
 		t.Fatal("runtime state update rebuilt the oVirt client")
 	}
 
-	// A real credential change must still take effect even if a database with
-	// coarse timestamp precision leaves UpdatedAt unchanged.
+	// Реальное изменение учётных данных все равно должно вступить в силу, даже если база
+	// данных с грубой точностью метки времени оставляет UpdatedAt неизменной.
 	srv.Password = "new-secret"
 	third, err := pool.ForServer(srv)
 	if err != nil {

@@ -56,8 +56,8 @@ func (s *Server) handleDiscoveryScan(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, badRequest("поиск сервисов не настроен"))
 		return
 	}
-	// A network scan can outlive the browser/proxy request. Keep it running so
-	// a disconnected client cannot leave the latest snapshot half-populated.
+	// Сканирование сети может пережить запрос браузера / прокси. Продолжайте работать,
+	// чтобы отключенный клиент не мог оставить последний снапшот наполовину заполненным.
 	snapshot, err := s.discovery.Scan(context.WithoutCancel(r.Context()))
 	if errors.Is(err, discovery.ErrScanRunning) {
 		writeJSON(w, http.StatusConflict, errorResponse{Error: err.Error(), Code: "discovery_busy"})

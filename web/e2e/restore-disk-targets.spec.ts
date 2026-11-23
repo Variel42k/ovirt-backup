@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test'
 
-// All API calls are mocked: these checks never create disks in a real engine.
+// Все вызовы API подменены. Проверки не создают диски в реальном Engine.
 test('new disk uses selected engine, host and storage and discards stale inventory', async ({ page }, testInfo) => {
   const servers = [
     { id: 'engine-1', name: 'Source engine', kind: 'ovirt', enabled: true, engine_url: 'https://source.example.test' },
@@ -73,7 +73,7 @@ test('new disk uses selected engine, host and storage and discards stale invento
   await page.getByRole('option', { name: /source-storage/ }).click()
   await dialog.getByLabel('ID ВМ для подключения диска', { exact: true }).fill('old-vm-id')
 
-  // A delayed response from a previous host must not repopulate another engine.
+  // Запоздалый ответ предыдущего хоста не должен менять список другого Engine.
   delayOld = true
   await dialog.getByLabel('Хост для загрузки диска', { exact: true }).click()
   await page.getByRole('option', { name: /engine-1-slow-node/ }).click()

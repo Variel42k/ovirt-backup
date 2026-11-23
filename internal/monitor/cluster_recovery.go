@@ -71,7 +71,7 @@ func recoveryVMProblem(vm *model.VM, p model.VMRecoveryPolicy) (model.Remediatio
 		if vm.PauseStatus == "eio" || vm.PauseStatus == "enospc" {
 			return model.ActionVMUnpause, "пауза из-за ошибки хранилища"
 		}
-		return "", "" // intentional pause
+		return "", "" // Преднамеренная пауза
 	case "not_responding", "powering_up", "powering_down", "reboot_in_progress", "wait_for_launch":
 		return model.ActionVMReboot, "состояние не восстанавливается: " + vm.Status
 	case "unknown":
@@ -116,8 +116,9 @@ func (r *Remediator) clusterRecoveryGate(ctx context.Context, sit Situation, p m
 	return "", nil
 }
 
-// Recheck live power, host, ownership, intent and the failed health check just
-// before a command. A stale observation never authorizes a reset.
+// Перед командой повторно проверяем питание, хост, принадлежность ВМ,
+// требуемое состояние и результат проверки работоспособности. По старому
+// замеру перезагрузку не разрешаем.
 func (r *Remediator) confirmClusterRecovery(ctx context.Context, sit Situation) (string, error) {
 	vm, err := r.store.GetVM(ctx, sit.ServerID, sit.ObjectID)
 	if err != nil {

@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
+import { diskCompressionSaving } from '../src/api/backupCompression'
 
 async function fixture(page: Page, compression = '', kind = 'ovirt') {
   let job: Record<string, unknown> = {
@@ -85,4 +86,106 @@ test('Proxmox не предлагает неприменимое сжатие ч
   const dialog = page.getByRole('dialog')
   await dialog.getByRole('tab', { name: 'Проверка', exact: true }).click()
   await expect(dialog.getByTestId('backup-compression')).toHaveCount(0)
+})
+
+test('фактический процент использует охваченные диски и не маскирует увеличение', () => {
+  const disk = { status: 'succeeded', logical_bytes: 100, stored_bytes: 40, manifest_key: 'disk.manifest' }
+  expect(diskCompressionSaving([disk])).toBe(60)
+  expect(diskCompressionSaving([{ ...disk, stored_bytes: 110 }])).toBeCloseTo(-10)
+  expect(diskCompressionSaving([{ ...disk, status: 'failed' }])).toBeNull()
+  expect(diskCompressionSaving([{ ...disk, logical_bytes: 0 }])).toBeNull()
+  expect(diskCompressionSaving([{ ...disk, manifest_key: '' }])).toBeNull()
+})
+
+for (const theme of ['light', 'dark']) test(`оценка до первой копии подтверждается отдельно и позволяет выбрать кодек ${theme}`, async ({ page }, info) => {
+  await page.addInitScript(mode => localStorage.setItem('jhv-theme-mode', mode), theme)
+  const f = await fixture(page)
+  f.job().exclude_disk_ids = ['scratch']
+  const requests: Record<string, unknown>[] = []
+  await page.route('**/compression-preview', route => {
+    requests.push(route.request().postDataJSON())
+    return route.fulfill({ json: {
+      id: 'preview', server_id: 'engine', vm_id: 'vm', sampled_at: '2026-11-04T10:00:00Z',
+      chunk_size: 4 * 1024 ** 2, level: 3, sample_bytes: 64 * 1024 ** 2, zero_bytes: 24 * 1024 ** 2,
+      compared_bytes: 40 * 1024 ** 2, sample_chunks: 16, disks: [{ id: 'os', name: 'OS', size: 100 * 1024 ** 3 }],
+      results: [{ algorithm: 'zstd', input_bytes: 40 * 1024 ** 2, stored_bytes: 16 * 1024 ** 2, saving_percent: 60, encode_milliseconds: 35 },
+        { algorithm: 'gzip', input_bytes: 40 * 1024 ** 2, stored_bytes: 20 * 1024 ** 2, saving_percent: 50, encode_milliseconds: 50 },
+        { algorithm: 's2', input_bytes: 40 * 1024 ** 2, stored_bytes: 28 * 1024 ** 2, saving_percent: 30, encode_milliseconds: 10 },
+        { algorithm: 'lz4', input_bytes: 40 * 1024 ** 2, stored_bytes: 26 * 1024 ** 2, saving_percent: 35, encode_milliseconds: 15 },
+        { algorithm: 'brotli', input_bytes: 40 * 1024 ** 2, stored_bytes: 14 * 1024 ** 2, saving_percent: 65, encode_milliseconds: 120 },
+        { algorithm: 'none', input_bytes: 40 * 1024 ** 2, stored_bytes: 40 * 1024 ** 2, saving_percent: 0, encode_milliseconds: 1 }],
+      warnings: ['Прогноз по выборке непустых данных; размер всей копии может отличаться.'],
+    } })
+  })
+  await page.goto('/jobs?job=job')
+  const job = page.getByRole('dialog')
+  await job.getByRole('tab', { name: 'Проверка', exact: true }).click()
+  await job.getByRole('button', { name: 'Оценить сжатие до бэкапа', exact: true }).click()
+  const preview = page.getByTestId('compression-preview')
+  await expect(preview.getByRole('button', { name: 'Сравнить алгоритмы', exact: true })).toBeDisabled()
+  await preview.getByRole('checkbox').check()
+  await preview.getByRole('button', { name: 'Сравнить алгоритмы', exact: true }).click()
+  await expect(preview.getByRole('button', { name: 'Выбрать LZ4', exact: true })).toBeVisible()
+  await expect(preview).toContainText('60 %')
+  expect(requests).toEqual([{ confirm_source_read: true, exclude_disk_ids: ['scratch'] }])
+  await expect(preview).toContainText('нулевых данных')
+  await expect(preview).toContainText('Прогноз по выборке')
+  await preview.screenshot({ path: info.outputPath(`compression-preview-${theme}.png`), animations: 'disabled' })
+  await preview.getByRole('button', { name: 'Выбрать LZ4', exact: true }).click()
+  await expect(page.getByTestId('backup-compression')).toHaveValue('LZ4')
+})
+
+test('фактическая экономия в карточке не включает дополнительный образ', async ({ page }, info) => {
+  await fixture(page)
+  const run = { id: 'run', server_id: 'engine', vm_id: 'vm', vm_name: 'Тестовая ВМ', type: 'full', status: 'succeeded',
+    compression: 'zstd', created_at: '2026-11-04T10:00:00Z', started_at: '2026-11-04T10:00:00Z', ended_at: '2026-11-04T10:10:00Z',
+    logical_bytes: 1024 ** 4, read_bytes: 100 * 1024 ** 3, stored_bytes: 200 * 1024 ** 3, disk_count: 1, progress: 100, copies: [],
+    disks: [{ id: 'disk', disk_id: 'disk', alias: 'OS', virtual_size: 1024 ** 4, logical_bytes: 100 * 1024 ** 3, stored_bytes: 60 * 1024 ** 3, manifest_key: 'disk.manifest', chunk_count: 25600, status: 'succeeded' }],
+  }
+  await page.route('**/api/v1/backups**', route => {
+    const path = new URL(route.request().url()).pathname
+    if (path.endsWith('/backups/run/telemetry')) return route.fulfill({ json: { events: [], disks: [], databases: [] } })
+    if (path.endsWith('/backups/run')) return route.fulfill({ json: run })
+    return route.fulfill({ json: { items: path.endsWith('/backups') || path.endsWith('/chain') ? [run] : [], total: 1 } })
+  })
+  await page.goto('/backups?run=run')
+  const summary = page.getByTestId('backup-compression-actual')
+  await expect(summary).toContainText('Фактическое сокращение 40 %')
+  await expect(summary).toContainText('дополнительные артефакты не входят')
+  await summary.screenshot({ path: info.outputPath('compression-actual.png') })
+})
+
+test('отмена оценки закрывает окно и не применяет поздний ответ', async ({ page }) => {
+  await fixture(page)
+  await page.route('**/compression-preview', async route => {
+    await new Promise(resolve => setTimeout(resolve, 1200))
+    await route.fulfill({ json: { results: [] } }).catch(() => undefined)
+  })
+  await page.goto('/jobs?job=job')
+  await page.getByRole('tab', { name: 'Проверка', exact: true }).click()
+  await page.getByRole('button', { name: 'Оценить сжатие до бэкапа', exact: true }).click()
+  const preview = page.getByTestId('compression-preview')
+  await preview.getByRole('checkbox').check()
+  await preview.getByRole('button', { name: 'Сравнить алгоритмы', exact: true }).click()
+  await preview.getByRole('button', { name: 'Отменить оценку', exact: true }).click()
+  await expect(preview).toHaveCount(0)
+  await expect(page.getByText(/Отмена запрошена/)).toBeVisible()
+  await expect(page.getByTestId('backup-compression')).toHaveValue('Системная настройка (ZSTD)')
+})
+
+test('нулевая выборка не показывает выдуманный процент сжатия', async ({ page }) => {
+  await fixture(page)
+  await page.route('**/compression-preview', route => route.fulfill({ json: {
+    id: 'preview', server_id: 'engine', vm_id: 'vm', sampled_at: '2026-11-04T10:00:00Z',
+    chunk_size: 4194304, level: 3, sample_bytes: 4194304, zero_bytes: 4194304, compared_bytes: 0,
+    sample_chunks: 1, disks: [], results: [], warnings: ['Выборка содержит только нули: оценка сжатия непустых данных недоступна.'],
+  } }))
+  await page.goto('/jobs?job=job')
+  await page.getByRole('tab', { name: 'Проверка', exact: true }).click()
+  await page.getByRole('button', { name: 'Оценить сжатие до бэкапа', exact: true }).click()
+  const preview = page.getByTestId('compression-preview')
+  await preview.getByRole('checkbox').check()
+  await preview.getByRole('button', { name: 'Сравнить алгоритмы', exact: true }).click()
+  await expect(preview).toContainText('Выборка содержит только нули')
+  await expect(preview.getByRole('table')).toHaveCount(0)
 })

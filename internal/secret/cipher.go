@@ -1,6 +1,5 @@
-// Package secret encrypts the credentials the service must keep in a usable
-// form: oVirt passwords, S3 keys and SSH keys. Hashing is not an option here —
-// the service has to replay these secrets to authenticate.
+// Пакет secret шифрует пароли oVirt и ключи S3 и SSH. Службе нужно использовать эти данные
+// для аутентификации, поэтому их нельзя хранить только в виде хешей.
 package secret
 
 import (
@@ -19,12 +18,12 @@ import (
 
 const keySize = 32 // AES-256
 
-// Cipher performs authenticated encryption with a single symmetric key.
+// Cipher выполняет аутентифицированное шифрование с помощью одного симметричного ключа.
 type Cipher struct {
 	aead cipher.AEAD
 }
 
-// New builds a Cipher from a raw 32-byte key.
+// New строит шифр из необработанного 32-байтного ключа.
 func New(key []byte) (*Cipher, error) {
 	if len(key) != keySize {
 		return nil, fmt.Errorf("key must be %d bytes, got %d", keySize, len(key))
@@ -40,9 +39,9 @@ func New(key []byte) (*Cipher, error) {
 	return &Cipher{aead: aead}, nil
 }
 
-// NewFromConfig resolves the key from the config: an inline base64 value wins,
-// otherwise the key file is read, and if it does not exist a fresh key is
-// generated and stored with owner-only permissions.
+// NewFromConfig разрешает ключ из конфигурации: встроенное значение base64 выигрывает, в
+// противном случае файл ключа читается, и если он не существует, новый ключ генерируется и
+// хранится с разрешениями только владельца.
 func NewFromConfig(cfg config.SecretsConfig) (*Cipher, error) {
 	if cfg.KeyBase64 != "" {
 		key, err := base64.StdEncoding.DecodeString(strings.TrimSpace(cfg.KeyBase64))
@@ -83,8 +82,8 @@ func NewFromConfig(cfg config.SecretsConfig) (*Cipher, error) {
 	return New(key)
 }
 
-// Encrypt returns a base64 blob of nonce||ciphertext. An empty input stays
-// empty so that "no secret stored" survives a round trip.
+// Encrypt возвращает nonce||ciphertext в base64. Пустой ввод остаётся пустым, чтобы
+// сохранить признак отсутствующего секрета.
 func (c *Cipher) Encrypt(plain string) (string, error) {
 	if plain == "" {
 		return "", nil
@@ -97,7 +96,7 @@ func (c *Cipher) Encrypt(plain string) (string, error) {
 	return base64.StdEncoding.EncodeToString(sealed), nil
 }
 
-// Decrypt reverses Encrypt.
+// Decrypt перешифровывается.
 func (c *Cipher) Decrypt(enc string) (string, error) {
 	if enc == "" {
 		return "", nil
@@ -112,14 +111,15 @@ func (c *Cipher) Decrypt(enc string) (string, error) {
 	}
 	plain, err := c.aead.Open(nil, raw[:ns], raw[ns:], nil)
 	if err != nil {
-		// Almost always means the key file was replaced or restored from a
-		// different host; say so rather than leaking a generic auth error.
+		// Почти всегда означает, что ключевой файл был заменен или восстановлен с другого
+		// хоста; Скажите так, вместо того, чтобы слить ошибку auth.
 		return "", fmt.Errorf("decrypt secret (ключ шифрования не совпадает с тем, которым данные были записаны): %w", err)
 	}
 	return string(plain), nil
 }
 
-// EncryptBytes seals arbitrary binary data, used for backup chunk encryption.
+// EncryptBytes запечатывает произвольные двоичные данные, используемые для резервного
+// шифрования блоков.
 func (c *Cipher) EncryptBytes(plain []byte) ([]byte, error) {
 	nonce := make([]byte, c.aead.NonceSize())
 	if _, err := rand.Read(nonce); err != nil {
@@ -128,7 +128,7 @@ func (c *Cipher) EncryptBytes(plain []byte) ([]byte, error) {
 	return c.aead.Seal(nonce, nonce, plain, nil), nil
 }
 
-// DecryptBytes opens data produced by EncryptBytes.
+// DecryptBytes открывает данные, произведенные EncryptBytes.
 func (c *Cipher) DecryptBytes(sealed []byte) ([]byte, error) {
 	ns := c.aead.NonceSize()
 	if len(sealed) < ns {
@@ -137,5 +137,5 @@ func (c *Cipher) DecryptBytes(sealed []byte) ([]byte, error) {
 	return c.aead.Open(nil, sealed[:ns], sealed[ns:], nil)
 }
 
-// Overhead reports how many bytes encryption adds to each chunk.
+// Overhead сообщает, сколько байтов шифрования добавляется к каждому блоку.
 func (c *Cipher) Overhead() int { return c.aead.NonceSize() + c.aead.Overhead() }

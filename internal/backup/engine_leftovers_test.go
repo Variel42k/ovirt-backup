@@ -47,6 +47,8 @@ func TestOwnerOfLeftoverBackup(t *testing.T) {
 	}{
 		{"метка службы", `{"id":"b1","phase":"ready","description":"jhvirt run crashed"}`, "crashed", false},
 		{"метка идущего запуска", `{"id":"b2","phase":"ready","description":"jhvirt run now"}`, "now", true},
+		{"описание известного запуска", `{"id":"b-new","phase":"ready","description":"Backup run now"}`, "now", true},
+		{"описание неизвестного запуска", `{"id":"b-foreign","phase":"ready","description":"Backup run other"}`, "", false},
 		{"записанный идентификатор", `{"id":"b-rec","phase":"ready"}`, "crashed", false},
 		{"бэкап идущего запуска", `{"id":"b-live","phase":"ready"}`, "now", true},
 		{"след сбоя разбора ответа", `{"id":"b3","phase":"ready","creation_date":` + at(40*time.Second) + `}`, "old", false},

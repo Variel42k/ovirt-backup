@@ -8,8 +8,8 @@ import (
 	"github.com/pierrec/lz4/v4"
 )
 
-// Each chunk is a complete independent frame. No dictionaries or external
-// state are required to recover it on another machine.
+// Каждый кусочек представляет собой полный независимый кадр. Никакие словари или внешнее
+// состояние не требуются для его восстановления на другом компьютере.
 type lz4Compressor struct{ level int }
 
 func (c *lz4Compressor) compress(plain []byte) ([]byte, error) {

@@ -8,14 +8,12 @@ import (
 	golibvirt "github.com/digitalocean/go-libvirt"
 )
 
-// Power management for libvirt domains.
+// Управление питанием для libvirt доменов.
 //
-// libvirt splits what oVirt merges: a stopped domain is started with
-// DomainCreate, while a paused one is released with DomainResume. Calling the
-// wrong one fails, so StartDomain looks at the current state first — the
-// caller should not have to know which of the two situations it is in.
+// libvirt запускает остановленный домен через DomainCreate, а приостановленный возобновляет
+// через DomainResume. StartDomain определяет состояние и выбирает нужный вызов.
 
-// StartDomain boots a stopped domain or releases a paused one.
+// StartDomain поостанови́ть остановленный доменъ или выпустить остановленный.
 func (c *Conn) StartDomain(ctx context.Context, dom golibvirt.Domain) error {
 	state, _, err := c.lv.DomainGetState(dom, 0)
 	if err != nil {
@@ -43,8 +41,8 @@ func (c *Conn) StartDomain(ctx context.Context, dom golibvirt.Domain) error {
 	}
 }
 
-// ShutdownDomain asks the guest to power off cleanly. It needs ACPI or a guest
-// agent; without either the domain simply keeps running.
+// ShutdownDomain просит гостя чисто выключить ВМ. Требуется ACPI или гостевой агент; Без
+// этого домен просто продолжает работать.
 func (c *Conn) ShutdownDomain(ctx context.Context, dom golibvirt.Domain) error {
 	if err := c.lv.DomainShutdown(dom); err != nil {
 		return fmt.Errorf("штатное выключение домена %s: %w", dom.Name, err)
@@ -52,8 +50,8 @@ func (c *Conn) ShutdownDomain(ctx context.Context, dom golibvirt.Domain) error {
 	return nil
 }
 
-// DestroyDomain cuts power to the domain. Data loss inside the guest is
-// possible, which is why callers gate it behind an explicit confirmation.
+// DestroyDomain поотключа́ет власть домену. Потеря данных внутри гостя возможна, поэтому
+// клиенты этого интерфейса закрывают его за явным подтверждением.
 func (c *Conn) DestroyDomain(ctx context.Context, dom golibvirt.Domain) error {
 	if err := c.lv.DomainDestroy(dom); err != nil {
 		return fmt.Errorf("выключение питания домена %s: %w", dom.Name, err)
@@ -61,7 +59,7 @@ func (c *Conn) DestroyDomain(ctx context.Context, dom golibvirt.Domain) error {
 	return nil
 }
 
-// SuspendDomain pauses execution, keeping the guest in memory.
+// SuspendDomain приостанавлива́ет казнь, держа гостя в памяти.
 func (c *Conn) SuspendDomain(ctx context.Context, dom golibvirt.Domain) error {
 	if err := c.lv.DomainSuspend(dom); err != nil {
 		return fmt.Errorf("приостановка домена %s: %w", dom.Name, err)
@@ -69,7 +67,7 @@ func (c *Conn) SuspendDomain(ctx context.Context, dom golibvirt.Domain) error {
 	return nil
 }
 
-// RebootDomain asks the guest to restart.
+// RebootDomain попроси́ть гостя перезапустить.
 func (c *Conn) RebootDomain(ctx context.Context, dom golibvirt.Domain) error {
 	if err := c.lv.DomainReboot(dom, 0); err != nil {
 		return fmt.Errorf("перезагрузка домена %s: %w", dom.Name, err)
@@ -77,7 +75,7 @@ func (c *Conn) RebootDomain(ctx context.Context, dom golibvirt.Domain) error {
 	return nil
 }
 
-// ResetDomain performs a hard reset, equivalent to the reset button.
+// ResetDomain выполняет жесткий сброс, эквивалентный кнопке сброса.
 func (c *Conn) ResetDomain(ctx context.Context, dom golibvirt.Domain) error {
 	if err := c.lv.DomainReset(dom, 0); err != nil {
 		return fmt.Errorf("аппаратный сброс домена %s: %w", dom.Name, err)
@@ -85,7 +83,7 @@ func (c *Conn) ResetDomain(ctx context.Context, dom golibvirt.Domain) error {
 	return nil
 }
 
-// DomainState reads the current state of a domain.
+// DomainState считывает текущее состояние домена.
 func (c *Conn) DomainState(ctx context.Context, dom golibvirt.Domain) (State, error) {
 	state, _, err := c.lv.DomainGetState(dom, 0)
 	if err != nil {
@@ -94,7 +92,7 @@ func (c *Conn) DomainState(ctx context.Context, dom golibvirt.Domain) (State, er
 	return stateFromCode(state), nil
 }
 
-// WaitDomainState polls until the domain reaches one of the wanted states.
+// WaitDomainState опрашивает домен, пока он не перейдёт в одно из заданных состояний.
 func (c *Conn) WaitDomainState(ctx context.Context, dom golibvirt.Domain, wanted []State, timeout time.Duration) (State, error) {
 	want := map[State]bool{}
 	for _, w := range wanted {
@@ -122,8 +120,8 @@ func (c *Conn) WaitDomainState(ctx context.Context, dom golibvirt.Domain, wanted
 	}
 }
 
-// HostInfo describes the hypervisor itself, which the dashboard shows as a
-// single host — because for a bare libvirt server, that is exactly what it is.
+// HostInfo описывает сам гипервизор, который панель управления показывает как один хост —
+// потому что для голого libvirt сервера это именно то, чем он является.
 type HostInfo struct {
 	Hostname  string
 	CPUs      int
@@ -133,7 +131,7 @@ type HostInfo struct {
 	TotalVMs  int
 }
 
-// HostInfo collects the hypervisor's own vitals.
+// HostInfo собирает собственные виталы гипервизора.
 func (c *Conn) HostInfo(ctx context.Context) (*HostInfo, error) {
 	info := &HostInfo{}
 
@@ -146,9 +144,8 @@ func (c *Conn) HostInfo(ctx context.Context) (*HostInfo, error) {
 		info.Version = version
 	}
 
-	// NodeGetInfo returns the physical machine's CPU and memory layout:
-	// model, memory in KiB, active CPUs, MHz, NUMA nodes, sockets, cores,
-	// threads.
+	// NodeGetInfo возвращает аппаратные сведения: модель, память в КиБ, активные CPU, частоту,
+	// узлы NUMA, сокеты, ядра и потоки.
 	if _, memory, cpus, _, _, sockets, cores, threads, err := c.lv.NodeGetInfo(); err == nil {
 		info.MemoryKiB = int64(memory)
 		info.CPUs = int(cpus)

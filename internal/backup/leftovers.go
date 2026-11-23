@@ -114,9 +114,9 @@ type leftoverScan struct {
 	backups   []ovirt.Backup // открытые
 	transfers []ovirt.ImageTransfer
 	snaps     []ovirt.Snapshot
-	// snapshotByTransferRef maps both a VM snapshot UUID and its disk-volume
-	// image_id values to that VM snapshot. oVirt 4.3 ImageTransfer uses the
-	// latter in transfer.snapshot.id.
+	// snapshotByTransferRef отображает как снапшот ВМ UUID, так и его значения на диске
+	// image_id в этот снапшот ВМ. oVirt 4.3 ImageTransfer использует последнее в
+	// transfer.snapshot.identifier.
 	snapshotByTransferRef map[string]string
 	// transferOwners — передачи, открытые запусками службы по этой ВМ
 	// (запись в хронологии): идентификатор передачи → запуск.
@@ -439,9 +439,10 @@ func (e *Engine) CleanupLeftovers(ctx context.Context, serverID, vmID string) (*
 				}
 			}
 			if err := client.DeleteSnapshotWhenReady(ctx, vm.ID, s.ID, 10*time.Minute); err != nil && !ovirt.IsNotFound(err) {
-				// HTTP 409 explicitly means that DELETE was rejected. A locked
-				// snapshot in this case is the pre-existing operation, not proof
-				// that our deletion started; report it honestly to the operator.
+				// HTTP 409 явно означает, что DELETE было отвергнуто. Заблокированный
+				// моментальный снапшот в этом случае является уже существующей операцией, а
+				// не доказательством того, что наше удаление началось; Сообщите об этом
+				// оператору честно.
 				if ovirt.IsConflict(err) {
 					res.Actions = append(res.Actions, CleanupAction{Kind: LeftoverSnapshot, ID: s.ID,
 						Detail: fmt.Sprintf("удаление не запущено: %v%s", err, e.cleanupLockHint(ctx, client, sc, refs))})

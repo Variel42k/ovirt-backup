@@ -20,9 +20,9 @@ import (
 	"github.com/Variel42k/ovirt-backup/docs"
 )
 
-// The API reference must mention every explicitly registered route. This
-// catches new endpoints omitted from the shipped documentation without a
-// second handwritten route inventory.
+// Ссылка API должна упоминать каждый явно зарегистрированный маршрут. Это позволяет
+// обнаружить новые конечные точки, исключенные из отправляемой документации без второго
+// рукописного инвентаризации маршрутов.
 func TestAPIReferenceListsRegisteredRoutes(t *testing.T) {
 	source, err := parser.ParseFile(token.NewFileSet(), "server.go", nil, 0)
 	if err != nil {
@@ -56,7 +56,7 @@ func TestAPIReferenceListsRegisteredRoutes(t *testing.T) {
 		}
 		count++
 		if !strings.Contains(string(reference), route) {
-			// Public authentication routes carry /api/v1 in the root mux.
+			// Публичные маршруты аутентификации несут /api/v1 в корневом mux.
 			if !strings.Contains(string(reference), strings.TrimPrefix(route, "/api/v1")) {
 				t.Errorf("%s is missing from docs/API.md", pattern)
 			}

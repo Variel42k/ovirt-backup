@@ -148,8 +148,8 @@ func (e *Engine) ListDatabases(ctx context.Context, hostID string, engine model.
 // секунд достаточно; чаще значило бы засорять журналы хоста и СУБД.
 const statsInterval = 10 * time.Second
 
-// MonitorBackup samples linked databases until stop is called. Telemetry
-// failures are visible in history but never fail the backup itself.
+// MonitorBackup образцы связанных баз данных до тех пор, пока не вызовут остановку.
+// Телеметрические сбои видны в истории, но никогда не подводят саму резервную копию.
 //
 // Каждый хост — своей горутиной и, если хелпер это умеет, одной долгой
 // сессией stats-watch на весь бэкап: команда на каждый замер оставляла бы в
@@ -174,8 +174,8 @@ func (e *Engine) MonitorBackup(parent context.Context, run *model.BackupRun) fun
 
 func (e *Engine) monitorHost(ctx, parent context.Context, run *model.BackupRun, host *model.DBHost) {
 	save := func(stats Stats, statsErr error) {
-		// Cancellation is the normal end of a backup monitor. Do not turn it
-		// into a misleading final "database unavailable" sample.
+		// Отмена штатно завершает мониторинг бэкапа. Последнее измерение не должно ошибочно
+		// сообщать, что БД недоступна.
 		if statsErr != nil && ctx.Err() != nil {
 			return
 		}

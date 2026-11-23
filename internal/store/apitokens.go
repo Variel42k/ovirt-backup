@@ -15,8 +15,8 @@ import (
 const apiTokenColumns = `id, name, prefix, secret_hash, role, created_by, ` +
 	`created_at, expires_at, last_used_at, disabled`
 
-// CreateAPIToken stores a new token. The caller supplies the already hashed
-// secret; the store never sees the token itself.
+// CreateAPIToken хранит новый токен. код вызова поставляет уже хешированный секрет; Магазин
+// никогда не видит сам токен.
 func (s *Store) CreateAPIToken(ctx context.Context, t *model.APIToken) error {
 	if t.ID == "" {
 		t.ID = uuid.NewString()
@@ -35,7 +35,7 @@ func (s *Store) CreateAPIToken(ctx context.Context, t *model.APIToken) error {
 	return nil
 }
 
-// GetAPITokenByPrefix loads the token whose public prefix matches.
+// GetAPITokenByPrefix загружает токен, чей публичный префикс совпадает.
 //
 // Сверять секрет — забота вызывающего: хранилище не знает ни самого токена, ни
 // того, как из него получается хеш.
@@ -47,13 +47,13 @@ func (s *Store) GetAPITokenByPrefix(ctx context.Context, prefix string) (*model.
 	return scanAPIToken(row)
 }
 
-// GetAPIToken loads a token by id.
+// GetAPIToken загружает маркер по идентификатору.
 func (s *Store) GetAPIToken(ctx context.Context, id string) (*model.APIToken, error) {
 	row := s.db.QueryRow(ctx, `SELECT `+apiTokenColumns+` FROM api_tokens WHERE id=?`, id)
 	return scanAPIToken(row)
 }
 
-// ListAPITokens returns every token, newest first.
+// ListAPITokens возвраща́ть каждый жетонъ, новѣйшій первый.
 func (s *Store) ListAPITokens(ctx context.Context) ([]model.APIToken, error) {
 	rows, err := s.db.Query(ctx, `SELECT `+apiTokenColumns+` FROM api_tokens ORDER BY created_at DESC`)
 	if err != nil {
@@ -72,8 +72,8 @@ func (s *Store) ListAPITokens(ctx context.Context) ([]model.APIToken, error) {
 	return tokens, rows.Err()
 }
 
-// UpdateAPIToken changes what may be changed after issue: the role, the expiry
-// and the disabled flag.
+// UpdateAPIToken изменяет то, что может быть изменено после выпуска: роль, истечение срока
+// действия и флаг отключены.
 //
 // Секрет не меняется никогда. Смена секрета — это выпуск нового токена, и она
 // должна выглядеть как выпуск нового токена: старый отзывается, новый
@@ -90,7 +90,7 @@ func (s *Store) UpdateAPIToken(ctx context.Context, t *model.APIToken) error {
 	return nil
 }
 
-// DeleteAPIToken removes a token permanently.
+// DeleteAPIToken удали́ть токен навсегда.
 func (s *Store) DeleteAPIToken(ctx context.Context, id string) error {
 	res, err := s.db.Exec(ctx, `DELETE FROM api_tokens WHERE id=?`, id)
 	if err != nil {
@@ -102,8 +102,8 @@ func (s *Store) DeleteAPIToken(ctx context.Context, id string) error {
 	return nil
 }
 
-// DisableAllAPITokens revokes every database-backed API token while keeping
-// its metadata for incident review.
+// DisableAllAPITokens отзывает каждый токен, поддерживаемый базой данных API, сохраняя при
+// этом свои метаданные для обзора инцидентов.
 func (s *Store) DisableAllAPITokens(ctx context.Context) (int64, error) {
 	res, err := s.db.Exec(ctx, `UPDATE api_tokens SET disabled=? WHERE disabled=?`, true, false)
 	if err != nil {
@@ -113,7 +113,7 @@ func (s *Store) DisableAllAPITokens(ctx context.Context) (int64, error) {
 	return n, nil
 }
 
-// TouchAPIToken records that the token has just been used.
+// TouchAPIToken Записывает, что токен только что был использован.
 //
 // Нужно это затем, чтобы забытый токен можно было отличить от рабочего. Без
 // отметки об использовании список токенов — это список, который никто не

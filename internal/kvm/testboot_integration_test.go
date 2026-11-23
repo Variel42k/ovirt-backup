@@ -15,18 +15,17 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/libvirtx"
 )
 
-// TestRealKVMGuestAgentBoot is an opt-in acceptance test against a real
-// libvirt/KVM host. The fixture must be a bootable image with qemu-guest-agent
-// enabled. It is cloned remotely first; the source image is never attached or
-// modified by the test.
+// TestRealKVMGuestAgentBoot — включаемый вручную приёмочный тест на реальном хосте
+// libvirt/KVM. Нужен загрузочный образ с qemu-guest-agent. Тест клонирует его на хосте,
+// исходный образ не подключается и не меняется.
 //
-// Required environment:
+// Требуемая среда:
 //
-//	JHV_TEST_KVM_HOST, JHV_TEST_KVM_USER, JHV_TEST_KVM_IMAGE
-//	JHV_TEST_KVM_PASSWORD or JHV_TEST_KVM_KEY_FILE
+// Обязательные параметры: JHV_TEST_KVM_HOST, JHV_TEST_KVM_USER, JHV_TEST_KVM_IMAGE и один из
+// JHV_TEST_KVM_PASSWORD или JHV_TEST_KVM_KEY_FILE.
 //
-// Optional: JHV_TEST_KVM_PORT, _SOCKET, _SCRATCH, _FORMAT, _ARCH, _MACHINE,
-// _FIRMWARE, _SECURE_BOOT, _MEMORY_MIB, _VCPUS and _TIMEOUT_SEC.
+// Дополнительные параметры: JHV_TEST_KVM_PORT, _SOCKET, _SCRATCH, _FORMAT, _ARCH, _MACHINE,
+// _FIRMWARE, _SECURE_BOOT, _MEMORY_MIB, _VCPUS и _TIMEOUT_SEC.
 func TestRealKVMGuestAgentBoot(t *testing.T) {
 	host := os.Getenv("JHV_TEST_KVM_HOST")
 	user := os.Getenv("JHV_TEST_KVM_USER")

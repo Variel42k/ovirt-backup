@@ -18,11 +18,11 @@ import (
 	"golang.org/x/crypto/ssh/knownhosts"
 )
 
-// hostKeyScanPayload asks for the key one host is currently presenting.
+// hostKeyScanPayload запрашивает ключ, который в настоящее время представляет один из
+// хостов.
 //
-// The address comes from the form rather than from a saved record: the moment
-// the operator needs a fingerprint is while adding a host, before there is
-// anything to save.
+// Адрес приходит из формы, а не из сохраненной записи: в тот момент, когда оператору нужен
+// отпечаток пальца, он добавляет хост, прежде чем что-то сохранить.
 type hostKeyScanPayload struct {
 	Host string `json:"host"`
 	Port int    `json:"port"`
@@ -33,11 +33,11 @@ type hostKeyScanResult struct {
 	Type        string `json:"type"`
 	Fingerprint string `json:"fingerprint"`
 
-	// Warning is shown next to the fingerprint, always.
+	// Предостережение всегда появляется рядом с отпечатком пальца.
 	//
-	// A scan proves nothing on its own: whoever could intercept the connection
-	// could also answer this request. Presenting the result without saying so
-	// would turn a convenience into a false sense of having verified something.
+	// Сканирование само по себе ничего не доказывает: тот, кто может перехватить
+	// соединение, также может ответить на этот запрос. Представление результата, не говоря
+	// об этом, превратило бы удобство в false чувство проверки чего-либо.
 	Warning string `json:"warning"`
 }
 
@@ -54,10 +54,9 @@ type proxmoxNodeKeysResult struct {
 	Warning string           `json:"warning"`
 }
 
-// handleScanProxmoxHostKeys discovers every cluster member through the trusted
-// API connection, then collects each SSH key before authentication. All nodes
-// must answer: accepting a partial bundle would make a VM become unprotected
-// merely by migrating to the unpinned node.
+// handleScanProxmoxHostKeys получает список узлов через доверенное соединение API и
+// считывает их SSH-ключи до аутентификации. Требуем ответ от всех узлов, чтобы после
+// миграции ВМ не потеряла защиту из-за незакреплённого ключа.
 func (s *Server) handleScanProxmoxHostKeys(w http.ResponseWriter, r *http.Request) {
 	var payload serverPayload
 	if err := decodeJSON(r, &payload); err != nil {
@@ -170,11 +169,11 @@ const hostKeyScanWarning = "Отпечаток получен по сети и �
 	"тот, кто способен вклиниться в соединение, ответил бы и на этот запрос. " +
 	"Сверьте его со снятым на самом хосте: ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub"
 
-// handleScanHostKey returns the SSH host key of an address, for confirmation.
+// handleScanHostKey возвращает ключ SSH узла адреса, для подтверждения.
 //
-// No credentials are involved: the handshake stops at the host key, before
-// authentication. So the scan is safe to run against an address that has only
-// been typed and not yet trusted.
+// Учетные данные аутентификации не используются: рукопожатие останавливается на ключе хоста
+// перед аутентификацией. Таким образом, сканирование безопасно для запуска по адресу,
+// который был только введен и еще не доверен.
 func (s *Server) handleScanHostKey(w http.ResponseWriter, r *http.Request) {
 	var payload hostKeyScanPayload
 	if err := decodeJSON(r, &payload); err != nil {
@@ -199,8 +198,8 @@ func (s *Server) handleScanHostKey(w http.ResponseWriter, r *http.Request) {
 	addr := net.JoinHostPort(host, strconv.Itoa(port))
 	key, err := sshtrust.Scan(r.Context(), addr, 15*time.Second)
 	if err != nil {
-		// Recorded as a failure, not silently: an operator probing addresses
-		// through the service is worth seeing in the audit trail either way.
+		// Записано как сбой, а не молча: оператор, проверяющий адреса через сервис, в любом
+		// случае стоит увидеть в аудиторском следе.
 		s.audit(r, "host_key.scan", model.ScopeServer, addr, false, err.Error())
 		s.writeError(w, r, badRequest("%v", err))
 		return
@@ -215,11 +214,11 @@ func (s *Server) handleScanHostKey(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// auditHostKeyTrust records the decision to connect without verifying the host.
+// auditHostKeyTrust Записывает решение о подключении без проверки хоста.
 //
-// Recorded when the setting is stored rather than on every connection: the
-// useful question afterwards is who turned verification off and when, and a
-// line per nightly connection would bury exactly that.
+// Записывается, когда параметр сохраняется, а не на каждом соединении: полезный вопрос
+// после этого заключается в том, кто и когда выключил верификацию, и строка за ночное
+// соединение похоронит именно это.
 func (s *Server) auditHostKeyTrust(r *http.Request, scope model.Scope, objectID, name string,
 	trustAny, applicable bool) {
 

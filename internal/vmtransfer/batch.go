@@ -94,7 +94,7 @@ func (s *Service) CreateBatch(ctx context.Context, r model.VMTransferBatchReques
 	if err = s.st.CreateVMTransfers(ctx, result.Items); err != nil {
 		return nil, err
 	}
-	// Copy the response before workers mutate their state.
+	// Скопируйте ответ до того, как рабочие изменят свое состояние.
 	response := &model.VMTransferBatchResult{ID: result.ID, Items: []*model.VMTransfer{}, Errors: []string{}}
 	for _, t := range result.Items {
 		clone := *t

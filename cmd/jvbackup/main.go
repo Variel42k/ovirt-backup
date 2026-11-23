@@ -1,9 +1,8 @@
-// Command jvbackup performs hot backups of libvirt/KVM domains and restores
-// them, without a database and without the management service running.
+// Команда jvbackup выполняет горячее резервное копирование доменов libvirt/KVM и
+// восстанавливает их, без базы данных и без запуска службы управления.
 //
-// It exists for the case the service is built for but cannot serve: the
-// management host is gone and somebody needs the data back. Everything it
-// needs is in the repository itself.
+// Он существует для случая, когда служба создана, но не может служить: хост управления
+// ушел, и кому-то нужны данные обратно. Все, что нужно, находится в самом хранилище.
 package main
 
 import (
@@ -36,10 +35,9 @@ var version = "dev"
 var cliLocation = time.UTC
 
 func defaultTimezone() string {
-	// The application setting is the first choice when the CLI is launched
-	// from the same environment as the service. TZ then represents the host or
-	// container zone. Invalid inherited values must not make unrelated CLI
-	// commands unusable; an explicit --timezone is still validated strictly.
+	// Если CLI запущен с тем же окружением, что и служба, сначала используем её настройку.
+	// TZ отражает часовой пояс хоста или контейнера. Ошибочное унаследованное значение не
+	// должно ломать другие команды CLI. Явный --timezone проверяется строго.
 	for _, key := range []string{"JHV_SCHEDULER_TIMEZONE", "TZ"} {
 		if name := strings.TrimSpace(os.Getenv(key)); name != "" {
 			if _, err := time.LoadLocation(name); err == nil {
@@ -145,7 +143,7 @@ func usage() {
 `)
 }
 
-// hostFlags collects the hypervisor connection options.
+// hostFlags собирает параметры соединения гипервизора.
 type hostFlags struct {
 	host     string
 	port     int
@@ -186,7 +184,7 @@ func (h *hostFlags) connect(ctx context.Context) (*libvirtx.Conn, error) {
 		cfg.PrivateKey = string(raw)
 	}
 	if cfg.PrivateKey == "" && cfg.Password == "" {
-		// Fall back to the usual key locations before giving up.
+		// Возвращайтесь к обычным ключевым местам, прежде чем сдаться.
 		for _, candidate := range []string{"id_ed25519", "id_rsa"} {
 			home, err := os.UserHomeDir()
 			if err != nil {
@@ -207,7 +205,7 @@ func (h *hostFlags) connect(ctx context.Context) (*libvirtx.Conn, error) {
 	return libvirtx.Connect(ctx, cfg)
 }
 
-// openRepo turns a -repo value into a storage backend.
+// openRepo превращает значение -repo в бэкэнд хранилища.
 func openRepo(ctx context.Context, spec string) (repo.Backend, error) {
 	if spec == "" {
 		return nil, fmt.Errorf("не указан -repo")
@@ -246,7 +244,7 @@ func openRepo(ctx context.Context, spec string) (repo.Backend, error) {
 	})
 }
 
-// parseS3 accepts s3://accessKey:secretKey@endpoint/bucket[/prefix].
+// parseS3 принимает адрес формата s3://accessKey:secretKey@endpoint/bucket[/prefix].
 func parseS3(spec string) (*model.StorageTarget, error) {
 	rest := strings.TrimPrefix(spec, "s3://")
 	at := strings.LastIndex(rest, "@")
@@ -276,7 +274,7 @@ func parseS3(spec string) (*model.StorageTarget, error) {
 	return target, nil
 }
 
-// parseSMB accepts smb://[DOMAIN;]user:password@host[:port]/share[/path].
+// parseSMB принимает адрес формата smb://[DOMAIN;]user:password@host[:port]/share[/path].
 //
 // Домен отделяется точкой с запятой, а не обратной косой: в адресе она
 // потребовала бы кодирования процентами, а команду для аварийного
@@ -317,7 +315,7 @@ func parseSMB(spec string) (*model.StorageTarget, error) {
 	return target, nil
 }
 
-// parseWebDAV accepts webdav://user:password@host/path and webdavs:// for TLS.
+// parseWebDAV принимает webdav://user:password@host/path и webdavs:// для TLS.
 func parseWebDAV(spec string) (*model.StorageTarget, error) {
 	parsed, err := url.Parse(spec)
 	if err != nil {
@@ -421,8 +419,7 @@ func cmdBackup(ctx context.Context, args []string) error {
 			"ключ шифрования: %s — без него копии не расшифровать, храните его отдельно от бэкапов\n", *keyFile)
 	}
 
-	// Without a database, the parent for an incremental comes from the
-	// repository itself.
+	// Без базы данных родитель для инкремента приходит из самого хранилища.
 	runs, err := backup.ScanRepository(ctx, backend, "")
 	if err != nil {
 		return err

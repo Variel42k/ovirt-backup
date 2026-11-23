@@ -423,10 +423,9 @@ cmd_vuln() {
     go run "golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION" ./... ||
         failed="$failed govulncheck"
 
-    # Security results must describe this working tree and the current image.
-    # Reusing an existing SBOM can hide a newly introduced dependency or report
-    # an already upgraded one, so every vulnerability scan starts from a fresh
-    # inventory.
+    # Результаты проверки должны соответствовать текущим исходникам и образу.
+    # Старый SBOM может пропустить новую зависимость или показать уже обновлённую,
+    # поэтому перед каждой проверкой уязвимостей строим новый список зависимостей.
     cmd_sbom
 
     # Порог high и только исправимое. Без этого список растёт за счёт того,
@@ -567,7 +566,7 @@ cmd_build() {
     # готовые артефакты публикуются в dist только в самом конце.
     trap 'rm -rf "$BUILD_TMP"' 0
     trap 'exit 1' HUP INT TERM
-    mkdir -p "$OUT/bin" "$OUT/config" "$OUT/web" "$OUT/systemd" "$OUT/compose" "$OUT/docs" "$OUT/proxmox" "$OUT/guest-hooks" "$OUT/db-dump" "$OUT/discovery" "$OUT/gitlab-clean"
+    mkdir -p "$OUT/bin" "$OUT/config" "$OUT/web" "$OUT/systemd" "$OUT/compose" "$OUT/docs" "$OUT/proxmox" "$OUT/guest-hooks" "$OUT/db-dump" "$OUT/discovery"
 
     if [ "$SKIP_WEB" -eq 0 ]; then
         step "веб-интерфейс"
@@ -606,9 +605,6 @@ cmd_build() {
         deploy/db-dump/db-dump-k8s.conf.example deploy/db-dump/k8s-rbac.yaml \
         deploy/db-dump/README.md "$OUT/db-dump/"
     chmod 0755 "$OUT/db-dump/jhvirt-db-dump" "$OUT/db-dump/setup.sh"
-    # Хелпер очистки репозиториев ставится внутрь ВМ с GitLab.
-    cp deploy/gitlab-clean/jhvirt-gitlab-clean deploy/gitlab-clean/setup.sh deploy/gitlab-clean/README.md "$OUT/gitlab-clean/"
-    chmod 0755 "$OUT/gitlab-clean/jhvirt-gitlab-clean" "$OUT/gitlab-clean/setup.sh"
     cp deploy/discovery/jhvirt-discovery deploy/discovery/README.md "$OUT/discovery/"
     chmod 0755 "$OUT/discovery/jhvirt-discovery"
     chmod 0755 "$OUT/guest-hooks/linux/install.sh" "$OUT/guest-hooks/linux/fsfreeze-hook" \
@@ -628,9 +624,9 @@ cmd_build() {
     # compose-файл пришлось бы править при упаковке, а расходящиеся копии
     # одного файла рано или поздно разъезжаются.
     cp deploy/Dockerfile.bundle "$OUT/Dockerfile"
-    # Documentation evolves independently of the installer. A fixed allowlist
-    # previously omitted new operational and security guides from the .run
-    # bundle, leaving an installation with less documentation than the source.
+    # Документация меняется независимо от установщика. Из-за фиксированного
+    # списка в комплект .run раньше не попадали новые руководства по эксплуатации
+    # и безопасности, доступные в исходниках.
     cp docs/*.md "$OUT/docs/"
     # В репозитории README ссылается на docs/X.md. Внутри комплекта он сам уже
     # находится в docs/, поэтому префикс убирается, чтобы ссылки не вели в
@@ -660,7 +656,7 @@ cmd_build() {
         cd "$BUILD_TMP"
         # Одной строкой намеренно: перенос строки здесь уже дважды не переживал
         # правку файла и превращался в аргумент tar с именем «n».
-        EXECUTABLES="$NAME/bin $NAME/install.sh $NAME/proxmox $NAME/db-dump/jhvirt-db-dump $NAME/db-dump/setup.sh $NAME/gitlab-clean/jhvirt-gitlab-clean $NAME/gitlab-clean/setup.sh $NAME/discovery/jhvirt-discovery $NAME/guest-hooks/linux/install.sh $NAME/guest-hooks/linux/fsfreeze-hook $NAME/guest-hooks/linux/fsfreeze-hook.d"
+        EXECUTABLES="$NAME/bin $NAME/install.sh $NAME/proxmox $NAME/db-dump/jhvirt-db-dump $NAME/db-dump/setup.sh $NAME/discovery/jhvirt-discovery $NAME/guest-hooks/linux/install.sh $NAME/guest-hooks/linux/fsfreeze-hook $NAME/guest-hooks/linux/fsfreeze-hook.d"
         set -f
         tar cf "$ARCHIVE" $(for path in $EXECUTABLES; do printf -- '--exclude=%s ' "$path"; done) "$NAME"
         tar rf "$ARCHIVE" --mode=0755 $EXECUTABLES

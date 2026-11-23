@@ -9,13 +9,12 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/repo"
 )
 
-// Edge cases of the image serialisation.
+// Краевые случаи сериализации образа.
 //
-// Every one of these produces an image of the wrong length or wrong content
-// rather than an error, and a wrong image surfaces as "гостевая система не
-// загрузилась" — a verdict that blames the backup for a defect in the reader.
+// Каждый случай может исказить размер или содержимое образа без ошибки чтения.
+// Тогда проверка сообщит, что гость не загрузился, хотя дефект в читателе образа.
 
-// writeSized stores a run on a disk whose size is not a whole number of chunks.
+// writeSized сохраняет запуск на диске, размер которого не является целым числом чанков.
 func writeSized(t *testing.T, backend repo.Backend, key string, virtual int64,
 	chunks map[int64][]byte) *backup.DiskManifest {
 	t.Helper()
@@ -42,8 +41,8 @@ func writeSized(t *testing.T, backend repo.Backend, key string, virtual int64,
 	return final
 }
 
-// A disk whose size is not a multiple of the chunk size has a short last
-// chunk. Writing a full chunk there would make the image longer than the disk.
+// Диск, размер которого не кратен размеру чанка, имеет короткий последний чанк. Написание
+// полного чанка там сделало бы образ длиннее диска.
 func TestWriteImageHandlesShortTailChunk(t *testing.T) {
 	backend := testBackend(t)
 	const virtual = chunkSize*5 + chunkSize/2 // 5,5 чанка
@@ -77,9 +76,8 @@ func TestWriteImageHandlesShortTailChunk(t *testing.T) {
 	}
 }
 
-// The same, but the tail is a hole: the zeros still have to be there, or the
-// image comes out short and the partition table at the end of a GPT disk goes
-// missing.
+// Если хвост образа разрежен, передаём нули и для него. Иначе образ окажется короче, а
+// таблица разделов в конце диска GPT пропадёт.
 func TestWriteImageHandlesShortTailHole(t *testing.T) {
 	backend := testBackend(t)
 	const virtual = chunkSize*3 + 1024
@@ -107,9 +105,9 @@ func TestWriteImageHandlesShortTailHole(t *testing.T) {
 	}
 }
 
-// A disk extended between runs: the newest size wins, and the added region is
-// a hole. An image cut to the old size would lose whatever the guest wrote
-// into the new space.
+// Между запусками диск был увеличен. Используем новый размер, а добавленную область считаем
+// невыделенной. Обрезка до старого размера потеряла бы данные, записанные гостем после
+// расширения.
 func TestWriteImageCoversExtendedDisk(t *testing.T) {
 	backend := testBackend(t)
 
@@ -143,8 +141,8 @@ func TestWriteImageCoversExtendedDisk(t *testing.T) {
 	}
 }
 
-// A backup of an entirely empty disk is a legitimate case (a freshly created
-// volume). It must still produce a full-length image of zeros.
+// Резервная копия полностью пустого диска является законным случаем (новосозданный том). Он
+// должен по-прежнему создавать полноразмерное образ нулей.
 func TestWriteImageOfEmptyDisk(t *testing.T) {
 	backend := testBackend(t)
 	manifest := writeSized(t, backend, "runs/a/vda.data", chunkSize*3, map[int64][]byte{})
@@ -168,8 +166,8 @@ func TestWriteImageOfEmptyDisk(t *testing.T) {
 	}
 }
 
-// Cancelling a verification must stop the transfer, not keep pushing a
-// terabyte at a hypervisor nobody is waiting for any more.
+// Отмена проверки должна остановить передачу, а не продолжать нажимать терабайт на
+// гипервизор, которого никто больше не ждет.
 func TestWriteImageStopsOnCancel(t *testing.T) {
 	backend := testBackend(t)
 	manifest := writeSized(t, backend, "runs/a/vda.data", chunkSize*8, map[int64][]byte{

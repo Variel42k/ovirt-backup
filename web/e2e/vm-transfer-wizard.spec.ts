@@ -95,7 +95,7 @@ test('миграция открывается окном в списке ВМ и
   await expect(page.getByRole('dialog')).toBeVisible()
   await expect(page).toHaveURL(/\/servers\/source$/)
   await page.getByRole('dialog').getByRole('button', { name: 'Закрыть', exact: true }).last().click()
-  // Quasar table selection has one header checkbox and one per row.
+  // В таблице Quasar есть один флажок выбора в заголовке и по одному в каждой строке.
   const checkboxes = page.locator('.q-table tbody .q-checkbox, .q-table__grid-content .q-checkbox')
   await checkboxes.first().click()
   await checkboxes.nth(1).click()

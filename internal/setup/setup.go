@@ -1,5 +1,5 @@
-// Package setup contains installation-time parsers. It is part of the shipped
-// binary so an offline installation does not need jq, Python or a YAML editor.
+// Пакет setup разбирает настройки установки. Он входит в поставляемый бинарник, чтобы для
+// автономной установки не требовались jq, Python и редактор YAML.
 package setup
 
 import (
@@ -201,8 +201,9 @@ func configOperation(op string, args []string, raw []byte, out io.Writer) error 
 	if err := dec.Decode(&extra); err != io.EOF {
 		return errors.New("ожидается один YAML-документ")
 	}
-	// Decode once to reject duplicate keys and incompatible role values before
-	// touching the node tree. Unknown configuration fields remain untouched.
+	// Декодируйте один раз, чтобы отклонить дубликаты ключей и несовместимые значения
+	// ролей, прежде чем касаться дерева узлов. Неизвестные поля конфигурации остаются
+	// нетронутыми.
 	var checked map[string]any
 	if err := document.Decode(&checked); err != nil {
 		return err

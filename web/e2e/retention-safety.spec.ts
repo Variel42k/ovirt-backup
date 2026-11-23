@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test'
 
-// The API is mocked: no real backup or repository is changed.
+// Ответы API подменены. Реальные бэкапы и репозитории не меняются.
 for (const readOnly of [false, true]) {
   test(`retention explains deferred deletion and read-only=${readOnly}`, async ({ page }) => {
     const list = (items: unknown[]) => ({ items, total: items.length })

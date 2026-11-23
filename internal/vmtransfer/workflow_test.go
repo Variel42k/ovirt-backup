@@ -20,8 +20,8 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// The coordinator uses real database locks and real oVirt power-management
-// requests. Only the already separately tested backup/restore data plane is fake.
+// Координатор использует реальные блокировки БД и запросы управления питанием oVirt.
+// Подменён только отдельно проверенный канал резервного копирования и восстановления.
 type workflowEngine struct {
 	st                       *store.Store
 	backend                  repo.Backend

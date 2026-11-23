@@ -56,9 +56,8 @@ func (v legacyVolume) transferRequest(inactivity time.Duration) ovirt.TransferRe
 // наверняка ошибка разбора backing file, а не настоящая цепочка.
 const legacyChainDepth = 128
 
-// legacyVolumeDownloadAttempts bounds retries of a full-volume stream. oVirt
-// 4.3 imageio cannot resume these downloads with Range, so every new ticket
-// starts the current volume from byte zero.
+// legacyVolumeDownloadAttempts ограничивает повторы чтения всего тома. ImageIO в oVirt 4.3
+// не поддерживает продолжение через Range. С новым билетом том читается с нулевого байта.
 const legacyVolumeDownloadAttempts = 3
 
 var (

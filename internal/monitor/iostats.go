@@ -11,15 +11,13 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
-// Collecting input/output metrics from a libvirt host.
+// Сбор метрик ввода-вывода с хоста libvirt.
 //
-// Everything the hypervisor exposes is a counter that only grows, so a single
-// poll says nothing: the previous reading is kept in memory and the difference
-// becomes a rate. That state is deliberately not persisted — after a restart
-// the first poll simply produces no sample rather than a fabricated spike from
-// comparing against a reading taken hours ago.
+// Гипервизор отдаёт накопительные счётчики. Скорости считаем по разнице с предыдущим
+// замером в памяти. После перезапуска первый опрос создаёт базовый замер, чтобы долгое окно
+// между опросами не вызвало ложный всплеск.
 
-// counterCache remembers the previous poll so rates can be derived.
+// counterCache помнит предыдущий опрос, поэтому ставки могут быть получены.
 type counterCache struct {
 	mu     sync.Mutex
 	blocks map[string]blockReading
@@ -69,8 +67,8 @@ func (c *counterCache) putMount(key string, r mountReading) {
 	c.mounts[key] = r
 }
 
-// forget drops readings for objects that no longer exist, so a host with
-// churning VMs does not grow the cache forever.
+// forget отбрасывает показания для объектов, которые больше не существуют, поэтому хост с
+// взбалтыванием ВМ не будет расти в кэше вечно.
 func (c *counterCache) forget(seenBlocks, seenMounts map[string]bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -86,7 +84,7 @@ func (c *counterCache) forget(seenBlocks, seenMounts map[string]bool) {
 	}
 }
 
-// collectLibvirtIO samples disk load and storage-path health for one host.
+// collectLibvirtIO выборки загрузки диска и состояния пути хранения для одного хоста.
 func (m *Monitor) collectLibvirtIO(ctx context.Context, srv *model.Server, conn *libvirtx.Conn) {
 	now := time.Now().UTC()
 	seenBlocks := map[string]bool{}
@@ -110,7 +108,7 @@ func (m *Monitor) collectLibvirtIO(ctx context.Context, srv *model.Server, conn 
 	m.raiseIOAlerts(ctx, srv, diskSamples, mountSamples)
 }
 
-// collectBlockStats reads per-disk counters of every running domain.
+// collectBlockStats читает счётчики каждого диска запущенных доменов.
 func (m *Monitor) collectBlockStats(ctx context.Context, srv *model.Server, conn *libvirtx.Conn,
 	now time.Time, seen map[string]bool) []model.DiskSample {
 
@@ -122,7 +120,7 @@ func (m *Monitor) collectBlockStats(ctx context.Context, srv *model.Server, conn
 
 	var out []model.DiskSample
 	for _, entry := range domains {
-		// A stopped domain has no counters and no load worth charting.
+		// У остановленного домена нет счётчиков и нагрузки для графика.
 		if !entry.Info.State.Running() {
 			continue
 		}
@@ -177,7 +175,7 @@ func (m *Monitor) collectBlockStats(ctx context.Context, srv *model.Server, conn
 	return out
 }
 
-// collectMountHealth samples the NFS and iSCSI paths of the hypervisor.
+// collectMountHealth образцы путей NFS и iSCSI гипервизора.
 func (m *Monitor) collectMountHealth(ctx context.Context, srv *model.Server, conn *libvirtx.Conn,
 	now time.Time, seen map[string]bool) []model.MountSample {
 
@@ -229,8 +227,8 @@ func (m *Monitor) collectMountHealth(ctx context.Context, srv *model.Server, con
 			sample.AvgExecuteMS = (mount.ExecuteMS - prev.counters.ExecuteMS) / ops
 			sample.QueueMS = (mount.QueueMS - prev.counters.QueueMS) / ops
 		}
-		// A path that timed out entirely is not healthy even if it answers
-		// again a second later: the guest already saw a stalled disk.
+		// Путь, который полностью отложен, не является здоровым, даже если он отвечает
+		// снова через секунду: гость уже видел заглохший диск.
 		if sample.MajorTimeouts > 0 {
 			sample.Healthy = false
 			sample.Detail = fmt.Sprintf("таймаутов за интервал: %d", sample.MajorTimeouts)
@@ -257,12 +255,10 @@ func (m *Monitor) collectMountHealth(ctx context.Context, srv *model.Server, con
 	return out
 }
 
-// raiseIOAlerts turns degraded samples into alerts.
+// raiseIOAlerts превращает деградировавшие образцы в оповещения.
 //
-// Only the storage paths raise alerts. A slow disk is a judgement call that
-// depends on what the guest is doing, and an alert on every busy moment would
-// be ignored within a day; a path that retransmits or drops its session is
-// unambiguous and usually precedes an outage.
+// Оповещаем только о сбоях пути к хранилищу. Скорость диска зависит от нагрузки гостя, а
+// повторы запросов и разрывы сеанса указывают на сбой связи.
 func (m *Monitor) raiseIOAlerts(ctx context.Context, srv *model.Server,
 	disks []model.DiskSample, mounts []model.MountSample) {
 
@@ -297,8 +293,7 @@ func (m *Monitor) raiseIOAlerts(ctx context.Context, srv *model.Server,
 		})
 	}
 
-	// Disk errors are different: the counter only moves when the hypervisor
-	// itself failed an operation, which is never normal.
+	// Счётчик ошибок диска растёт только при сбое операции на гипервизоре.
 	for _, disk := range disks {
 		if disk.ErrorsDelta <= 0 {
 			continue

@@ -70,10 +70,10 @@ func withinRoot(path, root string) bool {
 	return rel == "." || (!strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel))
 }
 
-// RestoreRequest describes what to restore and where.
+// RestoreRequest описаніе чего восстанавливать и гдѣ.
 type RestoreRequest struct {
 	TransferID string
-	// Internal incremental replay into an existing, stopped migration target.
+	// Внутренний инкрементальный повтор в существующую, остановленную миграцию.
 	DeltaAfterRunID string
 	OnDiskRestored  func(sourceID, targetID string) error
 	RunID           string
@@ -107,17 +107,16 @@ type RestoreRequest struct {
 	DiskBuses map[string]string
 
 	TriggeredBy string
-	// Progress mirrors byte-level transfer into a parent operation, such as a
-	// whole-VM restore or boot verification. It is internal and never comes
-	// from the API request.
+	// Прогресс зеркалирует передачу уровня байта в родительскую операцию, такую как
+	// восстановление всей ВМ или проверка загрузки. Она внутренняя и никогда не исходит из
+	// API запроса.
 	Progress func(transferred, total, bytesPerSecond int64)
 }
 
-// Restore reconstructs disks from a backup point.
+// Восстановление восстанавливает диски из точки резервного копирования.
 //
-// Restoring into an existing disk overwrites it, so the caller is expected to
-// have confirmed that with the operator; this function does not second-guess
-// an explicit target.
+// Восстановление на существующий диск перезапишет его, поэтому ожидается, что код вызова
+// подтвердит это с оператором; Эта функция не является явной целью.
 func (e *Engine) Restore(ctx context.Context, req RestoreRequest) (*model.RestoreRun, error) {
 	set, err := e.LoadChainCopy(ctx, req.RunID, req.CopyID)
 	if err != nil {
@@ -300,7 +299,7 @@ func restoreDiskTransferBytes(reader *ChainReader, target model.RestoreTarget) i
 	return reader.PresentBytes()
 }
 
-// restoreToFile writes a sparse raw image, optionally converting it to qcow2.
+// restoreToFile пишет разреженное сырое образ, опционально преобразуя его в qcow2.
 func (e *Engine) restoreToFile(ctx context.Context, set *ChainSet, reader *ChainReader,
 	diskID string, req RestoreRequest, record *model.RestoreRun, progress func(int64)) error {
 
@@ -347,8 +346,8 @@ func (e *Engine) restoreToFile(ctx context.Context, set *ChainSet, reader *Chain
 		}
 	}()
 
-	// Setting the size up front makes the file sparse on every filesystem we
-	// target, so zero regions cost no space and no writes.
+	// Установка размера вперед делает файл разреженным на каждой файловой системе, на
+	// которую мы ориентируемся, поэтому нулевой регион не стоит места и не записывает.
 	if err := f.Truncate(reader.VirtualSize()); err != nil {
 		return fmt.Errorf("резервирование размера образа: %w", err)
 	}
@@ -356,7 +355,7 @@ func (e *Engine) restoreToFile(ctx context.Context, set *ChainSet, reader *Chain
 	var transferred int64
 	err = reader.Stream(ctx, func(ctx context.Context, offset int64, data []byte, zeroLength int64) error {
 		if data == nil {
-			// The file is already zero there; skipping keeps it sparse.
+			// Файл там уже нулевой; Пропуск делает его скудным.
 			return nil
 		}
 		if _, err := f.WriteAt(data, offset); err != nil {
@@ -392,7 +391,7 @@ func (e *Engine) restoreToFile(ctx context.Context, set *ChainSet, reader *Chain
 	return nil
 }
 
-// restoreToEngine uploads the reconstructed image back into oVirt.
+// restoreToEngine загружает восстановленное образ обратно в oVirt.
 func (e *Engine) restoreToEngine(ctx context.Context, set *ChainSet, reader *ChainReader,
 	diskID string, req RestoreRequest, record *model.RestoreRun, progress func(int64)) error {
 
@@ -587,9 +586,9 @@ func (e *Engine) restoreToEngine(ctx context.Context, set *ChainSet, reader *Cha
 			lastKeepalive = time.Now()
 		}
 		if data == nil {
-			// A freshly created disk is already zero; an existing one may hold
-			// data that must be erased, or the restore would silently blend
-			// old and new content.
+			// Недавно созданный диск уже равен нулю; существующий может содержать данные,
+			// которые должны быть стерты, или восстановление будет молча смешивать старый и
+			// новый контент.
 			if freshDisk || zeroLength == 0 {
 				return nil
 			}
@@ -633,9 +632,9 @@ func (e *Engine) restoreToEngine(ctx context.Context, set *ChainSet, reader *Cha
 	e.log.Info().Str("restore", record.ID).Str("диск", record.TargetDiskName).
 		Str("диск-id", targetDiskID).Msg("запись и flush диска завершены")
 
-	// Finalize is asynchronous: the POST only asks the engine to finish. The
-	// disk remains locked until ImageTransfer reaches finished_success, so an
-	// immediate AttachDisk deterministically races and receives HTTP 409.
+	// Завершение асинхронно: POST только просит движок закончить. Диск остается запертым до
+	// тех пор, пока ImageTransfer не достигнет finished_success, поэтому непосредственный
+	// AttachDisk детерминированно гонит и получает HTTP 409.
 	record.Phase = "finalizing_transfer"
 	_ = e.store.UpdateRestoreRun(ctx, record)
 	watch.Observe("imageio_finalize", 0, leaf.VirtualSize)
@@ -690,8 +689,8 @@ func (e *Engine) restoreToEngine(ctx context.Context, set *ChainSet, reader *Cha
 // когда после загрузки движок ещё уменьшает том тонкого диска на блочном домене.
 const restoreAttachLockWait = 10 * time.Minute
 
-// writeZeros erases a range on daemons that do not support the zero operation,
-// by writing actual zero bytes.
+// writeZeros стирает диапазон демонов, которые не поддерживают нулевую операцию, записывая
+// фактически нулевые байты.
 func writeZeros(ctx context.Context, dst *imageio.Client, offset, length int64) error {
 	const block = 4 << 20
 	buf := make([]byte, block)

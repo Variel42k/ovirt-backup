@@ -30,12 +30,17 @@ const runColumns = `id, job_run_id, job_id, job_name, server_id, vm_id, vm_name,
 // этап проставляются своими запросами, а читаются со всем остальным.
 const runSelectColumns = runColumns + `, purge_after, stage, stage_steps, delete_reason, deleted_at`
 
-// CreateBackupRun records a new run in the pending state.
+// CreateBackupRun записывает новый запуск в ожидающем состоянии.
 func (s *Store) CreateBackupRun(ctx context.Context, r *model.BackupRun) error {
 	return s.CreateTransferBackupRun(ctx, r, "")
 }
 
 func (s *Store) CreateTransferBackupRun(ctx context.Context, r *model.BackupRun, transferID string) error {
+	if busy, err := s.VMCompressionPreviewBusy(ctx, r.ServerID, r.VMID); err != nil {
+		return err
+	} else if busy {
+		return fmt.Errorf("ВМ занята оценкой сжатия или очисткой её ресурсов")
+	}
 	if r.ID == "" {
 		r.ID = uuid.NewString()
 	}
@@ -45,7 +50,7 @@ func (s *Store) CreateTransferBackupRun(ctx context.Context, r *model.BackupRun,
 	if r.Status == "" {
 		r.Status = model.RunPending
 	}
-	// A full run is the root of its own chain.
+	// Полный бэкап начинает собственную цепочку.
 	if r.ChainID == "" {
 		r.ChainID = r.ID
 	}
@@ -55,6 +60,13 @@ func (s *Store) CreateTransferBackupRun(ctx context.Context, r *model.BackupRun,
 			return err
 		}
 		var owner string
+		var previews int
+		if err := tx.QueryRowContext(ctx, s.db.Rebind(`SELECT count(*) FROM compression_previews WHERE server_id=? AND vm_id=? AND status IN ('running','cleanup_failed')`), r.ServerID, r.VMID).Scan(&previews); err != nil {
+			return err
+		}
+		if previews > 0 {
+			return fmt.Errorf("ВМ занята оценкой сжатия или очисткой её ресурсов")
+		}
 		err := tx.QueryRowContext(ctx, s.db.Rebind(`SELECT id FROM vm_transfers WHERE (source_server_id=? AND source_vm_id=? AND status NOT IN ('canceled','rolled_back')) OR (target_server_id=? AND target_vm_id=? AND status NOT IN ('canceled','rolled_back','completed')) LIMIT 1`), r.ServerID, r.VMID, r.ServerID, r.VMID).Scan(&owner)
 		if err != nil && err != sql.ErrNoRows {
 			return err
@@ -83,9 +95,9 @@ func (s *Store) CreateTransferBackupRun(ctx context.Context, r *model.BackupRun,
 	return nil
 }
 
-// UpdateBackupRun persists the mutable state of a run while it executes.
-// SetRunManifestSHA256 records the manifest fingerprint of a point that has
-// none, and reports whether anything changed.
+// UpdateBackupRun Сохраняется изменчивое состояние запуска, пока он выполняется.
+// SetRunManifestSHA256 регистрирует явный отпечаток точки, у которой его нет, и сообщает,
+// изменилось ли что-либо.
 //
 // Копии, снятые до появления отпечатка, лежат в базе с пустым полем: сверять
 // их при разборе каталога не с чем, и подменённый манифест прошёл бы как
@@ -133,8 +145,8 @@ func (s *Store) UpdateBackupRun(ctx context.Context, r *model.BackupRun) error {
 	return s.SyncPrimaryCopy(ctx, r)
 }
 
-// SetRunProgress is the hot path used by the transfer loop; it touches only the
-// counters so it stays cheap enough to call every few seconds.
+// SetRunProgress в цикле передачи обновляет только счётчики. Вызов достаточно
+// дёшев, чтобы повторять его каждые несколько секунд.
 func (s *Store) SetRunProgress(ctx context.Context, runID string, progress int, read, stored int64) error {
 	_, err := s.db.Exec(ctx, `UPDATE backup_runs SET progress=?, read_bytes=?, stored_bytes=? WHERE id=?`,
 		progress, read, stored, runID)
@@ -188,13 +200,13 @@ func (s *Store) SetRunSnapshot(ctx context.Context, runID, snapshotID string) er
 	return err
 }
 
-// GetBackupRun loads a run without its disks.
+// GetBackupRun загружает запуск без своих дисков.
 func (s *Store) GetBackupRun(ctx context.Context, id string) (*model.BackupRun, error) {
 	row := s.db.QueryRow(ctx, `SELECT `+runSelectColumns+` FROM backup_runs WHERE id=?`, id)
 	return scanRun(row)
 }
 
-// GetBackupRunFull loads a run together with its per-disk records.
+// GetBackupRunFull загружает запуск вместе со своими записями на диск.
 func (s *Store) GetBackupRunFull(ctx context.Context, id string) (*model.BackupRun, error) {
 	run, err := s.GetBackupRun(ctx, id)
 	if err != nil {
@@ -208,7 +220,7 @@ func (s *Store) GetBackupRunFull(ctx context.Context, id string) (*model.BackupR
 	return run, nil
 }
 
-// RunFilter narrows a run listing.
+// RunFilter позабега́ть список.
 type RunFilter struct {
 	ServerID string
 	VMID     string
@@ -220,14 +232,14 @@ type RunFilter struct {
 	Types    []model.BackupType
 	Since    *time.Time
 	Until    *time.Time
-	// IncludeDeleted brings back runs whose data has been pruned from the
-	// repository but whose history is still interesting.
+	// IncludeDeleted возвращает запуски, данные которых были обрезаны из хранилища, но
+	// история которых все еще интересна.
 	IncludeDeleted bool
 	Limit          int
 	Offset         int
 }
 
-// ListBackupRuns returns runs newest first.
+// ListBackupRuns возвраща́ется, бежит сначала новейшее.
 func (s *Store) ListBackupRuns(ctx context.Context, f RunFilter) ([]*model.BackupRun, error) {
 	var where []string
 	var args []any
@@ -311,12 +323,12 @@ func (s *Store) ListBackupRuns(ctx context.Context, f RunFilter) ([]*model.Backu
 	return out, rows.Err()
 }
 
-// LatestUsableRun finds the most recent run that a new incremental or
-// differential can be based on: it must have succeeded, still be present in the
-// repository and carry a checkpoint the engine can diff against.
+// LatestUsableRun находит самый последний запуск, на котором может быть основан новый
+// инкремент или дифференциал: он должен быть успешным, все еще присутствовать в хранилище и
+// нести checkpoint против которого может работать движок.
 //
-// onlyFull selects the base for a differential backup (the chain's full run);
-// otherwise any successful link of the chain is acceptable.
+// onlyFull ограничивает поиск полной копией для разностного бэкапа. Иначе подходит любое
+// успешное звено цепочки.
 func (s *Store) LatestUsableRun(ctx context.Context, serverID, vmID, targetID string, onlyFull bool) (*model.BackupRun, error) {
 	query := `SELECT ` + runSelectColumns + ` FROM backup_runs
 		WHERE server_id=? AND vm_id=? AND storage_target_id=? AND deleted=?
@@ -332,9 +344,9 @@ func (s *Store) LatestUsableRun(ctx context.Context, serverID, vmID, targetID st
 	return scanRun(row)
 }
 
-// LatestLegacyRun selects a parent for an application-computed incremental.
-// Unlike LatestUsableRun it does not require an engine checkpoint: oVirt 4.3
-// has none. Snapshot roots count as full points for differential chains.
+// LatestLegacyRun выбирает родительский элемент для инкремента, вычисленного приложением.
+// В отличие от LatestUsableRun он не требует движка checkpoint: oVirt 4.3 не имеет. Корни
+// снапшотов считаются полными точками для дифференциальных цепей.
 func (s *Store) LatestLegacyRun(ctx context.Context, serverID, vmID, targetID string, onlyFull bool) (*model.BackupRun, error) {
 	query := `SELECT ` + runSelectColumns + ` FROM backup_runs
 		WHERE server_id=? AND vm_id=? AND storage_target_id=? AND deleted=?
@@ -415,7 +427,7 @@ func (s *Store) OwnCheckpoints(ctx context.Context, serverID, vmID string) (map[
 	return own, rows.Err()
 }
 
-// MarkRunDeleted flags a run whose data has been removed from the repository.
+// MarkRunDeleted отмечает запуск, данные которого были удалены из хранилища.
 func (s *Store) MarkRunDeleted(ctx context.Context, id string) error {
 	_, err := s.db.Exec(ctx, `UPDATE backup_runs SET deleted=? WHERE id=?`, true, id)
 	return err
@@ -527,16 +539,16 @@ func (s *Store) QuarantinedRuns(ctx context.Context, limit int) ([]*model.Backup
 	return out, rows.Err()
 }
 
-// PurgeRunRecord removes the history row entirely, used when an operator asks
-// to forget a backup rather than just drop its data.
+// PurgeRunRecord полностью удаляет строку истории, используемую, когда оператор просит
+// забыть резервную копию, а не просто сбросить ее данные.
 func (s *Store) PurgeRunRecord(ctx context.Context, id string) error {
 	_, err := s.db.Exec(ctx, `DELETE FROM backup_runs WHERE id=?`, id)
 	return err
 }
 
-// ListStaleRunningRuns finds runs that were executing when the process died.
-// They are reconciled at startup: their engine-side backup and image transfers
-// may still be open and must be finalised or cancelled.
+// ListStaleRunningRuns находит запуски, которые выполнялись, когда процесс умер.
+// Они согласуются при запуске: их резервная копия и передача образов со стороны движка все
+// еще могут быть открыты и должны быть завершены или отменены.
 func (s *Store) ListStaleRunningRuns(ctx context.Context) ([]*model.BackupRun, error) {
 	return s.ListBackupRuns(ctx, RunFilter{
 		Statuses:       []model.RunStatus{model.RunRunning, model.RunPending},
@@ -618,8 +630,8 @@ func decodeManualSteps(raw string) []model.ManualStep {
 	return items
 }
 
-// encodeSkipped stores the skipped-disk list as JSON in a TEXT column, matching
-// how the rest of the schema carries structures across both engines.
+// encodeSkipped сохраняет список пропущенных дисков как JSON в столбце TEXT, сопоставляя,
+// как остальная часть схемы переносит структуры через оба движка.
 func encodeSkipped(items []model.SkippedDisk) string {
 	if len(items) == 0 {
 		return "null"
@@ -645,7 +657,7 @@ func decodeSkipped(raw string) []model.SkippedDisk {
 const backupDiskColumns = `id, run_id, disk_id, alias, disk_index, virtual_size, format, bootable,
 	manifest_key, data_key, logical_bytes, stored_bytes, chunk_count, image_sha256, status, error`
 
-// UpsertBackupDisk records or updates the per-disk row of a run.
+// UpsertBackupDisk записывает или обновляет строку на диске запуска.
 func (s *Store) UpsertBackupDisk(ctx context.Context, d *model.BackupDisk) error {
 	if d.ID == "" {
 		d.ID = uuid.NewString()
@@ -666,7 +678,7 @@ func (s *Store) UpsertBackupDisk(ctx context.Context, d *model.BackupDisk) error
 	return nil
 }
 
-// ListBackupDisks returns the per-disk rows of a run in attachment order.
+// ListBackupDisks возвращает строки для диска запуска в порядке вложения.
 func (s *Store) ListBackupDisks(ctx context.Context, runID string) ([]model.BackupDisk, error) {
 	rows, err := s.db.Query(ctx, `SELECT `+backupDiskColumns+` FROM backup_disks WHERE run_id=? ORDER BY disk_index`, runID)
 	if err != nil {
@@ -693,7 +705,7 @@ const verifyColumns = `id, run_id, mode, status, progress, phase, transferred_by
 	details, error, started_at, ended_at, created_at, copy_id,
 	target_id, triggered_by`
 
-// CreateVerifyRun records a verification request.
+// CreateVerifyRun записывает проверочный запрос.
 func (s *Store) CreateVerifyRun(ctx context.Context, v *model.VerifyRun) error {
 	if v.ID == "" {
 		v.ID = uuid.NewString()
@@ -711,7 +723,7 @@ func (s *Store) CreateVerifyRun(ctx context.Context, v *model.VerifyRun) error {
 	return nil
 }
 
-// UpdateVerifyRun persists progress and outcome of a verification.
+// UpdateVerifyRun сохраняется прогресс и результат проверки.
 func (s *Store) UpdateVerifyRun(ctx context.Context, v *model.VerifyRun) error {
 	_, err := s.db.Exec(ctx, `UPDATE verify_runs SET status=?, progress=?, phase=?,
 		transferred_bytes=?, total_bytes=?, bytes_per_second=?, last_progress_at=?, details=?, error=?,
@@ -722,14 +734,14 @@ func (s *Store) UpdateVerifyRun(ctx context.Context, v *model.VerifyRun) error {
 	return err
 }
 
-// GetVerifyRun loads one verification record.
+// GetVerifyRun загружает одну проверочную запись.
 func (s *Store) GetVerifyRun(ctx context.Context, id string) (*model.VerifyRun, error) {
 	row := s.db.QueryRow(ctx, `SELECT `+verifyColumns+` FROM verify_runs WHERE id=?`, id)
 	return scanVerify(row)
 }
 
-// ListVerifyRuns returns verification history, newest first. An empty runID
-// returns the history across all backups.
+// ListVerifyRuns возвраща́ть исторію верификаціи, новѣйшую прежде. Пустой runID возвращает
+// историю по всем резервным копиям.
 func (s *Store) ListVerifyRuns(ctx context.Context, runID string, limit int) ([]*model.VerifyRun, error) {
 	query := `SELECT ` + verifyColumns + ` FROM verify_runs`
 	args := []any{}
@@ -760,8 +772,8 @@ func (s *Store) ListVerifyRuns(ctx context.Context, runID string, limit int) ([]
 	return out, rows.Err()
 }
 
-// ListInterruptedVerifyRuns returns checks that cannot still be executing
-// after a service restart.
+// ListInterruptedVerifyRuns возвращает проверки, которые не могут быть выполнены после
+// перезапуска службы.
 func (s *Store) ListInterruptedVerifyRuns(ctx context.Context) ([]*model.VerifyRun, error) {
 	rows, err := s.db.Query(ctx, `SELECT `+verifyColumns+`
 		FROM verify_runs WHERE status IN ('pending','running') ORDER BY created_at`)
@@ -813,7 +825,7 @@ const restoreColumns = `id, run_id, target, status, disk_ids, output_path, outpu
 	transferred_bytes, total_bytes, bytes_per_second, last_progress_at, error,
 	started_at, ended_at, created_at, copy_id, target_vm_name, phase, cleanup_errors`
 
-// CreateRestoreRun records a restore request.
+// CreateRestoreRun записывает запрос на восстановление.
 func (s *Store) CreateRestoreRun(ctx context.Context, r *model.RestoreRun) error {
 	if r.ID == "" {
 		r.ID = uuid.NewString()
@@ -835,7 +847,7 @@ func (s *Store) CreateRestoreRun(ctx context.Context, r *model.RestoreRun) error
 	return nil
 }
 
-// UpdateRestoreRun persists progress and outcome of a restore.
+// UpdateRestoreRun сохраняется прогресс и результат восстановления.
 func (s *Store) UpdateRestoreRun(ctx context.Context, r *model.RestoreRun) error {
 	_, err := s.db.Exec(ctx, `UPDATE restore_runs SET status=?, output_path=?,
 		target_server_name=?, target_cluster_id=?, target_cluster_name=?, target_disk_id=?, target_disk_name=?,
@@ -849,14 +861,14 @@ func (s *Store) UpdateRestoreRun(ctx context.Context, r *model.RestoreRun) error
 	return err
 }
 
-// GetRestoreRun loads one restore record.
+// GetRestoreRun загружает одну восстановительную запись.
 func (s *Store) GetRestoreRun(ctx context.Context, id string) (*model.RestoreRun, error) {
 	row := s.db.QueryRow(ctx, `SELECT `+restoreColumns+` FROM restore_runs WHERE id=?`, id)
 	return scanRestore(row)
 }
 
-// ListVerifyDiskRestores retains exact ownership even if the verification VM
-// was rolled back. It intentionally has no history-page limit.
+// ListVerifyDiskRestores сохраняет точное право собственности, даже если ВМ проверки была
+// отброшена назад. Он намеренно не имеет ограничений на страницы истории.
 func (s *Store) ListVerifyDiskRestores(ctx context.Context, serverID string) ([]*model.RestoreRun, error) {
 	rows, err := s.db.Query(ctx, `SELECT `+restoreColumns+` FROM restore_runs
 		WHERE target_server_id=? AND target=? AND target_disk_id<>''
@@ -888,7 +900,7 @@ const (
 // restoreListMax — предел одной выборки списка восстановлений.
 const restoreListMax = 500
 
-// RestoreFilter narrows the restore history.
+// RestoreFilter Сужает историю восстановления.
 //
 // Отбор идёт в базе, а не в браузере: список отдаётся ограниченной порцией,
 // и отбор по ней на клиенте молча терял бы всё, что в порцию не попало.
@@ -911,7 +923,7 @@ func likePattern(term string) string {
 	return "%" + replacer.Replace(strings.ToLower(term)) + "%"
 }
 
-// ListRestoreRuns returns restore history, newest first.
+// ListRestoreRuns возвраща́ть исторію, новѣйшую прежде.
 func (s *Store) ListRestoreRuns(ctx context.Context, f RestoreFilter) ([]*model.RestoreRun, error) {
 	var where []string
 	args := []any{}
@@ -1048,8 +1060,8 @@ func (s *Store) fillRestoreSources(ctx context.Context, items []*model.RestoreRu
 	return nil
 }
 
-// ListInterruptedRestoreRuns returns restores left pending or running by the
-// previous service process.
+// ListInterruptedRestoreRuns возвращает восстановления, оставшиеся незавершенными или
+// запущенными предыдущим процессом обслуживания.
 func (s *Store) ListInterruptedRestoreRuns(ctx context.Context) ([]*model.RestoreRun, error) {
 	rows, err := s.db.Query(ctx, `SELECT `+restoreColumns+`
 		FROM restore_runs WHERE status IN ('pending','running') ORDER BY created_at`)

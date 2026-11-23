@@ -1,5 +1,5 @@
-// Package dr checks that the database dump and encryption-key copy needed for
-// disaster recovery exist outside the application's live state.
+// Пакет dr проверяет, что дамп базы данных и копия ключа шифрования, необходимая для
+// аварийного восстановления, существуют за пределами текущего состояния приложения.
 package dr
 
 import (
@@ -218,9 +218,9 @@ func checkKeyCopy(livePath, backupPath string) (FileState, bool) {
 }
 
 func privateFileMode(mode os.FileMode) bool {
-	// Windows exposes synthesized Unix permission bits and reports 0666 even
-	// after Chmod(0600). Production targets are Linux; on Windows the reliable
-	// checks available through os are readability and content integrity.
+	// Windows раскрывает синтезированные биты разрешений Unix и отчеты 0666 даже после
+	// Chmod(0600). Производственные цели Linux; На Windows надежные проверки, доступные
+	// через os, являются читабельностью и целостностью контента.
 	return runtime.GOOS == "windows" || mode.Perm()&0o077 == 0
 }
 

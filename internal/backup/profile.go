@@ -17,7 +17,8 @@ func bootOrder(bootable bool) int {
 	return 0
 }
 
-// NormaliseDiskBus maps engine-specific attachment names to libvirt buses.
+// NormaliseDiskBus отображает названия приложений для конкретных движков для libvirt
+// автобусов.
 func NormaliseDiskBus(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "virtio", "virtio_blk":
@@ -35,9 +36,8 @@ func NormaliseDiskBus(value string) string {
 	}
 }
 
-// DiskTarget returns a deterministic guest device name. The index is global,
-// not per bus, so a mixed-bus VM cannot accidentally receive two "sda"
-// targets.
+// DiskTarget формирует постоянное имя устройства для гостя. Используем общий индекс, чтобы
+// разные шины не получили одинаковое имя вроде "sda".
 func DiskTarget(bus string, index int) string {
 	prefix := "vd"
 	switch NormaliseDiskBus(bus) {
@@ -63,9 +63,8 @@ func diskSuffix(index int) string {
 	}
 }
 
-// PortableMachine removes a version suffix that is often unavailable on a
-// different host while preserving the chipset family the guest was installed
-// against.
+// PortableMachine убирает суффикс версии, которой может не быть на другом хосте, сохраняя
+// семейство чипсета гостя.
 func PortableMachine(arch, machine string) string {
 	a := strings.ToLower(arch)
 	m := strings.ToLower(machine)
@@ -84,9 +83,9 @@ func PortableMachine(arch, machine string) string {
 	}
 }
 
-// ProfileFromOVirtConfig builds the libvirt-neutral profile used by a boot
-// verification. Unknown fields in the engine response are intentionally
-// ignored, so this stays compatible with oVirt forks that extend the VM JSON.
+// ProfileFromOVirtConfig строит libvirt-нейтральный профиль, используемый при проверке
+// загрузки. Неизвестные поля в ответе движка намеренно игнорируются, поэтому это остается
+// совместимым с oVirt вилками, которые расширяют ВМ JSON.
 func ProfileFromOVirtConfig(raw []byte, vm *model.VM, manifests []*DiskManifest) *VMProfile {
 	type configDocument struct {
 		Memory ovirt.Num `json:"memory"`

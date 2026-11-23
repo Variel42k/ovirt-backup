@@ -12,8 +12,8 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/store"
 )
 
-// optionDescriptor is a machine-readable enum entry with a human label, so the
-// UI does not have to duplicate the translations the backend already has.
+// optionDescriptor является машиночитаемой записью enum с человеческой меткой, поэтому UI
+// не должен дублировать переводы, которые уже есть у бэкэнда.
 type optionDescriptor struct {
 	Value       string `json:"value"`
 	Title       string `json:"title"`
@@ -24,9 +24,10 @@ type optionDescriptor struct {
 	NeedsHypervisor bool `json:"needs_hypervisor,omitempty"`
 }
 
-// virtualizationKindDescriptor describes a concrete connector and its scope.
-// Capability flags let the UI stay honest as more virtualization systems are
-// added: merely appearing in the inventory must not imply backup or restore.
+// virtualizationKindDescriptor описывает конкретный соединитель и его область применения.
+// Флаги возможностей позволяют UI оставаться честными, поскольку добавляется больше систем
+// виртуализации: простое появление в инвентаре не должно подразумевать резервное
+// копирование или восстановление.
 type virtualizationKindDescriptor struct {
 	Value                  string `json:"value"`
 	Title                  string `json:"title"`
@@ -42,8 +43,8 @@ type virtualizationKindDescriptor struct {
 	SupportsHostManagement bool   `json:"supports_host_management"`
 }
 
-// metaResponse tells the SPA what this deployment can do, which is what lets
-// the UI hide features that would only fail.
+// metaResponse говорит SPA что это развертывание может сделать, что позволяет UI скрыть
+// особенности, которые только потерпят неудачу.
 type metaResponse struct {
 	WebSections         model.WebSections              `json:"web_sections"`
 	BackupTypes         []optionDescriptor             `json:"backup_types"`
@@ -118,7 +119,8 @@ func virtualizationKindOptions() []virtualizationKindDescriptor {
 	return out
 }
 
-// storageKindOptions describes the backup repositories this build can write to.
+// storageKindOptions описывает резервные хранилища, в которые может записываться эта
+// сборка.
 //
 // Отдельная функция, а не литерал внутри обработчика: список проверяется
 // тестом. Тип хранилища, добавленный в модель и забытый здесь, попал бы в
@@ -231,8 +233,8 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// dashboardResponse is everything the landing page needs in one call, so the
-// first paint does not depend on a dozen round trips.
+// dashboardResponse объединяет данные для начального экрана, чтобы
+// интерфейс мог отобразить его после одного запроса.
 type dashboardResponse struct {
 	Servers    []*model.ServerSummary `json:"servers"`
 	Alerts     []*model.Alert         `json:"alerts"`
@@ -346,7 +348,7 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 	writeList(w, entries)
 }
 
-// userPayload is the write shape of a local account.
+// userPayload — форма записи локального счёта.
 type userPayload struct {
 	Username *string `json:"username"`
 	Password string  `json:"password"`
@@ -433,8 +435,8 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 	}
 	user.Disabled = payload.Disabled
 
-	// An empty password means "leave it alone", matching how the servers and
-	// storages endpoints treat their secrets.
+	// Пустой пароль сохраняет прежнее значение, как при редактировании секретов серверов и
+	// хранилищ.
 	user.PasswordHash = ""
 	if payload.Password != "" {
 		// Пароль внешней записи — это обход провайдера: у неё появилась бы
@@ -478,7 +480,7 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Removing the last administrator would lock everyone out of the service.
+	// Удаление последнего администратора заблокировало бы всех из службы.
 	if user.Role == model.RoleAdmin {
 		users, err := s.store.ListUsers(r.Context())
 		if err != nil {

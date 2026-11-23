@@ -18,8 +18,8 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/repo"
 )
 
-// VerifyReport is the machine-readable result stored on a verification run and
-// rendered in the UI.
+// VerifyReport — это машиночитаемый результат, хранящийся в проверочном запуске и
+// отображаемый в UI.
 type VerifyReport struct {
 	Mode      model.VerifyMode `json:"mode"`
 	RunID     string           `json:"run_id"`
@@ -32,12 +32,11 @@ type VerifyReport struct {
 	Boot *BootReport `json:"boot,omitempty"`
 }
 
-// BootReport is the outcome of a test boot.
+// BootReport содержит результат проверки загрузки.
 //
-// It duplicates the driver's result type instead of embedding it because the
-// driver lives in a package that imports this one; a plain struct here keeps
-// the dependency pointing one way and the stored JSON stable regardless of
-// which driver produced it.
+// Тип результата повторён здесь полями структуры, поскольку драйвер импортирует этот пакет.
+// Так зависимости идут в одну сторону, а формат сохранённого JSON одинаков для всех
+// драйверов.
 type BootReport struct {
 	// Host — подключение, на котором поднималась ВМ.
 	Host       string `json:"host"`
@@ -72,7 +71,7 @@ type BootReport struct {
 // BootStageAssembly — проверочная ВМ не собрана: до запуска дело не дошло.
 const BootStageAssembly = "assembly"
 
-// DiskReport is the per-disk part of a verification.
+// DiskReport — per-disk часть верификации.
 type DiskReport struct {
 	DiskID         string   `json:"disk_id"`
 	Alias          string   `json:"alias"`
@@ -87,16 +86,14 @@ type DiskReport struct {
 	Layout *ImageLayout `json:"layout,omitempty"`
 }
 
-// ExternalVerifier performs a verification mode the engine cannot run itself.
+// ExternalVerifier выполняет режим проверки, который движок не может запустить сам.
 //
-// The boot test is the only one: it needs a hypervisor to start a VM on, and
-// that code lives in internal/kvm, which imports this package for the storage
-// format. Registering a function here keeps the bookkeeping — the record, its
-// progress, the stored report — in one place instead of duplicating it in
-// whoever owns the hypervisor connection.
+// Только проверке запуска нужен гипервизор. Её реализация в internal/kvm импортирует этот
+// пакет для формата хранения. Регистрация функции позволяет вести запись, прогресс и отчёт
+// проверки здесь, независимо от способа подключения к гипервизору.
 type ExternalVerifier func(ctx context.Context, req ExternalVerifyRequest) error
 
-// ExternalVerifyRequest is everything an external mode gets to work with.
+// ExternalVerifyRequest — это все, с чем внешний режим работает.
 type ExternalVerifyRequest struct {
 	// Set — разобранная цепочка: из неё берутся диски и читается образ.
 	Set *ChainSet
@@ -107,7 +104,7 @@ type ExternalVerifyRequest struct {
 	Options model.VerifyOptions
 }
 
-// UpdateProgress publishes intermediate progress of a long external check.
+// UpdateProgress публикует промежуточный ход длинной внешней проверки.
 func (e *Engine) UpdateProgress(ctx context.Context, record *model.VerifyRun, percent int) {
 	if record == nil {
 		return
@@ -116,7 +113,7 @@ func (e *Engine) UpdateProgress(ctx context.Context, record *model.VerifyRun, pe
 	_ = e.store.UpdateVerifyRun(ctx, record)
 }
 
-// UpdateVerifyPhase publishes a human-readable stage together with progress.
+// UpdateVerifyPhase публикует понятное оператору имя этапа и прогресс.
 func (e *Engine) UpdateVerifyPhase(ctx context.Context, record *model.VerifyRun, phase string, percent int) {
 	if record == nil {
 		return
@@ -126,8 +123,8 @@ func (e *Engine) UpdateVerifyPhase(ctx context.Context, record *model.VerifyRun,
 	_ = e.store.UpdateVerifyRun(ctx, record)
 }
 
-// UpdateVerifyTransfer mirrors byte-level progress of the image transfer into
-// the verification record rendered by the web status bar.
+// UpdateVerifyTransfer зеркалирует прогресс байтового уровня передачи образа в проверочную
+// запись, отображаемую строкой состояния сети.
 func (e *Engine) UpdateVerifyTransfer(ctx context.Context, record *model.VerifyRun, phase string,
 	percent int, transferred, total, bytesPerSecond int64) {
 	if record == nil {
@@ -142,7 +139,7 @@ func (e *Engine) UpdateVerifyTransfer(ctx context.Context, record *model.VerifyR
 	_ = e.store.UpdateVerifyRun(ctx, record)
 }
 
-// RegisterVerifier installs a handler for a mode the engine does not implement.
+// RegisterVerifier устанавливает обработчик для режима, который не реализуется движком.
 func (e *Engine) RegisterVerifier(mode model.VerifyMode, fn ExternalVerifier) {
 	if e.external == nil {
 		e.external = map[model.VerifyMode]ExternalVerifier{}
@@ -158,10 +155,9 @@ type VerifyGate func(ctx context.Context, mode model.VerifyMode, opts model.Veri
 // SetVerifyGate устанавливает ограничитель проверок.
 func (e *Engine) SetVerifyGate(gate VerifyGate) { e.verifyGate = gate }
 
-// Verify checks a stored backup and records the outcome.
+// Проверяйте сохраненную резервную копию и записывайте результат.
 //
-// Every mode answers a different question, and the cheap ones do not imply the
-// expensive ones:
+// Каждый режим отвечает на разные вопросы, и дешевые не подразумевают дорогие:
 //
 //	quick    — объекты на месте и нужного размера
 //	manifest — данные в хранилище не испорчены (пересчёт SHA-256 всех чанков)
@@ -174,8 +170,8 @@ func (e *Engine) Verify(ctx context.Context, runID string, mode model.VerifyMode
 	return e.VerifyCopy(ctx, runID, "", mode, opts)
 }
 
-// VerifyCopy checks a specific physical copy. An empty copyID uses the normal
-// primary-then-replica selection rule.
+// VerifyCopy проверяется конкретная физическая копия. Пустой copyID использует обычное
+// правило выбора первично-то-реплики.
 func (e *Engine) VerifyCopy(ctx context.Context, runID, copyID string, mode model.VerifyMode, opts model.VerifyOptions) (*model.VerifyRun, error) {
 	if mode == "" {
 		mode = model.VerifyManifest
@@ -332,8 +328,8 @@ func (e *Engine) verify(ctx context.Context, runID, copyID string, mode model.Ve
 	if set.RunManifest != nil && len(set.RunManifest.Artifacts) > 0 {
 		err = verifyPublishedArtifacts(ctx, runID, set.RunManifest.Artifacts, set.Backend, mode == model.VerifyQuick)
 	} else if mode == model.VerifyQuick {
-		// Compatibility with points written before artifacts were included in
-		// run.json. New points use the published manifest as the source of truth.
+		// Совместимость с точками, написанными до того, как артефакты были включены в
+		// run.json. Новые точки используют опубликованный манифест как источник истины.
 		err = e.verifyArtifactsQuick(ctx, runID, set.Backend)
 	} else {
 		err = e.VerifyArtifacts(ctx, runID, set.Backend)
@@ -347,9 +343,9 @@ func (e *Engine) verify(ctx context.Context, runID, copyID string, mode model.Ve
 	return report, nil
 }
 
-// verifyQuick confirms every object exists with the recorded size. It costs a
-// handful of metadata calls and catches the most common real-world failure:
-// somebody cleaned up the bucket.
+// verifyQuick подтверждает существование каждого объекта с записанным размером. Это стоит
+// нескольких вызовов метаданных и ловит самый распространенный сбой в реальном мире: кто-то
+// очистил ведро.
 func (e *Engine) verifyQuick(ctx context.Context, set *ChainSet, report *VerifyReport) error {
 	for _, diskID := range set.DiskOrder {
 		dr := DiskReport{DiskID: diskID, OK: true}
@@ -380,7 +376,7 @@ func (e *Engine) verifyQuick(ctx context.Context, set *ChainSet, report *VerifyR
 	return nil
 }
 
-// verifyManifest recomputes the digest of every chunk in the chain.
+// verifyManifest пересчитывает дайджест каждого чанка в цепи.
 func (e *Engine) verifyManifest(ctx context.Context, set *ChainSet, report *VerifyReport, record *model.VerifyRun) error {
 	totalChunks := 0
 	for _, diskID := range set.DiskOrder {
@@ -397,8 +393,8 @@ func (e *Engine) verifyManifest(ctx context.Context, set *ChainSet, report *Veri
 		for _, m := range set.Manifests[diskID] {
 			dr.Alias = m.Alias
 
-			// The blob-level digest is a single streaming read that catches
-			// truncation and bit rot without decoding anything.
+			// Дайджест уровня blob — одно потоковое чтение, которое улавливает усечение и
+			// немного гниет, ничего не декодируя.
 			if err := VerifyDataObject(ctx, set.Backend, m); err != nil {
 				dr.OK = false
 				dr.Problems = append(dr.Problems, err.Error())
@@ -417,8 +413,8 @@ func (e *Engine) verifyManifest(ctx context.Context, set *ChainSet, report *Veri
 					reader.Close()
 					return err
 				}
-				// ReadChunk decodes and compares the digest; an error here is
-				// exactly the corruption we are looking for.
+				// ReadChunk декодирует данные и сверяет хеш. Ошибка на этом этапе указывает
+				// на искомое повреждение.
 				if _, err := reader.ReadChunk(ctx, ch.Index); err != nil {
 					dr.OK = false
 					dr.Problems = append(dr.Problems, err.Error())
@@ -454,8 +450,8 @@ func (e *Engine) verifyManifest(ctx context.Context, set *ChainSet, report *Veri
 	return nil
 }
 
-// verifyChain confirms the chain can be assembled and that its merged extent
-// map is self-consistent.
+// verifyChain подтверждает, что цепь может быть собрана и что ее объединенная карта
+// протяженности является самосогласованной.
 func (e *Engine) verifyChain(ctx context.Context, set *ChainSet, report *VerifyReport) error {
 	for i, run := range set.Runs {
 		if i == 0 {
@@ -466,8 +462,8 @@ func (e *Engine) verifyChain(ctx context.Context, set *ChainSet, report *VerifyR
 				fmt.Sprintf("бэкап %s ссылается на родителя %s, а в цепочке перед ним %s",
 					run.ID, run.ParentRunID, set.Runs[i-1].ID))
 		}
-		// The engine computes an increment against the parent's checkpoint;
-		// a break here means the delta was taken from somewhere else.
+		// Движок вычисляет приращение по отношению к родительскому checkpoint; Перелом
+		// здесь означает, что дельта была взята откуда-то еще.
 		if run.Type.NeedsParent() && run.FromCheckpointID != "" &&
 			set.Runs[i-1].ToCheckpointID != "" &&
 			run.FromCheckpointID != set.Runs[i-1].ToCheckpointID {
@@ -496,8 +492,9 @@ func (e *Engine) verifyChain(ctx context.Context, set *ChainSet, report *VerifyR
 		if grid > 0 {
 			dr.CoveragePct = int(int64(reader.PresentChunks()) * 100 / grid)
 		}
-		// Every object the merged map will read from must exist; a missing one
-		// turns into a failed restore at the worst possible moment.
+		// Каждый объект, с которого будет считываться объединенная карта, должен
+		// существовать; Пропавший превращается в неудачное восстановление в самый
+		// неподходящий момент.
 		for _, m := range chain {
 			if _, err := set.Backend.Stat(ctx, m.DataKey); err != nil {
 				dr.OK = false
@@ -516,9 +513,9 @@ func (e *Engine) verifyChain(ctx context.Context, set *ChainSet, report *VerifyR
 	return nil
 }
 
-// verifyRestore reconstructs the image into a temporary file. It is the
-// strongest local check: it exercises the exact code path a real restore uses,
-// including the merge across the chain.
+// verifyRestore реконструирует образ во временный файл. Это самая сильная локальная
+// проверка: она выполняет точный путь кода, который использует реальное восстановление,
+// включая слияние по всей цепочке.
 func (e *Engine) verifyRestore(ctx context.Context, set *ChainSet, report *VerifyReport,
 	record *model.VerifyRun, runQemuCheck bool) error {
 
@@ -621,8 +618,8 @@ func (e *Engine) verifyRestore(ctx context.Context, set *ChainSet, report *Verif
 			}
 			_ = os.Remove(qcowPath)
 		}
-		// Free the space before restoring the next disk: a VM with several
-		// terabyte disks would otherwise need all of them at once.
+		// Освободите пространство перед восстановлением следующего диска: ВМ с несколькими
+		// терабайтными дисками нуждалась бы во всех сразу.
 		_ = os.Remove(rawPath)
 
 		if !dr.OK {
@@ -639,14 +636,12 @@ func (e *Engine) verifyRestore(ctx context.Context, set *ChainSet, report *Verif
 	return nil
 }
 
-// verifyStructure reads the partition table and filesystem superblocks of each
-// restored disk.
+// verifyStructure читает таблицу разделов и суперблоки файловой системы каждого
+// восстановленного диска.
 //
-// This is the only check that can fail on a backup whose every checksum is
-// correct. A hash proves the copy is faithful; it cannot tell a faithful copy
-// of a working disk from a faithful copy of an empty one. Reading the
-// structures the way a bootloader would is what closes that gap, and it costs
-// a few kilobytes per disk rather than a full read.
+// Эта проверка может выявить проблему даже при совпадении всех хешей. Чтобы отличить
+// исправный диск от корректной копии пустого образа, читаем его структуры так, как их
+// читает загрузчик. Для этого достаточно нескольких килобайт на диск.
 func (e *Engine) verifyStructure(ctx context.Context, set *ChainSet, report *VerifyReport) error {
 	for _, diskID := range set.DiskOrder {
 		dr := DiskReport{DiskID: diskID, OK: true}
@@ -683,8 +678,9 @@ func (e *Engine) verifyStructure(ctx context.Context, set *ChainSet, report *Ver
 			dr.Problems = append(dr.Problems, problem)
 			report.Problems = append(report.Problems, problem)
 		case VerdictSuspicious:
-			// Not every unrecognised disk is broken: raw data volumes and
-			// exotic filesystems are legitimate. Report it without failing.
+			// Не каждый нераспознанный диск сломан: необработанные объемы данных и
+			// экзотические файловые системы являются законными. Сообщите об этом без
+			// ошибок.
 			note := fmt.Sprintf("диск %s: %s", dr.Alias, layout.Summary())
 			dr.Problems = append(dr.Problems, note)
 			e.log.Warn().Str("диск", dr.Alias).Msg(layout.Summary())
@@ -703,13 +699,12 @@ func (e *Engine) verifyStructure(ctx context.Context, set *ChainSet, report *Ver
 	return nil
 }
 
-// verifySource compares the digest recorded at backup time against what
-// ovirt-imageio reports for the disk now.
+// verifySource сравнивает дайджест, записанный во время резервного копирования, с тем, что
+// сейчас сообщает ovirt-imageio для диска.
 //
-// This answers "is the backup still an exact image of the live disk", which is
-// only a yes for a disk that has not been written to since. On a running VM a
-// mismatch is expected and does not mean the backup is bad — that is what the
-// manifest and restore modes are for.
+// Сравнение проверяет, остался ли бэкап точным образом текущего диска. Совпадение возможно,
+// если после копии диск не менялся. Для работающей ВМ различия ожидаемы. Состояние самого
+// бэкапа проверяют режимы манифеста и восстановления.
 func (e *Engine) verifySource(ctx context.Context, set *ChainSet, report *VerifyReport) error {
 	srv, err := e.store.GetServer(ctx, set.Leaf.ServerID)
 	if err != nil {
@@ -788,9 +783,9 @@ func (e *Engine) verifySource(ctx context.Context, set *ChainSet, report *Verify
 	return nil
 }
 
-// VerifyRepositoryOnly checks a backup without consulting the database, by
-// reading the run manifest from the repository. It is what makes a repository
-// usable after the service's own database is lost.
+// VerifyRepositoryOnly проверяет резервную копию, не консультируясь с базой данных, читая
+// манифест выполнения из хранилища. Это то, что делает хранилище пригодным для
+// использования после потери собственной базы данных службы.
 func (e *Engine) VerifyRepositoryOnly(ctx context.Context, target *model.StorageTarget, runPrefix string) (*RunManifest, error) {
 	backend, err := repo.Open(ctx, target)
 	if err != nil {

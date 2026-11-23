@@ -91,7 +91,7 @@ type ImageImportRequest struct {
 // Интерфейсы подключения диска, которые принимает движок.
 var imageImportInterfaces = map[string]bool{"virtio_scsi": true, "virtio": true, "sata": true, "ide": true}
 
-// Validate checks the request before anything is created in the engine.
+// Validate проверяет запрос, прежде чем что-либо будет создано в движке.
 func (r *ImageImportRequest) Validate() error {
 	r.Path = strings.TrimSpace(r.Path)
 	r.DiskName, r.VMName = strings.TrimSpace(r.DiskName), strings.TrimSpace(r.VMName)

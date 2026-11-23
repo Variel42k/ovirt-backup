@@ -1,6 +1,6 @@
-// Package config loads the service configuration from a YAML file and the
-// environment. Every key can be overridden with a JHV_-prefixed variable where
-// dots in the key path become underscores (JHV_DATABASE_POSTGRES_PASSWORD).
+// Пакет config загружает конфигурацию службы из файла YAML и окружения. Каждая клавиша
+// может быть переопределена с помощью JHV_-префиксированной переменной, где точки на пути
+// ключа становятся подчеркиваниями (JHV_DATABASE_POSTGRES_PASSWORD).
 package config
 
 import (
@@ -21,7 +21,7 @@ import (
 
 const envPrefix = "JHV"
 
-// Config is the fully resolved runtime configuration.
+// Config является полностью разрешенной конфигурацией выполнения.
 type Config struct {
 	Server           ServerConfig           `mapstructure:"server"`
 	Auth             AuthConfig             `mapstructure:"auth"`
@@ -55,7 +55,7 @@ type ServerConfig struct {
 	TLS             TLSConfig     `mapstructure:"tls"`
 }
 
-// ListenAddr renders the host:port pair for net.Listen.
+// ListenAddr отображает пару host:port для net.Listen.
 func (s ServerConfig) ListenAddr() string {
 	return fmt.Sprintf("%s:%d", s.Addr, s.Port)
 }
@@ -71,18 +71,18 @@ type AuthConfig struct {
 	SessionTTL        time.Duration `mapstructure:"session_ttl"`
 	BootstrapUser     string        `mapstructure:"bootstrap_user"`
 	BootstrapPassword string        `mapstructure:"bootstrap_password"`
-	// BootstrapPasswordFile keeps the one-time password out of the process
-	// environment. The installer removes the file after the first successful
-	// start.
+	// BootstrapPasswordFile хранит одноразовый пароль вне окружения процесса. Установщик
+	// удаляет файл после первого успешного запуска.
 	BootstrapPasswordFile string `mapstructure:"bootstrap_password_file"`
-	// RecoveryTokenHash is a SHA-256 verifier for the host-only recovery token.
-	// The token itself must never be mounted into the normal service.
+	// RecoveryTokenHash является SHA-256 верификатором для токена восстановления только для
+	// хоста.
+	// Сам токен никогда не должен быть установлен в обычное обслуживание.
 	RecoveryTokenHash string     `mapstructure:"recovery_token_hash"`
 	APITokens         []string   `mapstructure:"api_tokens"`
 	OIDC              OIDCConfig `mapstructure:"oidc"`
 }
 
-// OIDCConfig describes the external identity provider.
+// OIDCConfig описывает внешний провайдер удостоверений.
 //
 // Пароль пользователя при таком входе через службу не проходит вовсе: она
 // получает от провайдера подписанный токен и по нему заводит сессию. Отсюда и
@@ -112,7 +112,8 @@ type OIDCConfig struct {
 	// групп, и старшая должна побеждать.
 	GroupsClaim string            `mapstructure:"groups_claim"`
 	RoleMapping map[string]string `mapstructure:"role_mapping"`
-	// Exact, case-sensitive OIDC subjects; scoped to this configured issuer.
+	// Точные, чувствительные к делу OIDC субъекты; распространяется на этого
+	// сконфигурированного эмитента.
 	SubjectRoleMapping map[string]string `mapstructure:"subject_role_mapping"`
 	// DefaultRole получают те, чьи группы ни во что не отобразились. Пусто —
 	// вход запрещён: молча выдавать права тому, кого не ждали, нельзя.
@@ -125,13 +126,15 @@ type OIDCConfig struct {
 	// страницу ошибки.
 	PostLogoutRedirectURL string `mapstructure:"post_logout_redirect_url"`
 	// SessionTTL — срок сессии, заведённой через провайдера. Пусто — общий
-	// auth.session_ttl.
+	// АУТ.session_ttl.
 	//
 	// Ограничивает абсолютную длительность внешнего входа независимо от
 	// периодического пересчёта роли через refresh token.
 	SessionTTL time.Duration `mapstructure:"session_ttl"`
-	// RevalidateInterval bounds how long a session may use old provider claims.
-	// A provider failure denies the request; a missing refresh token requires login.
+	// RevalidateInterval Определяет, как долго сеанс может использовать старые утверждения
+	// провайдера.
+	// Отказ провайдера отклоняет запрос; отсутствие токена обновления требует входа в
+	// систему.
 	RevalidateInterval time.Duration `mapstructure:"revalidate_interval"`
 	// AllowLocalLogin оставляет вход по паролю рядом с внешним.
 	//
@@ -238,8 +241,9 @@ type DatabaseConfig struct {
 	//
 	// Пусто — берутся поля из блока postgres ниже.
 	URL string `mapstructure:"url"`
-	// URLFile is useful for an external PostgreSQL DSN containing credentials.
-	// It is resolved before validation and is never copied into the environment.
+	// URLFile полезен для внешнего PostgreSQL DSN носителя, содержащего учётные данные
+	// проверки подлинности.
+	// Он решается перед валидацией и никогда не копируется в окружающую среду.
 	URLFile string `mapstructure:"url_file"`
 
 	RunMigrationsOnStartup bool           `mapstructure:"run_migrations_on_startup"`
@@ -460,8 +464,8 @@ type PostgresConfig struct {
 	PasswordFile string `mapstructure:"password_file"`
 	Database     string `mapstructure:"database"`
 	SSLMode      string `mapstructure:"sslmode"`
-	// TrustedPlaintextHost is the exact service name of a PostgreSQL container
-	// on the private Compose network. It must not be used for an external DB.
+	// TrustedPlaintextHost — точное имя контейнера PostgreSQL во внутренней
+	// сети Compose. Для внешней БД этот параметр не применяется.
 	TrustedPlaintextHost string `mapstructure:"trusted_plaintext_host"`
 	MaxConns             int32  `mapstructure:"max_conns"`
 
@@ -474,7 +478,7 @@ type PostgresConfig struct {
 	SSLKey      string `mapstructure:"sslkey"`
 }
 
-// DSN renders a connection string for pgx.
+// DSN отображает строку соединения для pgx.
 //
 // pgx понимает обе формы, поэтому готовый URL отдаётся как есть: разбирать
 // его на части, чтобы тут же собрать обратно, значило бы завести собственный
@@ -551,8 +555,8 @@ type MonitorConfig struct {
 	Remediation      RemediationConfig           `mapstructure:"remediation"`
 }
 
-// RemediationConfig gates the automatic "revive" actions. Everything that can
-// disrupt a running workload is opt-in.
+// RemediationConfig завороты́ ж. автоматические "revive" действия. Все, что может нарушить
+// нагрузку, выбирается.
 type RemediationConfig struct {
 	Enabled            bool          `mapstructure:"enabled"`
 	DryRun             bool          `mapstructure:"dry_run"`
@@ -637,9 +641,11 @@ type FileBackupConfig struct {
 	Roots   []FileBackupRoot `mapstructure:"roots"`
 }
 
-// DiscoveryConfig controls read-only application and backup discovery.
-// Credentials for BACKUPDATA stay in an ordinary encrypted StorageTarget;
-// guest access uses a separate key file and known_hosts trust store.
+// DiscoveryConfig управляет приложением только для чтения и обнаружением резервного
+// копирования.
+// Учётные данные аутентификации для BACKUPDATA пребывания в обычном зашифрованном
+// StorageTarget; гостевой доступ использует отдельный файл ключа и known_hosts хранилище
+// доверия.
 type DiscoveryConfig struct {
 	Enabled               bool                 `mapstructure:"enabled"`
 	Interval              time.Duration        `mapstructure:"interval"`
@@ -752,7 +758,7 @@ type SchedulerConfig struct {
 	CatchUpMissed bool   `mapstructure:"catch_up_missed"`
 }
 
-// validRole reports whether a role name is one the authorization layer knows.
+// validRole сообщает, известно ли имя роли слою авторизации.
 //
 // Список повторён строкой, а не взят из internal/model: конфигурация лежит
 // ниже модели и импорт замкнул бы пакеты друг на друга. Расхождение ловится
@@ -765,8 +771,8 @@ func validRole(role string) bool {
 	return false
 }
 
-// Load reads the configuration from path (optional) merged over the built-in
-// defaults, then applies environment overrides and validates the result.
+// Load считывает конфигурацию из пути (необязательно), объединенного по встроенным по
+// умолчанию, затем применяет переопределение среды и проверяет результат.
 func Load(path string) (*Config, error) {
 	v := viper.New()
 	setDefaults(v)
@@ -781,8 +787,8 @@ func Load(path string) (*Config, error) {
 	v.SetEnvPrefix(envPrefix)
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	v.AutomaticEnv()
-	// AutomaticEnv alone does not reach nested keys during Unmarshal, so every
-	// known key is bound explicitly.
+	// При Unmarshal механизм AutomaticEnv сам не находит вложенные ключи, поэтому каждый
+	// известный ключ привязываем явно.
 	for _, key := range v.AllKeys() {
 		_ = v.BindEnv(key)
 	}
@@ -808,9 +814,9 @@ func Load(path string) (*Config, error) {
 	return &cfg, nil
 }
 
-// resolveSecretFiles loads credentials from protected regular files. Direct
-// values and file values are mutually exclusive so an old environment
-// variable cannot silently override a rotated secret.
+// resolveSecretFiles загружает учётные данные аутентификации из защищенных обычных файлов.
+// Прямые значения и значения файлов являются взаимоисключающими, поэтому старая переменная
+// окружения не может молча переопределить повернутый секрет.
 func (c *Config) resolveSecretFiles() error {
 	type secretSetting struct {
 		name   string
@@ -847,8 +853,8 @@ func readProtectedValue(path, name string) (string, error) {
 	if !info.Mode().IsRegular() {
 		return "", fmt.Errorf("%s %q должен быть обычным файлом", name, path)
 	}
-	// Windows does not expose Unix owner/group mode bits. Production targets
-	// are Linux; keeping the check there also lets the CLI be tested on Windows.
+	// Windows не отображает биты режима владельца/группы Unix. Производственные цели Linux;
+	// При этом, как и в случае с проверкой CLIWindows.
 	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
 		return "", fmt.Errorf("%s %q доступен группе или остальным; требуются права 0600", name, path)
 	}
@@ -869,7 +875,7 @@ func readProtectedValue(path, name string) (string, error) {
 	return value, nil
 }
 
-// Validate rejects combinations that would fail later in a confusing way.
+// Validate отклоняет комбинации, которые позже бы провалились запутанным образом.
 func (c *Config) Validate() error {
 	for _, proxy := range c.Server.TrustedProxies {
 		if _, _, err := net.ParseCIDR(proxy); err != nil && net.ParseIP(proxy) == nil {
@@ -947,8 +953,8 @@ func (c *Config) Validate() error {
 		// не отображаются и умолчания нет, вход запрещается, и это правильный
 		// исход: неизвестному пользователю не место в системе, которая
 		// управляет чужими виртуальными машинами.
-		// An empty access policy is valid: all external logins are denied until
-		// the administrator assigns groups or exact subjects.
+		// Политика пустого доступа действительна: все внешние логины отклоняются до тех
+		// пор, пока администратор не назначит группы или точные объекты.
 		for subject, role := range c.Auth.OIDC.SubjectRoleMapping {
 			if subject == "" || len(subject) > 255 || strings.TrimSpace(subject) != subject || strings.ContainsAny(subject, "\r\n\x00") || !validRole(role) {
 				return fmt.Errorf("auth.oidc.subject_role_mapping: недопустимый subject или роль")
@@ -1044,8 +1050,9 @@ func (c *Config) Validate() error {
 	if c.Discovery.Enabled && c.Discovery.Interval < time.Minute {
 		return fmt.Errorf("discovery.interval must be at least 1m")
 	}
-	// Manual discovery uses the same settings even when the periodic worker is
-	// disabled, so validate its read-only scan scope unconditionally.
+	// Ручное обнаружение использует одни и те же настройки, даже когда периодический
+	// работник отключен, поэтому безоговорочно проверяйте его область сканирования только
+	// для чтения.
 	if c.Discovery.WebTimeout < time.Second || c.Discovery.WebTimeout > time.Minute {
 		return fmt.Errorf("discovery.web_timeout must be between 1s and 1m")
 	}
@@ -1129,7 +1136,7 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// Location resolves the scheduler timezone, falling back to UTC.
+// Location определяет часовой пояс планировщика, возвращаясь к UTC.
 func (c *Config) Location() *time.Location {
 	loc, err := time.LoadLocation(c.Scheduler.Timezone)
 	if err != nil {
@@ -1167,10 +1174,9 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("auth.oidc.client_secret", "")
 	v.SetDefault("auth.oidc.client_secret_file", "")
 	v.SetDefault("auth.oidc.redirect_url", "")
-	// groups is a claim, not a standard OIDC scope. Keycloak rejects an
-	// unregistered `scope=groups` with invalid_scope even when a group mapper
-	// is attached directly to the client. Providers that expose a dedicated
-	// groups scope can still add it explicitly in configuration.
+	// groups — поле токена. Keycloak отклоняет незарегистрированный scope=groups с ошибкой
+	// invalid_scope, даже если у клиента настроено сопоставление групп. Если провайдер
+	// объявил отдельную область доступа groups, её можно явно добавить в конфигурацию.
 	v.SetDefault("auth.oidc.scopes", []string{"openid", "profile", "email"})
 	v.SetDefault("auth.oidc.button_label", "")
 	v.SetDefault("auth.oidc.groups_claim", "groups")

@@ -89,8 +89,8 @@ func (s *Server) handleListVMs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Filters are applied here rather than in SQL: the inventory is small and
-	// keeping the query layer simple is worth more than the microseconds.
+	// Фильтры применяются здесь, а не в SQL: инвентарь мал, и поддержание простого уровня
+	// запроса стоит больше, чем микросекунды.
 	query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
 	status := r.URL.Query().Get("status")
 	cluster := r.URL.Query().Get("cluster_id")
@@ -268,7 +268,7 @@ func (s *Server) handleListRestoreNetworks(w http.ResponseWriter, r *http.Reques
 	writeList(w, items)
 }
 
-// vmActionRequest is the body of a power-management call.
+// vmActionRequest является телом вызова управления питанием ВМ.
 type vmActionRequest struct {
 	// start | shutdown | stop | suspend | reboot | reset | migrate
 	Action string `json:"action"`
@@ -279,6 +279,13 @@ type vmActionRequest struct {
 
 func (s *Server) handleVMAction(w http.ResponseWriter, r *http.Request) {
 	serverID, vmID := r.PathValue("id"), r.PathValue("vmID")
+	if busy, err := s.store.VMCompressionPreviewBusy(r.Context(), serverID, vmID); err != nil {
+		s.writeError(w, r, err)
+		return
+	} else if busy {
+		s.writeError(w, r, badRequest("ВМ занята оценкой сжатия или очисткой её ресурсов"))
+		return
+	}
 	if owner, err := s.store.VMTransferOwner(r.Context(), serverID, vmID); err != nil {
 		s.writeError(w, r, err)
 		return
@@ -315,8 +322,8 @@ func (s *Server) handleVMAction(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
 	defer cancel()
 
-	// "stop" and "reset" cut power under a running guest; requiring an explicit
-	// confirmation keeps a mis-click from corrupting a filesystem.
+	// Действия "stop" и "reset" прерывают работу запущенного гостя. Явное подтверждение
+	// защищает файловую систему от случайного щелчка.
 	if (req.Action == "stop" || req.Action == "reset") && !req.Confirm {
 		s.writeError(w, r, badRequest(
 			"действие %q прерывает работу гостевой ОС и требует подтверждения (confirm=true)", req.Action))
@@ -397,8 +404,8 @@ func (s *Server) handleVMAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Refresh in the background so the UI sees the new state on its next poll
-	// without this call blocking on the engine's state machine.
+	// Обновите в фоне, чтобы UI увидел новое состояние при следующем опросе без блокировки
+	// вызова на машине состояния движка.
 	go s.refreshServer(context.WithoutCancel(r.Context()), serverID)
 
 	writeJSON(w, http.StatusAccepted, map[string]string{
@@ -407,7 +414,7 @@ func (s *Server) handleVMAction(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// libvirtVMAction performs a power operation on a libvirt domain.
+// libvirtVMAction выполняет силовую операцию на libvirt домене.
 func (s *Server) libvirtVMAction(ctx context.Context, srv *model.Server, vm *model.VM, req vmActionRequest) error {
 	conn, err := s.libvirt.ForServer(ctx, srv)
 	if err != nil {
@@ -432,8 +439,8 @@ func (s *Server) libvirtVMAction(ctx context.Context, srv *model.Server, vm *mod
 	case "reset":
 		return conn.ResetDomain(ctx, dom)
 	case "migrate":
-		// Live migration needs a destination host and shared storage, neither
-		// of which a single bare hypervisor has.
+		// Живая миграция требует хоста назначения и общего хранилища, ни один из которых не
+		// имеет ни одного голого гипервизора.
 		return badRequest("миграция недоступна для одиночного хоста libvirt: " +
 			"переносить ВМ некуда, а общего хранилища у него нет")
 	default:
@@ -441,8 +448,8 @@ func (s *Server) libvirtVMAction(ctx context.Context, srv *model.Server, vm *mod
 	}
 }
 
-// vmPolicyRequest declares what the VM should be doing, which is the input the
-// auto-revive engine compares reality against.
+// vmPolicyRequest объявляет, что должна делать ВМ, что является входом, с которым движок
+// автовосстановления сравнивает реальность.
 type vmPolicyRequest struct {
 	DesiredState      model.VMDesiredState `json:"desired_state"`
 	RemediationOptOut bool                 `json:"remediation_opt_out"`
@@ -512,7 +519,7 @@ func (s *Server) handleVMTags(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, vm)
 }
 
-// hostActionRequest is the body of a host management call.
+// hostActionRequest является телом вызова управления хостом.
 type hostActionRequest struct {
 	// activate | deactivate | fence
 	Action string `json:"action"`
@@ -538,9 +545,8 @@ func (s *Server) handleHostAction(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if srv, err := s.store.GetServer(r.Context(), serverID); err == nil && !srv.Kind.SupportsHostManagement() {
-		// There is no engine above a bare libvirt host: maintenance mode and
-		// fencing are engine concepts, and the hypervisor's own operating
-		// system is what manages it.
+		// Автономным хостом libvirt управляет его операционная система. Операции
+		// обслуживания и фенсинга относятся к движку и здесь недоступны.
 		s.writeError(w, r, badRequest(
 			"управление узлами для подключения %s не реализовано; доступны инвентарь и действия над ВМ", srv.Kind.Title()))
 		return
@@ -565,8 +571,8 @@ func (s *Server) handleHostAction(w http.ResponseWriter, r *http.Request) {
 		if fenceType == "" {
 			fenceType = "restart"
 		}
-		// Fencing a host kills every VM on it. Nothing about that should be
-		// possible from a single accidental request.
+		// Фенсинг прерывает работу всех ВМ на хосте. Одного случайного запроса для этого
+		// недостаточно.
 		if fenceType != "status" && !req.Confirm {
 			s.writeError(w, r, badRequest(
 				"перезагрузка хоста по питанию остановит все его ВМ и требует подтверждения (confirm=true)"))
@@ -586,8 +592,8 @@ func (s *Server) handleHostAction(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted"})
 }
 
-// diskBackupModeRequest toggles changed block tracking on a disk, which is the
-// prerequisite for hot incremental backups.
+// diskBackupModeRequest переключает измененное отслеживание блоков на диске, что является
+// предпосылкой для горячих инкрементных резервных копий.
 type diskBackupModeRequest struct {
 	Incremental bool `json:"incremental"`
 }
@@ -602,9 +608,9 @@ func (s *Server) handleDiskBackupMode(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if srv, err := s.store.GetServer(r.Context(), serverID); err == nil && !srv.Kind.UsesOVirtAPI() {
-		// In libvirt, changed block tracking is not a switch: a bitmap lives
-		// inside the qcow2 header, so the format alone decides. Pretending
-		// there is a toggle would record a change that changes nothing.
+		// В libvirt измененное отслеживание блоков не является переключателем: растровое
+		// образ живет внутри заголовка qcow2, поэтому решает только формат. Притворяясь,
+		// что есть переключатель, вы запишете изменение, которое ничего не меняет.
 		message := "для этого подключения нельзя переключать oVirt Backup API"
 		if srv.Kind.UsesLibvirt() {
 			message = "для libvirt отслеживание изменённых блоков определяется форматом диска: " +

@@ -1,0 +1,46 @@
+=== RUN   TestCompressionSamplePlanBoundedAndSpansEveryDisk
+--- PASS: TestCompressionSamplePlanBoundedAndSpansEveryDisk (0.00s)
+=== RUN   TestCompressionEstimateSeparatesZerosAndUsesWriterRepresentation
+--- PASS: TestCompressionEstimateSeparatesZerosAndUsesWriterRepresentation (0.02s)
+=== RUN   TestCompressionEstimateEmptyAndCanceled
+--- PASS: TestCompressionEstimateEmptyAndCanceled (0.00s)
+=== RUN   TestCompressionRangePointsAvoidThinHolesWithoutExpandingWholeDisk
+--- PASS: TestCompressionRangePointsAvoidThinHolesWithoutExpandingWholeDisk (0.00s)
+=== RUN   TestCompressionSourceReadsMappedDataBeforeAnyRepositoryExists
+--- PASS: TestCompressionSourceReadsMappedDataBeforeAnyRepositoryExists (0.01s)
+=== RUN   TestCompressionCleanupClosesOnlyItsOwnSourceAndTransfers
+--- PASS: TestCompressionCleanupClosesOnlyItsOwnSourceAndTransfers (0.00s)
+PASS
+ok  	github.com/Variel42k/ovirt-backup/internal/backup	0.036s
+testing: warning: no tests to run
+PASS
+ok  	github.com/Variel42k/ovirt-backup/internal/kvm	0.007s [no tests to run]
+=== RUN   TestCompressionBackupOwnershipIsExactXMLIdentity
+--- PASS: TestCompressionBackupOwnershipIsExactXMLIdentity (0.00s)
+PASS
+ok  	github.com/Variel42k/ovirt-backup/internal/libvirtx	0.006s
+testing: warning: no tests to run
+PASS
+ok  	github.com/Variel42k/ovirt-backup/internal/dispatch	0.008s [no tests to run]
+=== RUN   TestCompressionPreviewLedgerBlocksConflictingWorkAndSurvivesCleanupFailure
+--- PASS: TestCompressionPreviewLedgerBlocksConflictingWorkAndSurvivesCleanupFailure (0.64s)
+PASS
+ok  	github.com/Variel42k/ovirt-backup/internal/store	0.643s
+=== RUN   TestCompressionOptionsMatchCodecs
+--- PASS: TestCompressionOptionsMatchCodecs (0.00s)
+=== RUN   TestCompressionPreviewRequiresExplicitSourceReadConfirmation
+--- PASS: TestCompressionPreviewRequiresExplicitSourceReadConfirmation (0.00s)
+=== RUN   TestGuideRelativeLinksExist
+--- PASS: TestGuideRelativeLinksExist (0.28s)
+=== RUN   TestEveryEmbeddedGuideIsPlaced
+--- PASS: TestEveryEmbeddedGuideIsPlaced (0.00s)
+=== RUN   TestGuideCatalogDescribesEveryGuide
+--- PASS: TestGuideCatalogDescribesEveryGuide (0.01s)
+=== RUN   TestGuideOutlineSkipsCodeAndMarkup
+--- PASS: TestGuideOutlineSkipsCodeAndMarkup (0.00s)
+=== RUN   TestGuideOutlineIncludesListAfterColon
+--- PASS: TestGuideOutlineIncludesListAfterColon (0.00s)
+=== RUN   TestGuideHandlers
+--- PASS: TestGuideHandlers (0.00s)
+PASS
+ok  	github.com/Variel42k/ovirt-backup/internal/api	0.341s

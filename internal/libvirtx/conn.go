@@ -1,12 +1,9 @@
-// Package libvirtx connects to a libvirt host over SSH and exposes what the
-// backup driver needs: the domain inventory, checkpoints, the pull-mode backup
-// API, and a tunnel to the NBD socket the hypervisor opens for a backup.
+// Пакет libvirtx подключается к хосту libvirt через SSH и предоставляет драйверу инвентарь
+// доменов, checkpoint, API pull-бэкапа и туннель до сокета NBD.
 //
-// SSH rather than libvirt's TLS transport: it needs nothing installed on the
-// hypervisor and no port beyond 22, and the same channel carries both the
-// control plane (libvirt RPC over the unix socket) and the data plane (the
-// backup NBD socket). A site that has already built libvirt PKI can point the
-// dialer elsewhere; everything above this file is transport-agnostic.
+// SSH не требует дополнительных компонентов на гипервизоре или портов кроме 22. Один канал
+// переносит управляющий RPC libvirt и данные NBD через Unix-сокеты. При наличии PKI libvirt
+// способ подключения можно сменить без правок вышележащего кода.
 package libvirtx
 
 import (
@@ -28,10 +25,10 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/sshtrust"
 )
 
-// DefaultSocket is where libvirtd listens on a stock installation.
+// DefaultSocket — где libvirtd слушает на инсталляции запаса.
 const DefaultSocket = "/var/run/libvirt/libvirt-sock"
 
-// Config describes one hypervisor connection.
+// Config описывает одно гипервизорное соединение.
 type Config struct {
 	Host string
 	Port int
@@ -78,7 +75,7 @@ func (c Config) socket() string {
 	return c.Socket
 }
 
-// Conn is a live connection to one hypervisor.
+// Conn — живое соединение с одним гипервизором.
 type Conn struct {
 	cfg Config
 
@@ -91,7 +88,7 @@ type Conn struct {
 	stop chan struct{}
 }
 
-// Connect establishes the SSH session and the libvirt RPC channel on top of it.
+// Connect устанавливаетъ SSH сеансъ и libvirt RPC каналъ надъ нимъ.
 func Connect(ctx context.Context, cfg Config) (*Conn, error) {
 	if cfg.Host == "" {
 		return nil, errors.New("не указан адрес гипервизора")
@@ -115,8 +112,8 @@ func Connect(ctx context.Context, cfg Config) (*Conn, error) {
 		return nil, fmt.Errorf("подключение к %s: %w", cfg.addr(), err)
 	}
 
-	// The SSH handshake has no context support of its own, so the deadline is
-	// pushed onto the connection and cleared once it completes.
+	// Рукопожатие SSH не имеет собственной контекстной поддержки, поэтому крайний срок
+	// переносится на соединение и очищается после его завершения.
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = rawConn.SetDeadline(deadline)
 	} else {
@@ -188,15 +185,15 @@ func sshConfig(cfg Config) (*ssh.ClientConfig, error) {
 	}, nil
 }
 
-// Libvirt exposes the RPC client for calls this package does not wrap.
+// Libvirt выставляет клиент RPC для вызовов, которые этот пакет не обёртывает.
 func (c *Conn) Libvirt() *libvirt.Libvirt { return c.lv }
 
-// Host returns the configured hypervisor address, for log messages.
+// Host возвращает сконфигурированный адрес гипервизора для сообщений журнала.
 func (c *Conn) Host() string { return c.cfg.Host }
 
-// DialRemoteUnix opens a tunnel to a unix socket on the hypervisor. This is
-// how the NBD data stream of a pull-mode backup is reached without opening a
-// single extra port.
+// DialRemoteUnix открывает туннель к гнезду Unix на гипервизоре. Так достигается поток
+// данных NBD резервного копирования в pull-режиме без открытия ни одного дополнительного
+// порта.
 func (c *Conn) DialRemoteUnix(path string) (net.Conn, error) {
 	c.mu.Lock()
 	client := c.ssh
@@ -213,11 +210,11 @@ func (c *Conn) DialRemoteUnix(path string) (net.Conn, error) {
 	return conn, nil
 }
 
-// Run executes a command on the hypervisor and returns its standard output.
+// Run выполняет команду на гипервизоре и возвращает его стандартный вывод.
 //
-// It is used sparingly: creating and removing the scratch files a pull-mode
-// backup needs, and running qemu-img there when an image has to be inspected
-// where it lives. Everything else goes through libvirt.
+// Он используется экономно: для создания и удаления временных файлов данных требуется
+// резервное копирование в режиме извлечения и запуск qemu-img там, где образ должно быть
+// проверено, где оно живет. Все остальное проходит через libvirt.
 func (c *Conn) Run(ctx context.Context, command string) (string, error) {
 	c.mu.Lock()
 	client := c.ssh
@@ -243,7 +240,8 @@ func (c *Conn) Run(ctx context.Context, command string) (string, error) {
 
 	select {
 	case <-ctx.Done():
-		// Signal is best effort; closing the session is what actually stops it.
+		// Попытка отправки сигнала может завершиться ошибкой. Операцию останавливает
+		// закрытие сеанса.
 		_ = session.Signal(ssh.SIGKILL)
 		return "", ctx.Err()
 	case err := <-done:
@@ -255,11 +253,10 @@ func (c *Conn) Run(ctx context.Context, command string) (string, error) {
 	}
 }
 
-// RunWithStdin executes a command on the hypervisor, feeding it from r.
+// RunWithStdin Выполняет команду на гипервизоре, питая его от р.
 //
-// This is how a reconstructed disk image reaches the host for a boot test: the
-// bytes go straight into a file over the existing SSH channel, without a
-// staging copy on the backup server.
+// Восстановленный образ для проверки загрузки передаётся прямо в файл на хосте через
+// существующий канал SSH. На сервере копий промежуточный файл не создаётся.
 func (c *Conn) RunWithStdin(ctx context.Context, command string, r io.Reader) error {
 	c.mu.Lock()
 	client := c.ssh
@@ -290,7 +287,7 @@ func (c *Conn) RunWithStdin(ctx context.Context, command string, r io.Reader) er
 	copyErr := make(chan error, 1)
 	go func() {
 		_, err := io.Copy(stdin, r)
-		// Closing stdin is what tells the remote command it has everything.
+		// Закрытие stdin — то, что говорит удаленная команда, у которой есть все.
 		if closeErr := stdin.Close(); err == nil {
 			err = closeErr
 		}
@@ -324,11 +321,11 @@ func (c *Conn) RunWithStdin(ctx context.Context, command string, r io.Reader) er
 	}
 }
 
-// WriteFile creates a file on the hypervisor with the given content, used for
-// nothing larger than a helper script.
+// WriteFile создает на гипервизоре файл с заданным содержимым, используемый ни для чего
+// большего, чем вспомогательный скрипт.
 func (c *Conn) WriteFile(ctx context.Context, path string, content []byte, mode os.FileMode) error {
-	// Base64 through the shell avoids quoting problems with arbitrary content
-	// and keeps this dependency-free on the remote side.
+	// Base64 через оболочку избегает цитирования проблем с произвольным содержанием и
+	// сохраняет эту зависимость свободной на удаленной стороне.
 	encoded := encodeBase64(content)
 	cmd := fmt.Sprintf("umask 077 && printf '%%s' '%s' | base64 -d > %s && chmod %o %s",
 		encoded, shellQuote(path), mode.Perm(), shellQuote(path))
@@ -336,7 +333,7 @@ func (c *Conn) WriteFile(ctx context.Context, path string, content []byte, mode 
 	return err
 }
 
-// Close tears down the libvirt session and the SSH connection.
+// Close ср. libvirt сессія и SSH связь.
 func (c *Conn) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -363,8 +360,8 @@ func (c *Conn) Close() error {
 	return firstErr
 }
 
-// Alive reports whether the connection still answers, used by the poller
-// before deciding a host is down.
+// Alive сообщает, отвечает ли соединение, используемое процессом мониторинга, прежде чем
+// решить, что хост не работает.
 func (c *Conn) Alive(ctx context.Context) error {
 	c.mu.Lock()
 	lv := c.lv
@@ -388,21 +385,21 @@ func (c *Conn) Alive(ctx context.Context) error {
 	}
 }
 
-// Version returns the libvirt daemon version as major.minor.release.
+// Version возвращает демоническую версию libvirt как major.minor.release.
 func (c *Conn) Version(ctx context.Context) (string, error) {
 	raw, err := c.lv.ConnectGetLibVersion()
 	if err != nil {
 		return "", err
 	}
-	// libvirt encodes the version as major*1000000 + minor*1000 + release.
+	// libvirt кодирует версию как мажор*1000000 + минор*1000 + релиз.
 	major := raw / 1000000
 	minor := (raw % 1000000) / 1000
 	release := raw % 1000
 	return fmt.Sprintf("%d.%d.%d", major, minor, release), nil
 }
 
-// SupportsIncrementalBackup reports whether the daemon is new enough for the
-// pull-mode backup API with checkpoints, which landed in libvirt 6.0.
+// SupportsIncrementalBackup сообщает, является ли демон достаточно новым для резервного
+// копирования в режиме тяги API с checkpoints, который приземлился в libvirt 6.0.
 func (c *Conn) SupportsIncrementalBackup(ctx context.Context) (bool, string, error) {
 	version, err := c.Version(ctx)
 	if err != nil {

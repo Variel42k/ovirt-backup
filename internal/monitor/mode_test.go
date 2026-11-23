@@ -105,9 +105,9 @@ func TestObserveModeRecordsRepeatedSituationOnce(t *testing.T) {
 	}
 }
 
-// The mode must survive a restart. An operator halfway through observing the
-// automation would be badly served by a service that quietly starts acting
-// because it was restarted for an unrelated reason.
+// Мода должна пережить перезапуск. Оператор на полпути к автоматизации будет плохо
+// обслуживаться службой, которая тихо начинает действовать, потому что она была
+// перезапущена по несвязанной причине.
 func TestModeSurvivesRestart(t *testing.T) {
 	ctx := context.Background()
 	r, st, _ := testRemediator(t)
@@ -138,8 +138,8 @@ func TestModeSurvivesRestart(t *testing.T) {
 	}
 }
 
-// Leaving check mode must leave behind what was observed: that is the evidence
-// the decision to go live rests on.
+// Режим выездной проверки должен оставить позади то, что было замечено: это доказательство
+// того, что решение идти в прямом эфире остается.
 func TestLeavingCheckModeWritesArchive(t *testing.T) {
 	ctx := context.Background()
 	r, st, archiveDir := testRemediator(t)
@@ -211,8 +211,8 @@ func TestLeavingCheckModeWritesArchive(t *testing.T) {
 	}
 }
 
-// Going into check mode produces no archive: there is nothing observed yet, and
-// what happened during live operation is the remediation history itself.
+// Переход в режим проверки не создает архива: пока ничего не наблюдается, и то, что
+// произошло во время работы в реальном времени, является самой историей восстановления.
 func TestEnteringCheckModeMakesNoArchive(t *testing.T) {
 	ctx := context.Background()
 	r, _, _ := testRemediator(t)
@@ -235,9 +235,9 @@ func TestEnteringCheckModeMakesNoArchive(t *testing.T) {
 	}
 }
 
-// Switching to the mode already in force is a mistake worth reporting rather
-// than a no-op: it would otherwise close a period and open an identical one,
-// splitting the observation window for no reason.
+// Переключение на уже действующий режим является ошибкой, заслуживающей отчета, а не
+// бездействия: в противном случае он закроет период и откроет идентичный, разделив окно
+// наблюдения без причины.
 func TestSwitchingToSameModeIsRejected(t *testing.T) {
 	ctx := context.Background()
 	r, _, _ := testRemediator(t)
@@ -250,7 +250,7 @@ func TestSwitchingToSameModeIsRejected(t *testing.T) {
 	}
 }
 
-// Only the decisions inside the window belong to the archive.
+// Только решения внутри окна принадлежат архиву.
 func TestArchiveExcludesDecisionsOutsideTheWindow(t *testing.T) {
 	ctx := context.Background()
 	r, st, _ := testRemediator(t)

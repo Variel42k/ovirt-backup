@@ -76,10 +76,9 @@ func New(cfg config.NotificationsConfig, log zerolog.Logger) *Notifier {
 	return newNotifier(cfg, log, true)
 }
 
-// NewSender builds configured channels even when runtime delivery is disabled
-// in YAML. The durable manager applies the effective database override before
-// sending; without this constructor the UI could enable a configured channel
-// only after a process restart.
+// NewSender создаёт каналы, описанные в YAML, даже если доставка там отключена. Перед
+// отправкой диспетчер учитывает эффективное значение из БД. Так канал можно включить из
+// интерфейса без перезапуска.
 func NewSender(cfg config.NotificationsConfig, log zerolog.Logger) *Notifier {
 	return newNotifier(cfg, log, false)
 }
@@ -134,8 +133,8 @@ func newNotifier(cfg config.NotificationsConfig, log zerolog.Logger, requireEnab
 	return n
 }
 
-// ChannelNames lists configured delivery mechanisms without exposing their
-// credentials through the API.
+// ChannelNames перечисляет сконфигурированные механизмы доставки, не раскрывая их учётные
+// данные аутентификации через API.
 func (n *Notifier) ChannelNames() []string {
 	if n == nil {
 		return nil
@@ -147,8 +146,8 @@ func (n *Notifier) ChannelNames() []string {
 	return out
 }
 
-// SendChannel performs one synchronous outbox attempt. Retries and their
-// persistence belong to Manager; the transport stays deliberately simple.
+// SendChannel выполняет одну синхронную попытку выхода. Повторные попытки и их
+// настойчивость принадлежат Управляющему; транспорт остается намеренно простым.
 func (n *Notifier) SendChannel(ctx context.Context, name string, m Message) error {
 	if n == nil {
 		return fmt.Errorf("каналы уведомлений не настроены")
@@ -189,8 +188,8 @@ func (n *Notifier) Alert(a model.Alert) {
 	}
 }
 
-// SetTimezone changes the zone used in human-readable notifications. The
-// event instant remains unchanged; RFC3339 output carries the selected offset.
+// SetTimezone изменяет зону, используемую в считываемых человеком уведомлениях. момент
+// события остается неизменным; RFC3339 вывод несет выбранное смещение.
 func (n *Notifier) SetTimezone(name string) error {
 	if n == nil {
 		return nil

@@ -14,7 +14,7 @@ import (
 
 const roleColumns = `id, name, title, description, permissions, created_by, created_at, updated_at`
 
-// CreateRole stores a custom role.
+// CreateRole сохраня́ть привычную роль.
 //
 // Встроенные роли сюда не попадают: они живут в коде, чтобы новое право
 // доставалось администратору сразу, а не после ручной правки.
@@ -37,8 +37,8 @@ func (s *Store) CreateRole(ctx context.Context, r *model.RoleDefinition) error {
 	return nil
 }
 
-// UpdateRole changes a custom role. The name is not among the changeable
-// fields: accounts and provider group mappings refer to the role by it.
+// UpdateRole изменя́ть обывательскую роль. Имя не входит в число изменяемых полей: учётные
+// записи и сопоставления групп поставщиков относятся к роли, выполняемой им.
 func (s *Store) UpdateRole(ctx context.Context, r *model.RoleDefinition) error {
 	r.UpdatedAt = time.Now().UTC()
 	res, err := s.db.Exec(ctx,
@@ -53,7 +53,7 @@ func (s *Store) UpdateRole(ctx context.Context, r *model.RoleDefinition) error {
 	return nil
 }
 
-// DeleteRole removes a custom role.
+// DeleteRole удаля́ть обыкнов. роль.
 func (s *Store) DeleteRole(ctx context.Context, id string) error {
 	res, err := s.db.Exec(ctx, `DELETE FROM roles WHERE id=?`, id)
 	if err != nil {
@@ -65,13 +65,13 @@ func (s *Store) DeleteRole(ctx context.Context, id string) error {
 	return nil
 }
 
-// GetRole loads a custom role by id.
+// GetRole загружает пользовательскую роль по идентификатору.
 func (s *Store) GetRole(ctx context.Context, id string) (*model.RoleDefinition, error) {
 	row := s.db.QueryRow(ctx, `SELECT `+roleColumns+` FROM roles WHERE id=?`, id)
 	return scanRole(row)
 }
 
-// ListRoles returns the custom roles, by name.
+// ListRoles возвраща́ть обычныя роли, поименно.
 func (s *Store) ListRoles(ctx context.Context) ([]model.RoleDefinition, error) {
 	rows, err := s.db.Query(ctx, `SELECT `+roleColumns+` FROM roles ORDER BY name`)
 	if err != nil {
@@ -90,7 +90,7 @@ func (s *Store) ListRoles(ctx context.Context) ([]model.RoleDefinition, error) {
 	return roles, rows.Err()
 }
 
-// CountUsersWithRole reports how many accounts refer to the role.
+// CountUsersWithRole сообщает, сколько счетов относится к роли.
 //
 // Нужно перед удалением: учётная запись со ссылкой на исчезнувшую роль не
 // получает прав вовсе, и человек обнаруживает это входом в пустой интерфейс.

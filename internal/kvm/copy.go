@@ -27,8 +27,8 @@ type copyStats struct {
 	mismatch int
 }
 
-// copyDisks reads every selected disk from the backup's NBD server into the
-// repository, with bounded parallelism.
+// copyDisks считывает каждый выбранный диск с сервера NBD резервной копии в хранилище с
+// ограниченным параллелизмом.
 func (d *Driver) copyDisks(ctx context.Context, req Request, plan *Plan, socketPath string,
 	info *libvirtx.Domain, log zerolog.Logger) ([]*backup.DiskManifest, copyStats, error) {
 
@@ -92,8 +92,8 @@ func (d *Driver) copyDisks(ctx context.Context, req Request, plan *Plan, socketP
 		return out, stats, fmt.Errorf("ни один диск не сохранён: %w", firstErr)
 	}
 	if failed > 0 {
-		// Some disks made it. Reporting that as a blanket failure would throw
-		// away good data; the caller marks the run partial.
+		// Некоторые диски сделали это. Сообщения о том, что в качестве общего сбоя будут
+		// выброшены хорошие данные; код вызова отмечает частичный запуск.
 		return out, stats, fmt.Errorf("не сохранено дисков: %d из %d: %w", failed, len(plan.Disks), firstErr)
 	}
 	return out, stats, nil
@@ -119,8 +119,8 @@ func (d *Driver) copyOneDisk(ctx context.Context, req Request, plan *Plan, socke
 		return nil, stats, fmt.Errorf("сервер сообщил нулевой размер экспорта")
 	}
 	if !export.ReadOnly() {
-		// A writable backup export means we opened the live disk by mistake.
-		// Reading it would be safe, but the mistake is worth stopping on.
+		// Резервный экспорт означает, что мы открыли живой диск по ошибке.
+		// Читая это будет безопасно, но ошибка стоит остановиться.
 		log.Warn().Str("диск", disk.Target).
 			Msg("экспорт бэкапа доступен на запись — это не ожидаемое поведение libvirt")
 	}
@@ -220,9 +220,9 @@ func (d *Driver) copyOneDisk(ctx context.Context, req Request, plan *Plan, socke
 	}
 	stats.stored = final.StoredBytes
 
-	// The export is still open here, and this is the only moment when the exact
-	// point in time the backup was taken from is still readable. Once the job
-	// ends, that view is gone and nothing can be compared against it again.
+	// Пока экспорт открыт, можно прочитать именно тот момент времени, который сохраняет
+	// бэкап. После закрытия задания эта точка исчезает и сравнение с ней становится
+	// невозможным.
 	if req.SourceVerifyFraction > 0 {
 		checked, mismatch, err := d.verifyAgainstSource(ctx, client, final, req.SourceVerifyFraction, cipher, pacer, log)
 		stats.checked, stats.mismatch = checked, mismatch
@@ -256,12 +256,12 @@ func (d *Driver) copyOneDisk(ctx context.Context, req Request, plan *Plan, socke
 	return final, stats, nil
 }
 
-// dialExport opens an NBD session to one disk of the backup.
+// dialExport открывает сеанс NBD на один диск резервной копии.
 func (d *Driver) dialExport(ctx context.Context, socketPath string, disk libvirtx.Disk,
 	backupType model.BackupType) (*nbd.Client, net.Conn, error) {
 
-	// The NBD server libvirt opened listens on a unix socket on the
-	// hypervisor; the SSH channel carries it to us without an extra port.
+	// Сервер NBD libvirt открыл прослушивания на сокете Unix на гипервизоре; SSH каналъ
+	// несетъ его къ намъ безъ лишняго порта.
 	conn, err := d.conn.DialRemoteUnix(socketPath)
 	if err != nil {
 		return nil, nil, err
@@ -275,9 +275,8 @@ func (d *Driver) dialExport(ctx context.Context, socketPath string, disk libvirt
 	client, err := nbd.Connect(ctx, conn, nbd.Options{
 		ExportName:   libvirtx.ExportName(disk.Target),
 		MetaContexts: contexts,
-		// Without structured replies there is no BLOCK_STATUS, and without
-		// BLOCK_STATUS a "backup" would have to copy every byte of every disk
-		// every time.
+		// Без структурированных ответов нет BLOCK_STATUS, а без BLOCK_STATUS a "backup"
+		// пришлось бы каждый раз копировать каждый байт каждого диска.
 		RequireStructuredReplies: true,
 		HandshakeTimeout:         d.cfg.NBDTimeout,
 	})
@@ -298,8 +297,8 @@ func (d *Driver) dialExport(ctx context.Context, socketPath string, disk libvirt
 	return client, conn, nil
 }
 
-// selectChunks decides which grid cells this run has to store, and how much
-// guest data that covers.
+// selectChunks определяет, какие чанки сохраняет запуск и какой объём данных гостя они
+// покрывают.
 func (d *Driver) selectChunks(ctx context.Context, client *nbd.Client, plan *Plan,
 	disk libvirtx.Disk, size int64) ([]int64, int64, error) {
 
@@ -317,21 +316,18 @@ func (d *Driver) selectChunks(ctx context.Context, client *nbd.Client, plan *Pla
 	return indices, coverage, nil
 }
 
-// SelectFromExtents turns an NBD extent map into the set of chunks to store.
+// SelectFromExtents превращает карту NBD протяженности в набор чанков для хранения.
 //
-// The two cases are not symmetric, and the difference is the subtlest rule in
-// the whole driver:
+// Эти два случая не симметричны, и разница заключается в самом тонком правиле во всем
+// драйвере:
 //
-//   - A full run copies what holds data and skips holes and zero regions,
-//     because restore treats a chunk absent from the entire chain as zero.
+//   - Полный бэкап читает выделенные данные и пропускает нулевые и невыделенные диапазоны.
+//     При восстановлении чанк, отсутствующий во всей цепочке, читается как нули.
 //
-//   - An incremental run selects purely from the dirty bitmap and deliberately
-//     ignores allocation state. A region the guest discarded comes back as both
-//     dirty and a hole; skipping it because it is now empty would leave the
-//     chunk absent from this run, and absent in an incremental means
-//     "unchanged" — restore would then resurrect the old contents from the
-//     parent. Storing the zeroes explicitly is the only correct answer, and
-//     compression makes it nearly free.
+//   - Инкремент выбирает чанки по карте изменений без проверки выделения. Если гость
+//     освободил область, она одновременно изменённая и невыделенная. Записываем нули явно,
+//     иначе при восстановлении появятся старые данные родителя. Сжатие почти устраняет
+//     стоимость записи нулей.
 func SelectFromExtents(extents []nbd.Extent, incremental bool, chunkSize, virtualSize int64) ([]int64, int64) {
 	selector := backup.NewChunkSelector(chunkSize, virtualSize)
 	var coverage int64
@@ -353,9 +349,9 @@ func SelectFromExtents(extents []nbd.Extent, incremental bool, chunkSize, virtua
 	return selector.Indices(), coverage
 }
 
-// readWithRetry pulls a byte range, retrying transient failures. A backup that
-// dies because one channel hiccupped would be a poor trade for the hours it
-// takes to restart it.
+// readWithRetry вытягивает диапазон байтов, повторяя переходные отказы. Резервная копия,
+// которая умирает из-за сбоя одного канала, будет плохой торговлей в течение часов,
+// необходимых для ее перезагрузки.
 func (d *Driver) readWithRetry(ctx context.Context, client *nbd.Client, offset, length int64) ([]byte, error) {
 	var lastErr error
 	for attempt := 0; attempt <= d.cfg.RangeRetries; attempt++ {
@@ -380,12 +376,12 @@ func (d *Driver) readWithRetry(ctx context.Context, client *nbd.Client, offset, 
 		offset, length, d.cfg.RangeRetries+1, lastErr)
 }
 
-// verifyAgainstSource re-reads stored chunks from the still-open export and
-// compares them with what was written.
+// verifyAgainstSource Перечитывает сохраненные чанки из ещё открытого экспорта и сравнивает
+// их с написанными.
 //
-// This is the strongest check available anywhere in the pipeline: it compares
-// the repository against the hypervisor itself, not against another copy of
-// our own metadata. It is only possible before the backup job ends.
+// Это самая сильная проверка, доступная где-либо в конвейере: она сравнивает хранилище с
+// самим гипервизором, а не с другой копией наших собственных метаданных. Это возможно
+// только до окончания резервного копирования.
 func (d *Driver) verifyAgainstSource(ctx context.Context, client *nbd.Client, manifest *backup.DiskManifest,
 	fraction float64, cipher *secret.Cipher, pacer *backup.ReadPacer, log zerolog.Logger) (checked, mismatch int, err error) {
 
@@ -396,8 +392,8 @@ func (d *Driver) verifyAgainstSource(ctx context.Context, client *nbd.Client, ma
 		fraction = 1
 	}
 
-	// Deterministic sampling: every Nth chunk rather than random ones, so a
-	// repeated run checks the same set and a reported failure is reproducible.
+	// Детерминированная выборка: каждый N-й чанк, а не случайные, поэтому повторный запуск
+	// проверяет один и тот же набор, и заявленный сбой воспроизводим.
 	step := 1
 	if fraction < 1 {
 		step = int(1.0/fraction + 0.5)
@@ -430,7 +426,8 @@ func (d *Driver) verifyAgainstSource(ctx context.Context, client *nbd.Client, ma
 				Int64("чанк", chunk.Index).
 				Int64("смещение", offset).
 				Msg("сверка с источником: содержимое не совпало с сохранённым")
-			// Report a handful and stop flooding the log; the run fails anyway.
+			// Записываем только несколько примеров, чтобы не заполнять журнал. Запуск всё
+			// равно завершится ошибкой.
 			if mismatch >= 10 {
 				return checked, mismatch, nil
 			}

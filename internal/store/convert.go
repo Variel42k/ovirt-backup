@@ -40,9 +40,8 @@ func toSeconds(d time.Duration) int64 { return int64(d / time.Second) }
 
 func fromSeconds(s int64) time.Duration { return time.Duration(s) * time.Second }
 
-// encodeJSON marshals v for a JSON column, never returning an error: the values
-// involved are plain slices and structs, and a storage layer that can fail on
-// serialising a []string is worse than one that stores an empty list.
+// encodeJSON сериализует v для столбца JSON. На входе простые срезы и структуры. При ошибке
+// возвращается пустой массив, чтобы слой хранения мог сохранить запись.
 func encodeJSON(v any) string {
 	b, err := json.Marshal(v)
 	if err != nil {
@@ -51,7 +50,7 @@ func encodeJSON(v any) string {
 	return string(b)
 }
 
-// decodeJSON unmarshals a JSON column, tolerating empty and legacy-null values.
+// decodeJSON unmarshals JSON столбец, терпимый пустые и наследие-null значения.
 func decodeJSON(s string, dst any) {
 	if s == "" || s == "null" {
 		return
@@ -72,7 +71,7 @@ func jsonOrNull(s string) string {
 	return s
 }
 
-// decodeStrings is the common case of a JSON array of strings.
+// decodeStrings является общим случаем JSON массива строк.
 func decodeStrings(s string) []string {
 	var out []string
 	decodeJSON(s, &out)

@@ -174,7 +174,7 @@ func TestPoolClosesIdleConnection(t *testing.T) {
 }
 
 // Больше MaxSessions одновременных сессий — второе соединение, а не отказ
-// sshd «administratively prohibited».
+// sshd «административно запрещено».
 func TestPoolOpensAnotherConnectionWhenSessionsExhausted(t *testing.T) {
 	srv := startServer(t)
 	p := New(time.Minute, 2)

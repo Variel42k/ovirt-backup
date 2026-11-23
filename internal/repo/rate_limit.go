@@ -7,9 +7,9 @@ import (
 	"time"
 )
 
-// rateLimitedBackend applies one aggregate write limit to all concurrent Put
-// calls that use this backend instance. The configured value is bytes/second;
-// zero is handled by Open and means unlimited.
+// rateLimitedBackend применяет один совокупный предел записи ко всем параллельным вызовам
+// Put, которые используют этот серверный экземпляр. Настраиваемое значение — байт/секунда;
+// Ноль обрабатывается открытым и означает неограниченный.
 type rateLimitedBackend struct {
 	Backend
 	limiter *byteRateLimiter
@@ -23,8 +23,8 @@ func (b *rateLimitedBackend) Put(ctx context.Context, key string, r io.Reader, s
 	return b.Backend.Put(ctx, key, &limitedReader{ctx: ctx, reader: r, limiter: b.limiter}, size)
 }
 
-// Keep storage-native S3 copies native. The limit applies when copyFrom says
-// the optimization is unavailable and the caller falls back to Get+Put.
+// Сохраняйте родные S3 копии. Ограничение применяется, когда copyFrom говорит, что
+// оптимизация недоступна, и код вызова возвращается к Get + Put.
 func (b *rateLimitedBackend) copyFrom(ctx context.Context, source Backend, key string, size int64) (int64, bool, error) {
 	copier, ok := b.Backend.(optimizedCopier)
 	if !ok {
@@ -44,7 +44,7 @@ type byteRateLimiter struct {
 }
 
 func newByteRateLimiter(bytesPerSecond int64) *byteRateLimiter {
-	chunk := bytesPerSecond / 4 // at most 250 ms between cancellation checks
+	chunk := bytesPerSecond / 4 // не более 250 мс между проверками отмены
 	if chunk < 1 {
 		chunk = 1
 	}

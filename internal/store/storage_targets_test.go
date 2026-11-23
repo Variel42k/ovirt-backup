@@ -131,9 +131,8 @@ func TestStorageTargetRoundTripKeepsEveryField(t *testing.T) {
 	}
 }
 
-// Deleting a repository that a job writes to turns that job into a scheduled
-// failure at two in the morning. Counting only the backups already in it is not
-// enough: a target configured yesterday has none yet and is still in use.
+// Тест проверяет зависимость задания от репозитория до появления первой копии. Удаление
+// такого репозитория сорвало бы запланированный запуск.
 func TestJobsOnTargetFindsJobsWithoutBackups(t *testing.T) {
 	ctx := context.Background()
 	st := newTestStore(t)
@@ -190,8 +189,8 @@ func TestJobsOnTargetFindsJobsWithoutBackups(t *testing.T) {
 	}
 }
 
-// A job listing several targets must be reported for each of them, and exactly
-// once even if a target were repeated.
+// Для каждой из них должно быть сообщено о нескольких целевых заданиях, и ровно один раз,
+// даже если цель была повторена.
 func TestJobsOnTargetHandlesMultipleTargets(t *testing.T) {
 	ctx := context.Background()
 	st := newTestStore(t)

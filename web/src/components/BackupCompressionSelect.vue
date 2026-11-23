@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useAppStore } from '@/stores/app'
+import BackupCompressionPreview from './BackupCompressionPreview.vue'
 
-const props = defineProps<{ modelValue: string }>()
+const props = defineProps<{ modelValue: string; serverId?: string; vms?: { id: string; name: string }[]; excludeDiskIds?: string[] }>()
 defineEmits<{ 'update:modelValue': [value: string] }>()
 const app = useAppStore()
 const options = computed(() => {
@@ -31,4 +32,6 @@ const options = computed(() => {
       </q-item>
     </template>
   </q-select>
+  <BackupCompressionPreview v-if="serverId && vms?.length" :server-id="serverId" :vms="vms" :exclude-disk-ids="excludeDiskIds"
+    @choose="value => $emit('update:modelValue', value)" />
 </template>

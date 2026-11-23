@@ -7,8 +7,8 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/backup"
 )
 
-// RestoreDomain is the whitelisted, portable description used to define a
-// persistent VM. It intentionally cannot carry arbitrary source XML.
+// RestoreDomain — это описанное в белом списке портативное описание, используемое для
+// определения постоянной ВМ. Он намеренно не может нести произвольный источник XML.
 type RestoreDomain struct {
 	Name    string
 	Profile *backup.VMProfile
@@ -32,8 +32,8 @@ type RestoreNIC struct {
 	Connected  bool
 }
 
-// RestoreDomainXML builds safe libvirt XML for a persistent restored VM.
-// Source UUIDs, MAC addresses and arbitrary source XML are never replayed.
+// RestoreDomainXML строит безопасную libvirt XML для постоянной восстановленной ВМ.
+// Источник UUIDs, MAC адреса и произвольный источник XML никогда не переигрываются.
 func RestoreDomainXML(spec RestoreDomain) (string, error) {
 	name := strings.TrimSpace(spec.Name)
 	if name == "" {
@@ -132,7 +132,7 @@ func RestoreDomainXML(spec RestoreDomain) (string, error) {
 		if !nic.Connected {
 			b.WriteString("      <link state='down'/>\n")
 		}
-		// No <mac>: libvirt generates a fresh address.
+		// Нет <mac>: libvirt генерирует новый адрес.
 		b.WriteString("    </interface>\n")
 	}
 	b.WriteString("    <channel type='unix'><target type='virtio' name='org.qemu.guest_agent.0'/></channel>\n")

@@ -1,5 +1,5 @@
-// Command ovirt-backup-server manages oVirt engines and their forks: it polls
-// their state, revives what it is allowed to revive, and runs the backups.
+// Команда ovirt-backup-server управляетъ oVirt движками и ихъ вилками: она опрашиваетъ ихъ
+// состояніе, оживляетъ то, что дозволено оживлять, и запускаетъ резервные копии.
 package main
 
 import (
@@ -30,7 +30,6 @@ import (
 	drcheck "github.com/Variel42k/ovirt-backup/internal/dr"
 	"github.com/Variel42k/ovirt-backup/internal/events"
 	"github.com/Variel42k/ovirt-backup/internal/filebackup"
-	"github.com/Variel42k/ovirt-backup/internal/gitclean"
 	"github.com/Variel42k/ovirt-backup/internal/libvirtx"
 	"github.com/Variel42k/ovirt-backup/internal/logging"
 	"github.com/Variel42k/ovirt-backup/internal/model"
@@ -49,7 +48,7 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/vmtransfer"
 )
 
-// version is stamped at build time with -ldflags "-X main.version=...".
+// version — штампуется при построении -ldflags "-X main.version=...".
 var version = "dev"
 
 func main() {
@@ -88,9 +87,8 @@ func run() error {
 		return nil
 	}
 
-	// A missing config file is not fatal: the built-in defaults plus JHV_
-	// environment variables are enough to start, which is what a container
-	// deployment wants.
+	// При отсутствии файла конфигурации достаточно встроенных настроек и переменных JHV_.
+	// Это позволяет запускать службу в контейнере без отдельного файла.
 	if _, err := os.Stat(*configPath); err != nil {
 		if !os.IsNotExist(err) {
 			return fmt.Errorf("доступ к конфигурации %s: %w", *configPath, err)
@@ -141,8 +139,8 @@ func run() error {
 		defer cancel()
 		return superviseConfiguredService(ctx, cfg)
 	}
-	// Keep the startup values separately: DELETE runtime-setting returns to
-	// YAML/environment even after the effective config is overlaid from DB.
+	// Храним исходную конфигурацию отдельно. При DELETE настройки возвращаем
+	// значение из YAML или окружения, даже если его ранее переопределили в БД.
 	baseCfg := *cfg
 
 	log, logs, err := logging.Setup(cfg.Logging)
@@ -189,12 +187,12 @@ func run() error {
 	}
 	st := store.New(db, cipher)
 	if *registerStorage != "" {
-		// Exit before any inventory polling, scheduler, retention or network
-		// listener starts. This operation is local installer administration.
+		// Выход до начала любого опроса инвентаря, планировщика, удержания или
+		// прослушивания сети. Эта операция является локальной установочной администрацией.
 		return setup.RegisterBackupStorage(ctx, st, *registerStorage, *registerReadOnly, os.Stdout)
 	}
-	// Recovery is deliberately completed before any scheduler, notification,
-	// DR or replication work starts. The one-off process has one job and exits.
+	// Завершаем восстановление до запуска планировщика, оповещений, DR и репликации. После
+	// этой операции одноразовый процесс завершается.
 	if *resetUser != "" {
 		password, revoked, err := api.RecoverLocalAccess(ctx, st, *resetUser,
 			os.Getenv("JHV_NEW_PASSWORD"), *revokeAllAccess)
@@ -305,13 +303,11 @@ func run() error {
 			return fmt.Errorf("создание первой учётной записи: %w", err)
 		}
 		if generated != "" {
-			// Printed once and never stored in clear text anywhere.
+			// Печатается один раз и нигде не хранится в ясном тексте.
 			//
-			// It goes to stderr as its own block rather than into a log field:
-			// as a field it landed at the end of a long sentence, and a terminal
-			// narrower than that sentence wraps the line, so copying the
-			// password picks up a newline or a stray space and the first login
-			// fails for a reason nobody can see.
+			// Пароль выводим отдельным блоком в stderr. В журнале он был полем длинной
+			// строки, которую терминал мог перенести. При копировании в пароль попадал
+			// пробел или перевод строки, и первый вход завершался ошибкой.
 			printCredentials(cfg.Auth.BootstrapUser, generated, "СОЗДАНА УЧЁТНАЯ ЗАПИСЬ АДМИНИСТРАТОРА")
 			log.Warn().Str("пользователь", cfg.Auth.BootstrapUser).
 				Msg("создана учётная запись администратора, пароль напечатан отдельным блоком")
@@ -332,8 +328,8 @@ func run() error {
 		log.Warn().Err(err).Msg("не удалось обновить назначения бэкапа из сохранённого инвентаря доменов")
 	}
 
-	// Bare libvirt hosts are reached over SSH; the pool keeps one session per
-	// hypervisor and redials when it dies.
+	// К автономным хостам libvirt подключаемся через SSH. Пул держит один сеанс на
+	// гипервизор и восстанавливает его после разрыва.
 	libvirtPool := libvirtx.NewPool(loadServer, cfg.Monitor.Timeout, log)
 	defer libvirtPool.Close()
 	// Хосты СУБД и узлы Proxmox тоже получают соединения из пула, чтобы не
@@ -364,18 +360,17 @@ func run() error {
 		log.Info().Dur("карантин", cfg.Backup.PurgeDelay).
 			Msg("удалённые копии стираются не сразу: до срока их можно вернуть")
 	}
-	// The dispatcher adds the libvirt path on top of the oVirt engine; it
-	// cannot live inside the backup package because the KVM driver builds on
-	// that package's storage format.
+	// Диспетчеръ прибавляетъ libvirt путь поверхъ oVirt движка; он не может жить внутри
+	// пакета резервного копирования, потому что драйвер KVM опирается на формат хранения
+	// этого пакета.
 	dispatcher := dispatch.New(engine, st, libvirtPool, cfg.Backup, cipher, log)
 	dispatcher.SetProxmoxPool(proxmoxPool)
+	go dispatcher.RunCompressionPreviewRecovery(ctx)
 	fileBackupEngine := filebackup.New(st, *cfg, cipher, log)
 	dbDumpEngine := dbdump.New(st, *cfg, cipher, log)
 	discoveryEngine := discovery.New(st, cfg.Discovery, log)
 	dispatcher.SetTelemetryMonitor(dbDumpEngine)
 	dbDumpEngine.RecoverInterrupted(ctx)
-	gitCleanEngine := gitclean.New(st, log)
-	gitCleanEngine.FailInterrupted(ctx)
 
 	if backup.QemuImgAvailable(cfg.Backup.QemuImgPath) {
 		log.Info().Msg("qemu-img найден: доступны бэкап qcow2 с oVirt 4.3, экспорт в qcow2 и проверка qemu-img check")
@@ -383,9 +378,9 @@ func run() error {
 		log.Warn().Msg("qemu-img не найден в среде службы: недоступны бэкап qcow2 с oVirt 4.3, экспорт в qcow2 и qemu-img check")
 	}
 
-	// Runs that were executing when the previous process died still hold locks
-	// on the engine side; clearing them first prevents every later backup of
-	// those VMs from failing.
+	// Запуски, которые выполнялись, когда предыдущий процесс умер, все еще держат замки на
+	// стороне движка; Очистка сначала предотвращает отказ каждой последующей резервной
+	// копии этих ВМ.
 	if err := engine.ReconcileStaleRuns(ctx); err != nil {
 		log.Warn().Err(err).Msg("не удалось разобрать незавершённые бэкапы предыдущего запуска")
 	}
@@ -434,8 +429,8 @@ func run() error {
 	sched.SetFileBackupEngine(fileBackupEngine)
 	sched.SetDBDumpEngine(dbDumpEngine)
 
-	// The mode is stored, not configured: an operator halfway through observing
-	// the automation must not be dropped into live mode by a restart.
+	// Режим сохраняется, а не настраивается: оператор на полпути, наблюдающий за
+	// автоматизацией, не должен переключаться в режим реального времени при перезапуске.
 	if err := remediator.RestoreMode(ctx); err != nil {
 		return fmt.Errorf("восстановление режима авто-восстановления: %w", err)
 	}
@@ -487,7 +482,7 @@ func run() error {
 		Scheduler: sched, Monitor: mon, Remediator: remediator, Bus: bus, Logger: log,
 		Logs: logs, Quality: qualityService, Replicator: replicator, Notifier: notifier,
 		Notifications: notificationManager, DR: drChecker,
-		FileBackup: fileBackupEngine, DBDump: dbDumpEngine, GitClean: gitCleanEngine, AuditFile: auditFile,
+		FileBackup: fileBackupEngine, DBDump: dbDumpEngine, AuditFile: auditFile,
 		Discovery: discoveryEngine,
 	})
 
@@ -509,8 +504,9 @@ func run() error {
 		Addr:        cfg.Server.ListenAddr(),
 		Handler:     apiServer.Handler(),
 		ReadTimeout: cfg.Server.ReadTimeout,
-		// WriteTimeout stays unset by default: restoring a disk streams for
-		// hours through this handler, and a write deadline would cut it off.
+		// WriteTimeout остается неустановленным по умолчанию: восстановление потоков диска
+		// в течение нескольких часов через этот обработчик, и крайний срок записи отрежет
+		// его.
 		WriteTimeout:      cfg.Server.WriteTimeout,
 		ReadHeaderTimeout: 15 * time.Second,
 	}
@@ -688,14 +684,14 @@ func superviseLeadership(ctx context.Context, st *store.Store, poll time.Duratio
 	}
 }
 
-// printCredentials writes an account's credentials to stderr as a block that
-// survives being copied.
+// printCredentials записывает учётные данные аутентификации учётной записи в stderr как
+// блок, который остается скопированным.
 //
-// The password used to be a field on a log line, after a sentence long enough
-// to wrap on a normal terminal. A wrapped line copies with a newline in the
+// Пароль раньше был полем на строке журнала, после предложения достаточно долго, чтобы
+// обернуть на обычном терминале. Обёрнутая строка с новой строкой в
 // middle of the value, and the login then fails with "неверный пароль" — the
-// one error message that gives the operator nothing to work with. On its own
-// line, delimited, it cannot pick up neighbouring text.
+// Одно сообщение об ошибке не помогает оператору найти причину. Отдельная строка с
+// границами защищает пароль от попадания соседнего текста при копировании.
 func printCredentials(username, password, title string) {
 	const rule = "════════════════════════════════════════════════════════════"
 	fmt.Fprintf(os.Stderr, "\n%s\n  %s\n\n  пользователь: %s\n  пароль:       %s\n\n"+

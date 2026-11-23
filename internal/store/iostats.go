@@ -17,7 +17,7 @@ const mountSampleColumns = `id, server_id, kind, target, source, healthy, state,
 	retransmits, major_timeouts, bad_transfers, avg_rtt_ms, avg_exec_ms, queue_ms,
 	read_bps, write_bps, detail, at`
 
-// AddDiskSamples appends a batch of disk observations.
+// AddDiskSamples прилагает партию дисковых наблюдений.
 func (s *Store) AddDiskSamples(ctx context.Context, samples []model.DiskSample) error {
 	if len(samples) == 0 {
 		return nil
@@ -47,7 +47,7 @@ func (s *Store) AddDiskSamples(ctx context.Context, samples []model.DiskSample) 
 	})
 }
 
-// AddMountSamples appends a batch of storage-path observations.
+// AddMountSamples прилагает партию наблюдений пути хранения.
 func (s *Store) AddMountSamples(ctx context.Context, samples []model.MountSample) error {
 	if len(samples) == 0 {
 		return nil
@@ -73,16 +73,16 @@ func (s *Store) AddMountSamples(ctx context.Context, samples []model.MountSample
 	})
 }
 
-// surrogateID builds a monotonic-ish key without a sequence.
+// surrogateID строит монотонный ключ без последовательности.
 //
-// Neither AUTOINCREMENT nor SERIAL exists on both engines, and the samples only
-// ever need to be ordered, never referenced. Microseconds leave enough room for
-// a hundred rows written in the same instant.
+// Ни AUTOINCREMENT, ни SERIAL не существует на обоих движках, и образцы только когда-либо
+// должны быть заказаны, никогда не ссылаются. Микросекунды оставляют достаточно места для
+// сотни строк, написанных в один и тот же момент.
 func surrogateID(at time.Time, index int) int64 {
 	return at.UnixMicro()*100 + int64(index%100)
 }
 
-// DiskSampleFilter narrows a query for the charts.
+// DiskSampleFilter сужает запрос к диаграммам.
 type DiskSampleFilter struct {
 	ServerID string
 	RunID    string
@@ -96,8 +96,8 @@ type DiskSampleFilter struct {
 	Limit          int
 }
 
-// ListDiskSamples returns disk observations oldest-first, which is the order a
-// chart draws them in.
+// ListDiskSamples возвращает данные наблюдений за диском сначала старыми, то есть в том
+// порядке, в котором их рисует диаграмма.
 func (s *Store) ListDiskSamples(ctx context.Context, f DiskSampleFilter) ([]*model.DiskSample, error) {
 	query := `SELECT ` + diskSampleColumns + ` FROM disk_samples WHERE server_id=?`
 	args := []any{f.ServerID}
@@ -128,8 +128,8 @@ func (s *Store) ListDiskSamples(ctx context.Context, f DiskSampleFilter) ([]*mod
 	if limit <= 0 {
 		limit = 5000
 	}
-	// Newest first in SQL so the limit keeps the recent end of the window, then
-	// reversed in Go: a chart cut off at its right edge is worse than useless.
+	// Новейший сначала в SQL, так что предел сохраняет недавний конец окна, а затем
+	// перевернутый в Go: диаграмма, отрезанная на ее правом краю, хуже, чем бесполезна.
 	query += ` ORDER BY at DESC LIMIT ?`
 	args = append(args, limit)
 
@@ -164,7 +164,7 @@ func (s *Store) ListDiskSamples(ctx context.Context, f DiskSampleFilter) ([]*mod
 	return out, nil
 }
 
-// ListMountSamples returns storage-path observations oldest-first.
+// ListMountSamples возвращает наблюдения пути хранения самым старым.
 func (s *Store) ListMountSamples(ctx context.Context, serverID, target string,
 	since time.Time, limit int) ([]*model.MountSample, error) {
 
@@ -215,11 +215,11 @@ func (s *Store) ListMountSamples(ctx context.Context, serverID, target string,
 	return out, nil
 }
 
-// LatestMountSamples returns the most recent observation of every storage path
-// on a server — the overview a dashboard needs.
+// LatestMountSamples возвращает самое последнее наблюдение за каждым путем хранения на
+// сервере — обзор, необходимый панели управления.
 func (s *Store) LatestMountSamples(ctx context.Context, serverID string) ([]*model.MountSample, error) {
-	// Last hour is enough to be "current" and bounds the scan; a path that has
-	// not been sampled in an hour is not being monitored anyway.
+	// Последним часом достаточно быть "current" и ограничивает сканирование; Путь, который
+	// не был выбран в течение часа, в любом случае не контролируется.
 	samples, err := s.ListMountSamples(ctx, serverID, "", time.Now().Add(-time.Hour), 2000)
 	if err != nil {
 		return nil, err
@@ -287,7 +287,7 @@ func (s *Store) GuestWritesDuringRuns(ctx context.Context, serverID string, runI
 	return out, rows.Err()
 }
 
-// PruneIOSamples drops observations older than the retention window.
+// PruneIOSamples сбрасывает наблюдения, более старые, чем удерживающее окно.
 func (s *Store) PruneIOSamples(ctx context.Context, before time.Time) (int64, error) {
 	cutoff := before
 	var total int64

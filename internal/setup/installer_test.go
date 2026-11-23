@@ -9,8 +9,8 @@ import (
 	"testing"
 )
 
-// Extract function definitions only: never source/execute the actual installer
-// (which would affect services, Docker volumes and production databases).
+// Извлекайте только определения функций: никогда не создавайте/выполняйте фактический
+// установщик (что повлияет на службы, Docker тома и производственные базы данных).
 func installerFunctions(t *testing.T, names ...string) string {
 	t.Helper()
 	raw, err := os.ReadFile("../../deploy/install.sh")
@@ -66,7 +66,8 @@ func TestInstallerUpdatePreservesPasswordLoginWithoutQuestions(t *testing.T) {
 func TestInstallerUpdateLoadsKeycloakAndExternalOIDC(t *testing.T) {
 	source := installerFunctions(t, "env_file_value", "load_existing_oidc", "choose_oidc")
 	for _, profile := range []string{"keycloak", "metrics"} {
-		// All test state is created by the fixture in its own temporary directory.
+		// Все тестовое состояние создается приспособлением в собственном временном
+		// каталоге.
 		script := `WORK=$(mktemp -d); trap 'rm -f "$WORK/.env"; rmdir "$WORK"' EXIT
 printf '%s\n' 'JHV_OIDC_ENABLED=true' 'COMPOSE_PROFILES=` + profile + `' 'JHV_OIDC_ISSUER=https://kc/realms/existing' 'JHV_OIDC_CLIENT_ID=existing' 'JHV_OIDC_CLIENT_SECRET=test-only' > "$WORK/.env"
 UPDATE_REQUESTED=1; MIGRATION_ACTIVE=0; OIDC_MODE=''; OIDC_EXISTING=0
@@ -101,8 +102,8 @@ func TestInstallerDataPathDialogDoesNotCapturePrompt(t *testing.T) {
 }
 
 func TestInstallerUpdateDoesNotAskToReconfigureAD(t *testing.T) {
-	// Simulate a terminal while keeping deterministic scripted input. The
-	// production terminal check itself is not mocked anywhere in install.sh.
+	// Имитация терминала при сохранении детерминированного скриптового ввода. Сама проверка
+	// производственного терминала нигде не высмеивается install.sh.
 	source := strings.ReplaceAll(installerFunctions(t, "prepare_keycloak_ad"), "[ -t 0 ]", "true")
 	output := installerShell(t, source+`OIDC_MODE=keycloak; KEYCLOAK_AD_REQUESTED=0; UPDATE_REQUESTED=1; MIGRATION_ACTIVE=0
 prepare_keycloak_ad`, "", false)

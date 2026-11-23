@@ -1,7 +1,7 @@
 import { expect, test, type Page } from '@playwright/test'
 
 async function settingsFixture(page: Page, options: { admin?: boolean; failSave?: boolean } = {}) {
-  let sections = { discovery: true, gitlab_clean: true }
+  let sections = { discovery: true }
   const requests: string[] = []
   await page.route('**/api/v1/**', async route => {
     const request = route.request(), path = new URL(request.url()).pathname.replace('/api/v1', '')
@@ -33,30 +33,21 @@ test('разделы сохраняются и закрываются в мен�
   page.on('pageerror', error => errors.push(error.message))
   await page.goto('/settings')
   const discovery = page.getByLabel('Раздел Поиск сервисов', { exact: true })
-  const gitlab = page.getByLabel('Раздел Очистка GitLab', { exact: true })
   await expect(discovery).toHaveAttribute('aria-checked', 'true')
   await discovery.click()
   await expect(discovery).toHaveAttribute('aria-checked', 'false')
-  await gitlab.click()
-  await expect(gitlab).toHaveAttribute('aria-checked', 'false')
-  expect(fixture.sections()).toEqual({ discovery: false, gitlab_clean: false })
+  expect(fixture.sections()).toEqual({ discovery: false })
   await page.reload()
   await expect(discovery).toHaveAttribute('aria-checked', 'false')
-  await expect(gitlab).toHaveAttribute('aria-checked', 'false')
   await expect(page.locator('a[href="/discovery"]')).toHaveCount(0)
-  await expect(page.locator('a[href="/gitlab-clean"]')).toHaveCount(0)
   await page.goto('/discovery')
   await expect(page).toHaveURL(/\/settings$/)
-  await page.goto('/gitlab-clean')
-  await expect(page).toHaveURL(/\/settings$/)
   expect(fixture.requests).not.toContain('GET /discovery')
-  expect(fixture.requests).not.toContain('GET /gitlab-clean/hosts')
   await page.getByTestId('web-sections-settings').scrollIntoViewIfNeeded()
   await page.screenshot({ path: info.outputPath('web-sections.png'), animations: 'disabled' })
   await discovery.click()
   await expect(discovery).toHaveAttribute('aria-checked', 'true')
-  await expect(gitlab).toHaveAttribute('aria-checked', 'false')
-  expect(fixture.sections()).toEqual({ discovery: true, gitlab_clean: false })
+  expect(fixture.sections()).toEqual({ discovery: true })
   expect(errors).toEqual([])
 })
 

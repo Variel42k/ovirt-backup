@@ -1,0 +1,33 @@
+npm notice run ovirt-backup-web@0.1.0 npx
+npm notice run playwright test e2e/backup-compression.spec.ts --reporter=list
+
+Running 22 tests using 1 worker
+
+(node:27424) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ok  1 [desktop] › e2e\backup-compression.spec.ts:37:44 › алгоритм lz4 сохраняется в задании и после перезагрузки (3.3s)
+  ok  2 [desktop] › e2e\backup-compression.spec.ts:37:44 › алгоритм brotli сохраняется в задании и после перезагрузки (2.0s)
+  ok  3 [desktop] › e2e\backup-compression.spec.ts:70:36 › выбор системной настройки сохраняется явно (1.1s)
+  ok  4 [desktop] › e2e\backup-compression.spec.ts:70:36 › выбор none сохраняется явно (1.1s)
+  ok  5 [desktop] › e2e\backup-compression.spec.ts:83:1 › Proxmox не предлагает неприменимое сжатие чанков (837ms)
+  ok  6 [desktop] › e2e\backup-compression.spec.ts:91:1 › фактический процент использует охваченные диски и не маскирует увеличение (2ms)
+  ok  7 [desktop] › e2e\backup-compression.spec.ts:100:40 › оценка до первой копии подтверждается отдельно и позволяет выбрать кодек light (1.5s)
+  ok  8 [desktop] › e2e\backup-compression.spec.ts:100:40 › оценка до первой копии подтверждается отдельно и позволяет выбрать кодек dark (1.5s)
+  ok  9 [desktop] › e2e\backup-compression.spec.ts:135:1 › фактическая экономия в карточке не включает дополнительный образ (1.2s)
+  ok 10 [desktop] › e2e\backup-compression.spec.ts:155:1 › отмена оценки закрывает окно и не применяет поздний ответ (1.8s)
+  ok 11 [desktop] › e2e\backup-compression.spec.ts:173:1 › нулевая выборка не показывает выдуманный процент сжатия (1.4s)
+(node:22392) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ok 12 [mobile] › e2e\backup-compression.spec.ts:37:44 › алгоритм lz4 сохраняется в задании и после перезагрузки (2.0s)
+  ok 13 [mobile] › e2e\backup-compression.spec.ts:37:44 › алгоритм brotli сохраняется в задании и после перезагрузки (1.9s)
+  ok 14 [mobile] › e2e\backup-compression.spec.ts:70:36 › выбор системной настройки сохраняется явно (1.2s)
+  ok 15 [mobile] › e2e\backup-compression.spec.ts:70:36 › выбор none сохраняется явно (1.2s)
+  ok 16 [mobile] › e2e\backup-compression.spec.ts:83:1 › Proxmox не предлагает неприменимое сжатие чанков (776ms)
+  ok 17 [mobile] › e2e\backup-compression.spec.ts:91:1 › фактический процент использует охваченные диски и не маскирует увеличение (2ms)
+  ok 18 [mobile] › e2e\backup-compression.spec.ts:100:40 › оценка до первой копии подтверждается отдельно и позволяет выбрать кодек light (1.5s)
+  ok 19 [mobile] › e2e\backup-compression.spec.ts:100:40 › оценка до первой копии подтверждается отдельно и позволяет выбрать кодек dark (1.5s)
+  ok 20 [mobile] › e2e\backup-compression.spec.ts:135:1 › фактическая экономия в карточке не включает дополнительный образ (841ms)
+  ok 21 [mobile] › e2e\backup-compression.spec.ts:155:1 › отмена оценки закрывает окно и не применяет поздний ответ (1.7s)
+  ok 22 [mobile] › e2e\backup-compression.spec.ts:173:1 › нулевая выборка не показывает выдуманный процент сжатия (1.3s)
+
+  22 passed (31.6s)

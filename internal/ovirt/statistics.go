@@ -13,8 +13,8 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
-// decimal accepts both JSON numbers and the quoted numbers returned by some
-// oVirt-compatible engines.
+// decimal принимает числа JSON и числовые строки, которые возвращают некоторые совместимые с
+// oVirt движки.
 type decimal float64
 
 func (d *decimal) UnmarshalJSON(raw []byte) error {
@@ -65,9 +65,8 @@ func diskSampleFromStatistics(serverID, vmID string, disk Disk, list statisticLi
 		ReadBytesPerSec: max(0, int64(read)), WriteBytesPerSec: max(0, int64(write)),
 		ReadLatencyUS: -1, WriteLatencyUS: -1, FlushLatencyUS: -1, At: at,
 	}
-	// The API documents latency in seconds. Preserve sub-millisecond values;
-	// rounding straight to an integer second would make a healthy disk look
-	// artificially instantaneous.
+	// API Задержка документов в секундах. Сохранение субмиллисекундных значений; округление
+	// прямо до целочисленной секунды сделало бы здоровый диск искусственно мгновенным.
 	if hasReadLatency {
 		sample.ReadLatencyUS = max(0, int64(math.Round(readLatency*1_000_000)))
 	}
@@ -80,9 +79,9 @@ func diskSampleFromStatistics(serverID, vmID string, disk Disk, list statisticLi
 	return sample
 }
 
-// VMDiskStatistics returns the latest rates published by the engine for each
-// disk attached to a VM. These are gauges maintained by oVirt, so no local
-// counter baseline is needed.
+// VMDiskStatistics возвращает последние значения скорости, опубликованные движком для
+// каждого диска, подключенного к ВМ. Это датчики, поддерживаемые oVirt, поэтому нет
+// необходимости в местной встречной базовой линии.
 func (c *Client) VMDiskStatistics(ctx context.Context, serverID, vmID string) ([]model.DiskSample, error) {
 	disks, err := c.ListVMDisks(ctx, vmID)
 	if err != nil {
@@ -91,9 +90,9 @@ func (c *Client) VMDiskStatistics(ctx context.Context, serverID, vmID string) ([
 	return c.DiskStatistics(ctx, serverID, vmID, disks)
 }
 
-// DiskStatistics reads gauges for an already resolved disk list. A backup
-// keeps attachments locked, so its high-frequency monitor can resolve them
-// once instead of reloading the full attachment collection on every tick.
+// DiskStatistics считывает датчики для уже разрешенного списка дисков. Резервное
+// копирование блокирует вложения, поэтому его высокочастотный монитор может решить их один
+// раз, вместо того, чтобы перезагружать полную коллекцию вложений на каждом галочке.
 func (c *Client) DiskStatistics(ctx context.Context, serverID, vmID string, disks []Disk) ([]model.DiskSample, error) {
 	at := time.Now().UTC()
 	out := make([]model.DiskSample, 0, len(disks))
@@ -102,8 +101,8 @@ func (c *Client) DiskStatistics(ctx context.Context, serverID, vmID string, disk
 		path := fmt.Sprintf("/vms/%s/disks/%s/statistics", vmID, disk.ID)
 		err := c.get(ctx, path, &statistics)
 		if IsNotFound(err) {
-			// Newer API models expose attachments separately, but all supported
-			// engines retain the global disk statistics endpoint.
+			// Новые версии API показывают подключения отдельно. Во всех поддерживаемых
+			// движках сохраняется общая конечная точка статистики дисков.
 			err = c.get(ctx, "/disks/"+disk.ID+"/statistics", &statistics)
 		}
 		if err != nil {
@@ -123,8 +122,8 @@ type guestDiskUsage struct {
 	Used  decimal `json:"used"`
 }
 
-// VMGuestFilesystems returns the filesystems the guest has mounted, as the
-// guest agent reported them to the engine (statistic disks.usage).
+// VMGuestFilesystems возвращает файловые системы, установленные гостем, так как гостевой
+// агент сообщил о них движку (статистический disks.usage).
 //
 // Пустой список без ошибки — агент ещё не сообщил: движок получает эти
 // сведения позже, чем имя хоста и версию ОС.

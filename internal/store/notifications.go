@@ -13,9 +13,9 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
-// NotificationSettingsOverride returns the database layer over startup
-// configuration. The row is created by the migration, but an empty result is
-// tolerated to make rolling upgrades less brittle.
+// NotificationSettingsOverride возвращает уровень базы данных над конфигурацией запуска.
+// Ряд создается миграцией, но пустой результат допускается, чтобы сделать катание апгрейдов
+// менее хрупким.
 func (s *Store) NotificationSettingsOverride(ctx context.Context) (model.NotificationSettingsOverride, error) {
 	var out model.NotificationSettingsOverride
 	var enabled, resolved, ackStops sql.NullBool
@@ -127,16 +127,16 @@ func (s *Store) ReplaceNotificationPolicies(ctx context.Context, policies []mode
 	})
 }
 
-// SetNotificationConfiguration atomically replaces the global database
-// override and every per-kind policy. Alerts are made due in the same
-// transaction, so dispatchers can never observe a half-applied policy set.
+// SetNotificationConfiguration заменяет общие настройки и все политики по типам одной
+// транзакцией. Этой же транзакцией помечаем оповещения к отправке, чтобы диспетчер применял
+// правила целиком.
 func (s *Store) SetNotificationConfiguration(ctx context.Context, value model.NotificationSettings,
 	policies []model.NotificationPolicy, actor string) error {
 	return s.replaceNotificationConfiguration(ctx, &value, policies, actor)
 }
 
-// ResetNotificationConfiguration removes database overrides and policies as
-// one operation, returning delivery behaviour to the startup configuration.
+// ResetNotificationConfiguration удаляет переопределения базы данных и политики как одну
+// операцию, возвращая поведение доставки в конфигурацию запуска.
 func (s *Store) ResetNotificationConfiguration(ctx context.Context, actor string) error {
 	return s.replaceNotificationConfiguration(ctx, nil, nil, actor)
 }
@@ -197,17 +197,17 @@ func (s *Store) replaceNotificationConfiguration(ctx context.Context, value *mod
 	return nil
 }
 
-// WakeNotificationAlerts makes current problems eligible after a policy
-// change. Muted alerts remain excluded by the claim query.
+// WakeNotificationAlerts делает текущие проблемы приемлемыми после изменения политики.
+// Приглушенные предупреждения остаются исключенными запросом на утверждение.
 func (s *Store) WakeNotificationAlerts(ctx context.Context) error {
 	_, err := s.db.Exec(ctx, `UPDATE alerts SET next_notification_at=?
 		WHERE state IN ('firing','acked')`, time.Now().UTC())
 	return err
 }
 
-// ClaimNotificationAlert leases one due alert. It is safe for multiple
-// application instances: FOR UPDATE SKIP LOCKED plus the lease prevents two
-// dispatchers from scheduling the same reminder.
+// ClaimNotificationAlert аренда́ ж. об. дѣйств. по знач. глаг. Это безопасно для нескольких
+// случаев применения: FOR UPDATE SKIP LOCKED плюс аренда не позволяет двум диспетчерам
+// планировать одно и то же напоминание.
 func (s *Store) ClaimNotificationAlert(ctx context.Context, worker string, lease time.Duration) (*model.Alert, bool, error) {
 	now := time.Now().UTC()
 	row := s.db.QueryRow(ctx, `WITH picked AS (
@@ -264,8 +264,8 @@ func scanAlert(row notificationRowScanner) (*model.Alert, error) {
 	return &a, nil
 }
 
-// ScheduleNotification converts a leased alert into per-channel outbox rows
-// and advances its reminder clock atomically.
+// ScheduleNotification преобразует арендованное оповещение в строки исходящих каналов и
+// продвигает свои часы напоминания атомарно.
 func (s *Store) ScheduleNotification(ctx context.Context, worker string, alert *model.Alert,
 	event model.NotificationEvent, channels []string, payload []byte, next *time.Time) error {
 	return s.db.InTx(ctx, func(tx *sql.Tx) error {

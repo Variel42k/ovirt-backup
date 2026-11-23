@@ -107,8 +107,8 @@ func TestRefineOVirtProduct(t *testing.T) {
 		{KindOVirt, "Red Hat Virtualization Manager", KindRHV},
 		{KindOVirt, "Oracle Linux Virtualization Manager", KindOLVM},
 		{KindOVirt, "oVirt Engine", KindOVirt},
-		// A fork explicitly selected by the operator must not be downgraded by a
-		// generic compatibility name returned by its API.
+		// Вилка, явно выбранная оператором, не должна быть понижена общим именем
+		// совместимости, возвращаемым его API.
 		{KindRedVirt, "oVirt Engine", KindRedVirt},
 	}
 	for _, tt := range tests {

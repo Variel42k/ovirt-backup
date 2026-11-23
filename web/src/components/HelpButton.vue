@@ -4,11 +4,10 @@ import { notifyError } from '@/api/client'
 import { useAppStore } from '@/stores/app'
 import HelpArticleBody from './HelpArticleBody.vue'
 
-// A question mark next to the field it explains.
+// Значок вопроса рядом с полем, которое он поясняет.
 //
-// The point is the placement: an operator picking a backup type wants to know
-// how changed-block tracking works at that moment, without leaving the form. The article
-// is fetched on first open, so pages that never ask pay nothing.
+// Оператор может прочесть об отслеживании изменённых блоков прямо в форме выбора бэкапа.
+// Статья загружается при первом открытии.
 
 const props = defineProps<{
   /** Идентификатор статьи из ответа /help. */

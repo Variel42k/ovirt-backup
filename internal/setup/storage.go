@@ -16,9 +16,9 @@ type StorageRegistry interface {
 	CreateStorageTarget(context.Context, *model.StorageTarget) error
 }
 
-// RegisterBackupStorage only registers a local directory. It never imports,
-// deletes, rewrites, or recursively changes permissions on repository objects.
-// The operator reviews catalog entries in the web UI before importing them.
+// RegisterBackupStorage регистрирует только локальный каталог. Он никогда не импортирует,
+// не удаляет, не переписывает и не изменяет разрешения на объекты репозитория.
+// Оператор просматривает записи каталога в Интернете UI перед их импортом.
 func RegisterBackupStorage(ctx context.Context, st StorageRegistry, directory string, readOnly bool, out io.Writer) error {
 	if !filepath.IsAbs(directory) {
 		return fmt.Errorf("каталог копий должен быть абсолютным")

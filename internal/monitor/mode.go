@@ -12,17 +12,14 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
-// Switching auto-remediation between check and live mode, and the archive that
-// closing a check period leaves behind.
+// Переключение автовосстановления между проверкой и живым режимом, а архив, закрывающий
+// период проверки, оставляет позади.
 //
-// The archive is the point of the whole arrangement. Check mode is not a
-// setting, it is an experiment: the operator turns it on to find out what the
-// automation would do to production, watches for a while, and then decides. The
-// decision deserves evidence, and after the switch the live records start
-// mixing in — so the observations are collected at the moment the period ends,
-// while their boundaries are still exact.
+// В режиме проверки оператор наблюдает за решениями и определяет, можно ли включить
+// автоматические действия. При закрытии периода сохраняем точный набор наблюдений, пока к
+// ним не добавились записи рабочего режима.
 
-// ModeArchive is the document written when a check period closes.
+// ModeArchive является документом, написанным при закрытии контрольного периода.
 type ModeArchive struct {
 	PeriodID  string    `json:"period_id"`
 	StartedAt time.Time `json:"started_at"`
@@ -38,11 +35,11 @@ type ModeArchive struct {
 	Decisions []model.RemediationRecord `json:"decisions"`
 }
 
-// SwitchMode changes the remediation mode and returns the period it closed.
+// SwitchMode изменяет режим восстановления и возвращает период, который он закрыл.
 //
-// Closing and opening happen together: there is always exactly one period in
-// force, so a decision recorded a millisecond after the switch belongs
-// unambiguously to the new mode.
+// Закрытие и открытие происходят вместе: всегда действует ровно один период, поэтому
+// решение, записанное через миллисекунду после переключения, однозначно относится к новому
+// режиму.
 func (r *Remediator) SwitchMode(ctx context.Context, dryRun bool, changedBy, note string) (*model.RemediationPeriod, *model.RemediationPeriod, error) {
 	current, err := r.store.CurrentRemediationPeriod(ctx, r.cfg.DryRun)
 	if err != nil {
@@ -55,13 +52,14 @@ func (r *Remediator) SwitchMode(ctx context.Context, dryRun bool, changedBy, not
 	var archivePath string
 	var digest *model.RemediationDigest
 
-	// Only a check period produces an archive: for a live period the record of
-	// what happened is the remediation history itself.
+	// Только период проверки создает архив: для живого периода запись о том, что произошло,
+	// является самой историей восстановления.
 	if current.DryRun {
 		archivePath, digest, err = r.archivePeriod(ctx, current, changedBy, note)
 		if err != nil {
-			// A failed archive must not trap the operator in check mode — but it
-			// must be loud, because the evidence they were collecting is gone.
+			// Неудавшийся архив не должен задерживать оператора в режиме проверки, но он
+			// должен быть громким, потому что доказательства, которые они собирали,
+			// исчезли.
 			r.log.Error().Err(err).Str("период", current.ID).
 				Msg("НЕ УДАЛОСЬ СОХРАНИТЬ АРХИВ РЕЖИМА ПРОВЕРКИ — режим переключён, но наблюдения не сохранены")
 		}
@@ -70,10 +68,8 @@ func (r *Remediator) SwitchMode(ctx context.Context, dryRun bool, changedBy, not
 	if err := r.store.CloseRemediationPeriod(ctx, current.ID, archivePath, digest); err != nil {
 		return nil, nil, err
 	}
-	// Reflect the close on the returned object: the caller renders it straight
-	// away, and a freshly archived period that reports no archive would send
-	// the operator looking for a file the interface just told them not to
-	// expect.
+	// Отмечаем закрытие периода в возвращаемом объекте, чтобы интерфейс сразу показал созданный
+	// архив.
 	closedAt := time.Now().UTC()
 	current.EndedAt = &closedAt
 	current.ArchivePath = archivePath
@@ -105,7 +101,7 @@ func (r *Remediator) SwitchMode(ctx context.Context, dryRun bool, changedBy, not
 	return current, opened, nil
 }
 
-// archivePeriod collects the decisions of a period and writes them to disk.
+// archivePeriod собирает решения периода и записывает их на диск.
 func (r *Remediator) archivePeriod(ctx context.Context, period *model.RemediationPeriod,
 	closedBy, closeNote string) (string, *model.RemediationDigest, error) {
 
@@ -151,11 +147,11 @@ func (r *Remediator) archivePeriod(ctx context.Context, period *model.Remediatio
 	return path, &digest, nil
 }
 
-// writeArchive stores the document as indented JSON.
+// writeArchive хранит документ как отступ JSON.
 //
-// Plain JSON rather than a compressed blob: this is an audit artefact that
-// somebody may have to read a year later, possibly without this service
-// running, and the volume is decisions rather than disk images.
+// Обычный JSON вместо сжатого шарика: это артефакт аудита, который кому-то, возможно,
+// придется прочитать год спустя, возможно, без запуска этой службы, а объем — решения, а не
+// образы диска.
 func (r *Remediator) writeArchive(period *model.RemediationPeriod, archive ModeArchive) (string, error) {
 	dir := r.cfg.ArchiveDir
 	if dir == "" {
@@ -173,15 +169,15 @@ func (r *Remediator) writeArchive(period *model.RemediationPeriod, archive ModeA
 	if err != nil {
 		return "", err
 	}
-	// 0o640: an archive names the VMs and hosts of the installation, which is
-	// not something to leave world-readable.
+	// 0o640: архив имен ВМ и хостов установки, что не является чем-то, что можно прочитать
+	// во всем мире.
 	if err := os.WriteFile(path, body, 0o640); err != nil {
 		return "", fmt.Errorf("запись архива %s: %w", path, err)
 	}
 	return path, nil
 }
 
-// ReadArchive loads a stored archive.
+// ReadArchive загружает хранимый архив.
 func ReadArchive(path string) (*ModeArchive, error) {
 	body, err := os.ReadFile(path)
 	if err != nil {
@@ -194,12 +190,10 @@ func ReadArchive(path string) (*ModeArchive, error) {
 	return &archive, nil
 }
 
-// RestoreMode re-applies the stored mode at startup.
+// RestoreMode повторно применяет сохраненный режим при запуске.
 //
-// The stored mode wins over the configured one: an operator who left check mode
-// last month should not be put back into it by an unrelated restart, and — more
-// importantly — one who is still observing should not have the automation start
-// acting because the service happened to restart.
+// После перезапуска используем сохранённый режим. Иначе перезапуск мог бы вернуть оператора
+// в завершённую проверку или включить реальные действия, пока он ещё наблюдает.
 func (r *Remediator) RestoreMode(ctx context.Context) error {
 	period, err := r.store.CurrentRemediationPeriod(ctx, r.cfg.DryRun)
 	if err != nil {

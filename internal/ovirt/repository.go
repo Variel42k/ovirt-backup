@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// DomainDisks includes detached repository disks, which VM inventory omits.
+// DomainDisks включает в себя отдельные диски репозитория, которые опускает инвентарь ВМ.
 func (c *Client) DomainDisks(ctx context.Context, domainID string) ([]Disk, error) {
 	var list struct {
 		Disks []Disk `json:"disk"`
@@ -15,8 +15,8 @@ func (c *Client) DomainDisks(ctx context.Context, domainID string) ([]Disk, erro
 	return list.Disks, err
 }
 
-// An image transfer can be terminal while the engine's command still holds
-// its internal disk lock. disk.status alone does not reveal that lock.
+// Передача образа может быть терминальной, в то время как команда движка все еще удерживает
+// свой внутренний замок диска. disk.status Одинъ только этотъ замокъ не обнаруживаетъ.
 func (c *Client) DeleteDiskWhenUnlocked(ctx context.Context, diskID string) error {
 	err := retryRepositoryDiskLock(ctx, 2*time.Minute, 2*time.Second, func() error { return c.DeleteDisk(ctx, diskID) })
 	if err != nil {
@@ -31,8 +31,8 @@ func (c *Client) DeleteDiskWhenUnlocked(ctx context.Context, diskID string) erro
 	})
 }
 
-// Disk updates/deletions may be accepted before their asynchronous engine
-// command commits. Do not publish a successful repository operation early.
+// Обновления/удаления диска могут быть приняты до выполнения асинхронной команды движка. Не
+// публикуйте успешную операцию репозитория на ранней стадии.
 func waitRepositoryDiskState(ctx context.Context, done func(context.Context) (bool, error)) error {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()

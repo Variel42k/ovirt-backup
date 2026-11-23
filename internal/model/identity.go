@@ -2,8 +2,8 @@ package model
 
 import "time"
 
-// IdentitySettings is the database override for browser authentication.
-// Secrets are write-only at the HTTP boundary and encrypted by Store.
+// IdentitySettings является переопределением базы данных для проверки подлинности браузера.
+// Секреты принимаются на входе только на HTTP границе и шифруются Store.
 type IdentitySettings struct {
 	Enabled            bool
 	Issuer             string

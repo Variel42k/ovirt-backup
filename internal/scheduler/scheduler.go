@@ -1,5 +1,5 @@
-// Package scheduler runs backup jobs on their cron schedules and performs the
-// periodic housekeeping: retention, health checks and cleanup.
+// Пакет scheduler выполняет резервные задания по их cron графикам и выполняет периодическое
+// ведение домашнего хозяйства: удержание, проверки здоровья и очистку.
 package scheduler
 
 import (
@@ -33,13 +33,12 @@ import (
 // планировщик отличает штатный пропуск от настоящего сбоя.
 var ErrJobBusy = errors.New("задание уже выполняется")
 
-// cronParser accepts the standard five-field syntax plus the @daily-style
-// descriptors, which is what operators expect from a crontab field.
+// cronParser принимает стандартные пять полей и сокращения вроде @daily, как в crontab.
 var cronParser = cron.NewParser(
 	cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor,
 )
 
-// ValidateSchedule checks a cron expression and reports the next firing time.
+// ValidateSchedule проверяет cron выражение и сообщает следующее время выстрела.
 func ValidateSchedule(spec string, loc *time.Location) (time.Time, error) {
 	if spec == "" {
 		return time.Time{}, fmt.Errorf("расписание не задано")
@@ -51,7 +50,7 @@ func ValidateSchedule(spec string, loc *time.Location) (time.Time, error) {
 	return sched.Next(time.Now().In(loc)), nil
 }
 
-// Scheduler owns the cron engine and the backup worker pool.
+// Scheduler владеет движком cron и резервным рабочим пулом.
 type Scheduler struct {
 	store      *store.Store
 	engine     *dispatch.Dispatcher
@@ -64,8 +63,9 @@ type Scheduler struct {
 	dbDump     *dbdump.Engine
 
 	cron *cron.Cron
-	// scheduleMu serializes job reloads with a timezone change. robfig/cron can
-	// accept updates while running, but a reload must use one timezone snapshot.
+	// scheduleMu сериализует перезагрузки заданий с изменением часового пояса. robbig/cron
+	// может принимать обновления во время работы, но перезагрузка должна использовать один
+	// моментальный снапшот часового пояса.
 	scheduleMu sync.Mutex
 	timezoneMu sync.RWMutex
 	timezone   string
@@ -101,9 +101,9 @@ func (s *Scheduler) SetDBDumpEngine(engine *dbdump.Engine) {
 	s.dbDump = engine
 }
 
-// SetQualityService connects the schedule-aware health evaluator. It is kept
-// separate from New so scheduler tests and small command-line tools can run
-// without constructing the monitoring subsystem.
+// SetQualityService соединяет оценщик здоровья, осведомленный о расписании. Он хранится
+// отдельно от New, поэтому тесты планировщика и небольшие инструменты командной строки
+// могут работать без создания подсистемы мониторинга.
 func (s *Scheduler) SetQualityService(service *quality.Service) {
 	s.quality = service
 	if service != nil {
@@ -111,7 +111,7 @@ func (s *Scheduler) SetQualityService(service *quality.Service) {
 	}
 }
 
-// New builds the scheduler.
+// New строит планировщик.
 func New(st *store.Store, engine *dispatch.Dispatcher, cfg config.Config, bus *events.Bus, log zerolog.Logger) *Scheduler {
 	workers := cfg.Backup.Workers
 	if workers < 1 {
@@ -136,14 +136,14 @@ func New(st *store.Store, engine *dispatch.Dispatcher, cfg config.Config, bus *e
 	}
 }
 
-// Timezone returns the effective IANA timezone used for cron schedules.
+// Timezone возвращает эффективный IANA часовой пояс, используемый для cron расписаний.
 func (s *Scheduler) Timezone() string {
 	s.timezoneMu.RLock()
 	defer s.timezoneMu.RUnlock()
 	return s.timezone
 }
 
-// Location returns the effective scheduler location.
+// Location возвращает местоположение эффективного планировщика.
 func (s *Scheduler) Location() *time.Location {
 	s.timezoneMu.RLock()
 	defer s.timezoneMu.RUnlock()
@@ -162,8 +162,8 @@ func (s *Scheduler) storeTimezone(name string, loc *time.Location) {
 	s.timezoneMu.Unlock()
 }
 
-// SetTimezone applies an IANA timezone and recalculates every future job
-// occurrence. In-flight jobs are independent from cron entries and continue.
+// SetTimezone применяет IANA часовой пояс и пересчитывает каждое будущее появление работы.
+// Работа в полете независима от cron записей и продолжается.
 func (s *Scheduler) SetTimezone(ctx context.Context, name string) error {
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -198,7 +198,7 @@ func cronSpecInTimezone(spec, timezone string) string {
 	return "CRON_TZ=" + timezone + " " + spec
 }
 
-// Start loads the jobs, registers the housekeeping tasks and begins ticking.
+// Start загружа́ет вакансии, регистрирует хозяйственные задачи и начинает тикать.
 func (s *Scheduler) Start(ctx context.Context) error {
 	s.baseCtx = ctx
 	if err := s.recoverTaskFinalizations(ctx); err != nil {
@@ -251,10 +251,9 @@ type missedSchedule struct {
 	latest time.Time
 }
 
-// recoverMissedSchedules records every schedule point lost while the service
-// was stopped as one aggregate row. Catch-up, when enabled, starts only the
-// latest point; replaying every old point can overload both the engine and the
-// backup repository after a long outage.
+// recoverMissedSchedules объединяет пропущенные во время остановки точки расписания в одну
+// запись. Если разрешён догоняющий запуск, выполняется только последняя точка. Массовый
+// повтор после сбоя мог бы перегрузить движок и репозиторий.
 func (s *Scheduler) recoverMissedSchedules(ctx context.Context) ([]missedSchedule, error) {
 	jobs, err := s.store.ListBackupJobs(ctx, "")
 	if err != nil {
@@ -305,7 +304,7 @@ func (s *Scheduler) recoverMissedSchedules(ctx context.Context) ([]missedSchedul
 	return out, nil
 }
 
-// Stop halts the cron engine and waits for in-flight ticks to finish.
+// Stop останавливает планировщик cron и ждёт завершения выполняющихся обработчиков.
 func (s *Scheduler) Stop() {
 	stopCtx := s.cron.Stop()
 	<-stopCtx.Done()
@@ -317,16 +316,16 @@ func (s *Scheduler) Stop() {
 	}
 	s.mu.Unlock()
 
-	// Cancelling lets each run record its own interruption; the engine's
-	// deferred cleanup still releases engine-side locks.
+	// Отмена позволяет каждому запуску записывать свой собственный перерыв; отложенная
+	// очистка движка по-прежнему освобождает блокировку со стороны движка.
 	for _, cancel := range cancels {
 		cancel()
 	}
 	s.log.Info().Msg("планировщик остановлен")
 }
 
-// Reload rebuilds the cron entries from the stored job definitions. It is
-// called at startup and whenever a job is created, edited or deleted.
+// Reload перестраивает записи cron из хранимых определений заданий. Он вызывается при
+// запуске и всякий раз, когда работа создается, редактируется или удаляется.
 func (s *Scheduler) Reload(ctx context.Context) error {
 	s.scheduleMu.Lock()
 	defer s.scheduleMu.Unlock()
@@ -367,8 +366,8 @@ func (s *Scheduler) reload(ctx context.Context) error {
 	active := 0
 	for _, job := range jobs {
 		if !job.Enabled || job.Schedule == "" {
-			// A job without a schedule is still usable — it just only runs
-			// when somebody presses the button.
+			// Работа без расписания по-прежнему пригодна для использования — она работает
+			// только тогда, когда кто-то нажимает кнопку.
 			continue
 		}
 		next, err := ValidateSchedule(job.Schedule, loc)
@@ -531,7 +530,7 @@ func (s *Scheduler) runScheduledDBDump(jobID string) {
 	}
 }
 
-// registerMaintenance wires the periodic housekeeping.
+// registerMaintenance попери́дничать, попери́дничать.
 func (s *Scheduler) registerMaintenance() error {
 	tasks := []struct {
 		spec string
@@ -564,7 +563,7 @@ func (s *Scheduler) registerMaintenance() error {
 	return nil
 }
 
-// runScheduled is the cron callback for one job.
+// runScheduled — обработчик cron для одного задания.
 func (s *Scheduler) runScheduled(jobID string) {
 	ctx := s.baseCtx
 	if ctx == nil {
@@ -591,8 +590,8 @@ func (s *Scheduler) runScheduled(jobID string) {
 	}
 }
 
-// TriggerJob executes a job now: it resolves the VMs it covers and queues a
-// backup for each. It returns as soon as the runs are queued.
+// TriggerJob выполняет задание сейчас: он разрешает ВМ, которые он покрывает, и ставит в
+// очередь резервную копию для каждой. Он возвращается, как только маршруты очерчены.
 func (s *Scheduler) TriggerJob(ctx context.Context, jobID, triggeredBy string, scheduledAt *time.Time) (*model.BackupJobRun, error) {
 	job, err := s.store.GetBackupJob(ctx, jobID)
 	if err != nil {
@@ -797,8 +796,8 @@ func (s *Scheduler) RunOnce(ctx context.Context, req backup.RunRequest) {
 	go s.executeOne(ctx, req, nil)
 }
 
-// ExecuteControlled lets a durable coordinator wait for a backup while using
-// the same worker limits, cancellation registry and events as scheduled jobs.
+// ExecuteControlled позволяет долговечному координатору ждать резервной копии, используя те
+// же ограничения для работников, реестр отмены и события, что и запланированные задания.
 func (s *Scheduler) ExecuteControlled(ctx context.Context, req backup.RunRequest) (*model.BackupRun, error) {
 	var id string
 	created := req.OnRunCreated
@@ -861,7 +860,7 @@ func (s *Scheduler) executeBackupTask(ctx context.Context, owner string, task *m
 
 	release, err := s.acquireTaskSlot(ctx, task.JobID, task.Concurrency)
 	if err != nil {
-		return // the lease expires and another leader can resume the work
+		return // срок аренды истекает, и другой руководитель может возобновить работу
 	}
 	defer release()
 
@@ -918,9 +917,9 @@ func (s *Scheduler) maybeFinalizeBackupTaskGroup(ctx context.Context, task *mode
 	}
 }
 
-// recoverTaskFinalizations completes task groups whose last worker finished
-// just before a crash. It also handles older queued groups created before the
-// durable finalization marker existed.
+// recoverTaskFinalizations завершает целевые группы, последний рабочий которых закончил
+// непосредственно перед крушением. Он также обрабатывает более старые группы в очереди,
+// созданные до того, как появился маркер прочной доработки.
 func (s *Scheduler) recoverTaskFinalizations(ctx context.Context) error {
 	runs, err := s.store.ListBackupJobRuns(ctx, store.JobRunFilter{
 		Statuses: []model.RunStatus{model.RunRunning, model.RunWaitingCopies}, Limit: 1000,
@@ -983,7 +982,7 @@ func (s *Scheduler) acquireTaskSlot(ctx context.Context, jobID string, concurren
 	}
 }
 
-// executeOne runs a single backup, respecting the worker limit.
+// executeOne позабо́тъ м. одинъ запасной, соблюдающій рабочій пределъ.
 func (s *Scheduler) executeOne(ctx context.Context, req backup.RunRequest, job *model.BackupJob) (execErr error) {
 	select {
 	case s.workers <- struct{}{}:
@@ -1156,9 +1155,10 @@ func (s *Scheduler) finishJob(ctx context.Context, job *model.BackupJob, jobRun 
 	case waitingCopies > 0:
 		status = model.RunWaitingCopies
 	case jobRun.FailedCount > 0 && jobRun.SucceededCount == 0 && jobRun.PartialCount == 0:
-		// If no VM/copy produced a usable result, the whole job failed.  This
-		// also covers a worker that failed before it could create a BackupRun:
-		// the missing replica is accounted as failed just above.
+		// Если ни одна ВМ / копия не давала пригодного для использования результата, вся
+		// работа заканчивалась неудачей. Это также относится к работнику, который потерпел
+		// неудачу до того, как он смог создать BackupRun: отсутствующая копия учитывается
+		// как неудачная чуть выше.
 		status = model.RunFailed
 	case jobRun.FailedCount > 0 || jobRun.PartialCount > 0:
 		status = model.RunPartial
@@ -1202,10 +1202,9 @@ func (s *Scheduler) finishJob(ctx context.Context, job *model.BackupJob, jobRun 
 	})
 }
 
-// resolveVMs turns a job's selector into a concrete list of VMs.
+// resolveVMs превращает селектор задания в конкретный список ВМ.
 //
-// An empty selector means "every VM on the server", which is the setting most
-// installations actually want and the one people forget to configure.
+// Пустой селектор выбирает все ВМ сервера.
 func (s *Scheduler) resolveVMs(ctx context.Context, job *model.BackupJob) ([]*model.VM, error) {
 	all, err := s.store.ListVMs(ctx, job.ServerID)
 	if err != nil {
@@ -1226,7 +1225,7 @@ func (s *Scheduler) resolveVMs(ctx context.Context, job *model.BackupJob) ([]*mo
 	return out, nil
 }
 
-// CancelRun stops a backup that is currently executing.
+// CancelRun останавливает резервную копию, которая в настоящее время выполняется.
 func (s *Scheduler) CancelRun(runID string) bool {
 	s.mu.Lock()
 	cancel, ok := s.running[runID]
@@ -1239,14 +1238,14 @@ func (s *Scheduler) CancelRun(runID string) bool {
 	return true
 }
 
-// RunningCount reports how many backups are executing right now.
+// RunningCount сообщает, сколько резервных копий выполняется прямо сейчас.
 func (s *Scheduler) RunningCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.running)
 }
 
-// Housekeeping.
+// Обслуживание.
 
 func (s *Scheduler) runRetention(ctx context.Context) {
 	jobs, err := s.store.ListBackupJobs(ctx, "")
@@ -1301,9 +1300,11 @@ func (s *Scheduler) pruneExpired(ctx context.Context) {
 	}
 }
 
-// checkStorageTargets verifies each repository in its configured access mode:
-// writable targets round-trip a probe, read-only targets list their root.
-// Discovering that the backup target died only when a backup fails is too late.
+// checkStorageTargets проверяет каждый репозиторий в его настроенном режиме доступа:
+// записываемые цели запрашивают и отвечают зонду, только для чтения цели перечисляют свой
+// корень.
+// Обнаружение того, что резервная цель скончалась только тогда, когда резервное копирование
+// отказало, слишком поздно.
 func (s *Scheduler) checkStorageTargets(ctx context.Context) {
 	targets, err := s.store.ListStorageTargets(ctx)
 	if err != nil {

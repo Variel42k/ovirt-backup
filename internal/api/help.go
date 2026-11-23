@@ -6,18 +6,15 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
-// The in-app reference.
+// Ссылка в приложении.
 //
-// It lives on the backend for the same reason the enum titles do: the service
-// already owns the vocabulary, and a copy in the SPA would drift from it the
-// first time a type gains a caveat. The UI renders these structures next to the
-// fields they explain, so the answer is where the question is asked. The same
-// content also feeds the full documentation page in the SPA.
+// Справочные тексты хранятся на сервере вместе с названиями вариантов. Интерфейс показывает
+// их рядом с нужными полями и использует те же данные на странице документации.
 //
-// The content is deliberately specific about limits and failure modes. A
-// reference that only lists capabilities teaches an operator to be surprised.
+// Содержание намеренно указывает на пределы и режимы отказа. Ссылка, в которой перечислены
+// только возможности, учит оператора удивляться.
 
-// helpBlock is one renderable piece of an article.
+// helpBlock является одним рендерируемым фрагментом статьи.
 type helpBlock struct {
 	// Kind — как отрисовать: text, list, table, flow, layers, note, warning.
 	Kind    string     `json:"kind"`
@@ -29,14 +26,14 @@ type helpBlock struct {
 	Steps   []helpStep `json:"steps,omitempty"`
 }
 
-// helpStep is one node in a technical data-flow diagram.
+// helpStep является одним узлом в схеме технического потока данных.
 type helpStep struct {
 	Title  string `json:"title"`
 	Detail string `json:"detail"`
 	Icon   string `json:"icon,omitempty"`
 }
 
-// helpArticle is one reference topic.
+// helpArticle является одним из основных.
 type helpArticle struct {
 	ID       string      `json:"id"`
 	Title    string      `json:"title"`
@@ -45,7 +42,7 @@ type helpArticle struct {
 	Blocks   []helpBlock `json:"blocks"`
 }
 
-// backupTypeHelp explains one strategy in the shape the job form renders.
+// backupTypeHelp объясняет одну стратегию в форме, которую дает форма задания.
 type backupTypeHelp struct {
 	Value   string `json:"value"`
 	Title   string `json:"title"`

@@ -1,9 +1,8 @@
-// Package retention decides which backups may be deleted.
+// Пакет retention решает, какие резервные копии могут быть удалены.
 //
-// The policy is grandfather-father-son: a backup survives if any bucket still
-// wants it. On top of that sits the rule that makes retention safe for
-// incremental chains — a backup that another kept backup depends on is never
-// deleted, no matter what the buckets say.
+// Политика «дед — отец — сын» сохраняет копию, нужную хотя бы одному правилу ротации. Если
+// сохранённый инкремент зависит от другой копии, она тоже остаётся независимо от сроков
+// ротации.
 package retention
 
 import (
@@ -17,7 +16,7 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
-// Decision is the outcome of evaluating a policy over one VM's backups.
+// Decision является результатом оценки политики над резервными копиями одной ВМ.
 type Decision struct {
 	// Keep и Delete содержат идентификаторы запусков.
 	Keep   []string
@@ -27,10 +26,10 @@ type Decision struct {
 	Reasons map[string]string
 }
 
-// Apply evaluates the policy over runs belonging to one VM in one repository.
+// Apply оценивает политику по запускам, принадлежащим одной ВМ в одном хранилище.
 //
-// Only successful runs participate: a failed run has nothing to keep, and
-// pruning it is handled separately.
+// Участвуют только успешные запуски: неудачный запуск ничего не держит, а обрезка его
+// обрабатывается отдельно.
 func Apply(policy model.RetentionPolicy, runs []*model.BackupRun, now time.Time) Decision {
 	decision := Decision{Reasons: map[string]string{}}
 
@@ -48,13 +47,13 @@ func Apply(policy model.RetentionPolicy, runs []*model.BackupRun, now time.Time)
 		return decision
 	}
 
-	// Newest first, which is the order every bucket rule expects.
+	// Новейшее первое, которое является порядком, которого ожидает каждое правило ведра.
 	sort.SliceStable(candidates, func(i, j int) bool {
 		return candidates[i].CreatedAt.After(candidates[j].CreatedAt)
 	})
 
-	// An empty policy means "keep everything". Deleting all backups because a
-	// form was submitted with zeros is never what anyone wanted.
+	// Пустая политика означает "keep everything". Удаление всех резервных копий, потому что
+	// форма была отправлена с нулями, никогда не было тем, что кто-то хотел.
 	if policy.Empty() {
 		for _, r := range candidates {
 			decision.Keep = append(decision.Keep, r.ID)
@@ -91,8 +90,8 @@ func Apply(policy model.RetentionPolicy, runs []*model.BackupRun, now time.Time)
 		return t.Format("2006")
 	})
 
-	// MaxAge overrides the buckets: an installation with a legal retention
-	// limit needs old copies gone even if a yearly bucket would hold them.
+	// MaxAge переопределяет ведра: установка с законным пределом удержания нуждается в
+	// старых копиях, даже если ежегодное ведро будет держать их.
 	if policy.MaxAge > 0 {
 		cutoff := now.Add(-policy.MaxAge)
 		for _, r := range candidates {
@@ -102,17 +101,16 @@ func Apply(policy model.RetentionPolicy, runs []*model.BackupRun, now time.Time)
 		}
 	}
 
-	// Choose the final surviving point before protecting its ancestors. If
-	// MaxAge expired every run, the newest point may still be incremental.
+	// Выберите конечную точку выживания, прежде чем защищать своих предков. Если MaxAge
+	// продлевается каждый запуск, новейшая точка может быть все еще инкрементальной.
 	if len(keep) == 0 {
 		newest := candidates[0]
 		markKeep(keep, newest.ID, "последняя оставшаяся копия — удаление запрещено")
 	}
 
-	// Chain safety: restoring an incremental needs every ancestor up to the
-	// full backup, so keeping a link implicitly keeps its whole history. This
-	// runs after MaxAge on purpose — an ancestor that is technically expired
-	// still has to survive while something depends on it.
+	// Для восстановления инкремента нужны все предки до полного бэкапа. Проверяем
+	// зависимости после применения MaxAge. Даже просроченная копия должна сохраниться, если
+	// от неё зависит точка восстановления.
 	byID := map[string]*model.BackupRun{}
 	for _, r := range candidates {
 		byID[r.ID] = r
@@ -146,8 +144,8 @@ func Apply(policy model.RetentionPolicy, runs []*model.BackupRun, now time.Time)
 	return decision
 }
 
-// applyBucket keeps the newest run of each distinct period, up to limit
-// periods. Runs are expected newest first.
+// applyBucket сохраняет новейший запуск каждого отдельного периода, вплоть до предельных
+// периодов. Сначала ожидаются новые гонки.
 func applyBucket(keep map[string]string, runs []*model.BackupRun, limit int, label string, bucketOf func(time.Time) string) {
 	if limit <= 0 {
 		return
@@ -168,8 +166,8 @@ func applyBucket(keep map[string]string, runs []*model.BackupRun, limit int, lab
 	}
 }
 
-// markKeep records the first reason a run was kept; the first rule to claim a
-// backup is the most specific one, and listing all of them only adds noise.
+// markKeep сохраняет первую причину удержания. Первое правило наиболее конкретно, и
+// остальных причин для отчёта не требуется.
 func markKeep(keep map[string]string, id, reason string) {
 	if _, exists := keep[id]; exists {
 		return
@@ -181,8 +179,8 @@ func shortLabel(r *model.BackupRun) string {
 	return fmt.Sprintf("%s от %s", r.Type.Title(), r.CreatedAt.Format("2006-01-02 15:04"))
 }
 
-// Plan is a per-VM retention result, which is what the API returns for a dry
-// run so the operator can see what a policy would do before enabling it.
+// Plan — это результат удержания на ВМ, который является тем, что возвращает API для сухого
+// запуска, чтобы оператор мог видеть, что будет делать политика, прежде чем разрешить ее.
 type Plan struct {
 	ServerID string    `json:"server_id"`
 	VMID     string    `json:"vm_id"`
@@ -190,7 +188,7 @@ type Plan struct {
 	TargetID string    `json:"storage_target_id"`
 	Keep     []RunNote `json:"keep"`
 	Delete   []RunNote `json:"delete"`
-	// FreedBytes is selected payload size, not space already reclaimed.
+	// FreedBytes содержит объём данных, выбранных к удалению. Место ещё не освобождено.
 	FreedBytes        int64    `json:"freed_bytes"`
 	PurgeDelaySeconds int64    `json:"purge_delay_seconds"`
 	Warnings          []string `json:"warnings,omitempty"`
@@ -201,7 +199,7 @@ type Plan struct {
 	Token string `json:"token"`
 }
 
-// RunNote is one backup with the reason behind its fate.
+// RunNote описывает бэкап и причину, по которой его сохранили или удалили.
 type RunNote struct {
 	RunID     string           `json:"run_id"`
 	Type      model.BackupType `json:"type"`
@@ -210,7 +208,7 @@ type RunNote struct {
 	Reason    string           `json:"reason"`
 }
 
-// BuildPlan turns a Decision into the presentable form.
+// BuildPlan превращает решение в презентабельную форму.
 func BuildPlan(serverID, vmID, vmName, targetID string, runs []*model.BackupRun, decision Decision) Plan {
 	byID := map[string]*model.BackupRun{}
 	for _, r := range runs {
@@ -256,8 +254,9 @@ func planToken(plan Plan) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// WithDeletionConditions binds the preview to quarantine and storage protection
-// settings as well as selected runs. Changed conditions need a new preview.
+// WithDeletionConditions связывает предварительный просмотр с параметрами защиты от
+// карантина и хранения, а также с выбранными запусками. Измененные условия требуют нового
+// предварительного просмотра.
 func WithDeletionConditions(plan Plan, delay time.Duration, target *model.StorageTarget) Plan {
 	plan.PurgeDelaySeconds = int64(delay / time.Second)
 	if target.ReadOnly {

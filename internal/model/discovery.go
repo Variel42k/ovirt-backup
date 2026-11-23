@@ -16,9 +16,9 @@ const (
 	DiscoveryMaxPorts     = 256
 )
 
-// DiscoverySettings is the operator-controlled scan scope. Targets accept
-// exact DNS names/URLs and one numeric range such as node-[01-20].example.org.
-// AddressRanges accept IPv4 CIDRs and inclusive start-end ranges.
+// DiscoverySettings задаёт область поиска. Цели принимают DNS-имена, URL и один числовой
+// диапазон вроде node-[01-20].example.org. AddressRanges принимает IPv4 CIDR и поддерживает
+// начальные диапазоны.
 type DiscoverySettings struct {
 	WebTargets            []string  `json:"web_targets"`
 	AddressRanges         []string  `json:"address_ranges"`

@@ -13,8 +13,8 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
-// Number accepts the integer, floating-point and quoted forms returned by
-// different Proxmox releases and resource types.
+// Number принимает целые, с плавающей запятой и цитируемые формы, возвращаемые различными
+// Proxmox релизами и типами ресурсов.
 type Number float64
 
 func (n *Number) UnmarshalJSON(raw []byte) error {
@@ -35,7 +35,7 @@ func (n Number) Int() int     { return int(n) }
 func (n Number) Int64() int64 { return int64(n) }
 func (n Number) Bool() bool   { return n != 0 }
 
-// Info is the cluster-level identity shown in the connection list.
+// Info — это идентификатор уровня кластера, показанный в списке соединений.
 type Info struct {
 	Version     string
 	Release     string
@@ -51,7 +51,7 @@ func (i Info) FullVersion() string {
 	return i.Release
 }
 
-// Inventory is one cluster-wide Proxmox snapshot.
+// Inventory является одним кластерным Proxmox снимком.
 type Inventory struct {
 	Info     Info
 	Clusters []*model.Cluster
@@ -98,7 +98,7 @@ type resource struct {
 	Shared     Number `json:"shared"`
 }
 
-// Probe confirms token access and returns cluster-wide object counts.
+// Probe подтверждает доступ к токену и возвращает общее количество объектов кластера.
 func (c *Client) Probe(ctx context.Context) (Info, int, int, error) {
 	inv, err := c.FetchInventory(ctx, "")
 	if err != nil {
@@ -107,9 +107,9 @@ func (c *Client) Probe(ctx context.Context) (Info, int, int, error) {
 	return inv.Info, len(inv.Hosts), len(inv.VMs), nil
 }
 
-// GuestNode resolves the current owner immediately before a backup. Cached
-// inventory is useful for the UI, but a guest may migrate between a poll and
-// the scheduled run; sending vzdump to the old node would then fail.
+// GuestNode определяет текущий узел гостя прямо перед бэкапом. Инвентарь из кэша
+// используется в интерфейсе. За время между опросом и запуском гость может переехать, и
+// vzdump на прежнем узле завершится ошибкой.
 func (c *Client) GuestNode(ctx context.Context, vmID string) (string, error) {
 	kind, numericID, err := ParseVMID(vmID)
 	if err != nil {
@@ -131,8 +131,8 @@ func (c *Client) GuestNode(ctx context.Context, vmID string) (string, error) {
 	return "", fmt.Errorf("гость Proxmox %s не найден в актуальном инвентаре", vmID)
 }
 
-// GuestIO returns the cumulative bytes read and written by one guest since it
-// was started. The caller derives rates from two readings.
+// GuestIO возвращает кумулятивные байты, прочитанные и записанные одним гостем с момента
+// его запуска.
 func (c *Client) GuestIO(ctx context.Context, vmID string) (readBytes, writeBytes int64, err error) {
 	node, err := c.GuestNode(ctx, vmID)
 	if err != nil {
@@ -141,8 +141,8 @@ func (c *Client) GuestIO(ctx context.Context, vmID string) (readBytes, writeByte
 	return c.GuestIOOnNode(ctx, vmID, node)
 }
 
-// GuestIOOnNode avoids a cluster-wide owner lookup on each sample when the
-// caller already resolved the node for a locked backup operation.
+// GuestIOOnNode избегает поиска владельца кластера по каждому образцу, когда код вызова уже
+// разрешил узел для заблокированной операции резервного копирования.
 func (c *Client) GuestIOOnNode(ctx context.Context, vmID, node string) (readBytes, writeBytes int64, err error) {
 	kind, numericID, err := ParseVMID(vmID)
 	if err != nil {
@@ -162,8 +162,8 @@ func (c *Client) GuestIOOnNode(ctx context.Context, vmID, node string) (readByte
 	return status.DiskRead.Int64(), status.DiskWrite.Int64(), nil
 }
 
-// FetchInventory uses Proxmox's cluster-wide resources endpoint. It works when
-// pointed at any healthy member of a PVE cluster.
+// FetchInventory использует конечную точку ресурсов всего кластера Proxmox. Он работает,
+// когда направлен на любого здорового члена кластера PVE.
 func (c *Client) FetchInventory(ctx context.Context, serverID string) (*Inventory, error) {
 	var version versionResponse
 	if err := c.do(ctx, http.MethodGet, "/version", nil, &version); err != nil {
@@ -350,8 +350,8 @@ func max64(a, b int64) int64 {
 	return b
 }
 
-// VMAction submits one asynchronous power or migration operation. The caller
-// refreshes inventory afterward; Proxmox returns a UPID rather than waiting.
+// VMAction представляет одну асинхронную операцию питания или миграции. после этого код
+// вызова обновляет инвентарь; Proxmox возвращаетъ UPID безъ ожиданія.
 func (c *Client) VMAction(ctx context.Context, vmID, node, action, targetHost string) error {
 	kind, numericID, err := ParseVMID(vmID)
 	if err != nil {

@@ -153,8 +153,8 @@ async function loadSeries() {
   try {
     const result = await api.backupSeries(selectedPeriod, serverID)
     if (sequence !== seriesSequence || serverID !== serverFilter.value || selectedPeriod !== period.value) return
-    // Empty Go slices are encoded as null by older/empty databases. Keep the
-    // view model array-shaped so charts and empty states render consistently.
+    // Если сервер вернул null вместо пустого среза Go, подставляем массив для
+    // единообразного отображения графиков и пустых состояний.
     series.value = result ?? []
   } catch (err) {
     if (sequence === seriesSequence) seriesError.value = errorMessage(err)

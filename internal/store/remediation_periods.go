@@ -15,13 +15,11 @@ import (
 
 const periodColumns = `id, dry_run, started_at, ended_at, changed_by, note, archive_path, summary, created_at`
 
-// CurrentRemediationPeriod returns the mode in force, opening one from the
-// configured default if the table is empty.
+// CurrentRemediationPeriod возвращает режим в силе, открывая один из настроенных по
+// умолчанию, если таблица пуста.
 //
-// The default only applies once. After that the stored mode wins, because an
-// operator who switched to live mode last month would be surprised to find the
-// service back in check mode after an unrelated restart — and would be more
-// surprised to find it the other way around.
+// Значение по умолчанию применяется при первом запуске. Дальше действует сохранённый режим,
+// чтобы перезапуск не отменял решение оператора и не включал реальные действия сам по себе.
 func (s *Store) CurrentRemediationPeriod(ctx context.Context, defaultDryRun bool) (*model.RemediationPeriod, error) {
 	row := s.db.QueryRow(ctx, `SELECT `+periodColumns+
 		` FROM remediation_periods WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1`)
@@ -38,7 +36,7 @@ func (s *Store) CurrentRemediationPeriod(ctx context.Context, defaultDryRun bool
 		"режим взят из конфигурации при первом запуске")
 }
 
-// OpenRemediationPeriod starts a new period.
+// OpenRemediationPeriod начинается новый период.
 func (s *Store) OpenRemediationPeriod(ctx context.Context, dryRun bool, changedBy, note string) (*model.RemediationPeriod, error) {
 	now := time.Now().UTC()
 	period := &model.RemediationPeriod{
@@ -57,7 +55,7 @@ func (s *Store) OpenRemediationPeriod(ctx context.Context, dryRun bool, changedB
 	return period, nil
 }
 
-// CloseRemediationPeriod ends a period and stores its archive and digest.
+// CloseRemediationPeriod заканчивается периодъ и хранится его архивъ и дайджестъ.
 func (s *Store) CloseRemediationPeriod(ctx context.Context, id, archivePath string,
 	digest *model.RemediationDigest) error {
 
@@ -76,13 +74,13 @@ func (s *Store) CloseRemediationPeriod(ctx context.Context, id, archivePath stri
 	return nil
 }
 
-// GetRemediationPeriod reads one period.
+// GetRemediationPeriod читает один период.
 func (s *Store) GetRemediationPeriod(ctx context.Context, id string) (*model.RemediationPeriod, error) {
 	row := s.db.QueryRow(ctx, `SELECT `+periodColumns+` FROM remediation_periods WHERE id=?`, id)
 	return scanRemediationPeriod(row)
 }
 
-// ListRemediationPeriods returns the history, newest first.
+// ListRemediationPeriods возвраща́ть исторію, новѣйшую прежде.
 func (s *Store) ListRemediationPeriods(ctx context.Context, limit int) ([]*model.RemediationPeriod, error) {
 	if limit <= 0 {
 		limit = 50
@@ -105,8 +103,8 @@ func (s *Store) ListRemediationPeriods(ctx context.Context, limit int) ([]*model
 	return out, rows.Err()
 }
 
-// RemediationsBetween returns every decision recorded in a time window, which
-// is what a closed check period is archived from.
+// RemediationsBetween возвращает каждое решение, записанное во временном окне, из которого
+// архивируется закрытый период проверки.
 func (s *Store) RemediationsBetween(ctx context.Context, from time.Time, to *time.Time) ([]*model.RemediationRecord, error) {
 	until := time.Now().UTC()
 	if to != nil {

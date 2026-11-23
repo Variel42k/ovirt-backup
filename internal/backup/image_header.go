@@ -26,7 +26,7 @@ const (
 	ImageFormatRaw   = "raw"
 )
 
-// ImageInfo describes a disk image file found on a storage.
+// ImageInfo описывает файл образа диска, найденный в хранилище.
 type ImageInfo struct {
 	Path string `json:"path"`
 	// Format — qcow2 или raw; для остального — название распознанного формата.
@@ -41,7 +41,7 @@ type ImageInfo struct {
 	Notes []string `json:"notes,omitempty"`
 }
 
-// Importable reports whether the image can be uploaded as it is.
+// Importable сообщает, может ли образ быть загружено в том виде, в каком оно есть.
 func (i ImageInfo) Importable() bool { return i.Problem == "" }
 
 // DiskFormat — формат диска движка под этот образ.
@@ -75,7 +75,7 @@ var foreignImages = []struct {
 	{257, []byte("ustar"), "архив tar (OVA)"},
 }
 
-// InspectImageHeader recognises a disk image by the first bytes of its file.
+// InspectImageHeader распознает образ диска по первым байтам его файла.
 func InspectImageHeader(name string, header []byte, fileSize int64) ImageInfo {
 	info := ImageInfo{Path: name, FileSize: fileSize}
 	if fileSize <= 0 {

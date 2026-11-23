@@ -158,7 +158,7 @@ func buildGuideCatalog(files fs.FS) guideCatalog {
 	return catalog
 }
 
-// guideSlug превращает имя файла в идентификатор для адреса: KEYCLOAK-AD.md →
+// guideSlug формирует идентификатор адреса из имени файла, например KEYCLOAK-AD.md →
 // keycloak-ad.
 func guideSlug(file string) string {
 	return strings.ToLower(strings.TrimSuffix(path.Base(file), ".md"))

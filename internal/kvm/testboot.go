@@ -20,29 +20,25 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
-// The strongest verification available: boot the restored image and wait for
-// the guest to answer.
+// Самая сильная доступная проверка: загрузите восстановленное образ и дождитесь ответа
+// гостя.
 //
-// Every other check reasons about bytes. This one asks the operating system
-// inside the backup whether it came up — which is the actual question behind
-// "is this backup any good".
+// Проверки данных оценивают байты. Запуск ВМ показывает, загрузилась ли сама операционная
+// система из бэкапа.
 //
-// Two safety properties are non-negotiable and are enforced here rather than
-// left to configuration:
+// Два свойства безопасности не подлежат обсуждению и применяются здесь, а не оставлены на
+// конфигурацию:
 //
-//   - The test domain has no network interfaces at all. A restored production
-//     server booting onto the live network would take over addresses, register
-//     with directories and start writing to shared storage. Isolation is not a
-//     precaution here, it is the difference between a test and an incident.
-//   - The domain is transient and boots a copy. Nothing it does can reach the
-//     original disks, and it disappears when destroyed.
+//   - У тестовой ВМ нет сетевых адаптеров. В рабочей сети восстановленная ВМ могла бы занять
+//     действующие адреса, зарегистрироваться в каталогах и начать запись в общее хранилище.
+//   - ВМ загружается с копии во временном домене, который удаляется после проверки. Исходные
+//     диски ей недоступны.
 
-// BootTest describes a boot verification.
+// BootTest описывает проверку загрузки.
 type BootTest struct {
-	// Disks are reconstructed copies on the target hypervisor. All disks are
-	// attached by default because booting only the OS volume can produce a
-	// false failure for guests whose root, journal or application data spans
-	// several devices.
+	// Диски восстанавливаются на целевом гипервизоре и по умолчанию подключаются все.
+	// Загрузка только системного тома может завершиться ложной ошибкой, если корень, журнал
+	// или данные приложения занимают несколько дисков.
 	Disks   []BootDisk
 	Profile *backup.VMProfile
 
@@ -61,7 +57,7 @@ type BootTest struct {
 	DomainName string
 }
 
-// BootDisk is one disposable image attached to the test domain.
+// BootDisk является одним одноразовым образом, прикрепленным к тестовому домену.
 type BootDisk struct {
 	RemoteImage string
 	Format      string
@@ -116,7 +112,7 @@ func (t BootTest) withDefaults() BootTest {
 	return t
 }
 
-// BootTestResult reports what happened.
+// BootTestResult сообщить о случившемся.
 type BootTestResult struct {
 	DomainName   string        `json:"domain_name"`
 	Started      bool          `json:"started"`
@@ -131,10 +127,10 @@ type BootTestResult struct {
 	Kept bool `json:"kept,omitempty"`
 }
 
-// Passed reports whether the guest actually came up.
+// Passed докладывает, действительно ли гость подошел.
 func (r *BootTestResult) Passed() bool { return r.Started && r.AgentReplied }
 
-// Summary renders the outcome for a report.
+// Summary оформляет результат для доклада.
 func (r *BootTestResult) Summary() string {
 	switch {
 	case r.Passed():
@@ -153,39 +149,36 @@ func (r *BootTestResult) Summary() string {
 	}
 }
 
-// UploadOptions tunes how an image is streamed onto the hypervisor.
+// UploadOptions настраивает, как образ передается в потоке на гипервизор.
 type UploadOptions struct {
 	// Compressed означает, что src уже сжат gzip и на той стороне поток надо
 	// пропустить через распаковщик.
 	Compressed bool
-	// KeepOnFailure leaves cleanup to the caller. Managed libvirt volumes must
-	// be removed through the storage API, not unlinked behind libvirt's back.
+	// KeepOnFailure Оставляетъ очистку къ коду вызова. Управляемые libvirt тома должны быть
+	// удалены через хранилище API, а не развязаны за спиной libvirt.
 	KeepOnFailure bool
 }
 
-// RemoteHasGzip reports whether the hypervisor can decompress a gzip stream.
+// RemoteHasGzip сообщает, может ли гипервизор декомпрессировать поток gzip.
 //
-// It matters because a restored image is streamed at full logical size: the
-// holes in a sparse disk are real zeros on the wire. Compressing them away
-// turns a mostly-empty terabyte into a few megabytes of traffic, and gzip is
-// the one decompressor present on effectively every Linux host. Where it is
-// missing the transfer still works, just at full size.
+// Образ передаётся целиком в логическом размере, включая нули в разреженных диапазонах.
+// Сжатие превращает почти пустой терабайт в несколько мегабайт трафика. gzip есть почти на
+// всех хостах Linux. При его отсутствии передаём полный несжатый поток.
 func (d *Driver) RemoteHasGzip(ctx context.Context) bool {
 	out, err := d.conn.Run(ctx, "command -v gzip >/dev/null 2>&1 && echo yes || echo no")
 	return err == nil && strings.Contains(string(out), "yes")
 }
 
-// UploadImage streams a reconstructed image onto the hypervisor.
+// UploadImage реконструированное образ передается на гипервизор.
 func (d *Driver) UploadImage(ctx context.Context, src io.Reader, remotePath string, opt UploadOptions) error {
 	dir := path.Dir(remotePath)
 	if _, err := d.conn.Run(ctx, "mkdir -p "+shellQuote(dir)); err != nil {
 		return err
 	}
 
-	// dd with a large block size rather than `cat`: it reports write errors on
-	// a full filesystem instead of silently truncating. conv=sparse keeps the
-	// zero regions of the image from occupying real blocks — a 500 GiB disk
-	// with 20 GiB of data lands as a 20 GiB file.
+	// dd с крупным блоком сообщает об ошибке записи, если диск заполнился. conv=sparse
+	// сохраняет нулевые области разреженными. Образ на 500 ГиБ с 20 ГиБ данных займёт около
+	// 20 ГиБ.
 	cmd := fmt.Sprintf("dd of=%s bs=4M conv=sparse,fsync status=none", shellQuote(remotePath))
 	if opt.Compressed {
 		cmd = "gzip -dc | " + cmd
@@ -200,15 +193,13 @@ func (d *Driver) UploadImage(ctx context.Context, src io.Reader, remotePath stri
 	return nil
 }
 
-// AvailableBytes reports the free space of the filesystem holding dir.
+// AvailableBytes сообщает о свободном пространстве файловой системы, удерживающей dir.
 //
-// It is checked before an upload because the alternative is discovering the
-// shortfall halfway through: a hypervisor with a full root filesystem stops
-// being a hypervisor, and a verification must never be the thing that takes
-// production down.
+// Проверяем место до загрузки. Заполнение корневой файловой системы способно остановить
+// гипервизор, и проверка бэкапа не должна вызвать такой сбой.
 func (d *Driver) AvailableBytes(ctx context.Context, dir string) (int64, error) {
-	// -P forces the POSIX single-line format, -k fixes the unit at 1 KiB, so
-	// the numbers mean the same thing on any Unix the host might be.
+	// -P заставляет POSIX однострочный формат, -k фиксирует единицу в 1 КБ, поэтому числа
+	// означают то же самое в любом Unix, хост может быть.
 	out, err := d.conn.Run(ctx, "df -Pk "+shellQuote(dir))
 	if err != nil {
 		return 0, err
@@ -228,7 +219,7 @@ func (d *Driver) AvailableBytes(ctx context.Context, dir string) (int64, error) 
 	return kib * 1024, nil
 }
 
-// RemoveRemote deletes a file left on the hypervisor.
+// RemoveRemote удаляет файл, оставшийся на гипервизоре.
 func (d *Driver) RemoveRemote(ctx context.Context, remotePath string) {
 	if remotePath == "" {
 		return
@@ -238,8 +229,8 @@ func (d *Driver) RemoveRemote(ctx context.Context, remotePath string) {
 	}
 }
 
-// RunBootTest boots restored images in an isolated transient domain and waits for the
-// guest agent.
+// RunBootTest загружает восстановленные образа в изолированный переходный домен и ждет
+// гостевого агента.
 func (d *Driver) RunBootTest(ctx context.Context, test BootTest, log zerolog.Logger) (*BootTestResult, error) {
 	test = test.withDefaults()
 	if err := validateBootTest(test); err != nil {
@@ -271,8 +262,8 @@ func (d *Driver) RunBootTest(ctx context.Context, test BootTest, log zerolog.Log
 	result.Started = true
 
 	cleanup := func() {
-		// Detached context: the test domain must go away even if the
-		// verification was cancelled, or it keeps consuming host memory.
+		// Отдельный контекст: тестовый домен должен исчезнуть, даже если проверка была
+		// отменена, или он продолжает потреблять память хоста.
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
 		defer cancel()
 
@@ -383,11 +374,11 @@ type guestAgentInfo struct {
 	os       string
 }
 
-// waitForGuestAgent polls the guest agent until it answers.
+// waitForGuestAgent Опросъ гостепріимнаго агента, пока онъ не отвѣтитъ.
 //
-// A guest that boots but has no agent installed cannot be distinguished from
-// one that never booted, which is why the result says so explicitly rather
-// than reporting a bare failure.
+// Гость, который загружается, но не имеет установленного агента, не может быть отличен от
+// того, который никогда не загружался, поэтому результат говорит так явно, а не сообщает о
+// голом сбое.
 func (d *Driver) waitForGuestAgent(ctx context.Context, dom golibvirt.Domain, timeout time.Duration) (guestAgentInfo, error) {
 	deadline := time.Now().Add(timeout)
 	var info guestAgentInfo
@@ -397,7 +388,7 @@ func (d *Driver) waitForGuestAgent(ctx context.Context, dom golibvirt.Domain, ti
 			return info, err
 		}
 
-		// guest-ping is the cheapest call that proves the agent is alive.
+		// guest-ping — самый простой способ проверить, отвечает ли агент.
 		reply, err := d.conn.Libvirt().QEMUDomainAgentCommand(dom,
 			`{"execute":"guest-ping"}`, 5, 0)
 		if err == nil && len(reply) > 0 {
@@ -504,7 +495,7 @@ func (d *Driver) agentOSName(dom golibvirt.Domain) string {
 	return strings.TrimSpace(parsed.Return.Name + " " + parsed.Return.Version)
 }
 
-// bootTestDomainXML builds the transient domain used for the test.
+// bootTestDomainXML строит переходный домен, используемый для теста.
 func bootTestDomainXML(name string, test BootTest) string {
 	test = test.withDefaults()
 	var b strings.Builder
@@ -534,7 +525,8 @@ func bootTestDomainXML(name string, test BootTest) string {
 	}
 	b.WriteString("  <cpu mode='host-passthrough'/>\n")
 	b.WriteString(fmt.Sprintf("  <clock offset='%s'/>\n", xmlText(test.Profile.ClockOffset)))
-	// A guest that reboots or crashes must not loop: the test is over either way.
+	// Гость, который перезагружается или вылетает, не должен зацикливаться: тест закончился
+	// в любом случае.
 	b.WriteString("  <on_poweroff>destroy</on_poweroff>\n")
 	b.WriteString("  <on_reboot>destroy</on_reboot>\n")
 	b.WriteString("  <on_crash>destroy</on_crash>\n")
@@ -555,8 +547,8 @@ func bootTestDomainXML(name string, test BootTest) string {
 		}
 		b.WriteString("    </disk>\n")
 	}
-	// Deliberately no <interface>: the restored guest must not reach the
-	// network it thinks it owns.
+	// Намеренно не <интерфейс>: восстановленный гость не должен добираться до сети,
+	// которой, по его мнению, он владеет.
 	b.WriteString("    <channel type='unix'>\n")
 	b.WriteString("      <target type='virtio' name='org.qemu.guest_agent.0'/>\n")
 	b.WriteString("    </channel>\n")

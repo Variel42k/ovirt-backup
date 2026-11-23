@@ -15,10 +15,10 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/secret"
 )
 
-// runLegacyQcow2 creates the next persistent snapshot, downloads its qcow2
-// layer, rebases it on the locally reconstructed parent, and publishes only
-// chunks whose guest-visible contents changed. The previous service snapshot
-// is removed by the normal sweep only after the complete run is published.
+// runLegacyQcow2 создаёт следующий сохраняемый снапшот, загружает его слой qcow2,
+// привязывает к локально восстановленному родителю и публикует только чанки, изменившиеся
+// для гостя. Прежний служебный снапшот удаляется обычной уборкой после публикации всей
+// копии.
 func (e *Engine) runLegacyQcow2(ctx context.Context, client *ovirt.Client, backend repo.Backend,
 	srv *model.Server, vm *model.VM, run *model.BackupRun, req RunRequest,
 	disks []ovirt.Disk, p plan) ([]*DiskManifest, error) {
@@ -189,11 +189,9 @@ func (e *Engine) runLegacyQcow2(ctx context.Context, client *ovirt.Client, backe
 	e.event(ctx, run, model.RunEventTransfer, time.Since(started), fmt.Sprintf(
 		"слоёв QCOW2 сохранено: %d; передано %s, записано %s", len(manifests), humanBytes(readTotal), humanBytes(storedTotal)))
 
-	// Do not remove the previous base here. The VM configuration and run.json
-	// are published by Execute after this method returns. Once the complete run
-	// is durable, the normal snapshot sweep sees this successful child and
-	// removes the old base. If a later publication step fails, the old base is
-	// therefore still available and the failed new snapshot is discarded.
+	// Оставляем предыдущую базу, пока Execute не опубликует конфигурацию ВМ и run.json.
+	// После полной публикации штатная уборка увидит успешный дочерний запуск и удалит
+	// старую базу. При ошибке публикации старая база остаётся, а новый снапшот удаляется.
 	completed = true
 	return manifests, nil
 }

@@ -11,7 +11,8 @@ import (
 
 type ServerLoader func(context.Context, string) (*model.Server, error)
 
-// Pool caches immutable HTTP clients until connection settings change.
+// Pool кэширует неизменяемые HTTP клиенты до тех пор, пока не изменятся настройки
+// подключения.
 type Pool struct {
 	load    ServerLoader
 	timeout time.Duration

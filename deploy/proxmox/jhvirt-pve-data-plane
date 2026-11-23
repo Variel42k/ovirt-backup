@@ -9,9 +9,9 @@ fail() {
   exit 64
 }
 
-# With a forced command in authorized_keys sshd starts this helper without the
-# requested arguments and puts the request into SSH_ORIGINAL_COMMAND. Parse it
-# as words only after accepting the exact, space-free protocol alphabet.
+# При принудительной команде в authorized_keys sshd запускает хелпер без
+# аргументов и передаёт запрос в SSH_ORIGINAL_COMMAND. Разделяем его на слова
+# только после проверки допустимых символов в имени команды и аргументах.
 if [[ $# -eq 0 && -n "${SSH_ORIGINAL_COMMAND:-}" ]]; then
   [[ "$SSH_ORIGINAL_COMMAND" =~ ^(/usr/local/sbin/)?jhvirt-pve-data-plane(\ [A-Za-z0-9_./+=-]+)+$ ]] || fail "invalid forced command"
   IFS=' ' read -r -a original <<< "$SSH_ORIGINAL_COMMAND"
@@ -29,8 +29,8 @@ case "$action" in
     command -v qmrestore >/dev/null
     command -v pct >/dev/null
     printf 'jhvirt-pve-data-plane/2\n'
-    # Backup fleecing appeared in Proxmox VE 8.2. Older vzdump rejects the
-    # option, so the service only asks for it when the node announces it.
+    # Fleecing появился в Proxmox VE 8.2. Старый vzdump отклоняет параметр,
+    # поэтому служба запрашивает его, только если узел заявил поддержку.
     version="$(pveversion 2>/dev/null || true)"
     if [[ "$version" =~ pve-manager/([0-9]+)\.([0-9]+) ]]; then
       major="${BASH_REMATCH[1]}"; minor="${BASH_REMATCH[2]}"
@@ -54,7 +54,7 @@ case "$action" in
           seen_bwlimit=1
           value="${option#bwlimit=}"
           [[ "$value" =~ ^[1-9][0-9]{0,9}$ ]] || fail "invalid bwlimit"
-          # KiB/s of guest disk reads, as vzdump defines it.
+          # Скорость чтения дисков гостя в КиБ/с, как её задаёт vzdump.
           options+=(--bwlimit "$value")
           ;;
         fleecing=*)
@@ -63,15 +63,15 @@ case "$action" in
           value="${option#fleecing=}"
           [[ "$kind" == qemu ]] || fail "fleecing is only available for qemu guests"
           [[ "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || fail "invalid fleecing storage id"
-          # Old blocks the guest overwrites go to a local fleecing image
-          # instead of waiting for this stream to reach the backup service.
+          # Старые блоки при перезаписи гостем сразу сохраняются в локальном
+          # образе fleecing. Ждать, пока поток дойдёт до сервера копий, не нужно.
           options+=(--fleecing "enabled=1,storage=$value")
           ;;
         *) fail "unknown backup option" ;;
       esac
     done
-    # --stdout is the supported Proxmox CLI data path. The REST endpoint rejects
-    # this option, which is why this narrowly scoped SSH helper exists.
+    # CLI Proxmox передаёт данные через --stdout. REST API отклоняет этот
+    # параметр, поэтому передачу выполняет SSH-хелпер с ограниченными правами.
     exec vzdump "$vmid" --stdout --mode snapshot --compress zstd --quiet 1 ${options[@]+"${options[@]}"}
     ;;
 
@@ -105,10 +105,9 @@ case "$action" in
       created=1
       qm set "$vmid" --name "$name" >/dev/null
     else
-      # Omitting --rootfs keeps Proxmox in simple restore mode. In that mode it
-      # recreates every volume-backed mp0..mpN from the archive on --storage;
-      # specifying --rootfs would switch to advanced mode and silently ignore
-      # mount points we did not repeat on the command line.
+      # Без --rootfs Proxmox использует простой режим и восстанавливает из архива
+      # все точки mp0..mpN на томах в --storage. С --rootfs включается расширенный
+      # режим, в котором точки без явного аргумента пропускаются.
       pct restore "$vmid" - --storage "$storage" --unique 1
       created=1
       pct set "$vmid" --hostname "$name" >/dev/null

@@ -1,5 +1,5 @@
-// Package hosthelper is the narrow Unix-socket boundary between the
-// unprivileged application container and host-managed infrastructure.
+// Пакет hosthelper представляет собой узкую границу Unix-сокета между непривилегированным
+// контейнером приложений и инфраструктурой, управляемой хостом.
 package hosthelper
 
 import (

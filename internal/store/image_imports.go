@@ -18,7 +18,7 @@ const imageImportColumns = `id, storage_target_id, storage_target_name, path, fo
 	transfer_id, status, phase, progress, transferred_bytes, bytes_per_second, last_progress_at,
 	error, notes, triggered_by, created_at, started_at, ended_at`
 
-// CreateImageImport records a new image import.
+// CreateImageImport записывается импорт нового образа.
 func (s *Store) CreateImageImport(ctx context.Context, i *model.ImageImport) error {
 	if i.ID == "" {
 		i.ID = uuid.NewString()
@@ -39,7 +39,7 @@ func (s *Store) CreateImageImport(ctx context.Context, i *model.ImageImport) err
 	return nil
 }
 
-// UpdateImageImport persists progress and outcome of an import.
+// UpdateImageImport сохраняется прогресс и результат импорта.
 func (s *Store) UpdateImageImport(ctx context.Context, i *model.ImageImport) error {
 	_, err := s.db.Exec(ctx, `UPDATE image_imports SET disk_id=?, vm_id=?, transfer_id=?, status=?, phase=?,
 		progress=?, transferred_bytes=?, bytes_per_second=?, last_progress_at=?, error=?, notes=?,
@@ -53,12 +53,12 @@ func (s *Store) UpdateImageImport(ctx context.Context, i *model.ImageImport) err
 	return nil
 }
 
-// GetImageImport returns one import.
+// GetImageImport возвращает один импорт.
 func (s *Store) GetImageImport(ctx context.Context, id string) (*model.ImageImport, error) {
 	return scanImageImport(s.db.QueryRow(ctx, `SELECT `+imageImportColumns+` FROM image_imports WHERE id=?`, id))
 }
 
-// ListImageImports returns imports, newest first.
+// ListImageImports возвраща́ть импорт, новейшее первенство.
 func (s *Store) ListImageImports(ctx context.Context, limit int) ([]*model.ImageImport, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100
@@ -67,8 +67,8 @@ func (s *Store) ListImageImports(ctx context.Context, limit int) ([]*model.Image
 		ORDER BY created_at DESC LIMIT ?`, limit)
 }
 
-// ListInterruptedImageImports returns imports left pending or running by the
-// previous service process.
+// ListInterruptedImageImports возвращает импорт, оставшийся незавершенным или запущенным
+// предыдущим процессом обслуживания.
 func (s *Store) ListInterruptedImageImports(ctx context.Context) ([]*model.ImageImport, error) {
 	return s.queryImageImports(ctx, `SELECT `+imageImportColumns+` FROM image_imports
 		WHERE status IN ('pending','running') ORDER BY created_at`)

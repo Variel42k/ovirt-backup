@@ -172,8 +172,9 @@ func (e *Engine) Scan(ctx context.Context) (*model.DiscoverySnapshot, error) {
 		finish(model.RunFailed, err)
 		return nil, err
 	}
-	// Inventory-backed targets are the standard scan. Run and persist them
-	// first so a large optional network range cannot hide dynamic VM results.
+	// Объекты, поддерживаемые инвентарем, являются стандартным сканированием. Сначала
+	// выполните и сохраните их, чтобы большой дополнительный сетевой диапазон не мог скрыть
+	// динамические результаты ВМ.
 	services := e.scanVMs(ctx, vms, guest, virtualizationTargets, scanCfg,
 		e.phaseProgress(ctx, scan, "Проверка ВМ и платформ виртуализации"))
 	if err := e.persistServices(ctx, scan, services); err != nil {
@@ -335,8 +336,8 @@ func (e *Engine) scanVMs(ctx context.Context, vms []*model.VM, guest *guestProbe
 					}
 				}
 			}
-			// Some guests do not report an IP. Their inventory name is still a
-			// dynamic target when it is resolvable by the service DNS.
+			// О некоторых из них не сообщается IP. Их инвентарное имя по-прежнему является
+			// динамической целью, когда оно разрешимо службой DNS.
 			if len(addresses) == 0 && strings.TrimSpace(vm.Name) != "" {
 				for _, port := range scanCfg.WebPorts {
 					port := port

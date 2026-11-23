@@ -7,18 +7,16 @@ import (
 	libvirt "github.com/digitalocean/go-libvirt"
 )
 
-// Per-disk input/output counters straight from QEMU.
+// Счётчики ввода-вывода каждого диска напрямую из QEMU.
 //
-// Throughput on its own does not tell an operator whether a disk is in trouble:
-// a volume doing 3 MB/s may be idle or may be crawling. What distinguishes the
-// two is latency — how long the guest waits for each operation — and that is
-// only available through the typed-parameter form of the call, as accumulated
-// time divided by accumulated operations.
+// Низкая пропускная способность может означать простой или задержки диска. Различить эти
+// случаи помогает задержка операции гостя. Считаем её по накопленному времени и числу
+// операций из вызова с типизированными параметрами.
 //
-// Everything here is a monotonic counter since the domain started. A single
-// reading is meaningless; the caller subtracts consecutive readings.
+// Все счётчики растут с момента старта домена. Вызывающий код сравнивает два
+// последовательных замера.
 
-// BlockCounters is the raw state of one disk's counters at one instant.
+// BlockCounters — сырое состояние счётчиков одного диска в один момент времени.
 type BlockCounters struct {
 	// Target — имя устройства в домене (vda).
 	Target string
@@ -40,7 +38,7 @@ type BlockCounters struct {
 	Errors int64
 }
 
-// BlockStats reads the counters for one disk of a running domain.
+// BlockStats читает счётчики одного диска запущенного домена.
 func (c *Conn) BlockStats(ctx context.Context, dom libvirt.Domain, target string) (*BlockCounters, error) {
 	counters := &BlockCounters{
 		Target:      target,
@@ -49,8 +47,8 @@ func (c *Conn) BlockStats(ctx context.Context, dom libvirt.Domain, target string
 		FlushTimeNS: -1,
 	}
 
-	// The typed form carries the timing fields; ask for a generous parameter
-	// count in one round trip rather than probing first.
+	// Типизированная форма несет временные поля; попросите щедрое количество параметров в
+	// одном цикле запроса и ответа, а не сначала зондирования.
 	params, _, err := c.lv.DomainBlockStatsFlags(dom, target, 16, 0)
 	if err == nil && len(params) > 0 {
 		for _, p := range params {
@@ -82,8 +80,8 @@ func (c *Conn) BlockStats(ctx context.Context, dom libvirt.Domain, target string
 		return counters, nil
 	}
 
-	// Fall back to the old call: no timings, but throughput and errors are
-	// still worth having on a hypervisor too old for the typed form.
+	// Вернитесь к старому вызову: никаких таймингов, но пропускная способность и ошибки все
+	// равно стоит иметь на гипервизоре, слишком старом для печатной формы.
 	rdReq, rdBytes, wrReq, wrBytes, errs, ferr := c.lv.DomainBlockStats(dom, target)
 	if ferr != nil {
 		if err != nil {
@@ -97,11 +95,10 @@ func (c *Conn) BlockStats(ctx context.Context, dom libvirt.Domain, target string
 	return counters, nil
 }
 
-// typedParamInt64 extracts a numeric typed parameter regardless of its width.
+// typedParamInt64 извлекает числовой типизированный параметр независимо от его ширины.
 //
-// libvirt picks the narrowest type that fits, so the same field arrives as
-// int, uint, long or ulong depending on the value and the version. Treating
-// only one of them as valid silently drops counters once they grow.
+// libvirt подбирает тип по размеру значения. Одно поле может приходить как int, uint, long
+// или ulong. Учитываем все варианты, чтобы выросший счётчик не пропадал.
 func typedParamInt64(p libvirt.TypedParam) (int64, bool) {
 	switch v := p.Value.I.(type) {
 	case int32:
@@ -119,12 +116,10 @@ func typedParamInt64(p libvirt.TypedParam) (int64, bool) {
 	}
 }
 
-// Rate converts a pair of readings into per-second figures.
+// Скорость преобразует пару показаний в цифры в секунду.
 //
-// A counter that went backwards means the domain was restarted and QEMU began
-// counting again. Reporting the difference then would invent an enormous
-// negative rate, so the sample is refused instead: one missing point on a chart
-// is honest, a spike downward is not.
+// Уменьшение счётчика означает, что домен перезапустился и QEMU начал отсчёт заново. Такой
+// замер пропускаем, чтобы не рисовать отрицательный всплеск.
 func Rate(prev, cur *BlockCounters, seconds float64) (readBytes, writeBytes, readOps, writeOps int64, ok bool) {
 	if prev == nil || cur == nil || seconds <= 0 {
 		return 0, 0, 0, 0, false
@@ -140,11 +135,10 @@ func Rate(prev, cur *BlockCounters, seconds float64) (readBytes, writeBytes, rea
 	return readBytes, writeBytes, readOps, writeOps, true
 }
 
-// LatencyUS computes the average microseconds per operation over an interval.
+// LatencyUS вычисляет средние микросекунды за операцию в течение интервала.
 //
-// Returns -1 when the hypervisor does not report timings, or when nothing
-// happened: an idle disk has no latency, and showing zero would read as
-// "instant" on a chart, which is the opposite of the truth.
+// Возвращаем -1, если гипервизор не сообщает время или операций не было. У простаивающего
+// диска задержка не измерена, а ноль на графике выглядел бы как мгновенный ответ.
 func LatencyUS(prevTimeNS, curTimeNS, prevOps, curOps int64) int64 {
 	if prevTimeNS < 0 || curTimeNS < 0 {
 		return -1

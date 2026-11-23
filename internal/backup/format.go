@@ -1,23 +1,21 @@
-// Package backup implements the storage format, the transfer engine, restore
-// and verification.
+// Пакет backup реализует формат хранения, передачу данных, восстановление и проверку
+// бэкапов.
 //
-// # Storage format
+// # Формат хранения
 //
-// One disk of one run is stored as two objects:
+// На каждый диск запуска приходится два объекта.
 //
 //	disk-NN-<id>.manifest  — zstd-сжатый JSON: карта чанков и их SHA-256
 //	disk-NN-<id>.data      — сами чанки подряд, сжатые и (опционально) шифрованные
 //
-// The image is divided into a fixed grid of chunks. A chunk is present in the
-// blob only if this run captured it: for a full run that means "contains
-// non-zero data", for an incremental one "changed since the parent
-// checkpoint". Everything absent is resolved by walking the chain; anything
-// absent from the whole chain is zero.
+// Образ разбит на чанки фиксированного размера. Чанк попадает в объект данных, если полный
+// бэкап нашёл в нём ненулевые данные или инкрементальный бэкап обнаружил изменения после
+// родительского checkpoint. Отсутствующий чанк ищем по всей цепочке. Если его нигде нет,
+// восстанавливаем нули.
 //
-// Fixing the grid for the whole chain is what makes restore simple and exact:
-// merging N incrementals is a matter of "newest run that has chunk i wins",
-// with no range arithmetic and no possibility of partially overlapping writes.
-// The cost is that a dirty extent of one byte still stores a whole chunk.
+// Единая сетка чанков упрощает точное восстановление. Для каждого чанка берём данные самого
+// свежего запуска, в котором он есть. Вычислять пересечения диапазонов не нужно.
+// Даже при изменении одного байта сохраняется целый чанк.
 package backup
 
 import (
@@ -33,17 +31,17 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
-// FormatName and FormatVersion identify the container. A reader refuses
-// anything it does not know rather than guessing.
+// FormatName и FormatVersion определяют формат контейнера. Чтение допускается только для
+// известных форматов и версий.
 const (
 	FormatName    = "jhvirt-disk"
 	FormatVersion = 1
 )
 
-// DefaultChunkSize is the grid step used when a chain has no opinion.
+// DefaultChunkSize задаёт размер чанка, если в цепочке он ещё не определён.
 const DefaultChunkSize = 4 << 20
 
-// Compression algorithms.
+// Алгоритмы сжатия.
 //
 // Алгоритм записан в манифесте каждого диска, и читатель берёт его оттуда, а не
 // из конфигурации: сменить сжатие в настройках можно в любой момент, а копии,
@@ -57,10 +55,11 @@ const (
 	CompressionBrotli = "brotli"
 )
 
-// Compressions lists the supported writer algorithms in UI display order.
+// Compressions перечисляет поддерживаемые алгоритмы записи в порядке отображения в
+// интерфейсе.
 var Compressions = []string{CompressionZstd, CompressionGzip, CompressionS2, CompressionLZ4, CompressionBrotli, CompressionNone}
 
-// KnownCompression reports whether the algorithm is one this build can read.
+// KnownCompression проверяет, поддерживает ли эта сборка чтение указанного алгоритма.
 func KnownCompression(name string) bool {
 	for _, c := range Compressions {
 		if c == name {
@@ -70,11 +69,11 @@ func KnownCompression(name string) bool {
 	return false
 }
 
-// Chunk is one grid cell present in this run's data blob.
+// Chunk описывает один чанк из объекта данных этого запуска.
 //
-// The JSON names are single letters on purpose: a 1 TiB disk on a 4 MiB grid
-// produces 262144 records, and the difference between short and descriptive
-// names there is tens of megabytes per manifest.
+// Для полей JSON выбраны однобуквенные имена. При объёме диска 1 ТиБ и чанке 4 МиБ
+// получается 262144 записи, поэтому длинные имена добавили бы десятки мегабайт к каждому
+// манифесту.
 type Chunk struct {
 	// Index — номер чанка в сетке; логическое смещение = Index * ChunkSize.
 	Index int64 `json:"i"`
@@ -88,10 +87,10 @@ type Chunk struct {
 	Hash string `json:"h"`
 }
 
-// Offset returns the logical byte offset of the chunk.
+// Offset возвращает логическое смещение чанка в байтах.
 func (c Chunk) Offset(chunkSize int64) int64 { return c.Index * chunkSize }
 
-// DiskManifest describes one disk inside one run.
+// DiskManifest описывает один диск запуска.
 type DiskManifest struct {
 	Format  string `json:"format"`
 	Version int    `json:"version"`
@@ -110,8 +109,8 @@ type DiskManifest struct {
 	Alias    string `json:"alias"`
 	Index    int    `json:"disk_index"`
 	Bootable bool   `json:"bootable"`
-	// Target and Bus preserve how the guest saw this disk. DiskID is an oVirt
-	// UUID there, so it cannot double as a libvirt target name.
+	// Поля Target и Bus сохраняют сведения о подключении диска в гостевой системе. В oVirt
+	// поле DiskID содержит UUID и не подходит как имя устройства libvirt.
 	Target    string `json:"target,omitempty"`
 	Bus       string `json:"bus,omitempty"`
 	BootOrder int    `json:"boot_order,omitempty"`
@@ -149,10 +148,10 @@ type DiskManifest struct {
 	Chunks []Chunk `json:"chunks"`
 }
 
-// ChunkCount returns how many chunks this run stored.
+// ChunkCount возвращает число чанков, сохранённых запуском.
 func (m *DiskManifest) ChunkCount() int { return len(m.Chunks) }
 
-// GridChunks returns the number of chunks a full image occupies on this grid.
+// GridChunks возвращает число чанков во всём образе при заданной сетке.
 func (m *DiskManifest) GridChunks() int64 {
 	if m.ChunkSize <= 0 {
 		return 0
@@ -160,7 +159,7 @@ func (m *DiskManifest) GridChunks() int64 {
 	return (m.VirtualSize + m.ChunkSize - 1) / m.ChunkSize
 }
 
-// Validate checks the invariants a reader depends on.
+// Validate проверяет условия, на которые опирается чтение манифеста.
 func (m *DiskManifest) Validate() error {
 	if m.Format != FormatName {
 		return fmt.Errorf("чужой формат манифеста: %q", m.Format)
@@ -182,8 +181,8 @@ func (m *DiskManifest) Validate() error {
 	return nil
 }
 
-// RunManifest is the run-level document, written last. Its presence is what
-// marks a backup as complete in the repository, independently of the database.
+// RunManifest записывается последним. По его наличию репозиторий определяет, что бэкап
+// завершён, независимо от состояния БД.
 type RunManifest struct {
 	Format  string `json:"format"`
 	Version int    `json:"version"`
@@ -221,9 +220,9 @@ type RunManifest struct {
 	LogicalBytes int64 `json:"logical_bytes"`
 	StoredBytes  int64 `json:"stored_bytes"`
 
-	// VMProfile is the safe, portable subset used for an isolated boot test.
-	// ConfigKey points at the complete source description kept for recovery
-	// and audit; source paths and network devices are never replayed directly.
+	// VMProfile содержит переносимые настройки для проверки запуска в изоляции.
+	// ConfigKey указывает на полное описание источника для восстановления и аудита.
+	// Исходные пути и сетевые устройства напрямую не восстанавливаются.
 	VMProfile    *VMProfile `json:"vm_profile,omitempty"`
 	ConfigKey    string     `json:"config_key,omitempty"`
 	ConfigFormat string     `json:"config_format,omitempty"`
@@ -233,9 +232,9 @@ type RunManifest struct {
 	Provider  *ProviderBackup       `json:"provider,omitempty"`
 }
 
-// ProviderBackup carries only the portable, non-secret facts a provider's
-// native restore needs. The complete Proxmox configuration stays inside the
-// encrypted vzdump archive rather than leaking into run.json.
+// ProviderBackup хранит переносимые данные без секретов для штатного восстановления на
+// платформе. Полная конфигурация Proxmox остаётся в зашифрованном архиве vzdump и не
+// попадает в run.json.
 type ProviderBackup struct {
 	Name               string `json:"name"`
 	GuestKind          string `json:"guest_kind,omitempty"`
@@ -245,7 +244,7 @@ type ProviderBackup struct {
 	NativeArtifactKind string `json:"native_artifact_kind,omitempty"`
 }
 
-// RunManifestDisk is the per-disk summary inside the run document.
+// RunManifestDisk содержит сводку по диску в манифесте запуска.
 type RunManifestDisk struct {
 	DiskID      string `json:"disk_id"`
 	Alias       string `json:"alias"`
@@ -276,10 +275,9 @@ type RunManifestArtifact struct {
 	Encrypted    bool   `json:"encrypted"`
 }
 
-// VMProfile is a host-independent domain description. Version 2 records NIC
-// intent but never source paths, UUIDs or NVRAM paths. Restores map every NIC
-// explicitly and generate new MAC addresses; isolated verification ignores
-// NICs completely.
+// VMProfile описывает ВМ независимо от хоста. Версия 2 хранит сведения об адаптерах без
+// исходных путей, UUID и путей NVRAM. При восстановлении адаптеры сопоставляются явно и
+// получают новые MAC-адреса. Изолированная проверка их не подключает.
 type VMProfile struct {
 	BIOSType     string          `json:"bios_type,omitempty"`
 	OSType       string          `json:"os_type,omitempty"`
@@ -309,7 +307,8 @@ type VMProfileNIC struct {
 	SourceKind    string `json:"source_kind,omitempty"` // vnic_profile | network | bridge
 }
 
-// VMProfileDisk maps a stored disk id to its guest-visible attachment.
+// VMProfileDisk связывает идентификатор сохранённого диска с его подключением в гостевой
+// системе.
 type VMProfileDisk struct {
 	DiskID    string `json:"disk_id"`
 	Target    string `json:"target"`
@@ -317,11 +316,11 @@ type VMProfileDisk struct {
 	BootOrder int    `json:"boot_order,omitempty"`
 }
 
-// zstdMagic is the frame header of a zstd stream, used to tell a compressed
-// manifest from a plain one without a separate format flag.
+// zstdMagic — заголовок кадра zstd. По нему отличаем сжатый манифест от несжатого без
+// отдельного флага формата.
 var zstdMagic = []byte{0x28, 0xB5, 0x2F, 0xFD}
 
-// EncodeManifest serialises and compresses a manifest for storage.
+// EncodeManifest сериализует и сжимает манифест перед сохранением.
 func EncodeManifest(v any) ([]byte, error) {
 	raw, err := json.Marshal(v)
 	if err != nil {
@@ -342,8 +341,7 @@ func EncodeManifest(v any) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// DecodeManifest reads a manifest written by EncodeManifest, transparently
-// accepting an uncompressed one.
+// DecodeManifest читает манифест EncodeManifest и поддерживает несжатые манифесты.
 func DecodeManifest(r io.Reader, out any) error {
 	raw, err := io.ReadAll(io.LimitReader(r, 2<<30))
 	if err != nil {

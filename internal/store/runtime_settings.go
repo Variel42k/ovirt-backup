@@ -18,8 +18,8 @@ const runtimeSettingsColumns = `backup_compression, scheduler_timezone, log_max_
 	quality_storage_critical_forecast_days, quality_history_retention_days,
 	quality_domain_warning_free_percent, quality_domain_critical_free_percent, updated_by, updated_at`
 
-// RuntimeSettings returns the stored overrides. An absent singleton is the
-// normal first-start state and is represented by an empty value.
+// RuntimeSettings возвращает сохраненные переопределения. Отсутствующий синглетон является
+// нормальным первым начальным состоянием и представлен пустым значением.
 func (s *Store) RuntimeSettings(ctx context.Context) (model.RuntimeSettings, error) {
 	row := s.db.QueryRow(ctx, `SELECT `+runtimeSettingsColumns+` FROM runtime_settings WHERE id=1`)
 	var out model.RuntimeSettings
@@ -40,7 +40,7 @@ func (s *Store) RuntimeSettings(ctx context.Context) (model.RuntimeSettings, err
 	return out, nil
 }
 
-// SetSchedulerTimezone persists the IANA timezone used by all cron schedules.
+// SetSchedulerTimezone сохраняется IANA часовой пояс, используемый всеми cron графиками.
 func (s *Store) SetSchedulerTimezone(ctx context.Context, timezone, actor string) error {
 	now := time.Now().UTC()
 	_, err := s.db.Exec(ctx, `INSERT INTO runtime_settings
@@ -54,7 +54,7 @@ func (s *Store) SetSchedulerTimezone(ctx context.Context, timezone, actor string
 	return nil
 }
 
-// ResetSchedulerTimezone removes the database override.
+// ResetSchedulerTimezone удаляет переопределение базы данных.
 func (s *Store) ResetSchedulerTimezone(ctx context.Context, actor string) error {
 	_, err := s.db.Exec(ctx, `UPDATE runtime_settings SET scheduler_timezone=NULL,
 		updated_by=?, updated_at=? WHERE id=1`, actor, time.Now().UTC())
@@ -114,7 +114,7 @@ func (s *Store) ResetBackupQuality(ctx context.Context, actor string) error {
 	return nil
 }
 
-// SetBackupCompression persists the algorithm used by future backup runs.
+// SetBackupCompression сохраняет алгоритм, используемый для будущих резервных запусков.
 func (s *Store) SetBackupCompression(ctx context.Context, compression, actor string) error {
 	now := time.Now().UTC()
 	_, err := s.db.Exec(ctx, `INSERT INTO runtime_settings
@@ -128,7 +128,7 @@ func (s *Store) SetBackupCompression(ctx context.Context, compression, actor str
 	return nil
 }
 
-// ResetBackupCompression removes the database override.
+// ResetBackupCompression удаляет переопределение базы данных.
 func (s *Store) ResetBackupCompression(ctx context.Context, actor string) error {
 	_, err := s.db.Exec(ctx, `UPDATE runtime_settings SET backup_compression=NULL,
 		updated_by=?, updated_at=? WHERE id=1`, actor, time.Now().UTC())
@@ -138,7 +138,7 @@ func (s *Store) ResetBackupCompression(ctx context.Context, actor string) error 
 	return nil
 }
 
-// SetLogRotation persists the complete file-retention policy.
+// SetLogRotation сохраняется полная политика сохранения файлов.
 func (s *Store) SetLogRotation(ctx context.Context, maxSizeMB, maxBackups, maxAgeDays int, actor string) error {
 	now := time.Now().UTC()
 	_, err := s.db.Exec(ctx, `INSERT INTO runtime_settings
@@ -156,7 +156,7 @@ func (s *Store) SetLogRotation(ctx context.Context, maxSizeMB, maxBackups, maxAg
 	return nil
 }
 
-// ResetLogRotation removes the database override as one unit.
+// ResetLogRotation удаляет переопределение базы данных как один блок.
 func (s *Store) ResetLogRotation(ctx context.Context, actor string) error {
 	_, err := s.db.Exec(ctx, `UPDATE runtime_settings SET log_max_size_mb=NULL,
 		log_max_backups=NULL, log_max_age_days=NULL, updated_by=?, updated_at=? WHERE id=1`,

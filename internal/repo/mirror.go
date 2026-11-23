@@ -127,9 +127,9 @@ func (m *Mirror) Put(ctx context.Context, key string, r io.Reader, size int64) (
 		}(backend, pr)
 	}
 
-	// io.MultiWriter cannot be used here: it stops at the first failed mirror
-	// and would truncate the primary as well. Feed each pipe explicitly and
-	// retire only the failed mirror; a primary failure still aborts the source.
+	// io.MultiWriter прекращает запись при первой ошибке, поэтому сбой реплики оборвал бы и
+	// основную запись. Передаём данные в каждый канал отдельно и отключаем только
+	// отказавшую реплику. Сбой основной записи прерывает чтение источника.
 	buf := make([]byte, 256<<10)
 	var copyErr error
 	for {

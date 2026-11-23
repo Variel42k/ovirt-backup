@@ -7,8 +7,8 @@ import (
 	"time"
 )
 
-// A running worker keeps its session lock until all cancellation cleanup has
-// returned. A timeout never gives a second worker permission to race it.
+// Работающий работник сохраняет блокировку сеанса до тех пор, пока не вернется вся очистка
+// отмены. Тайм-аут никогда не дает второму работнику разрешение на гонку.
 type VMTransferLock struct {
 	conn *sql.Conn
 	key  string

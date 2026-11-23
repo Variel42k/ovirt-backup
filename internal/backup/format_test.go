@@ -41,8 +41,8 @@ func testCipher(t *testing.T) *secret.Cipher {
 	return c
 }
 
-// pattern builds recognisable chunk content so a mix-up between runs shows up
-// as wrong bytes rather than as a passing test.
+// pattern заполняет чанки узнаваемыми данными, чтобы перепутанные запуски привели к
+// несовпадению байтов в тесте.
 func pattern(tag byte, size int) []byte {
 	buf := make([]byte, size)
 	for i := range buf {
@@ -51,7 +51,7 @@ func pattern(tag byte, size int) []byte {
 	return buf
 }
 
-// writeRun stores one run's chunks and returns its manifest.
+// writeRun хранит чанки одного запуска и возвращает его манифест.
 func writeRun(t *testing.T, backend repo.Backend, key string, opts WriterOptions,
 	base DiskManifest, chunks map[int64][]byte) *DiskManifest {
 	t.Helper()
@@ -73,7 +73,7 @@ func writeRun(t *testing.T, backend repo.Backend, key string, opts WriterOptions
 	for i := range chunks {
 		indices = append(indices, i)
 	}
-	// WriteChunk requires ascending order.
+	// WriteChunk Требуется восходящий порядок.
 	for i := 0; i < len(indices); i++ {
 		for j := i + 1; j < len(indices); j++ {
 			if indices[j] < indices[i] {
@@ -308,7 +308,8 @@ func TestCorruptedChunkIsDetected(t *testing.T) {
 		DiskManifest{RunID: "r", ChainID: "r", Type: model.BackupFull, DiskID: "d1"},
 		map[int64][]byte{0: pattern('Q', testChunkSize)})
 
-	// Whole-object digest must catch a flipped bit before anything is decoded.
+	// Целообъектный дайджест должен поймать перевернутый бит, прежде чем что-либо будет
+	// расшифровано.
 	if err := VerifyDataObject(ctx, backend, m); err != nil {
 		t.Fatalf("исправный объект не прошёл проверку: %v", err)
 	}

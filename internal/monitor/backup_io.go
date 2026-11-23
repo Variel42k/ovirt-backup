@@ -10,9 +10,9 @@ import (
 
 const backupIOInterval = 2 * time.Second
 
-// MonitorBackup samples only the VM being backed up at a higher cadence than
-// the general infrastructure poll. It uses read-only hypervisor APIs and
-// stops with the run; a metrics failure never changes the backup result.
+// MonitorBackup только ВМ резервируется с более высокой частотой, чем общий опрос
+// инфраструктуры. Он использует гипервизор только для чтения APIs и останавливается при
+// запуске; Сбой метрики никогда не меняет результат резервного копирования.
 func (m *Monitor) MonitorBackup(parent context.Context, run *model.BackupRun) func() {
 	if !m.cfg.Enabled || !m.cfg.CollectIOStats || run == nil || run.ID == "" {
 		return func() {}
@@ -84,9 +84,9 @@ func (m *Monitor) monitorKVMBackupIO(ctx context.Context, srv *model.Server, run
 				Errors:         current.Errors, ErrorsDelta: max(current.Errors-before.Errors, 0), At: at,
 			})
 		}
-		// Commit the baseline only after every disk was read. A transient error
-		// on the last disk must not leave the earlier disks with a newer counter
-		// but an older timestamp, which would under-report their next rate.
+		// Обновляем базовые измерения только после чтения всех дисков. Ошибка последнего
+		// диска не должна оставлять ранним дискам новые счётчики со старой меткой времени.
+		// Это занизило бы следующую скорость.
 		previous = currentByDisk
 		previousAt = at
 		return out, nil

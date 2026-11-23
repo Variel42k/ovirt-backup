@@ -47,7 +47,7 @@ var imageImports sync.Map // id → context.CancelFunc
 // выполнялся прежним запуском службы.
 var ErrImageImportNotRunning = errors.New("импорт не выполняется")
 
-// openImageSource opens the storage an image is read from.
+// openImageSource открывает хранилище, из которого считывается образ.
 func (e *Engine) openImageSource(ctx context.Context, targetID string) (repo.Backend, *model.StorageTarget, error) {
 	target, err := e.store.GetStorageTarget(ctx, targetID)
 	if err != nil {
@@ -63,8 +63,8 @@ func (e *Engine) openImageSource(ctx context.Context, targetID string) (repo.Bac
 	return backend, target, nil
 }
 
-// InspectImage reads the header of an image file on a storage and tells
-// whether it can be imported.
+// InspectImage считывает заголовок файла образа на хранилище и сообщает, можно ли его
+// импортировать.
 func (e *Engine) InspectImage(ctx context.Context, targetID, imagePath string) (*ImageInfo, error) {
 	backend, _, err := e.openImageSource(ctx, targetID)
 	if err != nil {
@@ -103,8 +103,7 @@ func inspectImage(ctx context.Context, backend repo.Backend, imagePath string) (
 	return &info, nil
 }
 
-// StartImageImport validates the request, records the import and runs it in
-// the background.
+// StartImageImport подтверждает запрос, записывает импорт и запускает его в фоне.
 func (e *Engine) StartImageImport(ctx context.Context, req model.ImageImportRequest) (*model.ImageImport, error) {
 	if err := req.Validate(); err != nil {
 		return nil, err
@@ -172,8 +171,8 @@ func (e *Engine) StartImageImport(ctx context.Context, req model.ImageImportRequ
 	return &started, nil
 }
 
-// CancelImageImport stops a running import; the created objects are removed
-// by the import itself.
+// CancelImageImport останавливает запущенный импорт; созданные объекты удаляются самим
+// импортом.
 func (e *Engine) CancelImageImport(id string) error {
 	cancel, ok := imageImports.Load(id)
 	if !ok {
@@ -505,8 +504,8 @@ func deleteImportedDisk(ctx context.Context, client *ovirt.Client, diskID string
 	}
 }
 
-// reconcileInterruptedImageImports closes transfers of imports cut off by a
-// service restart and marks them failed.
+// reconcileInterruptedImageImports закрывает передачи импорта, отрезанные перезапуском
+// службы, и отмечает их неудачными.
 func (e *Engine) reconcileInterruptedImageImports(ctx context.Context) error {
 	imports, err := e.store.ListInterruptedImageImports(ctx)
 	if err != nil {

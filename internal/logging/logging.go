@@ -1,4 +1,4 @@
-// Package logging configures the process-wide logger and owns the log files.
+// Пакет logging настраивает общепроцессный регистратор и владеет файлами журналов.
 package logging
 
 import (
@@ -20,14 +20,10 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/config"
 )
 
-// Manager owns the log output: the rotating file, the level, and the answers to
-// "what is in the log right now".
+// Manager управляет уровнем журнала, ротацией файлов и чтением последних записей.
 //
-// It exists because logging is not only a write path. During an incident an
-// operator needs three things the writer alone cannot give: to raise the level
-// without restarting the service (a restart during an incident loses exactly
-// the monitoring being relied on), to see the log without shell access to the
-// host, and to be sure yesterday's log still exists.
+// При расследовании оператор может повысить уровень журнала без перезапуска службы,
+// прочитать журнал без доступа к оболочке хоста и посмотреть архив предыдущего дня.
 type Manager struct {
 	mu     sync.Mutex
 	cfg    config.LoggingConfig
@@ -39,19 +35,19 @@ type Manager struct {
 	stop     chan struct{}
 	worker   sync.WaitGroup
 	stopOnce sync.Once
-	// level is stored separately from zerolog's global so the current value can
-	// be reported back; zerolog exposes a setter but reading it races.
+	// уровень хранится отдельно от глобального zerolog, так что текущее значение может быть
+	// сообщено обратно; zerolog разоблачает сеттера, но читает его гонки.
 	level atomic.Value
-	// rotated counts rotations performed by the daily timer, for the UI.
+	// rotated считает ротации по суточному таймеру для отображения в интерфейсе.
 	rotated atomic.Int64
-	// location is read for every new log record through a callback installed
-	// once in Setup. Replacing the pointer makes runtime timezone changes safe
-	// while other goroutines are logging.
+	// Часовой пояс считывается для каждой записи через функцию, установленную
+	// в Setup. Замена указателя безопасна при записи из нескольких горутин.
 	location atomic.Pointer[time.Location]
 	timezone atomic.Value
 }
 
-// Setup installs a process-wide logger and returns it together with its manager.
+// Setup устанавливает регистратор всего процесса и возвращает его вместе со своим
+// менеджером.
 func Setup(cfg config.LoggingConfig) (zerolog.Logger, *Manager, error) {
 	level, err := zerolog.ParseLevel(strings.ToLower(cfg.Level))
 	if err != nil {
@@ -83,8 +79,9 @@ func Setup(cfg config.LoggingConfig) (zerolog.Logger, *Manager, error) {
 	return logger, m, nil
 }
 
-// SetTimezone changes the offset used for human-facing log timestamps.
-// Stored database timestamps remain UTC and are not affected.
+// SetTimezone изменяет смещение, используемое для меток времени журнала, обращенных к
+// человеку.
+// Хранимые временные метки базы данных остаются UTC и не затрагиваются.
 func (m *Manager) SetTimezone(name string) error {
 	if m == nil {
 		return fmt.Errorf("log manager is not configured")
@@ -99,7 +96,7 @@ func (m *Manager) SetTimezone(name string) error {
 	return nil
 }
 
-// Timezone reports the active IANA timezone used by the logger.
+// Timezone сообщает об активном IANA часовом поясе, используемом регистратором.
 func (m *Manager) Timezone() string {
 	if m == nil {
 		return "UTC"
@@ -111,7 +108,7 @@ func (m *Manager) Timezone() string {
 	return name
 }
 
-// Now returns the current instant represented in the configured timezone.
+// Now возвращает текущий момент, представленный в настроенном часовом поясе.
 func (m *Manager) Now() time.Time {
 	now := time.Now()
 	if m == nil {
@@ -131,17 +128,17 @@ func consoleWriter(format string) io.Writer {
 	return zerolog.ConsoleWriter{Out: os.Stdout, TimeFormat: "15:04:05.000"}
 }
 
-// Level reports the level in force.
+// Level отчёты об уровне в силе.
 func (m *Manager) Level() zerolog.Level {
 	level, _ := m.level.Load().(zerolog.Level)
 	return level
 }
 
-// SetLevel changes the level without restarting the service.
+// SetLevel изменяет уровень без перезапуска сервиса.
 //
-// Turning on debug logging is the first thing anyone does when a problem is
-// hard to see, and requiring a restart for it means restarting the monitoring
-// during the incident it is meant to observe.
+// Включение отладочного журнала — первое, что делает каждый, когда проблему трудно увидеть,
+// и для этого требуется перезапуск, что означает перезапуск мониторинга во время инцидента,
+// который он должен наблюдать.
 func (m *Manager) SetLevel(name string) (zerolog.Level, error) {
 	level, err := zerolog.ParseLevel(strings.ToLower(strings.TrimSpace(name)))
 	if err != nil {
@@ -152,7 +149,7 @@ func (m *Manager) SetLevel(name string) (zerolog.Level, error) {
 	return level, nil
 }
 
-// Enabled reports whether a file is being written at all.
+// Enabled сообщает, пишется ли файл вообще.
 func (m *Manager) Enabled() bool {
 	if m == nil {
 		return false
@@ -162,7 +159,7 @@ func (m *Manager) Enabled() bool {
 	return m.cfg.File != ""
 }
 
-// Path returns the active log file.
+// Path возвращает активный файл журнала.
 func (m *Manager) Path() string {
 	if m == nil {
 		return ""
@@ -172,9 +169,9 @@ func (m *Manager) Path() string {
 	return m.cfg.File
 }
 
-// Write appends one log record and rotates before it would exceed the active
-// size limit. All file state is protected by the manager mutex, including
-// runtime policy changes.
+// Write добавляет одну запись журнала и вращается до того, как она превысит предел
+// активного размера. Все состояние файла защищено менеджером mutex, включая изменения
+// политики выполнения.
 func (m *Manager) Write(p []byte) (int, error) {
 	m.mu.Lock()
 	if m.closed {
@@ -232,7 +229,7 @@ func (m *Manager) openLocked() error {
 	return nil
 }
 
-// Rotate closes the current file and starts a new one.
+// Rotate закрывает текущий файл и запускает новый.
 func (m *Manager) Rotate() error {
 	if m == nil {
 		return fmt.Errorf("менеджер журнала не настроен")
@@ -279,12 +276,11 @@ func (m *Manager) rotateLocked() (bool, error) {
 	return rotated, nil
 }
 
-// Close releases the log file.
+// Close выпускает файл журнала.
 //
-// The process exiting would close it anyway; doing it explicitly means the last
-// buffered line is on disk before the service reports that it stopped, and it
-// lets a test remove its temporary directory on platforms that refuse to delete
-// an open file.
+// Явное закрытие записывает последнюю строку из буфера до сообщения об остановке службы.
+// Оно также позволяет удалять временный каталог в тестах на системах, где открытые файлы
+// удалять нельзя.
 func (m *Manager) Close() error {
 	if m == nil {
 		return nil
@@ -307,8 +303,8 @@ func (m *Manager) Close() error {
 	return closeErr
 }
 
-// UpdateRotation applies a policy to the active writer. Cleanup is performed
-// by the single maintenance worker; the next write observes the new size limit.
+// UpdateRotation применяет политику к активному писателю. Очистка выполняется одним
+// работником режима обслуживания; Следующая запись показывает новый предел размера.
 func (m *Manager) UpdateRotation(maxSizeMB, maxBackups, maxAgeDays int) error {
 	if err := ValidateRotation(maxSizeMB, maxBackups, maxAgeDays); err != nil {
 		return err
@@ -322,7 +318,7 @@ func (m *Manager) UpdateRotation(maxSizeMB, maxBackups, maxAgeDays int) error {
 	return nil
 }
 
-// ValidateRotation applies the same bounds as the database and web form.
+// ValidateRotation применяет те же границы, что и база данных и веб-форма.
 func ValidateRotation(maxSizeMB, maxBackups, maxAgeDays int) error {
 	switch {
 	case maxSizeMB < 1 || maxSizeMB > 10240:
@@ -478,8 +474,8 @@ func compressArchive(path string) (err error) {
 		return err
 	}
 	final := path + ".gz"
-	// A previous process may have compressed the archive and failed only while
-	// removing the source. Replace that completed file deterministically.
+	// Предыдущий процесс мог сжать архив и не удался только при удалении источника.
+	// Замените этот завершенный файл детерминированно.
 	_ = os.Remove(final)
 	if err = os.Rename(tmp, final); err != nil {
 		return err
@@ -488,10 +484,10 @@ func compressArchive(path string) (err error) {
 	return os.Remove(path)
 }
 
-// RotateDaily rotates the log at every local midnight until ctx ends.
+// RotateDaily Поворачивает бревно в каждую местную полночь, пока ctx не закончится.
 //
-// On a quiet installation the file may never reach the size limit. Daily
-// rotation gives the age policy an archive it can actually remove.
+// При спокойной установке файл может никогда не достичь предела размера. Ежедневная ротация
+// дает возрастной политике архив, который она может фактически удалить.
 func (m *Manager) RotateDaily(done <-chan struct{}, log zerolog.Logger) {
 	if !m.Enabled() {
 		return
@@ -505,9 +501,9 @@ func (m *Manager) RotateDaily(done <-chan struct{}, log zerolog.Logger) {
 			return
 		case <-timer.C:
 		}
-		// An empty file is not worth rotating: doing so every midnight on an
-		// idle installation would fill the directory with empty archives and
-		// push the real ones out of max_backups.
+		// Пустой файл не стоит вращать: делая это каждую полночь на простаивающей
+		// установке, вы заполните каталог пустыми архивами и вытолкаете реальные из
+		// max_backups.
 		if size, err := m.currentSize(); err == nil && size == 0 {
 			continue
 		}
@@ -540,7 +536,7 @@ func (m *Manager) currentSize() (int64, error) {
 	return info.Size(), nil
 }
 
-// LogFile describes one file on disk.
+// LogFile описывает один файл на диске.
 type LogFile struct {
 	Name string `json:"name"`
 	// Current — это файл, в который идёт запись прямо сейчас.
@@ -551,7 +547,7 @@ type LogFile struct {
 	RotationsRun int64     `json:"-"`
 }
 
-// Files lists the active log and its rotated siblings, newest first.
+// Files перечисляет активный журнал и его повернутых братьев и сестер, сначала новейших.
 func (m *Manager) Files() ([]LogFile, error) {
 	if m == nil {
 		return nil, nil
@@ -606,14 +602,13 @@ func (m *Manager) Files() ([]LogFile, error) {
 	return out, nil
 }
 
-// maxTailBytes bounds how far back a tail may read.
+// maxTailBytes Ограничи́ть, как далеко назад хвост может прочесть.
 //
-// A log file can be a hundred megabytes; reading it whole to show the last
-// hundred lines would allocate the lot. Two megabytes is far more than any
-// reasonable tail and small enough to be harmless.
+// Для последних ста строк не читаем весь журнал, который может занимать сотни мегабайт.
+// Двух мегабайт достаточно для просмотра конца файла при небольшом расходе памяти.
 const maxTailBytes = 2 << 20
 
-// Tail returns the last n lines of the active log.
+// Tail возвращает последние n строк активного журнала.
 func (m *Manager) Tail(n int) ([]string, error) {
 	path := m.Path()
 	if path == "" {
@@ -665,7 +660,7 @@ func (m *Manager) Tail(n int) ([]string, error) {
 	return ring, nil
 }
 
-// Status is what the interface shows about logging.
+// Status — то, что интерфейс показывает о логировании.
 type Status struct {
 	Level      string    `json:"level"`
 	Format     string    `json:"format"`
@@ -680,7 +675,7 @@ type Status struct {
 	TotalBytes int64     `json:"total_bytes"`
 }
 
-// Status collects the current state of logging.
+// Status собира́тель м. собирательница ж. состояніе по знач. глаг.
 func (m *Manager) Status() Status {
 	if m == nil {
 		return Status{Level: "info"}
@@ -708,7 +703,7 @@ func (m *Manager) Status() Status {
 	return st
 }
 
-// Levels lists the selectable levels in order of verbosity.
+// Levels перечисляет выбираемые уровни в порядке многозначности.
 func Levels() []string {
 	return []string{"trace", "debug", "info", "warn", "error"}
 }

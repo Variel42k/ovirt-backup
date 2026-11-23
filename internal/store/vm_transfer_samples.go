@@ -8,7 +8,7 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
-// VMTransferSamples are bounded per operation and survive browser reloads.
+// VMTransferSamples ограничены на операцию и выдерживают перезагрузки браузера.
 func (s *Store) VMTransferSamples(ctx context.Context, id string) ([]model.VMTransferSample, error) {
 	rows, err := s.db.Query(ctx, `SELECT payload FROM (SELECT at,payload FROM vm_transfer_samples WHERE transfer_id=? ORDER BY at DESC LIMIT 600) recent ORDER BY at`, id)
 	if err != nil {
@@ -76,7 +76,7 @@ func (s *Store) RecordVMTransferSample(ctx context.Context, t *model.VMTransfer)
 				sample.Speed = 0
 			}
 		} else {
-			// A stage boundary or counter reset is a new baseline, not traffic.
+			// Граница этапа или обратный сброс — новая базовая линия, а не трафик.
 			sample.Speed = 0
 		}
 	}

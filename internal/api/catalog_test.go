@@ -91,7 +91,7 @@ func TestCatalogScanImportsRunTransactionallyAndIdempotently(t *testing.T) {
 	if err := srv.importCatalogEntry(ctx, scan, entries[0]); err != nil {
 		t.Fatal(err)
 	}
-	// Repeating an explicit import must not duplicate the run, disk or copy.
+	// Повторение явного импорта не должно дублировать запуск, диск или копию.
 	if err := srv.importCatalogEntry(ctx, scan, entries[0]); err != nil {
 		t.Fatal(err)
 	}

@@ -227,9 +227,8 @@ func (t *SSHTransport) WatchStats(ctx context.Context, engine model.DBEngine, in
 	return errors.New("поток статистики закончился")
 }
 
-// ParseStats validates the deliberately small helper response. Rejecting an
-// extra token keeps diagnostics or an unexpected program on the remote side
-// from being silently accepted as monitoring data.
+// ParseStats проверяет короткий ответ хелпера. Лишний элемент отклоняется, чтобы не принять
+// диагностику или вывод другой программы за метрики.
 func ParseStats(body string, engine model.DBEngine) (Stats, error) {
 	var out Stats
 	var protocol, returned string

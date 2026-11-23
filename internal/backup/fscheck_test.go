@@ -10,7 +10,7 @@ import (
 
 const testImageSize = 64 << 20
 
-// writeExt4 lays down a plausible ext4 superblock at the given partition offset.
+// writeExt4 устанавливает правдоподобный суперблок ext4 при данном смещении раздела.
 func writeExt4(img []byte, partOffset int64, label string, ext4 bool) {
 	sb := partOffset + 0x400
 	binary.LittleEndian.PutUint16(img[sb+0x38:], 0xEF53) // magic
@@ -29,7 +29,7 @@ func writeSwap(img []byte, partOffset int64) {
 	copy(img[partOffset+0xFF6:], "SWAPSPACE2")
 }
 
-// writeMBR builds a classic partition table.
+// writeMBR построена классическая таблица разделов.
 type mbrPart struct {
 	typeByte byte
 	startLBA uint32
@@ -50,7 +50,7 @@ func writeMBR(img []byte, parts []mbrPart) {
 	}
 }
 
-// writeGPT builds a GUID partition table with a protective MBR in front of it.
+// writeGPT сооружает GUID таблицу перегородок с предохранительным MBR перед собою.
 type gptPart struct {
 	typeGUID string
 	firstLBA uint64
@@ -63,7 +63,7 @@ func writeGPT(img []byte, parts []gptPart) {
 	const entrySize = 128
 	const entryLBA = 2
 
-	// Protective MBR, which is what a real GPT disk carries.
+	// Защитный MBR — что носитъ въ себѣ настоящий GPT дискъ.
 	img[510], img[511] = 0x55, 0xAA
 	img[446+4] = 0xEE
 	binary.LittleEndian.PutUint32(img[446+8:], 1)
@@ -92,8 +92,7 @@ func writeGPT(img []byte, parts []gptPart) {
 	}
 }
 
-// parseGUIDForTest converts the canonical text form into the mixed-endian
-// bytes GPT stores.
+// parseGUIDForTest преобразует каноническую текстовую форму в смешанные байты GPT.
 func parseGUIDForTest(s string) []byte {
 	clean := strings.ReplaceAll(s, "-", "")
 	raw := make([]byte, 16)

@@ -16,7 +16,7 @@ import (
 // намерением и действием должен быть шаг, на котором видно объём и
 // последствия. Предпросмотр ничего не создаёт и его можно звать сколько угодно.
 
-// restoreVMRequest is the wire form of model.RestoreVMRequest.
+// restoreVMRequest — проволочная форма модели.RestoreVMRequest.
 type restoreVMRequest struct {
 	CopyID          string                          `json:"copy_id"`
 	ServerID        string                          `json:"server_id"`
@@ -46,7 +46,7 @@ func (r *restoreVMRequest) toModel(runID string) *model.RestoreVMRequest {
 	}
 }
 
-// handlePlanRestoreVM returns what a full VM restore would do.
+// handlePlanRestoreVM возвращает то, что будет делать полное восстановление ВМ.
 func (s *Server) handlePlanRestoreVM(w http.ResponseWriter, r *http.Request) {
 	var req restoreVMRequest
 	if err := decodeJSON(r, &req); err != nil {
@@ -65,7 +65,7 @@ func (s *Server) handlePlanRestoreVM(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, plan)
 }
 
-// handleRestoreVM assembles a whole VM from a backup point.
+// handleRestoreVM собирает всю ВМ из резервной точки.
 func (s *Server) handleRestoreVM(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 

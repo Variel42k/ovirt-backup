@@ -8,8 +8,8 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/ovirt"
 )
 
-// CancellationState reads power state from both Engines. Missing inventory or a
-// lost create response must never be presented as proof that a target is absent.
+// CancellationState читает состояние питания ВМ на обоих движках. Отсутствие записи в
+// инвентаре или потеря ответа при создании не подтверждают отсутствие целевой ВМ.
 func (s *Service) CancellationState(ctx context.Context, id string) (*model.VMTransferCancellationState, error) {
 	t, err := s.st.GetVMTransfer(ctx, id)
 	if err != nil {
@@ -29,7 +29,8 @@ func (s *Service) CancellationState(ctx context.Context, id string) (*model.VMTr
 	}
 	targetID := t.TargetVMID
 	if targetID == "" && t.RestoreID == "" {
-		// The restore ID is persisted before the first target create request.
+		// Идентификатор восстановления сохраняется до первого запроса на создание целевой
+		// ВМ.
 		absent := false
 		r.TargetExists, r.TargetStatus = &absent, "not_created"
 	} else if dst, e := s.pool.Get(ctx, t.Request.TargetServerID); e == nil {
@@ -40,7 +41,7 @@ func (s *Service) CancellationState(ctx context.Context, id string) (*model.VMTr
 			} else {
 				matches := 0
 				for _, vm := range vms {
-					if vm.Description == "jhvirt-transfer:"+t.ID {
+					if transferTargetOwned(t, &vm) {
 						matches++
 						targetID = vm.ID
 					}

@@ -15,7 +15,8 @@ import (
 	"github.com/google/uuid"
 )
 
-// Run refreshes standby targets until an operator requests final cutover.
+// Run обновляет резервные цели до тех пор, пока оператор не запросит окончательное
+// сокращение.
 func (s *Service) Run(ctx context.Context) {
 	tick := time.NewTicker(15 * time.Second)
 	defer tick.Stop()
@@ -37,8 +38,9 @@ func (s *Service) Run(ctx context.Context) {
 			}
 			for _, t := range items {
 				if autoSyncDue(t, time.Now()) {
-					// Preparing the rest of a group has priority over periodic
-					// re-syncs, otherwise a long sequential group can starve.
+					// Подготовка остальной части группы имеет приоритет над периодическими
+					// повторными синхронизациями, в противном случае длинная
+					// последовательная группа может голодать.
 					waiting := false
 					if t.BatchID != "" {
 						for _, other := range items {
@@ -204,7 +206,7 @@ func (s *Service) prepare(ctx context.Context, t *model.VMTransfer) error {
 	}
 	result, err := s.engine.RestoreVM(ctx, &model.RestoreVMRequest{
 		TransferID: t.ID, RestoreID: t.RestoreID, RunID: run.ID, ServerID: t.Request.TargetServerID, ClusterID: t.Request.ClusterID, StorageDomainID: t.Request.StorageDomainID, Name: t.Request.Name,
-		Network: model.RestoreNetworkDetached, NetworkMappings: mappings, PreserveMAC: t.Request.PreserveMAC, Description: "jhvirt-transfer:" + t.ID,
+		Network: model.RestoreNetworkDetached, NetworkMappings: mappings, PreserveMAC: t.Request.PreserveMAC, Description: transferTargetDescription(t.ID),
 		OnVMCreated:    func(id string) error { t.TargetVMID = id; return s.save(t) },
 		OnDiskRestored: func(source, target string) error { t.DiskMap[source] = target; return s.save(t) },
 	})
@@ -259,7 +261,7 @@ func (s *Service) synchronize(ctx context.Context, t *model.VMTransfer, final bo
 		return fmt.Errorf("состав дисков изменился во время миграции")
 	}
 	var deltaTotal int64
-	// Validate the entire set before changing even the first target disk.
+	// Проверка всего набора перед изменением даже первого целевого диска.
 	for _, id := range set.DiskOrder {
 		targetID := t.DiskMap[id]
 		if targetID == "" {
@@ -369,8 +371,8 @@ func (s *Service) startTarget(ctx context.Context, t *model.VMTransfer) error {
 	if err != nil {
 		return err
 	}
-	// Mapping by source NIC name remains stable even when the destination assigns
-	// fresh NIC IDs and MAC addresses.
+	// Сопоставление по имени источника NIC остается стабильным, даже если получатель
+	// назначает новые NIC идентификаторы и MAC адреса.
 	set, err := s.engine.LoadVMChainCopy(ctx, t.AppliedRunID, "")
 	if err != nil {
 		return err
@@ -389,8 +391,8 @@ func (s *Service) startTarget(ctx context.Context, t *model.VMTransfer) error {
 	}
 	set.Close()
 	for _, nic := range nics {
-		// The list is already loaded. Avoid redundant PUTs (and their Engine
-		// events) on retry, but do not infer a missing on_boot value.
+		// Список уже загружен. Избегайте лишних PUTs (и их Engine событий) при повторной
+		// попытке, но не выводите недостающее on_boot значение.
 		connected := wanted[nic.Name]
 		if nic.OnBoot != nil && bool(nic.Linked) == connected && bool(*nic.OnBoot) == connected {
 			continue
@@ -470,7 +472,8 @@ func (s *Service) rollback(ctx context.Context, t *model.VMTransfer, action stri
 	if err != nil {
 		return err
 	}
-	// Recover a VM created just before a process crash, before its ID was saved.
+	// Восстановить ВМ, созданную непосредственно перед сбоем процесса, до сохранения ее
+	// идентификатора.
 	if t.TargetVMID == "" {
 		vms, e := dst.SearchVMs(ctx, "")
 		if e != nil {
@@ -478,7 +481,7 @@ func (s *Service) rollback(ctx context.Context, t *model.VMTransfer, action stri
 		}
 		matches := 0
 		for _, v := range vms {
-			if v.Description == "jhvirt-transfer:"+t.ID {
+			if transferTargetOwned(t, &v) {
 				t.TargetVMID = v.ID
 				matches++
 			}
@@ -527,7 +530,8 @@ func (s *Service) rollback(ctx context.Context, t *model.VMTransfer, action stri
 				if err = dst.DeleteVM(ctx, t.TargetVMID, false); err != nil {
 					return err
 				}
-				// Deletion is asynchronous; do not restart the source until absence is proven.
+				// Удаление является асинхронным; Не перезагружайте источник до тех пор,
+				// пока не будет доказано отсутствие.
 				if err = dst.WaitTransferVMDeleted(ctx, t.TargetVMID, 5*time.Minute); err != nil {
 					return err
 				}

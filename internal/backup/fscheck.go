@@ -9,23 +9,19 @@ import (
 	"unicode/utf16"
 )
 
-// Structural inspection of a restored image.
+// Структурный осмотр восстановленного образа.
 //
-// Checksums prove the bytes came back exactly as they were stored. They say
-// nothing about whether those bytes were ever a working disk — a backup that
-// faithfully preserves an empty image passes every hash check there is. This
-// file reads the partition table and the filesystem superblocks the way a
-// bootloader would, and reports whether the image looks like something that
-// could be booted or mounted.
+// Контрольные суммы подтверждают, что байты совпадают с сохранёнными. Даже пустой образ
+// проходит такую проверку, если он сохранён без ошибок. Здесь читаем таблицу разделов и
+// суперблоки, чтобы определить, выглядит ли образ пригодным для загрузки или монтирования.
 //
-// It deliberately never mounts anything: mounting an untrusted filesystem
-// image is a kernel attack surface, and the question here is only "does this
-// look intact", not "give me the files".
+// Проверяем структуры без монтирования образа. Для оценки его целостности
+// открывать файлы не требуется, а монтирование передало бы недоверенный образ ядру.
 
-// Standard sector sizes, tried in order when locating a partition table.
+// Стандартные размеры секторов, опробованные по порядку при поиске таблицы разделов.
 var sectorSizes = []int64{512, 4096}
 
-// PartitionScheme names the partitioning style found on an image.
+// PartitionScheme именует стиль разделения, найденный на образе.
 type PartitionScheme string
 
 const (
@@ -34,7 +30,7 @@ const (
 	SchemeNone PartitionScheme = "none"
 )
 
-// Partition is one entry of a partition table.
+// Partition — одна запись таблицы разделов.
 type Partition struct {
 	Number     int    `json:"number"`
 	Start      int64  `json:"start"`
@@ -47,7 +43,7 @@ type Partition struct {
 	FSLabel    string `json:"fs_label,omitempty"`
 }
 
-// ImageLayout is what structural inspection found.
+// ImageLayout — то, что структурная проверка обнаружила.
 type ImageLayout struct {
 	Scheme     PartitionScheme `json:"scheme"`
 	SectorSize int64           `json:"sector_size"`
@@ -61,17 +57,17 @@ type ImageLayout struct {
 	Verdict string `json:"verdict"`
 }
 
-// Verdict values.
+// Ценности вердикта.
 const (
 	VerdictUsable     = "usable"
 	VerdictSuspicious = "suspicious"
 	VerdictEmpty      = "empty"
 )
 
-// Usable reports whether something recognisable was found.
+// Usable сообщает, было ли найдено что-то узнаваемое.
 func (l *ImageLayout) Usable() bool { return l.Verdict == VerdictUsable }
 
-// Summary renders a one-line description for logs and the UI.
+// Summary отображает однострочное описание для бревен и UI.
 func (l *ImageLayout) Summary() string {
 	switch l.Verdict {
 	case VerdictEmpty:
@@ -95,10 +91,10 @@ func (l *ImageLayout) Summary() string {
 		strings.ToUpper(string(l.Scheme)), len(l.Partitions), strings.Join(parts, ", "))
 }
 
-// InspectImage reads the structure of a disk image.
+// InspectImage считывает структуру образа диска.
 //
-// It reads a few kilobytes at a handful of offsets, so it is cheap enough to
-// run on every backup even when the image is measured in terabytes.
+// Он считывает несколько килобайт при нескольких смещениях, поэтому он достаточно дешев,
+// чтобы работать на каждой резервной копии, даже когда образ измеряется в терабайтах.
 func InspectImage(src io.ReaderAt, size int64) (*ImageLayout, error) {
 	if size <= 0 {
 		return nil, fmt.Errorf("нулевой размер образа")
@@ -113,8 +109,8 @@ func InspectImage(src io.ReaderAt, size int64) (*ImageLayout, error) {
 		return nil, fmt.Errorf("чтение начала образа: %w", err)
 	}
 
-	// GPT first: a GPT disk also carries a protective MBR, so checking MBR
-	// first would misreport every modern disk as having one huge partition.
+	// GPT во-первых: GPT диск также имеет защитный MBR, поэтому проверка MBR сначала
+	// неправильно сообщит каждый современный диск как имеющий один огромный раздел.
 	for _, sectorSize := range sectorSizes {
 		if parts, ok := readGPT(src, size, sectorSize); ok {
 			layout.Scheme = SchemeGPT
@@ -131,7 +127,7 @@ func InspectImage(src io.ReaderAt, size int64) (*ImageLayout, error) {
 		}
 	}
 
-	// Identify the filesystem inside each partition.
+	// Определите файловую систему внутри каждого раздела.
 	for i := range layout.Partitions {
 		p := &layout.Partitions[i]
 		fs, label := probeFilesystem(src, p.Start, p.Size)
@@ -195,7 +191,7 @@ func allZero(buf []byte) bool {
 	return true
 }
 
-// readMBR parses a classic partition table.
+// readMBR разбор классической таблицы разделов.
 func readMBR(head []byte, size int64) ([]Partition, bool) {
 	if len(head) < 512 {
 		return nil, false
@@ -211,8 +207,8 @@ func readMBR(head []byte, size int64) ([]Partition, bool) {
 		if partType == 0x00 {
 			continue
 		}
-		// 0xEE marks a protective MBR guarding a GPT disk; the real table is
-		// elsewhere and this entry describes nothing.
+		// 0xEE обозначает защитную MBR диска GPT. Действительная таблица находится в другом
+		// месте, а эта запись не описывает раздел.
 		if partType == 0xEE {
 			return nil, false
 		}
@@ -235,7 +231,7 @@ func readMBR(head []byte, size int64) ([]Partition, bool) {
 	if len(parts) == 0 {
 		return nil, false
 	}
-	// A table pointing outside the image is a table from a different disk.
+	// Таблица, указывающая вне образа, представляет собой таблицу с другого диска.
 	for _, p := range parts {
 		if p.Start >= size {
 			return nil, false
@@ -244,7 +240,7 @@ func readMBR(head []byte, size int64) ([]Partition, bool) {
 	return parts, true
 }
 
-// readGPT parses a GUID partition table.
+// readGPT разборъ GUID таблицы перегородокъ.
 func readGPT(src io.ReaderAt, size, sectorSize int64) ([]Partition, bool) {
 	header := make([]byte, 92)
 	if sectorSize >= size {
@@ -261,8 +257,8 @@ func readGPT(src io.ReaderAt, size, sectorSize int64) ([]Partition, bool) {
 	entryCount := int64(binary.LittleEndian.Uint32(header[80:84]))
 	entrySize := int64(binary.LittleEndian.Uint32(header[84:88]))
 
-	// Sanity-check before allocating: a corrupted header must not turn into a
-	// gigabyte allocation.
+	// Проверка здравомыслия перед выделением: поврежденный заголовок не должен превращаться
+	// в гигабайтное выделение.
 	if entrySize < 128 || entrySize > 4096 || entryCount <= 0 || entryCount > 1024 {
 		return nil, false
 	}
@@ -299,14 +295,14 @@ func readGPT(src io.ReaderAt, size, sectorSize int64) ([]Partition, bool) {
 			TypeID:   guid,
 			TypeName: gptTypeName(guid),
 			Label:    decodeUTF16(entry[56:128]),
-			// GPT has no "active" flag; bit 2 is the legacy BIOS bootable one.
+			// GPT не имеет "active" флага; Вторую строчку занимает Legacy BIOS.
 			Bootable: len(entry) >= 56 && entry[48]&0x04 != 0,
 		})
 	}
 	return parts, len(parts) > 0
 }
 
-// probeFilesystem identifies a filesystem by its superblock magic.
+// probeFilesystem идентифицирует файловую систему по ее магии суперблоков.
 func probeFilesystem(src io.ReaderAt, offset, length int64) (name, label string) {
 	if length <= 0 {
 		return "", ""
@@ -323,13 +319,13 @@ func probeFilesystem(src io.ReaderAt, offset, length int64) (name, label string)
 		return buf
 	}
 
-	// ext2/3/4: magic 0xEF53 at 0x438, volume label at 0x478.
+	// ext2/3/4: магия 0xEF53 в 0x438, метка объема в 0x478.
 	if sb := read(0x400, 0x100); sb != nil {
 		if binary.LittleEndian.Uint16(sb[0x38:0x3A]) == 0xEF53 {
 			featureIncompat := binary.LittleEndian.Uint32(sb[0x60:0x64])
 			featureRO := binary.LittleEndian.Uint32(sb[0x64:0x68])
 			kind := "ext2"
-			if featureIncompat&0x0004 != 0 { // HAS_JOURNAL lives in compat, but
+			if featureIncompat&0x0004 != 0 { // HAS_JOURNAL Живет в компате, но
 				kind = "ext3" //             this bit is enough to tell them apart
 			}
 			if featureIncompat&0x0040 != 0 || featureRO&0x0008 != 0 {
@@ -339,12 +335,12 @@ func probeFilesystem(src io.ReaderAt, offset, length int64) (name, label string)
 		}
 	}
 
-	// XFS: "XFSB" at offset 0, label at 0x6C.
+	// XFS: "XFSB" по смещению 0, метка по 0x6C.
 	if sb := read(0, 0x80); sb != nil && bytes.Equal(sb[0:4], []byte("XFSB")) {
 		return "xfs", trimNul(sb[0x6C:0x7C])
 	}
 
-	// btrfs: "_BHRfS_M" at 0x10040, label at 0x102B8 (0x278 into the superblock).
+	// btrfs: "_BHRfS_M" по смещению 0x10040, метка по 0x102B8 (0x278 от начала суперблока).
 	if sb := read(0x10040, 0x8); sb != nil && bytes.Equal(sb, []byte("_BHRfS_M")) {
 		label := ""
 		if l := read(0x102B8, 0x100); l != nil {
@@ -353,12 +349,12 @@ func probeFilesystem(src io.ReaderAt, offset, length int64) (name, label string)
 		return "btrfs", label
 	}
 
-	// NTFS: "NTFS    " at offset 3.
+	// NTFS: "NTFS    " по смещению 3.
 	if sb := read(0, 0x20); sb != nil && bytes.Equal(sb[3:11], []byte("NTFS    ")) {
 		return "ntfs", ""
 	}
 
-	// FAT: the type string sits at 0x36 (FAT12/16) or 0x52 (FAT32).
+	// FAT: строка типа сидит в 0x36 (FAT12/16) или 0x52 (FAT32).
 	if sb := read(0, 0x60); sb != nil {
 		if bytes.HasPrefix(sb[0x36:], []byte("FAT")) {
 			return strings.TrimSpace(string(sb[0x36:0x3E])), trimNul(sb[0x2B:0x36])
@@ -368,18 +364,18 @@ func probeFilesystem(src io.ReaderAt, offset, length int64) (name, label string)
 		}
 	}
 
-	// Linux swap: signature at the end of the first page.
+	// Linux Своп: подпись в конце первой страницы.
 	if sb := read(0xFF6, 10); sb != nil && bytes.Equal(sb, []byte("SWAPSPACE2")) {
 		return "swap", ""
 	}
 
-	// LUKS: an encrypted volume is intact even though nothing inside it can be
-	// identified, so recognising the header avoids a false alarm.
+	// Зашифрованный том LUKS может быть исправен, даже если его содержимое не распознаётся. По
+	// заголовку отличаем его от повреждённого образа.
 	if sb := read(0, 8); sb != nil && bytes.Equal(sb[0:6], []byte{'L', 'U', 'K', 'S', 0xBA, 0xBE}) {
 		return "luks", ""
 	}
 
-	// LVM2 physical volume: the label sits in one of the first four sectors.
+	// Метка физического тома LVM2 находится в одном из первых четырёх секторов.
 	for _, sector := range []int64{0, 512, 1024, 1536} {
 		if sb := read(sector, 8); sb != nil && bytes.Equal(sb, []byte("LABELONE")) {
 			return "lvm2-pv", ""
@@ -408,7 +404,7 @@ func decodeUTF16(b []byte) string {
 	return strings.TrimSpace(string(utf16.Decode(units)))
 }
 
-// formatGUID renders a GPT type GUID in its canonical mixed-endian form.
+// formatGUID передаёт GPT тип GUID в его канонической смешанно-эндийской форме.
 func formatGUID(b []byte) string {
 	if len(b) < 16 {
 		return ""

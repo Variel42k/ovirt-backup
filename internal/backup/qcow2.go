@@ -12,14 +12,13 @@ import (
 	"time"
 )
 
-// qemu-img is part of the oVirt 4.3 qcow2 data path: old imageio returns the
-// volume file instead of a guest-visible raw stream, so the service has to
-// materialise its backing chain locally. It is also used for managed qcow2
-// artifacts, qcow2 restores and `qemu-img check`. Raw-only legacy VMs and
-// other verification modes can still work without it.
+// qemu-img нужен для бэкапа qcow2 через oVirt 4.3. Старый ImageIO отдаёт файл тома, поэтому
+// цепочку образов собираем локально. Инструмент также нужен для артефактов qcow2,
+// восстановления qcow2 и проверки qemu-img check. Старые ВМ с raw-дисками и другие проверки
+// могут работать без него.
 
-// FindQemuImg resolves the qemu-img binary. An explicit path from the config
-// wins; otherwise PATH is searched.
+// FindQemuImg разрешает двоичный код qemu-img. Явный путь из настроек выигрывает; В
+// противном случае PATH обыскивается.
 func FindQemuImg(configured string) (string, error) {
 	configured = strings.TrimSpace(configured)
 	if configured != "" {
@@ -51,21 +50,21 @@ func FindQemuImg(configured string) (string, error) {
 	return "", fmt.Errorf("qemu-img не найден в среде службы (PATH и стандартные каталоги): %w", err)
 }
 
-// QemuImgAvailable reports whether the tool can be used, for feature flags in
-// the UI.
+// QemuImgAvailable определяет, доступен ли инструмент. Результат нужен для списка
+// возможностей в интерфейсе.
 func QemuImgAvailable(configured string) bool {
 	_, err := FindQemuImg(configured)
 	return err == nil
 }
 
-// ConvertToQcow2 converts a raw image into a compressed qcow2.
+// ConvertToQcow2 преобразовывает сырое образ в сжатое qcow2.
 func ConvertToQcow2(ctx context.Context, configured, src, dst string) error {
 	bin, err := FindQemuImg(configured)
 	if err != nil {
 		return err
 	}
-	// -S 4k keeps the output sparse; without it a mostly-empty raw image
-	// becomes a fully allocated qcow2.
+	// -S 4k держит выход разреженным; без него в основном пустое сырое образ становится
+	// полностью выделенным qcow2.
 	cmd := exec.CommandContext(ctx, bin, "convert", "-p", "-O", "qcow2", "-S", "4k", src, dst)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -74,7 +73,7 @@ func ConvertToQcow2(ctx context.Context, configured, src, dst string) error {
 	return nil
 }
 
-// QemuImgCheck runs a consistency check over an image and returns its output.
+// QemuImgCheck выполняет проверку согласованности образа и возвращает его вывод.
 func QemuImgCheck(ctx context.Context, configured, path string) (string, error) {
 	bin, err := FindQemuImg(configured)
 	if err != nil {
@@ -87,15 +86,15 @@ func QemuImgCheck(ctx context.Context, configured, path string) (string, error) 
 	out, err := cmd.CombinedOutput()
 	text := strings.TrimSpace(string(out))
 	if err != nil {
-		// qemu-img check exits non-zero for "leaked clusters" too, which is a
-		// warning rather than corruption; the caller sees the text and decides.
+		// qemu-img проверить выходы не ноль для "leaked clusters" тоже, что является
+		// предупреждением, а не коррупция; Код вызова видит текст и принимает решение.
 		return text, fmt.Errorf("qemu-img check: %w", err)
 	}
 	return text, nil
 }
 
-// QemuImgInfo returns the tool's description of an image, used to confirm a
-// restored file really is what it claims to be.
+// QemuImgInfo возвращает инструментальное описание образа, используемое для подтверждения
+// восстановленного файла, действительно является тем, что он утверждает.
 func QemuImgInfo(ctx context.Context, configured, path string) (string, error) {
 	bin, err := FindQemuImg(configured)
 	if err != nil {
@@ -109,8 +108,8 @@ func QemuImgInfo(ctx context.Context, configured, path string) (string, error) {
 	return string(out), nil
 }
 
-// Qcow2BackingFile returns the backing reference embedded in an overlay. An
-// empty result means the downloaded qcow2 is self-contained.
+// Qcow2BackingFile возвращает опорную ссылку, встроенную в наложение. Пустой результат
+// означает, что загруженный qcow2 является автономным.
 func Qcow2BackingFile(ctx context.Context, configured, path string) (string, error) {
 	raw, err := QemuImgInfo(ctx, configured, path)
 	if err != nil {
@@ -129,8 +128,8 @@ func Qcow2BackingFile(ctx context.Context, configured, path string) (string, err
 	return info.Full, nil
 }
 
-// backingMatchesImage compares path components rather than substrings so one
-// volume UUID cannot accidentally match a longer, unrelated UUID.
+// backingMatchesImage сравнивает компоненты пути, а не подстроки, поэтому один том UUID не
+// может случайно соответствовать более длинному, несвязанному UUID.
 func backingMatchesImage(backing, imageID string) bool {
 	if backing == "" || imageID == "" {
 		return false
@@ -144,9 +143,9 @@ func backingMatchesImage(backing, imageID string) bool {
 	return false
 }
 
-// RebaseQcow2 replaces the inaccessible oVirt backing reference in a copied
-// overlay with the locally reconstructed parent image. -u only edits metadata;
-// the overlay's guest data is not rewritten.
+// RebaseQcow2 заменяет недоступную oVirt опорную ссылку в скопированном наложении на
+// локально реконструированный родительский образ. -u только редактирует метаданные;
+// гостевые данные оверлея не переписываются.
 func RebaseQcow2(ctx context.Context, configured, overlay, parentRaw string) error {
 	return RebaseQcow2Onto(ctx, configured, overlay, parentRaw, "raw")
 }
@@ -166,7 +165,7 @@ func RebaseQcow2Onto(ctx context.Context, configured, overlay, parent, parentFor
 	return nil
 }
 
-// ConvertQcow2ToRaw materialises an overlay and its local backing image.
+// ConvertQcow2ToRaw материализует наложение и его локальное родительское образ.
 // onProgress, если задан, получает долю выполненного от 0 до 1: её qemu-img
 // печатает по ключу -p.
 func ConvertQcow2ToRaw(ctx context.Context, configured, src, dst string, onProgress func(float64)) error {

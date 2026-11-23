@@ -1,6 +1,5 @@
-// Package imageio is a client for ovirt-imageio, the data plane of oVirt disk
-// transfers. The engine hands out a ticket URL; everything here speaks to that
-// URL directly.
+// Пакет imageio обменивается данными дисков с ovirt-imageio. Движок выдаёт адрес с билетом
+// доступа, по которому клиент обращается напрямую.
 package imageio
 
 import (
@@ -19,7 +18,7 @@ import (
 	"time"
 )
 
-// Client talks to one imageio ticket.
+// Client гово́ритъ одинъ билетъ образио.
 type Client struct {
 	base   string
 	http   *http.Client
@@ -43,10 +42,9 @@ type Timeouts struct {
 	Scan time.Duration
 }
 
-// ErrReadIdleTimeout means that an HTTP response stayed open but delivered no
-// bytes for the configured Block interval. It is deliberately different from
-// a total request deadline: downloading a large volume may take hours while a
-// silent, half-open imageio stream must not hold a snapshot forever.
+// ErrReadIdleTimeout означает, что открытый HTTP-ответ не передавал данные в течение
+// интервала Block. Общий запрос может длиться часами для большого тома, но прерванный поток
+// ImageIO не должен бесконечно удерживать снапшот.
 var ErrReadIdleTimeout = errors.New("imageio read idle timeout")
 
 type activityReader struct {
@@ -62,8 +60,8 @@ func (r activityReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// New wraps a transfer URL. The HTTP client should carry the engine CA, which
-// is why it is passed in rather than built here.
+// New оку́тывать переносье URL Окута́ть. HTTP Клиент должен нести движок CA поэтому он
+// передается, а не строится здесь.
 func New(transferURL string, httpClient *http.Client) *Client {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 10 * time.Minute}
@@ -88,10 +86,10 @@ func bound(ctx context.Context, d time.Duration) (context.Context, context.Cance
 	return context.WithTimeout(ctx, d)
 }
 
-// URL returns the ticket URL in use.
+// URL возвраща́ть билетъ URL въ пользованіе.
 func (c *Client) URL() string { return c.base }
 
-// Features is the capability document returned by OPTIONS.
+// Features — документ о возможностях, возвращаемый посредством OPTIONS.
 type Features struct {
 	Features   []string `json:"features"`
 	UnixSocket string   `json:"unix_socket,omitempty"`
@@ -99,7 +97,7 @@ type Features struct {
 	MaxWriters int      `json:"max_writers,omitempty"`
 }
 
-// Has reports whether a named capability is present.
+// Has сообщает, присутствует ли названная способность.
 func (f *Features) Has(name string) bool {
 	for _, s := range f.Features {
 		if s == name {
@@ -109,9 +107,9 @@ func (f *Features) Has(name string) bool {
 	return false
 }
 
-// Options queries the ticket's capabilities. Older daemons answer 405 to
-// OPTIONS on the ticket path; that is reported as "no optional features"
-// rather than as an error, because plain ranged reads still work.
+// Options запрашивает возможности по билету доступа. Ответ 405 от старого
+// демона означает отсутствие дополнительных возможностей. Чтение диапазонов
+// по-прежнему доступно.
 func (c *Client) Options(ctx context.Context) (*Features, error) {
 	ctx, cancel := bound(ctx, c.limits.Block)
 	defer cancel()
@@ -141,7 +139,7 @@ func (c *Client) Options(ctx context.Context) (*Features, error) {
 	return &features, nil
 }
 
-// Extent is one contiguous region of the image.
+// Extent — одна смежная область образа.
 type Extent struct {
 	Start  int64 `json:"start"`
 	Length int64 `json:"length"`
@@ -154,10 +152,10 @@ type Extent struct {
 	Dirty bool `json:"dirty"`
 }
 
-// End returns the exclusive end offset of the extent.
+// End возвращает исключительное конечное смещение степени.
 func (e Extent) End() int64 { return e.Start + e.Length }
 
-// Extent contexts.
+// Обширные контексты.
 const (
 	// ContextZero описывает, какие области содержат данные, а какие — нули.
 	// Используется для полного бэкапа: разреженные тома читаются только там,
@@ -168,7 +166,7 @@ const (
 	ContextDirty = "dirty"
 )
 
-// Extents fetches the extent map for the requested context.
+// Extents получает карту протяженности для запрошенного контекста.
 func (c *Client) Extents(ctx context.Context, extentContext string) ([]Extent, error) {
 	ctx, cancel := bound(ctx, c.limits.Map)
 	defer cancel()
@@ -204,8 +202,7 @@ func (c *Client) Extents(ctx context.Context, extentContext string) ([]Extent, e
 	return extents, nil
 }
 
-// ReadRange copies [offset, offset+length) into w and returns how many bytes
-// were written.
+// ReadRange копирует [offset, offset+length] в w и возвращает количество записанных байтов.
 func (c *Client) ReadRange(ctx context.Context, offset, length int64, w io.Writer) (int64, error) {
 	ctx, cancel := bound(ctx, c.limits.Block)
 	defer cancel()
@@ -216,7 +213,7 @@ func (c *Client) ReadRange(ctx context.Context, offset, length int64, w io.Write
 	if err != nil {
 		return 0, err
 	}
-	// HTTP ranges are inclusive on both ends.
+	// HTTP диапазоны являются инклюзивными на обоих концах.
 	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", offset, offset+length-1))
 
 	resp, err := c.http.Do(req)
@@ -239,10 +236,10 @@ func (c *Client) ReadRange(ctx context.Context, offset, length int64, w io.Write
 	return n, nil
 }
 
-// Download streams the complete representation exposed by a transfer ticket.
-// It is used for legacy qcow2 snapshot layers, whose length is the qcow2 file
-// length rather than the virtual disk size and therefore cannot be inferred by
-// the caller before the request.
+// Загрузите потоки полного представления, раскрытого трансферным билетом.
+// Он используется для устаревших слоев qcow2 snapshot, длина которых равна длине файла
+// qcow2, а не размеру виртуального диска, и поэтому не может быть выведена кодом вызова
+// перед запросом.
 func (c *Client) Download(ctx context.Context, w io.Writer) (int64, error) {
 	return c.DownloadSized(ctx, w, nil)
 }
@@ -308,7 +305,7 @@ func (c *Client) DownloadSized(ctx context.Context, w io.Writer, onSize func(int
 	return n, nil
 }
 
-// WriteRange uploads length bytes from r at the given offset.
+// WriteRange загружает байты длины из r при заданном смещении.
 func (c *Client) WriteRange(ctx context.Context, offset int64, r io.Reader, length int64, flush bool) error {
 	ctx, cancel := bound(ctx, c.limits.Block)
 	defer cancel()
@@ -317,8 +314,8 @@ func (c *Client) WriteRange(ctx context.Context, offset int64, r io.Reader, leng
 	}
 	endpoint := c.base
 	if !flush {
-		// Flushing on every chunk destroys throughput; the caller issues one
-		// explicit Flush at the end instead.
+		// Промывка на каждом куске разрушает пропускную способность; Код вызова выдает один
+		// явный Flush в конце вместо этого.
 		endpoint += "?flush=n"
 	}
 
@@ -342,8 +339,8 @@ func (c *Client) WriteRange(ctx context.Context, offset int64, r io.Reader, leng
 	return nil
 }
 
-// Zero punches a zero range without transferring the data. Restoring a sparse
-// image over an existing disk needs this to erase whatever was there before.
+// Zero пробивает нулевую дальность без передачи данных. Восстановление разреженного образа
+// на существующем диске требует этого, чтобы стереть все, что было там раньше.
 func (c *Client) Zero(ctx context.Context, offset, size int64, flush bool) error {
 	if size <= 0 {
 		return nil
@@ -360,7 +357,7 @@ func (c *Client) Zero(ctx context.Context, offset, size int64, flush bool) error
 	return c.patch(ctx, body)
 }
 
-// Flush forces buffered writes to stable storage.
+// Flush силы буферизованной записи в стабильное хранилище.
 func (c *Client) Flush(ctx context.Context) error {
 	body, err := json.Marshal(map[string]any{"op": "flush"})
 	if err != nil {
@@ -390,19 +387,19 @@ func (c *Client) patch(ctx context.Context, body []byte) error {
 	return nil
 }
 
-// Checksum is the daemon-side digest of the image.
+// Checksum — дайджест с демонической стороны образа.
 type Checksum struct {
 	Checksum  string `json:"checksum"`
 	Algorithm string `json:"algorithm"`
 	BlockSize int64  `json:"block_size"`
 }
 
-// ChecksumOf asks the daemon to hash the image it is serving. Comparing this
-// against a digest computed over what we stored is the strongest verification
-// available: it is calculated independently, on the other side of the wire.
+// ChecksumOf запрашивает у демона хеш отдаваемого образа. Его вычисляет источник независимо
+// от сервера копий, поэтому сравнение с хешем сохранённых данных проверяет весь путь
+// передачи.
 //
-// The digest is block-based, so it is only comparable against a digest computed
-// with the same algorithm and block size.
+// Дайджест основан на блоке, поэтому его можно сравнить только с дайджестом, вычисленным с
+// тем же алгоритмом и размером блока.
 func (c *Client) ChecksumOf(ctx context.Context, algorithm string, blockSize int64) (*Checksum, error) {
 	ctx, cancel := bound(ctx, c.limits.Scan)
 	defer cancel()
@@ -441,7 +438,7 @@ func (c *Client) ChecksumOf(ctx context.Context, algorithm string, blockSize int
 	return &sum, nil
 }
 
-// Algorithms lists the digests the daemon can compute.
+// Algorithms перечисляет дайджесты, которые демон может вычислить.
 func (c *Client) Algorithms(ctx context.Context) ([]string, error) {
 	ctx, cancel := bound(ctx, c.limits.Block)
 	defer cancel()
@@ -470,7 +467,7 @@ func (c *Client) Algorithms(ctx context.Context) ([]string, error) {
 	return out.Algorithms, nil
 }
 
-// Error is a non-2xx answer from the daemon.
+// Error является ответом non-2xx от демона.
 type Error struct {
 	Status int
 	Method string
@@ -553,8 +550,8 @@ func drain(resp *http.Response) {
 	_ = resp.Body.Close()
 }
 
-// redactTicket strips the ticket id from a URL before it reaches a log: it is
-// a bearer credential for the disk's data for as long as the transfer lives.
+// redactTicket удаляет идентификатор билета из URL прежде, чем он достигнет журнала: это
+// учётные данные носителя для данных диска до тех пор, пока передача жива.
 func redactTicket(raw string) string {
 	idx := strings.Index(raw, "/images/")
 	if idx < 0 {

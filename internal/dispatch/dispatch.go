@@ -1,10 +1,8 @@
-// Package dispatch routes a backup request to the driver that can serve it.
+// Пакет dispatch направляет резервный запрос драйверу, который может его обслуживать.
 //
-// It exists because of a dependency direction: internal/kvm builds on
-// internal/backup for the storage format, so internal/backup cannot reach back
-// into internal/kvm without an import cycle. Rather than bend the format
-// package around that, the choice of driver is made one level up — which is
-// also where it belongs, since it is a policy decision, not a storage one.
+// internal/kvm зависит от internal/backup из-за формата хранения. Выбор драйвера вынесен
+// уровнем выше, чтобы сохранить направление зависимостей и принимать решение по политике
+// вне пакета формата.
 package dispatch
 
 import (
@@ -28,9 +26,10 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/store"
 )
 
-// Dispatcher presents the same surface as the oVirt backup engine and adds the
-// libvirt path. Embedding means every method that is not hypervisor-specific —
-// verification, restore, retention, chain resolution — is inherited unchanged.
+// Dispatcher представляет ту же поверхность, что и резервный движок oVirt и добавляет путь
+// libvirt. Встраивание означает, что каждый метод, который не является специфичным для
+// гипервизора — проверка, восстановление, удержание, разрешение цепи — наследуется без
+// изменений.
 type Dispatcher struct {
 	*backup.Engine
 
@@ -55,8 +54,9 @@ type Dispatcher struct {
 	verifyDiskActions sync.Map
 }
 
-// SetProxmoxPool enables the native Proxmox data path while keeping New
-// source-compatible with tests and small embeddings that do not use it.
+// SetProxmoxPool позволяет использовать нативный Proxmox путь данных, сохраняя при этом
+// совместимость нового источника с тестами и небольшими вложениями, которые его не
+// используют.
 func (d *Dispatcher) SetProxmoxPool(pool *proxmox.Pool) { d.proxmox = pool }
 
 func (d *Dispatcher) SetTelemetryMonitor(value interface {
@@ -67,7 +67,7 @@ func (d *Dispatcher) SetTelemetryMonitor(value interface {
 	}
 }
 
-// New builds a dispatcher over the existing engine.
+// New понад существующим движком строится диспетчер.
 func New(engine *backup.Engine, st *store.Store, pool *libvirtx.Pool,
 	cfg config.BackupConfig, cipher *secret.Cipher, log zerolog.Logger) *Dispatcher {
 	d := &Dispatcher{Engine: engine, store: st, libvirt: pool, cfg: cfg, cipher: cipher, log: log}
@@ -76,7 +76,7 @@ func New(engine *backup.Engine, st *store.Store, pool *libvirtx.Pool,
 	return d
 }
 
-// Execute performs one backup, choosing the driver by connection type.
+// Execute выполняет одну резервную копию, выбирая драйвер по типу подключения.
 func (d *Dispatcher) Execute(ctx context.Context, req backup.RunRequest) (*model.BackupRun, error) {
 	originalCreated := req.OnRunCreated
 	var stops []func()
@@ -111,7 +111,7 @@ func (d *Dispatcher) Execute(ctx context.Context, req backup.RunRequest) (*model
 	return d.Engine.Execute(ctx, req)
 }
 
-// executeLibvirt runs a hot backup against a bare libvirt host.
+// executeLibvirt выполняет горячий бэкап на автономном хосте libvirt.
 func (d *Dispatcher) executeLibvirt(ctx context.Context, srv *model.Server, req backup.RunRequest) (*model.BackupRun, error) {
 	compression, err := d.Engine.ResolveCompression(req.Compression)
 	if err != nil {
@@ -162,9 +162,9 @@ func (d *Dispatcher) executeLibvirt(ctx context.Context, srv *model.Server, req 
 		Str("run", run.ID).Str("vm", vm.Name).Str("гипервизор", srv.Name).
 		Str("target", target.Name).Logger()
 
-	// Without a parent there is nothing to diff against; the driver would work
-	// it out anyway, but resolving it here keeps the chain bookkeeping in one
-	// place for both drivers.
+	// Без родителя нет ничего, против чего можно было бы спорить. Водитель справится с этим
+	// в любом случае, но решение здесь держит цепочку бухгалтерского учета в одном месте
+	// для обоих водителей.
 	if req.Type.NeedsParent() {
 		onlyFull := req.Type == model.BackupDifferential
 		parent, err := d.store.LatestUsableRun(ctx, srv.ID, vm.ID, target.ID, onlyFull)
@@ -268,15 +268,15 @@ func (d *Dispatcher) executeLibvirt(ctx context.Context, srv *model.Server, req 
 			_ = d.store.SetRunProgress(ctx, run.ID, pct, done, 0)
 		},
 	}
-	// The byte-for-byte comparison against the source is only possible while
-	// the backup's NBD export is still open, so it has to happen inside the
-	// driver rather than as a later verification pass.
+	// Сравнение байтов с исходным кодом возможно только тогда, когда экспорт резервной
+	// копии NBD все еще открыт, поэтому это должно происходить внутри драйвера, а не в
+	// качестве более позднего проверочного пропуска.
 	if req.VerifyAfter == model.VerifySource {
 		driverReq.SourceVerifyFraction = 1
 	}
 
-	// The per-job time limit is applied by the scheduler around this call, so
-	// there is nothing extra to wrap here.
+	// Ограничение длительности задания задаёт планировщик вокруг этого вызова.
+	// Дополнительная обёртка здесь не нужна.
 	execCtx := ctx
 
 	d.event(ctx, run, model.RunEventStarted, 0,
@@ -487,7 +487,7 @@ func (d *Dispatcher) failRun(ctx context.Context, run *model.BackupRun, cause er
 		run.Error = cause.Error()
 	}
 
-	// A run killed by shutdown still needs its state written down.
+	// Запуск, убитый отключением, все еще нуждается в записи состояния.
 	saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 	defer cancel()
 	if _, err := d.store.GetBackupRun(saveCtx, run.ID); err == nil {
@@ -526,8 +526,8 @@ func (d *Dispatcher) saveTimeline(ctx context.Context, run *model.BackupRun, eve
 	}
 }
 
-// diskTargets converts stored disk identifiers to the libvirt target names the
-// driver expects. Inventory stores them as "<domain-uuid>:<target>".
+// diskTargets преобразует сохраненные идентификаторы диска в libvirt целевые имена, которые
+// ожидает драйвер. Инвентарь хранит их как "<domain-uuid>:<target>".
 func diskTargets(ids []string) []string {
 	out := make([]string, 0, len(ids))
 	for _, id := range ids {

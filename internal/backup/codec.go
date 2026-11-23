@@ -16,18 +16,17 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/secret"
 )
 
-// codec turns a plaintext chunk into the bytes stored in the blob and back.
+// Кодек превращает чанк открытого текста в байты, хранящиеся в blob и обратно.
 //
-// Compression is applied per chunk rather than over the whole stream: a chunk
-// has to be independently readable, because restore and verification address
-// chunks by offset and must not decompress a terabyte to reach the last one.
+// Сжимаем каждый чанк отдельно. Восстановление и проверка могут обратиться к любому
+// смещению без распаковки всего потока.
 type codec struct {
 	compression string
 	algo        compressor     // nil — сжатие выключено
 	cipher      *secret.Cipher // nil — шифрование выключено
 }
 
-// compressor is one algorithm.
+// Компрессор — это алгоритм.
 //
 // Отдельный интерфейс, а не ветвления по имени в encode/decode: алгоритм
 // выбирается один раз при создании кодека, и добавление ещё одного не трогает
@@ -81,8 +80,8 @@ func (c *codec) close() {
 	}
 }
 
-// encode returns the stored representation of a plaintext chunk and the hex
-// SHA-256 of the plaintext.
+// encode возвращает сохраненное представление чанка открытого текста и гекс SHA-256
+// открытого текста.
 func (c *codec) encode(plain []byte) (stored []byte, digest string, err error) {
 	sum := sha256.Sum256(plain)
 	digest = hex.EncodeToString(sum[:])
@@ -93,8 +92,8 @@ func (c *codec) encode(plain []byte) (stored []byte, digest string, err error) {
 		if err != nil {
 			return nil, "", fmt.Errorf("сжатие чанка (%s): %w", c.compression, err)
 		}
-		// Incompressible data (already-compressed guest filesystems, encrypted
-		// volumes) would otherwise grow by the frame header on every chunk.
+		// В противном случае несжимаемые данные (уже сжатые гостевые файловые системы,
+		// зашифрованные тома) будут расти по заголовку фрейма на каждом куске.
 		if len(compressed) < len(plain) {
 			out = compressed
 		} else {
@@ -111,8 +110,8 @@ func (c *codec) encode(plain []byte) (stored []byte, digest string, err error) {
 	return out, digest, nil
 }
 
-// decode reverses encode. wantLen is the plaintext length recorded in the
-// manifest and is used to tell a stored-as-is chunk from a compressed one.
+// decode перекодирова́ть, перекодировать. wantLen — длина открытого текста, записанная в
+// манифесте, и используется для того, чтобы отличить сохраненный как есть чанк от сжатого.
 func (c *codec) decode(stored []byte, wantLen int) ([]byte, error) {
 	buf := stored
 	if c.cipher != nil {
@@ -124,7 +123,7 @@ func (c *codec) decode(stored []byte, wantLen int) ([]byte, error) {
 		buf = plain
 	}
 	if c.algo != nil && len(buf) != wantLen {
-		// Equal lengths mean the encoder decided compression was not worth it.
+		// Равная длина означает, что кодировщик решил, что сжатие не стоит того.
 		plain, err := c.algo.decompress(buf, wantLen)
 		if err != nil {
 			return nil, fmt.Errorf("распаковка чанка (%s): %w", c.compression, err)
@@ -137,7 +136,7 @@ func (c *codec) decode(stored []byte, wantLen int) ([]byte, error) {
 	return buf, nil
 }
 
-// verifyDigest recomputes the plaintext hash and compares it with the manifest.
+// verifyDigest перечисляет хэш открытого текста и сравнивает его с манифестом.
 func verifyDigest(plain []byte, want string) error {
 	sum := sha256.Sum256(plain)
 	got := hex.EncodeToString(sum[:])

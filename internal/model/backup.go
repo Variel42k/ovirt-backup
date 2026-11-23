@@ -7,22 +7,21 @@ import (
 	"time"
 )
 
-// BackupType enumerates the strategies the engine can execute. They differ in
-// what the engine is asked to produce, not just in how much data is copied.
+// BackupType перечисляет стратегии, которые может выполнять движок. Они различаются в том,
+// что движок просят производить, а не только в том, сколько данных копируется.
 type BackupType string
 
-// LegacyIncrementalMode selects how an oVirt engine without the native
-// Backup API produces an incremental chain.
+// LegacyIncrementalMode выбирает, как движок oVirt без собственного резервного копирования
+// API производит инкрементную цепь.
 type LegacyIncrementalMode string
 
 const (
-	// LegacyIncrementalCompare reads a complete temporary snapshot and keeps
-	// only chunks that differ from the parent restore point. It is the safest
-	// compatibility mode: no snapshot remains on the engine between runs.
+	// LegacyIncrementalCompare читает временный снапшот целиком и сохраняет чанки,
+	// отличающиеся от родительской точки. Между запусками снапшот на движке отсутствует.
 	LegacyIncrementalCompare LegacyIncrementalMode = "compare"
-	// LegacyIncrementalQcow2 keeps one service snapshot and downloads the next
-	// qcow2 overlay. This saves source-side I/O, but requires qcow2 disks and
-	// qemu-img on the backup server.
+	// LegacyIncrementalQcow2 сохраняет один моментальный снапшот службы и загружает
+	// следующее наложение qcow2. Это экономит исходную часть I/O, но требует qcow2 дисков и
+	// qemu-img на сервере резервного копирования.
 	LegacyIncrementalQcow2 LegacyIncrementalMode = "qcow2_chain"
 )
 
@@ -58,22 +57,22 @@ const (
 	BackupConfig BackupType = "config"
 )
 
-// AllBackupTypes lists the supported strategies in presentation order.
+// AllBackupTypes перечисляют поддерживаемые стратегии в порядке представления.
 func AllBackupTypes() []BackupType {
 	return []BackupType{BackupFull, BackupIncremental, BackupDifferential, BackupSnapshot, BackupOVA, BackupConfig}
 }
 
-// NeedsParent reports whether a run of this type must be based on an earlier run.
+// NeedsParent сообщает, должен ли запуск этого типа основываться на более раннем запуске.
 func (t BackupType) NeedsParent() bool {
 	return t == BackupIncremental || t == BackupDifferential
 }
 
-// UsesCBT reports whether the type relies on changed block tracking.
+// UsesCBT сообщает, полагается ли тип на измененное отслеживание блоков.
 func (t BackupType) UsesCBT() bool {
 	return t == BackupFull || t == BackupIncremental || t == BackupDifferential
 }
 
-// Title returns a Russian label for the UI and for log messages.
+// Title возвращает русскую метку для UI и для лог-сообщений.
 func (t BackupType) Title() string {
 	switch t {
 	case BackupFull:
@@ -93,7 +92,7 @@ func (t BackupType) Title() string {
 	}
 }
 
-// RunStatus is the lifecycle of a backup, verify or restore run.
+// RunStatus — жизненный цикл резервного копирования, проверки или восстановления.
 type RunStatus string
 
 const (
@@ -107,7 +106,7 @@ const (
 	RunMissed        RunStatus = "missed"
 )
 
-// Terminal reports whether the status will not change on its own.
+// Terminal сообщает, не изменится ли статус сам по себе.
 func (s RunStatus) Terminal() bool {
 	switch s {
 	case RunSucceeded, RunPartial, RunFailed, RunCanceled, RunMissed:
@@ -116,7 +115,7 @@ func (s RunStatus) Terminal() bool {
 	return false
 }
 
-// StorageKind identifies a backup repository backend.
+// StorageKind идентифицирует бэкэнд резервного хранилища.
 type StorageKind string
 
 const (
@@ -144,22 +143,24 @@ func KnownStorageKind(kind StorageKind) bool {
 	return false
 }
 
-// StorageTarget is a configured backup repository. Secret fields are encrypted
-// at rest and never serialised back to the client.
+// StorageTarget является сконфигурированным резервным хранилищем. Секретные поля шифруются
+// в покое и никогда не сериализируются обратно клиенту.
 type StorageTarget struct {
 	ID      string      `json:"id"`
 	Name    string      `json:"name"`
 	Kind    StorageKind `json:"kind"`
 	Enabled bool        `json:"enabled"`
-	// Derived from the stable inventory identity, never accepted from API writes.
+	// Происходит от стабильной инвентарной идентичности, никогда не принималась от API
+	// пишет.
 	Automatic bool `json:"automatic"`
 	// ReadOnly подключает существующий репозиторий только для просмотра,
 	// проверки и восстановления. Новые копии и retention в него не пишут.
 	ReadOnly bool `json:"read_only"`
 
-	// Local
+	// Локальное хранилище.
 	BasePath string `json:"base_path,omitempty"`
-	// Existing engine connection and data domain; credentials stay in servers.
+	// Существующее подключение движка и домен данных; учётные данные аутентификации
+	// остаются на серверах.
 	ServerID        string `json:"server_id,omitempty"`
 	StorageDomainID string `json:"storage_domain_id,omitempty"`
 
@@ -234,7 +235,7 @@ type StorageTarget struct {
 	InsecureTLSSince *time.Time `json:"insecure_tls_since,omitempty"`
 
 	// Ограничение полосы, байт/с. 0 — без ограничения.
-	RateLimit int64 `json:"rate_limit"` // bytes/second for aggregate streaming writes; 0 means unlimited
+	RateLimit int64 `json:"rate_limit"` // байт/сек для агрегированной потоковой записи; 0 означает неограниченный
 
 	LastCheckAt  *time.Time `json:"last_check_at,omitempty"`
 	LastCheckOK  bool       `json:"last_check_ok"`
@@ -286,13 +287,13 @@ func (t *StorageTarget) Retargeted(other *StorageTarget) bool {
 		t.PrivateKey != other.PrivateKey
 }
 
-// HasSecret reports whether credentials are stored for this target.
+// HasSecret сообщает, хранятся ли учётные данные аутентификации для этой цели.
 func (t *StorageTarget) HasSecret() bool {
 	return t.SecretKey != "" || t.Password != "" || t.PrivateKey != ""
 }
 
-// RetentionPolicy is a grandfather-father-son retention rule. A backup survives
-// if it is kept by at least one bucket. Zero means "this bucket keeps nothing".
+// RetentionPolicy задаёт правила хранения «дед — отец — сын». Копия остаётся,
+// пока нужна хотя бы одному правилу. Ноль отключает соответствующее правило.
 type RetentionPolicy struct {
 	KeepLast    int `json:"keep_last"`
 	KeepHourly  int `json:"keep_hourly"`
@@ -304,16 +305,15 @@ type RetentionPolicy struct {
 	MaxAge time.Duration `json:"max_age"`
 }
 
-// Empty reports whether the policy would delete everything, which is almost
-// always a configuration mistake and is treated as "keep all".
+// Empty сообщает, будет ли политика удалять все, что почти всегда является ошибкой
+// конфигурации и рассматривается как "keep all".
 func (r RetentionPolicy) Empty() bool {
 	return r.KeepLast == 0 && r.KeepHourly == 0 && r.KeepDaily == 0 &&
 		r.KeepWeekly == 0 && r.KeepMonthly == 0 && r.KeepYearly == 0 && r.MaxAge == 0
 }
 
-// Validate rejects values that would make retention select points in an
-// undefined way. API clients are not limited to the web form, so this belongs
-// to the model as well as to the interactive validation.
+// Validate отклоняет значения, при которых правила хранения выбирали бы точки неоднозначно.
+// Проверка нужна в модели, поскольку API можно вызвать без веб-формы.
 func (r RetentionPolicy) Validate() error {
 	values := []struct {
 		name  string
@@ -335,13 +335,13 @@ func (r RetentionPolicy) Validate() error {
 	return nil
 }
 
-// DefaultRetention is the policy offered to a user who does not want to think
-// about it: a week of dailies, a month of weeklies, half a year of monthlies.
+// DefaultRetention — политика, предлагаемая пользователю, который не хочет думать об этом:
+// неделя ежедневных, месяц еженедельных, пол года ежемесячных.
 func DefaultRetention() RetentionPolicy {
 	return RetentionPolicy{KeepLast: 3, KeepDaily: 7, KeepWeekly: 4, KeepMonthly: 6}
 }
 
-// SkippedDisk is a disk that was deliberately left out of a backup.
+// SkippedDisk — диск, намеренно оставленный из резервной копии.
 // ManualStep — одно действие администратора. Command выполняется как есть:
 // всё, кроме пароля, уже подставлено; пароль команда спрашивает сама и нигде
 // не сохраняет.
@@ -366,7 +366,7 @@ type SkippedDisk struct {
 	Excluded bool `json:"excluded"`
 }
 
-// VerifyMode selects how deeply a stored backup is checked.
+// VerifyMode выбирает, насколько глубоко проверяется сохраненная резервная копия.
 type VerifyMode string
 
 const (
@@ -405,7 +405,7 @@ const (
 	VerifyBoot VerifyMode = "boot"
 )
 
-// Title returns a Russian label for the UI.
+// Title возвращает русскую метку для UI.
 func (m VerifyMode) Title() string {
 	switch m {
 	case VerifyQuick:
@@ -429,7 +429,7 @@ func (m VerifyMode) Title() string {
 	}
 }
 
-// AllVerifyModes lists the checks in order of increasing cost and strength.
+// AllVerifyModes перечисляет чеки в порядке возрастания стоимости и силы.
 func AllVerifyModes() []VerifyMode {
 	return []VerifyMode{
 		VerifyQuick, VerifyChain, VerifyManifest,
@@ -437,13 +437,13 @@ func AllVerifyModes() []VerifyMode {
 	}
 }
 
-// NeedsHypervisor reports whether the mode has to run somewhere other than the
-// backup server. Only the boot test does: everything else reasons about bytes
-// in the repository and needs nothing but the repository.
+// NeedsHypervisor сообщает, должен ли режим запускаться где-либо, кроме сервера резервного
+// копирования. Только тест запуска ВМ делает: все остальное рассуждает о байтах в хранилище
+// и не нуждается ни в чем, кроме хранилища.
 func (m VerifyMode) NeedsHypervisor() bool { return m == VerifyBoot }
 
-// VerifyOptions carries what a mode needs beyond the mode itself. Today only
-// the boot test reads them; the zero value is valid for every other mode.
+// VerifyOptions переносит то, что нужно моде, за пределы самого режима. Сегодня их читает
+// только тест запуска ВМ; нулевое значение справедливо для любого другого режима.
 type VerifyOptions struct {
 	// BootHostID — подключение типа kvm, на котором поднимается проверочная ВМ.
 	// Это не обязательно тот гипервизор, откуда снят бэкап: пробный запуск
@@ -490,9 +490,9 @@ type VerifyOptions struct {
 // KVM-хосте.
 func (o VerifyOptions) OnEngine() bool { return o.BootEngineID != "" }
 
-// Validate rejects values which would make a boot verification meaningless or
-// could exhaust a hypervisor because of a typo. Zero keeps the verifier's
-// documented default.
+// Validate отвергает значения, которые делают проверку загрузки бессмысленной или могут
+// исчерпать гипервизор из-за опечатки. Ноль сохраняет задокументированный по умолчанию
+// верификатор.
 func (o VerifyOptions) Validate() error {
 	if o.TargetID != "" && (o.BootHostID != "" || o.BootEngineID != "") {
 		return fmt.Errorf("укажите либо площадку проверки, либо хост или движок вручную")
@@ -515,7 +515,7 @@ func (o VerifyOptions) Validate() error {
 	return nil
 }
 
-// BackupJob is a reusable definition: what to back up, how, where and when.
+// BackupJob — многоразовое определение: что резервировать, как, где и когда.
 type BackupJob struct {
 	ID       string `json:"id"`
 	Name     string `json:"name"`
@@ -537,8 +537,8 @@ type BackupJob struct {
 	FullEvery int        `json:"full_every"`
 	// Fallback, если для диска недоступен CBT (raw-диск, старый движок).
 	FallbackType BackupType `json:"fallback_type"`
-	// LegacyIncrementalMode enables a compatibility implementation on oVirt
-	// 4.3 and older engines instead of degrading every run to a full snapshot.
+	// LegacyIncrementalMode позволяет реализовать совместимость на oVirt 4.3 и более старых
+	// движках вместо того, чтобы ухудшать каждый запуск до полного снапшота.
 	LegacyIncrementalMode LegacyIncrementalMode `json:"legacy_incremental_mode,omitempty"`
 
 	Schedule string `json:"schedule"` // cron-выражение (5 или 6 полей), пусто — только вручную
@@ -556,9 +556,8 @@ type BackupJob struct {
 	// ForceFullNext устанавливается мастером перехода или смены primary.
 	ForceFullNext bool `json:"force_full_next"`
 
-	// OVA is written by oVirt directly to a hypervisor host. It deliberately
-	// has no repository target: lifecycle and removal of this external artifact
-	// remain explicit operator actions.
+	// oVirt записывает OVA на хост гипервизора. Для внешнего артефакта цель-репозиторий не
+	// задаётся. Его обслуживание и удаление выполняет оператор.
 	OVAHostID    string `json:"ova_host_id,omitempty"`
 	OVADirectory string `json:"ova_directory,omitempty"`
 
@@ -612,7 +611,7 @@ type BackupJob struct {
 	ExportQcow2 bool `json:"export_qcow2"`
 	// Шифровать данные в хранилище (AES-256-GCM на чанк).
 	Encrypt bool `json:"encrypt"`
-	// Empty inherits the system algorithm; "none" explicitly disables compression.
+	// Пустой наследует системный алгоритм; "none" явно отключает сжатие.
 	Compression string `json:"compression"`
 
 	Priority    int `json:"priority"` // больше — раньше в очереди
@@ -625,8 +624,8 @@ type BackupJob struct {
 	UpdatedAt  time.Time  `json:"updated_at"`
 }
 
-// Validate checks the parts of a job definition that must hold before it is
-// stored, independent of the current inventory.
+// Validate проверяет части определения задания, которые должны храниться до его хранения,
+// независимо от текущего инвентаря.
 func (j *BackupJob) Validate() error {
 	if !ValidBackupCompression(j.Compression) {
 		return fmt.Errorf("неизвестный алгоритм сжатия: %q", j.Compression)
@@ -745,7 +744,7 @@ const (
 	RunStepDone    = "done"
 )
 
-// BackupRun is one execution: one VM, one point in time, one repository.
+// BackupRun — одно выполнение: одна ВМ, один момент времени, один репозиторий.
 type BackupRun struct {
 	ID       string     `json:"id"`
 	JobRunID string     `json:"job_run_id,omitempty"`
@@ -765,7 +764,7 @@ type BackupRun struct {
 
 	StorageTargetID string `json:"storage_target_id"`
 	// Префикс объектов бэкапа в хранилище, например
-	// jhvirt/<server>/<vm-id>/2026/08/03/<run-id>/
+	// jhvirt/<сервер>/<ВМ-идентификатор>/2026/08/03/<run-identifier>/
 	RepoPath string `json:"repo_path"`
 
 	// Идентификаторы на стороне движка — нужны, чтобы подчистить хвосты
@@ -774,8 +773,8 @@ type BackupRun struct {
 	FromCheckpointID string `json:"from_checkpoint_id,omitempty"`
 	ToCheckpointID   string `json:"to_checkpoint_id,omitempty"`
 	SnapshotID       string `json:"snapshot_id,omitempty"`
-	// LegacyIncrementalMode records why SnapshotID may intentionally remain
-	// after a successful run. Empty means an ordinary temporary snapshot.
+	// LegacyIncrementalMode записывает, почему SnapshotID может намеренно остаться после
+	// успешного пробега. Пустой означает обычный временный снапшот.
 	LegacyIncrementalMode LegacyIncrementalMode `json:"legacy_incremental_mode,omitempty"`
 
 	DiskCount int `json:"disk_count"`
@@ -951,7 +950,7 @@ const (
 	CopyDeleted   BackupCopyStatus = "deleted"
 )
 
-// BackupCopy is one physical location of a logical restore point.
+// BackupCopy является одним физическим местоположением логической точки восстановления.
 type BackupCopy struct {
 	ID                string           `json:"id"`
 	RunID             string           `json:"run_id"`
@@ -980,10 +979,9 @@ type BackupCopy struct {
 	UpdatedAt   time.Time  `json:"updated_at"`
 }
 
-// Healthy reports whether the physical data can be read for verification,
-// restore or further replication. A copy locked by S3 retention remains
-// healthy; a structurally blocked copy uses the same status but has no
-// retention deadline and is not readable.
+// Healthy показывает, доступны ли данные копии для проверки, восстановления или репликации.
+// Удержание S3 не мешает чтению. При структурной блокировке статус тот же, но срок
+// удержания отсутствует и данные прочитать нельзя.
 func (c *BackupCopy) Healthy() bool {
 	return c != nil && (c.Status == CopySucceeded ||
 		(c.Status == CopyLocked && c.LockedUntil != nil))
@@ -1040,9 +1038,9 @@ type CatalogEntry struct {
 	CreatedAt      time.Time  `json:"created_at"`
 }
 
-// BackupJobRun groups every VM/repository copy started by one scheduler tick
-// or one manual invocation. It is deliberately a snapshot of the job: deleting
-// a job must not erase the evidence that one of its replicas failed.
+// BackupJobRun объединяет копии ВМ и репозиториев, запущенные одним событием расписания или
+// вручную. Настройки задания копируются в запись запуска, чтобы после удаления задания
+// сохранить сведения об ошибках его реплик.
 type BackupJobRun struct {
 	ID              string     `json:"id"`
 	JobID           string     `json:"job_id"`
@@ -1064,7 +1062,7 @@ type BackupJobRun struct {
 	CreatedAt       time.Time  `json:"created_at"`
 }
 
-// Duration returns how long the run took, or 0 while it is still going.
+// Duration возвращает, сколько времени занял пробег, или 0, пока он ещё продолжается.
 func (r *BackupRun) Duration() time.Duration {
 	if r.StartedAt == nil || r.EndedAt == nil {
 		return 0
@@ -1072,7 +1070,7 @@ func (r *BackupRun) Duration() time.Duration {
 	return r.EndedAt.Sub(*r.StartedAt)
 }
 
-// BackupDisk records one disk inside a run.
+// BackupDisk записывает один диск внутри запуска.
 type BackupDisk struct {
 	ID     string `json:"id"`
 	RunID  string `json:"run_id"`
@@ -1099,7 +1097,7 @@ type BackupDisk struct {
 	Error  string    `json:"error,omitempty"`
 }
 
-// VerifyRun is one verification pass over a stored backup.
+// VerifyRun является одним проверочным проходом над сохраненной резервной копией.
 type VerifyRun struct {
 	ID     string `json:"id"`
 	RunID  string `json:"run_id"`
@@ -1124,7 +1122,7 @@ type VerifyRun struct {
 	CreatedAt time.Time  `json:"created_at"`
 }
 
-// RestoreTarget selects where a restored disk image is written.
+// RestoreTarget выбирает, где записывается восстановленный образ диска.
 type RestoreTarget string
 
 const (
@@ -1148,7 +1146,7 @@ func KnownRestoreTarget(t RestoreTarget) bool {
 	return false
 }
 
-// RestoreRun is one restore operation.
+// RestoreRun — операция по восстановлению.
 type RestoreRun struct {
 	ID     string        `json:"id"`
 	RunID  string        `json:"run_id"`

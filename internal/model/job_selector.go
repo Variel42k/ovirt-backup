@@ -6,14 +6,14 @@ import (
 	"slices"
 )
 
-// VMSelector is the single source of truth for job selection. Preview,
-// scheduling and coverage must use the same compiled instance semantics.
+// VMSelector задаёт единые правила отбора ВМ для предпросмотра, планирования и подсчёта
+// покрытия.
 type VMSelector struct {
 	job    *BackupJob
 	nameRE *regexp.Regexp
 }
 
-// NewVMSelector validates and compiles the selector of a backup job.
+// NewVMSelector проверяет и компилирует фильтр задания бэкапа.
 func NewVMSelector(job *BackupJob) (*VMSelector, error) {
 	if job == nil {
 		return nil, fmt.Errorf("не задано задание бэкапа")
@@ -29,8 +29,9 @@ func NewVMSelector(job *BackupJob) (*VMSelector, error) {
 	return selector, nil
 }
 
-// Match reports inclusion and a stable reason suitable for a preview UI.
-// Positive selectors are ORed; explicit exclusions always win.
+// Match сообщает о включении и стабильной причине, подходящей для предварительного
+// просмотра UI.
+// Положительные селекторы ORed; Явные исключения всегда выигрывают.
 func (s *VMSelector) Match(vm *VM) (bool, string) {
 	if vm == nil {
 		return false, "виртуальная машина отсутствует"

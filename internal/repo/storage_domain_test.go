@@ -322,7 +322,7 @@ func TestDomainRepositoryIsolationAndShortStreams(t *testing.T) {
 	if len(f.disks) != 2 {
 		t.Fatal("foreign disks deleted")
 	}
-	// A fabricated index may not redirect deletion to an ordinary VM disk.
+	// Сфабрикованный индекс не может перенаправлять удаление на обычный диск ВМ.
 	forged := domainObject{Namespace: "test", Key: "forged", Size: 1, Modified: time.Now(), DataDiskID: "vm"}
 	raw, _ = json.Marshal(forged)
 	f.disks["forged-index"] = ovirt.Disk{ID: "forged-index", Description: domainObjectMarker + string(raw), Status: "ok", ProvisionedSize: 1 << 20}

@@ -18,8 +18,8 @@ type verifyControl struct {
 	done   chan struct{}
 }
 
-// CancelBootCheck stops the local writer; its normal cleanup closes ImageIO
-// and rolls back the temporary VM. Disk removal must wait for done.
+// CancelBootCheck останавливается местный писатель; его обычная очистка закрывается ImageIO
+// и откатывает временную ВМ. Удаление диска должно подождать.
 func (d *Dispatcher) CancelBootCheck(id string) error {
 	value, ok := d.activeVerify.Load(id)
 	if !ok {
@@ -111,8 +111,8 @@ func (d *Dispatcher) engineVerifyDiskLeftovers(ctx context.Context, srv *model.S
 		if err != nil {
 			return out, fmt.Errorf("подключения диска %s: %w", disk.ID, err)
 		}
-		// Attached disks are managed with the whole verification VM. Never
-		// offer a separate destructive action against an attached disk.
+		// Вложенные диски управляются всей ВМ проверки. Никогда не предлагайте отдельное
+		// разрушительное действие против прикрепленного диска.
 		if len(vms) > 0 {
 			continue
 		}
@@ -132,8 +132,8 @@ func (d *Dispatcher) engineVerifyDiskLeftovers(ctx context.Context, srv *model.S
 	return out, nil
 }
 
-// CancelVerifyDisk is also useful after a timed-out POST: on 4.3 the disk
-// reference in the lost session is image.id, not disk.id.
+// CancelVerifyDisk также полезен после тайм-аута POST: на 4.3 ссылка на диск в потерянном
+// сеансе image.id, а не disk.identifier.
 func (d *Dispatcher) CancelVerifyDisk(ctx context.Context, serverID, diskID string) error {
 	srv, err := d.store.GetServer(ctx, serverID)
 	if err != nil {
@@ -209,7 +209,7 @@ func finishVerifyDiskAction(ctx context.Context, client *ovirt.Client, record *m
 }
 
 func removeCanceledVerifyDisk(ctx context.Context, client *ovirt.Client, diskID string, log func(string)) error {
-	// Cancellation may delete an unfinished upload on some engine versions.
+	// Отмена может удалить незавершенную загрузку на некоторых версиях движка.
 	disk, err := client.GetDisk(ctx, diskID)
 	if ovirt.IsNotFound(err) {
 		return nil
@@ -223,8 +223,8 @@ func removeCanceledVerifyDisk(ctx context.Context, client *ovirt.Client, diskID 
 			return fmt.Errorf("передача остановлена, но диск не освобождён; удаление не выполнено: %w", err)
 		}
 	}
-	// Recheck attachments immediately before DELETE, after all asynchronous
-	// cleanup has completed. The engine also rejects a still-attached disk.
+	// Перепроверьте вложения непосредственно перед DELETE, ведь асинхронная очистка
+	// завершена. Движок также отклоняет все еще прикрепленный диск.
 	vms, err := client.DiskVMs(ctx, diskID)
 	if ovirt.IsNotFound(err) {
 		return nil
@@ -239,7 +239,7 @@ func removeCanceledVerifyDisk(ctx context.Context, client *ovirt.Client, diskID 
 	if err := client.DeleteDisk(ctx, diskID); err != nil && !ovirt.IsNotFound(err) {
 		return fmt.Errorf("передача остановлена, но диск не удалён: %w", err)
 	}
-	// DELETE acceptance is not completion: report success only after 404.
+	// DELETE Принятие не является завершением: отчет об успехе только после 404.
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 	for {

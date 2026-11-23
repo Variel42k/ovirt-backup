@@ -17,9 +17,9 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/proxmox"
 )
 
-// serverPayload is the write shape of a connection. It is separate from the
-// model so that adding an internal field does not silently become part of the
-// public API, and so the password can be optional on update.
+// serverPayload описывает тело запроса для создания или изменения подключения. Отдельный
+// тип позволяет добавлять внутренние поля без изменения публичного API и обновлять
+// подключение без повторного ввода пароля.
 type serverPayload struct {
 	// ID заполняется только пробой из формы редактирования: по нему берётся
 	// сохранённый секрет. Поиск по имени для этого не годится — оператор мог
@@ -31,13 +31,13 @@ type serverPayload struct {
 	EngineURL string `json:"engine_url"`
 	Username  string `json:"username"`
 	Password  string `json:"password"`
-	// ClearPassword is only useful for a migrated KVM connection. API-backed
-	// connectors still require their password or token secret during validation.
+	// ClearPassword полезно только для мигрирующего KVM соединения. Разъемы с поддержкой
+	// API по-прежнему требуют своего пароля или секрета токена во время проверки.
 	ClearPassword bool   `json:"clear_password"`
 	CACert        string `json:"ca_cert"`
-	// ClearCACert is deliberately separate from an empty CACert. The API never
-	// echoes a stored certificate, so an edit form submits an empty value when
-	// the operator wants to keep the existing trust anchor.
+	// ClearCACert нарочно отделяется от пустого CACert. API никогда не повторяет
+	// сохраненный сертификат, поэтому форма редактирования представляет пустое значение,
+	// когда оператор хочет сохранить существующий якорь доверия.
 	ClearCACert bool     `json:"clear_ca_cert"`
 	InsecureTLS bool     `json:"insecure_tls"`
 	Enabled     *bool    `json:"enabled"`
@@ -49,8 +49,8 @@ type serverPayload struct {
 	SSHPort       int    `json:"ssh_port"`
 	SSHUsername   string `json:"ssh_username"`
 	SSHPrivateKey string `json:"ssh_private_key"`
-	// ClearSSHPrivateKey is explicit because an empty write-only field means
-	// "keep the stored key" while editing an existing connection.
+	// Сброс SSH-ключа запрашивается явно через ClearSSHPrivateKey. Пустое поле при
+	// редактировании сохраняет действующий ключ.
 	ClearSSHPrivateKey bool   `json:"clear_ssh_private_key"`
 	SSHHostKey         string `json:"ssh_host_key"`
 	ClearSSHHostKey    bool   `json:"clear_ssh_host_key"`
@@ -96,9 +96,9 @@ func (p serverPayload) apply(dst *model.Server) {
 	}
 }
 
-// validateServer applies the model's own rules, which differ by connection
-// type, and adds the one rule that only matters on creation: a brand new
-// connection has no stored secret to fall back on.
+// validateServer применяет собственные правила модели, которые различаются по типу
+// соединения, и добавляет одно правило, которое имеет значение только при создании:
+// совершенно новое соединение не имеет хранимого секрета, на который можно вернуться.
 func validateServer(srv *model.Server, isNew bool) error {
 	if err := srv.Validate(); err != nil {
 		return badRequest("%v", err)
@@ -187,8 +187,8 @@ func (s *Server) handleCreateServer(w http.ResponseWriter, r *http.Request) {
 	s.auditHostKeyTrust(r, model.ScopeServer, srv.ID, srv.Name, srv.SSHTrustAnyHostKey,
 		srv.Kind.UsesLibvirt() || srv.HasProxmoxDataPlane())
 
-	// Probe immediately so the operator sees whether the connection works
-	// instead of waiting for the next poll.
+	// Проверяйте сразу, чтобы оператор увидел, работает ли соединение, а не ждал следующего
+	// опроса.
 	go s.refreshServer(context.WithoutCancel(r.Context()), srv.ID)
 
 	writeJSON(w, http.StatusCreated, srv)
@@ -211,9 +211,9 @@ func (s *Server) handleUpdateServer(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, badRequest("тип существующего подключения менять нельзя; создайте новое подключение"))
 		return
 	}
-	// apply keeps the write-only password unless the payload explicitly replaces
-	// or clears it. SSHPrivateKey still uses the legacy empty-is-keep contract, so
-	// restore it here before validation when the edit form leaves it blank.
+	// apply сохраняет пароль, если запрос его явно не меняет и не удаляет.
+	// Перед проверкой возвращаем сохранённый SSHPrivateKey, если форма
+	// редактирования оставила поле пустым.
 	storedKey := existing.SSHPrivateKey
 	payload.apply(existing)
 	if existing.SSHPrivateKey == "" && !payload.ClearSSHPrivateKey {
@@ -230,7 +230,7 @@ func (s *Server) handleUpdateServer(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
-	// The cached client holds the old credentials and TLS settings.
+	// Кэшированный клиент содержит старые учётные данные аутентификации и TLS настройки.
 	s.pool.Invalidate(id)
 	if s.proxmox != nil {
 		s.proxmox.Invalidate(id)
@@ -285,7 +285,7 @@ func (s *Server) handleDeleteServer(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
-// probeResult is what the "проверить подключение" button gets back.
+// probeResult содержит результат проверки подключения.
 type probeResult struct {
 	OK              bool   `json:"ok"`
 	Error           string `json:"error,omitempty"`
@@ -311,19 +311,17 @@ type probeResult struct {
 	ExcessPrivileges []ovirt.ExcessPrivilege `json:"excess_privileges,omitempty"`
 }
 
-// handleProbeServer tests a connection without storing it, so an operator can
-// get the credentials right before committing them.
+// handleProbeServer проверяет соединение, не сохраняя его, поэтому оператор может получить
+// учётные данные аутентификации прямо перед их фиксацией.
 func (s *Server) handleProbeServer(w http.ResponseWriter, r *http.Request) {
 	var payload serverPayload
 	if err := decodeJSON(r, &payload); err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	// An edit form submits empty secrets and hidden trust material meaning
-	// "unchanged"; resolve them from the stored connection so the probe tests
-	// the actual connection. The id is the reliable key; the name is the
-	// fallback for the create form, where there is no id yet but the operator
-	// may be re-checking a saved one.
+	// Пустые секреты в форме редактирования означают, что используются сохранённые значения.
+	// Для проверки подставляем их из подключения по идентификатору. При создании формы без
+	// идентификатора ищем сохранённое подключение по имени.
 	if (payload.Password == "" && !payload.ClearPassword) ||
 		(payload.SSHPrivateKey == "" && !payload.ClearSSHPrivateKey) ||
 		(payload.CACert == "" && !payload.ClearCACert) ||
@@ -496,11 +494,11 @@ func (p *serverPayload) fillHiddenFrom(existing *model.Server) {
 	}
 }
 
-// probeLibvirt tests an SSH connection to a bare libvirt host.
+// probeLibvirt тестирует SSH соединение с голым libvirt узлом.
 //
-// It checks more than reachability: an operator who can log in but whose user
-// is not in the libvirt group will otherwise discover that only when the first
-// nightly backup fails.
+// Он проверяет больше, чем доступность: оператор, который может войти в систему, но чей
+// пользователь не входит в группу libvirt, в противном случае обнаружит, что только тогда,
+// когда первая ночная резервная копия выходит из строя.
 func (s *Server) probeLibvirt(ctx context.Context, payload serverPayload) probeResult {
 	if payload.SSHHost == "" || payload.Username == "" {
 		return probeResult{OK: false, Error: "нужны адрес хоста и пользователь SSH"}
@@ -547,8 +545,8 @@ func (s *Server) probeLibvirt(ctx context.Context, payload serverPayload) probeR
 		result.Hint = "libvirt старше 6.0: инкрементальный бэкап недоступен, будут только полные копии."
 	}
 
-	// The scratch directory has to exist and be writable by qemu before the
-	// first backup, not at 3am during it.
+	// Временный рабочий каталог должен существовать и быть записываемым qemu перед первой
+	// резервной копией, а не в 3 утра во время нее.
 	scratch := payload.ScratchDir
 	if scratch == "" {
 		scratch = "/var/lib/libvirt/qemu"
@@ -580,8 +578,7 @@ func libvirtHint(err error) string {
 	}
 }
 
-// probeHint translates the usual first-connection failures into an actionable
-// sentence.
+// probeHint формулирует понятную подсказку для типичных ошибок первого подключения.
 func probeHint(err error) string {
 	switch {
 	case ovirt.IsAuthError(err):
@@ -621,8 +618,8 @@ func containsAny(haystack string, needles ...string) bool {
 	return false
 }
 
-// handleFetchCA downloads the engine's CA certificate so the operator can
-// review and accept it instead of disabling verification altogether.
+// handleFetchCA загружает сертификат движка CA, чтобы оператор мог просмотреть и принять
+// его вместо того, чтобы отключать проверку вообще.
 func (s *Server) handleFetchCA(w http.ResponseWriter, r *http.Request) {
 	var payload struct {
 		EngineURL string `json:"engine_url"`
@@ -705,7 +702,7 @@ func (s *Server) handleRefreshServer(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, updated)
 }
 
-// refreshServer polls one engine in the background, used after create/update.
+// refreshServer опросы один движок в фоне, используется после создания/обновления.
 func (s *Server) refreshServer(ctx context.Context, id string) {
 	pollCtx, cancel := context.WithTimeout(ctx, s.cfg.Monitor.Timeout)
 	defer cancel()
@@ -729,7 +726,7 @@ func (s *Server) handleServerSummary(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, summary)
 }
 
-// buildSummary aggregates one engine's state for the dashboard.
+// buildSummary агрегатирует состояние одного движка для приборной панели.
 func (s *Server) buildSummary(ctx context.Context, serverID string) (*model.ServerSummary, error) {
 	srv, err := s.store.GetServer(ctx, serverID)
 	if err != nil {

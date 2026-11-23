@@ -19,8 +19,8 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/repo"
 )
 
-// TestExternalBackendMatrix is opt-in because it needs MinIO and SFTP. The
-// repository test runner can provide the endpoints locally or in CI.
+// TestExternalBackendMatrix является option-in, потому что ему нужно MinIO и SFTP.
+// Тестировщик репозитория может предоставить конечные точки локально или в CI.
 func TestExternalBackendMatrix(t *testing.T) {
 	endpoint := os.Getenv("JHV_TEST_S3_ENDPOINT")
 	if endpoint == "" {
@@ -118,9 +118,9 @@ func TestExternalBackendMatrix(t *testing.T) {
 		t.Fatalf("locked object disappeared: %v", err)
 	}
 
-	// Versioned buckets retain data behind delete markers unless every
-	// concrete version is removed. Staging and health probes must leave no
-	// versions because they intentionally have no Governance retention.
+	// Версии ведер сохраняют данные за маркерами удаления, если не удалена каждая
+	// конкретная версия. Постановка и проверка доступности не должны оставлять никаких
+	// версий, потому что они намеренно не удерживают управление.
 	minioEndpoint := strings.TrimPrefix(strings.TrimPrefix(endpoint, "https://"), "http://")
 	client, err := minio.New(minioEndpoint, &minio.Options{
 		Creds:  credentials.NewStaticV4(locked.AccessKey, locked.SecretKey, ""),

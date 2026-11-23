@@ -11,9 +11,9 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
-func TestWebSectionsRequireCompleteBooleanSettings(t *testing.T) {
+func TestWebSectionsRequireDiscoveryBoolean(t *testing.T) {
 	s := &Server{store: testStore(t)}
-	for _, body := range []string{`{}`, `{"discovery":false}`, `{"discovery":null,"gitlab_clean":true}`, `{"discovery":"false","gitlab_clean":true}`} {
+	for _, body := range []string{`{}`, `{"discovery":null}`, `{"discovery":"false"}`} {
 		rec := httptest.NewRecorder()
 		s.handleSetWebSections(rec, httptest.NewRequest(http.MethodPut, "/", bytes.NewBufferString(body)))
 		if rec.Code != http.StatusBadRequest {
@@ -21,7 +21,7 @@ func TestWebSectionsRequireCompleteBooleanSettings(t *testing.T) {
 		}
 	}
 	rec := httptest.NewRecorder()
-	s.handleSetWebSections(rec, httptest.NewRequest(http.MethodPut, "/", bytes.NewBufferString(`{"discovery":false,"gitlab_clean":true}`)))
+	s.handleSetWebSections(rec, httptest.NewRequest(http.MethodPut, "/", bytes.NewBufferString(`{"discovery":false}`)))
 	if rec.Code != http.StatusOK {
 		t.Fatal(rec.Code, rec.Body.String())
 	}
@@ -30,7 +30,7 @@ func TestWebSectionsRequireCompleteBooleanSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 	stored, err := s.store.WebSections(context.Background())
-	if err != nil || stored != value || value.Discovery || !value.GitlabClean {
+	if err != nil || stored != value || value.Discovery {
 		t.Fatal(stored, value, err)
 	}
 }

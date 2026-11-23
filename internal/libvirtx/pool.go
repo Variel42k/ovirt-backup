@@ -11,17 +11,15 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
-// ServerLoader fetches a connection definition by id. Taking it as a function
-// keeps this package independent of the store.
+// ServerLoader извлекает определение соединения по идентификатору. Принимая его в качестве
+// функции, этот пакет остается независимым от магазина.
 type ServerLoader func(ctx context.Context, serverID string) (*model.Server, error)
 
-// Pool keeps one live SSH+libvirt session per hypervisor.
+// Пул поддерживает один живой SSH+libvirt сеанс на гипервизор.
 //
-// It differs from the oVirt pool in one important way: an SSH connection is
-// stateful and can die silently — a rebooted hypervisor, a dropped NAT
-// mapping, a restarted libvirtd. Handing out a dead connection would turn one
-// network blip into a failed backup, so every handout is preceded by a cheap
-// liveness probe and a reconnect if it fails.
+// Состояние SSH-соединения может пропасть без уведомления при перезагрузке хоста, сбросе
+// NAT или перезапуске libvirtd. Перед выдачей соединения проверяем его и переподключаемся
+// при сбое.
 type Pool struct {
 	load    ServerLoader
 	timeout time.Duration
@@ -36,7 +34,7 @@ type poolEntry struct {
 	updatedAt time.Time
 }
 
-// NewPool builds a pool. timeout bounds connection setup and liveness probes.
+// NewPool строит пул. тайм-аут ограничивает настройку соединения и liveness зондов.
 func NewPool(load ServerLoader, timeout time.Duration, log zerolog.Logger) *Pool {
 	if timeout <= 0 {
 		timeout = 30 * time.Second
@@ -49,8 +47,7 @@ func NewPool(load ServerLoader, timeout time.Duration, log zerolog.Logger) *Pool
 	}
 }
 
-// Get returns a live connection for the hypervisor, dialing or redialing as
-// needed.
+// Get возвращает рабочее соединение с гипервизором и при необходимости подключается заново.
 func (p *Pool) Get(ctx context.Context, serverID string) (*Conn, error) {
 	srv, err := p.load(ctx, serverID)
 	if err != nil {
@@ -59,7 +56,7 @@ func (p *Pool) Get(ctx context.Context, serverID string) (*Conn, error) {
 	return p.ForServer(ctx, srv)
 }
 
-// ForServer returns a connection for an already-loaded definition.
+// ForServer возвращает соединение для уже загруженного определения.
 func (p *Pool) ForServer(ctx context.Context, srv *model.Server) (*Conn, error) {
 	if srv == nil {
 		return nil, fmt.Errorf("сервер не задан")
@@ -73,9 +70,8 @@ func (p *Pool) ForServer(ctx context.Context, srv *model.Server) (*Conn, error) 
 
 	p.mu.Lock()
 	entry, cached := p.entries[srv.ID]
-	// A definition edited since the connection was made carries different
-	// credentials or a different host; the cached session is stale by
-	// definition.
+	// Если после подключения изменились учётные данные или адрес хоста, кэшированный сеанс
+	// относится к старым настройкам.
 	if cached && entry.updatedAt.Before(srv.UpdatedAt) {
 		delete(p.entries, srv.ID)
 		p.mu.Unlock()
@@ -103,7 +99,7 @@ func (p *Pool) ForServer(ctx context.Context, srv *model.Server) (*Conn, error) 
 	}
 
 	p.mu.Lock()
-	// Another goroutine may have connected while we were dialing; keep one.
+	// Другой goroutine можетъ подключаться, пока мы набирали; Оставь себе.
 	if existing, ok := p.entries[srv.ID]; ok {
 		p.mu.Unlock()
 		go conn.Close()
@@ -123,7 +119,7 @@ func (p *Pool) ForServer(ctx context.Context, srv *model.Server) (*Conn, error) 
 	return conn, nil
 }
 
-// ConfigFromServer maps a stored connection onto the transport config.
+// ConfigFromServer отображает сохраненное соединение на транспортную настройку.
 func ConfigFromServer(srv *model.Server) Config {
 	return Config{
 		Host:            srv.SSHHost,
@@ -136,7 +132,7 @@ func ConfigFromServer(srv *model.Server) Config {
 	}
 }
 
-// Invalidate drops the cached connection for one hypervisor.
+// Invalidate отбрасывает кэшированное соединение для одного гипервизора.
 func (p *Pool) Invalidate(serverID string) {
 	p.mu.Lock()
 	entry, ok := p.entries[serverID]
@@ -148,7 +144,7 @@ func (p *Pool) Invalidate(serverID string) {
 	}
 }
 
-// Close tears down every cached session.
+// Close срыва́ть каждую кэшированную сессию.
 func (p *Pool) Close() {
 	p.mu.Lock()
 	entries := p.entries

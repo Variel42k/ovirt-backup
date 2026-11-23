@@ -11,8 +11,9 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/repo"
 )
 
-// RunManifestSHA256 fingerprints the exact portable manifest representation.
-// Replicas with the same run id are merged only when this value matches.
+// RunManifestSHA256 Отпечатки пальцев точного портативного представления манифеста.
+// Реплики с одним и тем же идентификатором запуска объединяются только тогда, когда это
+// значение совпадает.
 func RunManifestSHA256(doc *RunManifest) (string, error) {
 	encoded, err := EncodeManifest(doc)
 	if err != nil {
@@ -22,25 +23,23 @@ func RunManifestSHA256(doc *RunManifest) (string, error) {
 	return fmt.Sprintf("%x", sum[:]), nil
 }
 
-// Reading a repository without the service's database.
+// Чтение репозитория без базы данных сервиса.
 //
-// The database is a convenience: it makes listing fast and carries scheduling
-// state. It is not the source of truth. Every run writes a self-describing
-// run.json next to its data, so a repository can be enumerated, verified and
-// restored from with nothing but the objects themselves — which is exactly the
-// situation a disaster recovery finds itself in.
+// База ускоряет просмотр и хранит состояние расписаний. Каждый запуск записывает
+// самодостаточный run.json рядом с данными, чтобы после аварии можно было перечислить,
+// проверить и восстановить копии по объектам репозитория.
 
-// StoredRun is one backup found by scanning a repository.
+// StoredRun — одна резервная копия, найденная при сканировании хранилища.
 type StoredRun struct {
 	// Prefix — путь запуска в хранилище, оканчивающийся на «/».
 	Prefix   string       `json:"prefix"`
 	Manifest *RunManifest `json:"manifest"`
 }
 
-// ScanRepository enumerates completed runs under a prefix.
+// ScanRepository перечисляет завершённые запуски под заданным префиксом репозитория.
 //
-// A directory without run.json is a run that never finished; it is skipped
-// rather than reported, because half a backup is not a restore point.
+// Каталог без run.json — запуск, который никогда не завершается; он пропущен, а не
+// сообщается, потому что половина резервной копии не является точкой восстановления.
 func ScanRepository(ctx context.Context, backend repo.Backend, prefix string) ([]StoredRun, error) {
 	if prefix == "" {
 		prefix = repo.Root + "/"
@@ -63,7 +62,7 @@ func ScanRepository(ctx context.Context, backend repo.Backend, prefix string) ([
 
 		manifest, err := ReadRunManifest(ctx, backend, obj.Key)
 		if err != nil {
-			// One unreadable manifest must not hide the rest of the archive.
+			// Один нечитаемый манифест не должен скрывать остальную часть архива.
 			continue
 		}
 		runs = append(runs, StoredRun{Prefix: runPrefix, Manifest: manifest})
@@ -75,7 +74,7 @@ func ScanRepository(ctx context.Context, backend repo.Backend, prefix string) ([
 	return runs, nil
 }
 
-// ReadRunManifest loads the self-describing run document from a repository.
+// ReadRunManifest загружает самоописывающийся документ запуска из хранилища.
 func ReadRunManifest(ctx context.Context, backend repo.Backend, key string) (*RunManifest, error) {
 	rc, err := backend.Get(ctx, key)
 	if err != nil {
@@ -96,8 +95,8 @@ func ReadRunManifest(ctx context.Context, backend repo.Backend, key string) (*Ru
 	return &doc, nil
 }
 
-// FindChain assembles the chain a stored run depends on, using only what is in
-// the repository.
+// FindChain собирает цепь, от которой зависит сохраненный запуск, используя только то, что
+// находится в хранилище.
 func FindChain(runs []StoredRun, leafRunID string) ([]StoredRun, error) {
 	byID := make(map[string]StoredRun, len(runs))
 	for _, r := range runs {
@@ -131,7 +130,7 @@ func FindChain(runs []StoredRun, leafRunID string) ([]StoredRun, error) {
 		cur = parent
 	}
 
-	// Reverse into root-to-leaf order, which is what the reader expects.
+	// Обернитесь в порядок от корня к листу, что и ожидает читатель.
 	for i, j := 0, len(chain)-1; i < j; i, j = i+1, j-1 {
 		chain[i], chain[j] = chain[j], chain[i]
 	}
@@ -143,8 +142,8 @@ func FindChain(runs []StoredRun, leafRunID string) ([]StoredRun, error) {
 	return chain, nil
 }
 
-// LatestUsable finds the newest run for a VM that a new incremental can be
-// based on: it must carry a checkpoint and its chain must be intact.
+// LatestUsable находит новейший запуск ВМ, на котором может основываться новый инкремент:
+// он должен нести checkpoint и его цепь должна быть неповрежденной.
 func LatestUsable(runs []StoredRun, vmID string, onlyFull bool) (StoredRun, bool) {
 	var best StoredRun
 	found := false
@@ -160,7 +159,7 @@ func LatestUsable(runs []StoredRun, vmID string, onlyFull bool) (StoredRun, bool
 		if onlyFull && m.Type != model.BackupFull {
 			continue
 		}
-		// Anything whose ancestry is broken cannot serve as a base either.
+		// Все, чья родословная сломана, также не может служить основой.
 		if _, err := FindChain(runs, m.RunID); err != nil {
 			continue
 		}
@@ -171,13 +170,13 @@ func LatestUsable(runs []StoredRun, vmID string, onlyFull bool) (StoredRun, bool
 	return best, found
 }
 
-// LoadChainManifests reads the per-disk manifests of a chain, grouped by disk.
+// LoadChainManifests считывает манифесты на диск цепочки, сгруппированные по диску.
 func LoadChainManifests(ctx context.Context, backend repo.Backend, chain []StoredRun) (map[string][]*DiskManifest, []string, error) {
 	byDisk := map[string][]*DiskManifest{}
 	var order []string
 
-	// Only disks present in the newest link are restorable: a disk detached
-	// before this point has no current version.
+	// Восстановимыми являются только диски, присутствующие в новейшей ссылке: диск,
+	// отсоединенный до этого момента, не имеет текущей версии.
 	leaf := chain[len(chain)-1]
 	present := map[string]bool{}
 	for _, d := range leaf.Manifest.Disks {
@@ -210,8 +209,8 @@ func LoadChainManifests(ctx context.Context, backend repo.Backend, chain []Store
 	return byDisk, order, nil
 }
 
-// WriteRunManifest publishes the run-level document, which is what marks a
-// backup as complete in the repository.
+// WriteRunManifest публикует документ уровня выполнения, который помечает резервную копию
+// как завершенную в хранилище.
 func WriteRunManifest(ctx context.Context, backend repo.Backend, prefix string, doc *RunManifest) error {
 	doc.Format = FormatName
 	doc.Version = FormatVersion

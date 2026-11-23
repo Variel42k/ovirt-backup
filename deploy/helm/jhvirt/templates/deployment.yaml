@@ -160,8 +160,8 @@ spec:
         - name: database-source
           secret:
             secretName: {{ .Values.database.existingSecret }}
-            # The non-root init container can read the projected source and
-            # rewrites it as owner-only 0600 in the in-memory prepared volume.
+            # Init-контейнер без root копирует секрет из подключённого источника
+            # в том в памяти и выставляет права 0600.
             defaultMode: 0444
             items:
               - key: {{ .Values.database.urlKey }}

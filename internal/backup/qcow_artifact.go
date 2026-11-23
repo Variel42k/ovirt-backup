@@ -23,10 +23,9 @@ const (
 	ArtifactProxmoxVZDUMP = "proxmox-vzdump"
 )
 
-// ExportQcow2Artifacts reconstructs each disk at this restore point, converts
-// it to qcow2, validates it with qemu-img, and stores it as a chunked managed
-// artifact. The chunk container provides streaming encryption without loading
-// a disk image into memory.
+// ExportQcow2Artifacts восстанавливает каждый диск точки, преобразует его в qcow2,
+// проверяет через qemu-img и сохраняет как управляемый артефакт. Чанковый контейнер
+// позволяет шифровать данные потоком без загрузки образа целиком в память.
 func (e *Engine) ExportQcow2Artifacts(ctx context.Context, backend repo.Backend, run *model.BackupRun, current []*DiskManifest) (int64, error) {
 	qemuImg, err := FindQemuImg(e.cfg.QemuImgPath)
 	if err != nil {
@@ -302,10 +301,9 @@ func verifyPublishedArtifacts(ctx context.Context, runID string, artifacts []Run
 	return nil
 }
 
-// ValidateArtifactManifest binds a managed artifact record to the manifest it
-// names. Without these checks a modified run.json could point at one manifest
-// while naming a different data object, making catalog verification inspect
-// bytes other than the ones restore would consume.
+// ValidateArtifactManifest проверяет соответствие записи артефакта указанному манифесту.
+// Без проверки изменённый run.json мог бы указать манифест одного объекта и имя другого. В
+// таком случае проверка каталога и восстановление прочитали бы разные данные.
 func ValidateArtifactManifest(runID, diskID, kind, dataKey string, manifest *DiskManifest) error {
 	if manifest == nil {
 		return fmt.Errorf("artifact manifest is missing")

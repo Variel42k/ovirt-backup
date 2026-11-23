@@ -107,8 +107,8 @@ type embeddedKeycloakRequest struct {
 	RevalidateSeconds  int                `json:"revalidate_seconds"`
 }
 
-// OIDCConfigFromIdentity translates the database representation used by both
-// startup and hot reload into the authentication configuration.
+// OIDCConfigFromIdentity преобразует представление базы данных, используемое как при
+// запуске, так и при горячей перезагрузке, в конфигурацию аутентификации.
 func OIDCConfigFromIdentity(value model.IdentitySettings) config.OIDCConfig {
 	return config.OIDCConfig{
 		Enabled: value.Enabled, Issuer: value.Issuer, BackchannelURL: value.BackchannelURL,
@@ -371,10 +371,9 @@ func (s *Server) handleBootstrapEmbeddedKeycloak(w http.ResponseWriter, r *http.
 		s.writeError(w, r, badRequest("%v", err))
 		return
 	}
-	// The host helper owns a long-running deployment. Detach it from the HTTP
-	// request so a navigation or browser refresh cannot leave Keycloak half
-	// configured. The bounded context still prevents a stuck helper from
-	// running forever.
+	// Хост-помощник владеет длительным развертыванием. Отделить его от HTTP запроса, чтобы
+	// обновление навигации или браузера не могло оставить Keycloak наполовину настроенным.
+	// Ограниченный контекст по-прежнему мешает застрявшему помощнику работать вечно.
 	bootstrapCtx, cancel := context.WithTimeout(context.Background(), 7*time.Minute)
 	defer cancel()
 	result, err := s.hostHelper.Bootstrap(bootstrapCtx, hosthelper.BootstrapRequest{
@@ -488,10 +487,10 @@ func identityAccessPolicyChanged(before, after model.IdentitySettings) bool {
 	return before.DefaultRole != after.DefaultRole || !maps.Equal(before.SubjectRoleMapping, after.SubjectRoleMapping)
 }
 
-// identityDomainBindingChanged identifies values whose change invalidates the
-// previous Keycloak/LDAP check. Keeping DomainConnected after switching realm,
-// client credentials, redirect or role groups could let an administrator turn
-// off local login based on a check performed for an unrelated configuration.
+// identityDomainBindingChanged выявляет изменения, после которых результаты предыдущей
+// проверки Keycloak/LDAP устарели. После смены области, клиента, адреса перенаправления или
+// групп ролей нельзя отключать локальный вход, опираясь на прежнее значение
+// DomainConnected.
 func identityDomainBindingChanged(before, after model.IdentitySettings) bool {
 	trimURL := func(value string) string { return strings.TrimRight(strings.TrimSpace(value), "/") }
 	if trimURL(before.Issuer) != trimURL(after.Issuer) ||
@@ -629,9 +628,9 @@ func (s *Server) handleConfigureDomain(w http.ResponseWriter, r *http.Request) {
 		OperatorGroup: strings.TrimSpace(req.Domain.OperatorGroup), ViewerGroup: strings.TrimSpace(req.Domain.ViewerGroup),
 		GroupMode: strings.TrimSpace(req.Domain.GroupMode),
 	}
-	// Domain discovery and federation setup must finish even if the operator
-	// closes the settings page. Credentials stay only in this bounded goroutine
-	// stack and are cleared before the handler returns.
+	// Обнаружение домена и настройка федерации должны завершиться, даже если оператор
+	// закроет страницу настроек. учётные данные проверки подлинности остаются только в этом
+	// ограниченном goroutine стеке и очищаются до возвращения обработчика.
 	configureCtx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
 	defer cancel()
 	var result keycloakadmin.Result

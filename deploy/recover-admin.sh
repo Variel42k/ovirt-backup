@@ -1,7 +1,6 @@
 #!/bin/sh
-# Host-side recovery of the local administrator after a lost password or an
-# application-container compromise. The normal service never receives the raw
-# recovery token.
+# Восстановление локального администратора на хосте после потери пароля
+# или компрометации контейнера приложения. Обычной службе передаётся хеш токена.
 set -eu
 
 SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"

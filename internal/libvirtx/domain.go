@@ -12,7 +12,7 @@ import (
 	"github.com/digitalocean/go-libvirt"
 )
 
-// State is the lifecycle of a domain, mapped from libvirt's numeric codes.
+// State — жизненный цикл домена, отображенный из libvirt числовых кодов.
 type State string
 
 const (
@@ -26,10 +26,10 @@ const (
 	StateUnknown     State = "unknown"
 )
 
-// Running reports whether the domain is executing.
+// Running сообщает, выполняется ли домен.
 func (s State) Running() bool { return s == StateRunning || s == StateBlocked }
 
-// Title renders a Russian label for the UI.
+// Title отдаетъ русскій ярлыкъ на UI.
 func (s State) Title() string {
 	switch s {
 	case StateRunning:
@@ -52,7 +52,7 @@ func (s State) Title() string {
 }
 
 func stateFromCode(code int32) State {
-	// Values from libvirt's virDomainState enum.
+	// Значения из libvirtvirDomainState enum.
 	switch code {
 	case 1:
 		return StateRunning
@@ -73,22 +73,22 @@ func stateFromCode(code int32) State {
 	}
 }
 
-// Disk is one virtual disk of a domain, as described by its XML.
+// Disk является одним виртуальным диском домена, как описано в его XML.
 type Disk struct {
 	// Target — имя устройства внутри ВМ (vda, sda). Именно оно служит
 	// идентификатором диска во всех вызовах Backup API.
 	Target string
 	Bus    string
-	// BootOrder is the per-device libvirt boot priority. Zero means that the
-	// domain relies on the legacy <os><boot dev='hd'/> order.
+	// BootOrder задаёт порядок загрузки этого устройства в libvirt. Ноль означает порядок
+	// из устаревшего <os><boot dev='hd'/>.
 	BootOrder int
-	// Device: disk | cdrom | floppy | lun
+	// Устройство: disk | cdrom | floppy | lun
 	Device string
 	// Format: qcow2 | raw | ... из <driver type='...'>
 	Format string
 	// Source — путь к файлу или блочному устройству.
 	Source string
-	// Type: file | block | network | volume
+	// Тип: file | block | network | volume
 	Type      string
 	ReadOnly  bool
 	Shareable bool
@@ -105,14 +105,14 @@ type NetworkInterface struct {
 	Source string
 }
 
-// SupportsCBT reports whether QEMU can track changed blocks for this disk.
-// Persistent dirty bitmaps live inside the qcow2 header, so any other format
-// can only ever be copied in full.
+// SupportsCBT сообщает, может ли QEMU отслеживать измененные блоки для этого диска.
+// Постоянные растровые образа измененных блоков находятся внутри заголовка qcow2, поэтому
+// любой другой формат может быть скопирован только полностью.
 func (d Disk) SupportsCBT() bool {
 	return d.Format == "qcow2" && d.Device == "disk"
 }
 
-// BackupCandidate reports whether the disk should be part of a VM backup.
+// BackupCandidate отчитывается о том, должен ли диск быть частью резервной копии ВМ.
 func (d Disk) BackupCandidate() bool {
 	if d.Device != "disk" {
 		return false
@@ -120,15 +120,15 @@ func (d Disk) BackupCandidate() bool {
 	if d.ReadOnly || d.Transient {
 		return false
 	}
-	// A shared disk belongs to several domains; copying it once per domain
-	// would multiply the data and make restore ambiguous.
+	// Общий диск принадлежит нескольким доменам; копирование его один раз на домен умножит
+	// данные и сделает восстановление неоднозначным.
 	if d.Shareable {
 		return false
 	}
 	return d.Source != ""
 }
 
-// SkipReason explains why a disk is not backed up, for the UI.
+// SkipReason объясняет, почему диск не резервируется, для UI.
 func (d Disk) SkipReason() string {
 	switch {
 	case d.Device == "cdrom":
@@ -150,7 +150,7 @@ func (d Disk) SkipReason() string {
 	}
 }
 
-// Domain is the inventory view of one virtual machine.
+// Domain — вид инвентаризации одной ВМ.
 type Domain struct {
 	Name         string
 	UUID         string
@@ -159,8 +159,8 @@ type Domain struct {
 	VCPUs        int
 	Architecture string
 	Machine      string
-	// Firmware is "bios" or "efi". SecureBoot is recorded separately so a
-	// verification can request matching firmware on another host.
+	// Прошивка "bios" или "efi". SecureBoot записывается отдельно, так что проверка может
+	// запросить соответствующую прошивку на другом хосте.
 	Firmware    string
 	SecureBoot  bool
 	ClockOffset string
@@ -176,7 +176,7 @@ type Domain struct {
 	XML string
 }
 
-// BackupDisks returns the disks that should be included in a backup.
+// BackupDisks возвращает диски, которые должны быть включены в резервную копию.
 func (d *Domain) BackupDisks() []Disk {
 	out := make([]Disk, 0, len(d.Disks))
 	for _, disk := range d.Disks {
@@ -187,9 +187,9 @@ func (d *Domain) BackupDisks() []Disk {
 	return out
 }
 
-// CBTReady reports whether every disk that would be backed up supports changed
-// block tracking. Mixed domains cannot take an incremental backup: the backup
-// covers the whole VM or nothing.
+// CBTReady сообщает о том, что каждый диск, который будет поддерживаться, изменил
+// отслеживание блоков. Смешанные домены не могут принимать инкрементное резервное
+// копирование: резервное копирование охватывает всю ВМ или ничего.
 func (d *Domain) CBTReady() (bool, []string) {
 	var blockers []string
 	for _, disk := range d.BackupDisks() {
@@ -201,7 +201,7 @@ func (d *Domain) CBTReady() (bool, []string) {
 	return len(blockers) == 0, blockers
 }
 
-// domainXML mirrors the parts of libvirt's domain description this tool reads.
+// domainXML отражает части libvirt описания домена, которое читает этот инструмент.
 type domainXML struct {
 	XMLName xml.Name `xml:"domain"`
 	Name    string   `xml:"name"`
@@ -283,7 +283,7 @@ type domainXML struct {
 	} `xml:"devices"`
 }
 
-// ParseDomainXML turns a libvirt domain description into the inventory view.
+// ParseDomainXML превращает libvirt описание домена в представление инвентаря.
 func ParseDomainXML(raw string) (*Domain, error) {
 	var doc domainXML
 	if err := xml.Unmarshal([]byte(raw), &doc); err != nil {
@@ -340,8 +340,8 @@ func ParseDomainXML(raw string) (*Domain, error) {
 		})
 	}
 
-	// Domains using the legacy OS-level boot order do not mark an individual
-	// disk. In that case libvirt boots the first hard disk in device order.
+	// Домены, использующие унаследованный порядок загрузки OS-уровня, не отмечают отдельный
+	// диск. В этом случае libvirt загружается первый жесткий диск в порядке устройства.
 	hdBoot := false
 	for _, boot := range doc.OS.Boot {
 		if boot.Dev == "hd" {
@@ -377,7 +377,7 @@ func ParseDomainXML(raw string) (*Domain, error) {
 	return d, nil
 }
 
-// normaliseMemoryKiB converts libvirt's unit-tagged memory value to KiB.
+// normaliseMemoryKiB преобразовывает значение памяти libvirt с меткой единицы в KiB.
 func normaliseMemoryKiB(value int64, unit string) int64 {
 	switch strings.ToUpper(unit) {
 	case "", "KIB", "K":
@@ -395,7 +395,7 @@ func normaliseMemoryKiB(value int64, unit string) int64 {
 	}
 }
 
-// ListDomains returns every domain the hypervisor knows about.
+// ListDomains возвращает каждый домен, о котором знает гипервизор.
 func (c *Conn) ListDomains(ctx context.Context) ([]*Domain, error) {
 	domains, _, err := c.lv.ConnectListAllDomains(1, 0)
 	if err != nil {
@@ -409,7 +409,7 @@ func (c *Conn) ListDomains(ctx context.Context) ([]*Domain, error) {
 		}
 		parsed, err := c.describe(dom)
 		if err != nil {
-			// One unreadable domain must not hide the rest of the inventory.
+			// Один нечитаемый домен не должен скрывать остальную часть инвентаря.
 			continue
 		}
 		out = append(out, parsed)
@@ -417,17 +417,18 @@ func (c *Conn) ListDomains(ctx context.Context) ([]*Domain, error) {
 	return out, nil
 }
 
-// DomainEntry pairs a libvirt handle with its parsed description.
+// DomainEntry Пары libvirt ручка с его разборным описанием.
 //
-// Metrics need both: the description says which disks exist, the handle is what
-// the statistics calls take. Fetching them together avoids a second lookup per
-// domain on every poll.
+// Метрики нужны обе: в описании говорится, какие диски существуют, объектная обработка —
+// то, что вызывает статистика. Получение их вместе позволяет избежать второго поиска по
+// домену в каждом опросе.
 type DomainEntry struct {
 	Handle libvirt.Domain
 	Info   *Domain
 }
 
-// ListDomainsWithHandles returns every domain together with its handle.
+// ListDomainsWithHandles возвращает каждый домен вместе со ссылкой, которая его
+// идентифицирует.
 func (c *Conn) ListDomainsWithHandles(ctx context.Context) ([]DomainEntry, error) {
 	domains, _, err := c.lv.ConnectListAllDomains(1, 0)
 	if err != nil {
@@ -441,7 +442,7 @@ func (c *Conn) ListDomainsWithHandles(ctx context.Context) ([]DomainEntry, error
 		}
 		parsed, err := c.describe(dom)
 		if err != nil {
-			// One unreadable domain must not hide the rest.
+			// Один нечитаемый домен не должен скрывать остальное.
 			continue
 		}
 		out = append(out, DomainEntry{Handle: dom, Info: parsed})
@@ -449,7 +450,7 @@ func (c *Conn) ListDomainsWithHandles(ctx context.Context) ([]DomainEntry, error
 	return out, nil
 }
 
-// LookupDomain finds one domain by name.
+// LookupDomain находитъ одинъ доменъ по имени.
 func (c *Conn) LookupDomain(ctx context.Context, name string) (libvirt.Domain, *Domain, error) {
 	dom, err := c.lv.DomainLookupByName(name)
 	if err != nil {
@@ -479,13 +480,13 @@ func (c *Conn) describe(dom libvirt.Domain) (*Domain, error) {
 	return parsed, nil
 }
 
-// FreezeFilesystems asks the guest agent to quiesce the filesystems, turning a
-// crash-consistent copy into a filesystem-consistent one. It returns how many
-// filesystems were frozen.
+// FreezeFilesystems просит гостевого агента успокоить файловые системы, превратив
+// непротиворечивую копию в совместимую с файловой системой. Он возвращает количество
+// файловых систем, которые были заморожены.
 //
-// mountpoints limits the freeze to those filesystems (guest-fsfreeze-freeze-list);
-// empty freezes all. The agent runs the fsfreeze hooks either way. Thawing is
-// always for all: a partial freeze is thawed by the same call.
+// mountpoints ограничивает заморозку указанными файловыми системами через
+// guest-fsfreeze-freeze-list. Пустой список замораживает все. Агент выполняет fsfreeze-хуки
+// в обоих случаях. Один вызов размораживает все файловые системы.
 func (c *Conn) FreezeFilesystems(ctx context.Context, dom libvirt.Domain, mountpoints []string) (int, error) {
 	n, err := c.lv.DomainFsfreeze(dom, mountpoints, 0)
 	if err != nil {
@@ -494,9 +495,9 @@ func (c *Conn) FreezeFilesystems(ctx context.Context, dom libvirt.Domain, mountp
 	return int(n), nil
 }
 
-// ThawFilesystems releases a freeze and reports how many filesystems were
-// thawed. It must run even when the operation in between failed: a guest left
-// frozen stops serving anything.
+// ThawFilesystems выпускает зависание и сообщает, сколько файловых систем было оттаяно. Он
+// должен работать даже тогда, когда операция между ними не удалась: гость оставил
+// замороженную остановку для обслуживания чего-либо.
 func (c *Conn) ThawFilesystems(ctx context.Context, dom libvirt.Domain) (int, error) {
 	n, err := c.lv.DomainFsthaw(dom, nil, 0)
 	if err != nil {

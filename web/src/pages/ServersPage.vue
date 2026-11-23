@@ -82,9 +82,8 @@ const { confirmDiscard: confirmConnectionDiscard } = useUnsavedChanges(
   computed(() => dialog.value && connectionFormSignature.value !== connectionFormBaseline.value),
 )
 
-// A successful probe only describes the exact credentials and trust settings
-// that were sent. Clear the result as soon as a connection-relevant field
-// changes so the form never shows an old green status for new values.
+// Результат проверки относится к отправленным учётным данным и настройкам доверия.
+// Сбрасываем его при изменении любого поля подключения.
 const connectionSignature = computed(() => JSON.stringify({
   name: form.value.name,
   kind: form.value.kind,
@@ -159,8 +158,8 @@ function kindSafeProvision(kind: string): boolean {
 const isLibvirt = computed(() => kindUsesLibvirt(form.value.kind))
 const isProxmox = computed(() => selectedKind.value?.family === 'proxmox-api')
 
-// Trust material is write-only. The backend only returns presence flags;
-// newly selected material remains in memory until this dialog closes.
+// Сервер возвращает только признаки наличия сохранённых ключей и сертификатов. Выбранные в
+// форме данные остаются в памяти до закрытия окна.
 const caStored = computed(
   () => Boolean(form.value.ca_cert) || Boolean(editing.value?.ca_cert_stored && !form.value.clear_ca_cert),
 )
@@ -759,6 +758,7 @@ onMounted(load)
     <div class="row items-center q-mb-md">
       <div class="text-h5">Платформы виртуализации</div>
       <q-space />
+      <q-btn flat color="primary" icon="content_copy" label="Дубли ВМ" :to="{ name: 'vm-duplicates' }" />
       <q-btn flat dense round icon="refresh" aria-label="Обновить платформы" :loading="loading" @click="load"><q-tooltip>Обновить</q-tooltip></q-btn>
       <q-btn
         v-if="auth.can('servers.admin')"

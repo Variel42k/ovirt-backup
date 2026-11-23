@@ -9,11 +9,11 @@ import (
 	"time"
 )
 
-// An ImageTransfer is the control-plane half of moving disk data: the engine
-// picks a host, opens a ticket in ovirt-imageio on it and hands back a URL.
-// The data itself is read or written directly against that URL.
+// ImageTransfer — половина контрольной плоскости движущихся данных диска: движок выбирает
+// хост, открывает на нем билет в ovirt-imageio и передает назад URL.
+// Сами данные читаются или пишутся прямо против этого URL.
 
-// TransferRequest describes a transfer to open.
+// TransferRequest описывает переход к открытию.
 type TransferRequest struct {
 	// Ровно одно из трёх должно быть заполнено.
 	DiskID     string // обычная передача по диску (нужно для upload)
@@ -22,7 +22,7 @@ type TransferRequest struct {
 	// BackupID переводит передачу в режим чтения точки Backup API; вместе с
 	// DiskID это единственный способ прочитать данные горячего бэкапа.
 	BackupID string
-	// HostID pins ImageIO to the selected upload host, including oVirt 4.3.
+	// HostID выводит ImageIO на выбранный хост загрузки, включая oVirt 4.3.
 	HostID string
 
 	Direction string // download | upload
@@ -38,13 +38,13 @@ type TransferRequest struct {
 	// покотором бэкапе снапшотов).
 	Shallow bool
 
-	// RequestTimeout bounds the control-plane POST, independently of the
-	// short inventory timeout. Preparing an upload may involve slow storage
-	// activation and ticket creation on the host.
+	// RequestTimeout ограничивает плоскость управления POST, независимо от короткого
+	// инвентарного таймаута. Подготовка загрузки может включать медленную активацию
+	// хранилища и создание билета на хосте.
 	RequestTimeout time.Duration
 }
 
-// CreateTransfer opens an image transfer.
+// CreateTransfer открывается передача образа.
 func (c *Client) CreateTransfer(ctx context.Context, req TransferRequest) (*ImageTransfer, error) {
 	if req.Direction == "" {
 		req.Direction = "download"
@@ -97,19 +97,18 @@ func (c *Client) CreateTransfer(ctx context.Context, req TransferRequest) (*Imag
 		return &transfer, nil
 	}
 
-	// timeout_policy (and its cancel value) appeared in oVirt 4.4. A 4.3
-	// engine rejects the entire ImageTransfer document with the generic
-	// "For correct usage" response. Retry the same request in the 4.3 shape;
-	// a rejected POST cannot have opened a transfer, so this cannot duplicate
-	// a session. Cache the successful downgrade for the remaining disks.
+	// timeout_policy и режим cancel появились в oVirt 4.4. Движок 4.3 отклоняет весь запрос
+	// ImageTransfer с общим сообщением "For correct usage". Такой POST не открывает передачу,
+	// поэтому повторяем запрос в формате 4.3 и запоминаем этот формат для остальных дисков.
 	var apiErr *APIError
 	if !legacyRequest && errors.As(err, &apiErr) && apiErr.Status == http.StatusBadRequest {
 		delete(body, "timeout_policy")
 		transfer = ImageTransfer{}
 		if retryErr := c.post(ctx, "/imagetransfers", body, &transfer, longRequest); retryErr != nil {
-			// A conflict means the 4.3-shaped document was understood and only
-			// the disk state rejected it. Remember the downgrade now; otherwise
-			// every lock retry would first send another known-invalid 4.4 request.
+			// Конфликт означает, что 4,3-образный документ был понят, и только состояние
+			// диска отклонило его. Запомните понижение сейчас; В противном случае каждая
+			// повторная попытка блокировки сначала отправит другой известный неверный
+			// запрос 4.4.
 			if IsConflict(retryErr) {
 				c.legacyImageTransfer.Store(true)
 			}
@@ -121,9 +120,9 @@ func (c *Client) CreateTransfer(ctx context.Context, req TransferRequest) (*Imag
 	return nil, err
 }
 
-// CreateUploadForNewDisk can recover a lost POST response for a disk created
-// exclusively by this operation. Never use it for an existing disk: another
-// uploader's session must not be adopted. The POST itself is never repeated.
+// CreateUploadForNewDisk может восстановить потерянный POST ответ для диска, созданного
+// исключительно этой операцией. Никогда не используйте его для существующего диска: сеанс
+// другого загрузчика не должен быть принят. Сама POST никогда не повторяется.
 func (c *Client) CreateUploadForNewDisk(ctx context.Context, req TransferRequest) (*ImageTransfer, error) {
 	if req.DiskID == "" || req.Direction != "upload" || req.SnapshotID != "" || req.BackupID != "" {
 		return nil, fmt.Errorf("восстановление ответа передачи допустимо только для загрузки в новый диск")
@@ -137,9 +136,9 @@ func (c *Client) CreateUploadForNewDisk(ctx context.Context, req TransferRequest
 		return nil, err
 	}
 
-	// The engine can finish the request after the HTTP client has timed out.
-	// Locate that session by its exclusive disk ID, including the 4.3 image
-	// reference, rather than creating a duplicate session.
+	// Движок может завершить запрос после истечения таймаута HTTP-клиента.
+	// Найдите эту сессию по ее эксклюзивному идентификатору диска, включая ссылку на образ
+	// 4.3, а не создавайте дубликат сессии.
 	lookupCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	for {
@@ -175,11 +174,10 @@ func (c *Client) CreateUploadForNewDisk(ctx context.Context, req TransferRequest
 	}
 }
 
-// CreateTransferWhenReady opens a transfer after transient disk locks clear.
-// Snapshot creation and transfer finalisation are asynchronous on older oVirt
-// engines: a snapshot may already report "ok" while POST /imagetransfers still
-// answers 409 for a few seconds. Only conflicts are retried; malformed
-// requests, authentication failures and connectivity errors return at once.
+// CreateTransferWhenReady открывает передачу после очистки переходных дисковых блокировок.
+// Старые движки oVirt создают снапшот и завершают передачу асинхронно. Снапшот может уже
+// быть "ok", а POST /imagetransfers ещё несколько секунд отвечает 409. Повторяем только
+// конфликты. Остальные ошибки возвращаются сразу.
 func (c *Client) CreateTransferWhenReady(ctx context.Context, req TransferRequest,
 	timeout time.Duration) (*ImageTransfer, error) {
 	return c.createTransferWhenReady(ctx, req, timeout, 5*time.Second)
@@ -199,7 +197,7 @@ func (c *Client) createTransferWhenReady(ctx context.Context, req TransferReques
 	return transfer, nil
 }
 
-// GetTransfer reads the current state of a transfer.
+// GetTransfer прочита́етъ текущій состояніе перемѣны.
 func (c *Client) GetTransfer(ctx context.Context, id string) (*ImageTransfer, error) {
 	var transfer ImageTransfer
 	if err := c.get(ctx, "/imagetransfers/"+id, &transfer); err != nil {
@@ -208,8 +206,7 @@ func (c *Client) GetTransfer(ctx context.Context, id string) (*ImageTransfer, er
 	return &transfer, nil
 }
 
-// WaitTransferReady polls until the transfer is usable and a data URL is
-// available.
+// WaitTransferReady опрашивает передачу, пока она не будет готова и не появится URL данных.
 func (c *Client) WaitTransferReady(ctx context.Context, id string, timeout time.Duration) (*ImageTransfer, error) {
 	deadline := time.Now().Add(timeout)
 	for {
@@ -240,10 +237,8 @@ func (c *Client) WaitTransferReady(ctx context.Context, id string, timeout time.
 	}
 }
 
-// DataURL picks the endpoint to read or write. The direct host URL is faster;
-// the engine proxy is the fallback when the backup server cannot reach the
-// hypervisors directly, which is common when they sit on an isolated storage
-// network.
+// DataURL выбирает адрес чтения или записи. Предпочитаем прямой адрес хоста. Если сервер
+// копий не видит гипервизор в изолированной сети хранения, используем прокси движка.
 func DataURL(t *ImageTransfer, preferProxy bool) string {
 	if preferProxy && t.ProxyURL != "" {
 		return t.ProxyURL
@@ -254,29 +249,29 @@ func DataURL(t *ImageTransfer, preferProxy bool) string {
 	return t.ProxyURL
 }
 
-// FinalizeTransfer completes a transfer successfully.
+// FinalizeTransfer успешно завершается передача.
 func (c *Client) FinalizeTransfer(ctx context.Context, id string) error {
 	return c.post(ctx, "/imagetransfers/"+id+"/finalize", struct{}{}, nil)
 }
 
-// CancelTransfer aborts a transfer and releases the disk.
+// CancelTransfer прерывает передачу и освобождает диск.
 func (c *Client) CancelTransfer(ctx context.Context, id string) error {
 	return c.post(ctx, "/imagetransfers/"+id+"/cancel", struct{}{}, nil)
 }
 
-// ExtendTransfer resets the inactivity timer. Long verification passes between
-// reads can otherwise let the engine cancel a healthy transfer.
+// ExtendTransfer сбрасывает таймер бездействия. Длинные проверочные проходы между чтениями
+// могут в противном случае позволить движку отменить здоровую передачу.
 func (c *Client) ExtendTransfer(ctx context.Context, id string) error {
 	return c.post(ctx, "/imagetransfers/"+id+"/extend", struct{}{}, nil)
 }
 
-// WaitTransferDone polls until a finalised transfer reaches a terminal phase.
+// WaitTransferDone опрашивает передачу до перехода в конечное состояние после завершения.
 func (c *Client) WaitTransferDone(ctx context.Context, id string, timeout time.Duration) (string, error) {
 	deadline := time.Now().Add(timeout)
 	for {
 		transfer, err := c.GetTransfer(ctx, id)
 		if err != nil {
-			// Finished transfers are garbage-collected by the engine.
+			// Готовые передачи собираются движком.
 			if IsNotFound(err) {
 				return "finished_success", nil
 			}
@@ -297,9 +292,9 @@ func (c *Client) WaitTransferDone(ctx context.Context, id string, timeout time.D
 	}
 }
 
-// FinalizeTransferAndWait completes an upload and waits until the engine has
-// actually released the disk. A successful POST /finalize is only an accepted
-// request; attaching the disk before the terminal phase races its engine lock.
+// FinalizeTransferAndWait завершает загрузку и ждет, пока движок фактически выпустит диск.
+// Успешный POST /finalize это только принятая просьба; присоединение диска до того, как
+// конечная фаза загоняет его блокировку движка.
 func (c *Client) FinalizeTransferAndWait(ctx context.Context, id string, timeout time.Duration) error {
 	if err := c.FinalizeTransfer(ctx, id); err != nil {
 		return err
@@ -314,9 +309,9 @@ func (c *Client) FinalizeTransferAndWait(ctx context.Context, id string, timeout
 	return nil
 }
 
-// CloseTransfer finalises a transfer, falling back to cancel when finalising is
-// rejected. Used in deferred cleanup where the caller cannot handle an error
-// but must not leave a disk locked.
+// CloseTransfer завершает передачу, отступая назад, чтобы отменить, когда финал
+// отклоняется. Используется при отложенной очистке, когда код вызова не может обработать
+// ошибку, но не должен оставлять диск заблокированным.
 func (c *Client) CloseTransfer(ctx context.Context, id string, success bool) error {
 	if success {
 		if err := c.FinalizeTransfer(ctx, id); err == nil {

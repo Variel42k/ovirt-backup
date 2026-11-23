@@ -18,8 +18,7 @@ import (
 // читать файлы хоста. Обзор без границ стёр бы эту разницу, поэтому корни
 // заданы списком (backup.scratch_roots), а пустой список запрещает обзор вовсе.
 
-// handleBrowseHost lists directories on a hypervisor for the scratch directory
-// field.
+// handleBrowseHost перечисляет каталоги гипервизора для выбора временного рабочего каталога.
 func (s *Server) handleBrowseHost(w http.ResponseWriter, r *http.Request) {
 	srv, err := s.store.GetServer(r.Context(), r.PathValue("id"))
 	if err != nil {

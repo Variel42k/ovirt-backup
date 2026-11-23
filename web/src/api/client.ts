@@ -67,6 +67,7 @@ import type {
   StorageTarget,
   VerifyRun,
   VM,
+  VMDuplicate,
 } from './types'
 import type {
   ApiToken,
@@ -105,7 +106,7 @@ export interface JobPreviewRow {
 
 export const http = axios.create({
   baseURL: '/api/v1',
-  // Sessions are cookie-based, so every call has to carry them.
+  // При каждом запросе отправляем cookie сеанса.
   withCredentials: true,
   timeout: 120_000,
 })
@@ -218,7 +219,7 @@ export function setPopupNotificationsEnabled(enabled: boolean): void {
   try {
     window.localStorage.setItem(POPUP_NOTIFICATIONS_STORAGE_KEY, String(enabled))
   } catch {
-    // Keep the preference for this page when persistent browser storage is unavailable.
+    // Если хранилище браузера недоступно, сохраняем настройку до закрытия страницы.
   }
   if (!enabled) dismissAllNotifications()
 }
@@ -279,6 +280,10 @@ http.interceptors.response.use(
 const unwrap = <T>(data: ListResponse<T>): T[] => data.items ?? []
 
 export const api = {
+  previewCompression: (serverId: string, vmId: string, excludeDiskIds: string[], signal?: AbortSignal) =>
+    http.post<import('./backupCompression').CompressionEstimate>(`/servers/${encodeURIComponent(serverId)}/vms/${encodeURIComponent(vmId)}/compression-preview`, {
+      confirm_source_read: true, exclude_disk_ids: excludeDiskIds,
+    }, { timeout: 510_000, signal }).then(r => r.data),
   listVMTransfers: () => http.get<ListResponse<import('./types').VMTransfer>>('/vm-transfers').then(r => unwrap(r.data)),
   vmTransferSamples: (id: string) => http.get<ListResponse<import('./types').VMTransferSample>>(`/vm-transfers/${id}/samples`).then(r => unwrap(r.data)),
   vmTransferCancellationState: (id: string) => http.get<import('./types').VMTransferCancellationState>(`/vm-transfers/${id}/cancellation-state`, { timeout: 20000 }).then(r => r.data),
@@ -376,6 +381,7 @@ export const api = {
   resetClusterRecovery: (serverId: string, clusterId: string) => http.delete<import('./types').ClusterRecoveryPolicy>(`/servers/${serverId}/clusters/${clusterId}/recovery`).then(r => r.data),
   listVMs: (serverId: string, params?: Record<string, string>) =>
     http.get<ListResponse<VM>>(`/servers/${serverId}/vms`, { params }).then((r) => unwrap(r.data)),
+  listVMDuplicates: () => http.get<ListResponse<VMDuplicate>>('/vm-duplicates').then((r) => unwrap(r.data)),
   getVM: (serverId: string, vmId: string) => http.get<VM>(`/servers/${serverId}/vms/${vmId}`).then((r) => r.data),
   listVMDisks: (serverId: string, vmId: string) =>
     http.get<ListResponse<Disk>>(`/servers/${serverId}/vms/${vmId}/disks`).then((r) => unwrap(r.data)),
@@ -601,27 +607,6 @@ export const api = {
     http.post<RestoreVMPlan>(`/backups/${id}/restore-vm/plan`, payload).then((r) => r.data),
   restoreVM: (id: string, payload: Record<string, unknown>) =>
     http.post(`/backups/${id}/restore-vm`, payload).then((r) => r.data),
-  // Очистка истории репозиториев GitLab
-  gitCleanDefaults: () => http.get<import('./types').GitCleanRules>('/gitlab-clean/defaults').then((r) => r.data),
-  listGitlabHosts: () =>
-    http.get<ListResponse<import('./types').GitlabHost>>('/gitlab-clean/hosts').then((r) => unwrap(r.data)),
-  createGitlabHost: (payload: Record<string, unknown>) =>
-    http.post<import('./types').GitlabHost>('/gitlab-clean/hosts', payload).then((r) => r.data),
-  updateGitlabHost: (id: string, payload: Record<string, unknown>) =>
-    http.put<import('./types').GitlabHost>(`/gitlab-clean/hosts/${id}`, payload).then((r) => r.data),
-  deleteGitlabHost: (id: string) => http.delete(`/gitlab-clean/hosts/${id}`).then(() => undefined),
-  probeGitlabHost: (id: string) =>
-    http.post<import('./types').GitlabHost>(`/gitlab-clean/hosts/${id}/probe`, {}, { timeout: 90_000 }).then((r) => r.data),
-  startGitAnalyze: (hostId: string, rules: import('./types').GitCleanRules) =>
-    http.post<import('./types').GitCleanRun>(`/gitlab-clean/hosts/${hostId}/analyze`, { rules }, { timeout: 90_000 }).then((r) => r.data),
-  startGitClean: (hostId: string, payload: Record<string, unknown>) =>
-    http.post<import('./types').GitCleanRun>(`/gitlab-clean/hosts/${hostId}/clean`, payload, { timeout: 90_000 }).then((r) => r.data),
-  listGitCleanRuns: (hostId = '') =>
-    http.get<ListResponse<import('./types').GitCleanRun>>('/gitlab-clean/runs', { params: hostId ? { host_id: hostId } : undefined })
-      .then((r) => unwrap(r.data)),
-  getGitCleanRun: (id: string) => http.get<import('./types').GitCleanRun>(`/gitlab-clean/runs/${id}`).then((r) => r.data),
-  cancelGitCleanRun: (id: string) => http.post(`/gitlab-clean/runs/${id}/cancel`).then(() => undefined),
-
   // Импорт образов дисков из подключённого хранилища
   listStorageFiles: (storageId: string, path = '') =>
     http.get<import('./types').StorageFiles>(`/storages/${storageId}/files`, { params: path ? { path } : undefined, timeout: 50_000 })

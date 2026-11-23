@@ -33,8 +33,8 @@ func (s *Server) revalidateOIDCSession(ctx context.Context, session *model.Sessi
 		return session, nil
 	}
 	result, err, _ := s.oidcRefresh.Do(session.Token, func() (any, error) {
-		// The shared operation has its own bounded lifetime: a disconnected browser
-		// must not cancel token rotation underneath other requests for this session.
+		// Общая операция имеет свой ограниченный срок службы: отключенный браузер не должен
+		// отменять вращение токена под другими запросами для этой сессии.
 		checkCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), oidcExchangeTimeout)
 		defer cancel()
 		fresh, err := s.store.GetSession(checkCtx, session.Token)
@@ -64,9 +64,10 @@ func (s *Server) revalidateOIDCSession(ctx context.Context, session *model.Sessi
 			}
 			return nil, errors.New("провайдер временно недоступен для проверки сессии")
 		}
-		// A refreshed ID token is checked when supplied. Prefer its groups because
-		// some providers deliberately omit them from UserInfo; when they are absent,
-		// UserInfo is still accepted only for the exact same subject.
+		// Обновленный маркер идентификатора проверяется при поставке. Предпочитают его
+		// groups потому, что некоторые поставщики умышленно упускают их из UserInfo; Когда
+		// они отсутствуют, UserInfo все еще принимается только по одному и тому же
+		// предмету.
 		var groups []string
 		if raw, ok := token.Extra("id_token").(string); ok && raw != "" {
 			id, verifyErr := verifier.Verify(checkCtx, raw)

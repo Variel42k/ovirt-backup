@@ -1,6 +1,6 @@
-// Package ovirt is a REST client for the oVirt engine API and its forks
+// Пакет ovirt реализует REST-клиент API oVirt и его форков.
 // (РЕД Виртуализация, OLVM, RHV). It covers inventory, power management,
-// snapshots, the incremental Backup API with checkpoints, and image transfers.
+// Снимки, инкрементное резервное копирование API с checkpoints и передача образов.
 package ovirt
 
 import (
@@ -24,7 +24,7 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// Config describes one engine connection.
+// Config описывает одно подключение к движку.
 type Config struct {
 	EngineURL   string // https://engine.example.org (без /ovirt-engine)
 	Username    string // admin@internal
@@ -37,31 +37,31 @@ type Config struct {
 	Logger    zerolog.Logger
 }
 
-// Client talks to one engine. It is safe for concurrent use; the SSO token is
-// refreshed under a mutex and shared by all in-flight requests.
+// Client работает с одним движком и допускает вызовы из нескольких горутин. Общий SSO-токен
+// обновляется под мьютексом.
 type Client struct {
 	cfg     Config
 	baseURL *url.URL
 	apiURL  string
 	http    *http.Client
 
-	// tokenMu protects the cached bearer token. authMu serializes the slower
-	// password grant so concurrent inventory and backup requests don't create
-	// several engine sessions when the token is first needed or expires.
+	// tokenMu защищает кэш bearer-токена. authMu выполняет запросы по паролю по очереди,
+	// чтобы одновременные запросы инвентаря и бэкапа не открывали лишние сеансы при выдаче
+	// или истечении токена.
 	tokenMu  sync.RWMutex
 	authMu   sync.Mutex
 	token    string
 	tokenExp time.Time
 
-	// oVirt 4.3 knows inactivity_timeout, but not timeout_policy (added in
-	// 4.4). Once the engine confirms that older request shape, keep using it
-	// for this pooled client so every disk doesn't first receive HTTP 400.
+	// oVirt 4.3 поддерживает inactivity_timeout, а timeout_policy появился в 4.4. Для
+	// клиента запоминаем принятый движком старый формат, чтобы каждый диск не получал
+	// сначала HTTP 400.
 	legacyImageTransfer atomic.Bool
 
 	log zerolog.Logger
 }
 
-// APIError is a non-2xx response from the engine.
+// APIError представляет ответ движка с кодом вне диапазона 2xx.
 type APIError struct {
 	Status int
 	Method string
@@ -98,20 +98,21 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("oVirt %s %s: HTTP %d: %s", e.Method, e.Path, e.Status, msg)
 }
 
-// IsNotFound reports whether the engine answered 404.
+// IsNotFound проверяет, ответил ли движок кодом 404.
 func IsNotFound(err error) bool {
 	var apiErr *APIError
 	return errors.As(err, &apiErr) && apiErr.Status == http.StatusNotFound
 }
 
-// IsConflict reports whether the engine rejected the request because the object
-// is in the wrong state (409), which is usually retryable after a wait.
+// IsConflict проверяет, отклонил ли движок запрос из-за состояния объекта (409). Обычно
+// запрос можно повторить после ожидания.
 func IsConflict(err error) bool {
 	var apiErr *APIError
 	return errors.As(err, &apiErr) && apiErr.Status == http.StatusConflict
 }
 
-// IsLockConflict reports whether a 409 says the object is locked by another
+// IsLockConflict проверяет, означает ли ответ 409, что объект заблокирован другой
+// операцией.
 // engine operation — отказ, который проходит сам, в отличие от 409 о
 // неподходящем состоянии объекта.
 func IsLockConflict(err error) bool {
@@ -128,7 +129,7 @@ func IsLockConflict(err error) bool {
 	return false
 }
 
-// IsAuthError reports whether credentials were rejected.
+// IsAuthError определяет, отклонены ли учётные данные.
 func IsAuthError(err error) bool {
 	var apiErr *APIError
 	return errors.As(err, &apiErr) &&
@@ -145,7 +146,7 @@ func APIURL(engineURL string) (string, error) {
 	return base.String() + "/ovirt-engine/api", nil
 }
 
-// New builds a client. It does not contact the engine; call Info to verify.
+// New создаёт клиент без обращения к движку. Для проверки подключения вызовите Info.
 func New(cfg Config) (*Client, error) {
 	if cfg.EngineURL == "" {
 		return nil, errors.New("не указан адрес движка")
@@ -197,15 +198,15 @@ func New(cfg Config) (*Client, error) {
 	}, nil
 }
 
-// normalizeEngineURL prevents credentials from ever being sent over a remote
-// plaintext connection. Loopback HTTP remains available for local development
-// and the in-process contract tests; every network engine must use HTTPS.
+// normalizeEngineURL запрещает передачу учётных данных по незашифрованному сетевому
+// соединению. HTTP на loopback оставлен для локальной разработки и тестов. Для сетевых
+// движков обязателен HTTPS.
 func normalizeEngineURL(engineURL string) (*url.URL, error) {
 	raw := strings.TrimRight(strings.TrimSpace(engineURL), "/")
 	if !strings.Contains(raw, "://") {
 		raw = "https://" + raw
 	}
-	// Operators habitually paste the full API URL from the admin portal.
+	// Из административного портала часто копируют полный URL API.
 	raw = strings.TrimSuffix(raw, "/ovirt-engine/api")
 	raw = strings.TrimSuffix(raw, "/ovirt-engine")
 
@@ -231,8 +232,8 @@ func loopbackEngineHost(host string) bool {
 func buildTLSConfig(caPEM string, insecure bool) (*tls.Config, error) {
 	cfg := &tls.Config{MinVersion: tls.VersionTLS12}
 	if insecure {
-		// Explicitly requested by the operator; the alternative is that they
-		// cannot connect to a lab engine with a self-signed certificate at all.
+		// Оператор может явно выбрать подключение к стендовому движку с самоподписанным
+		// сертификатом.
 		cfg.InsecureSkipVerify = true
 		return cfg, nil
 	}
@@ -247,11 +248,10 @@ func buildTLSConfig(caPEM string, insecure bool) (*tls.Config, error) {
 	return cfg, nil
 }
 
-// BaseURL returns the engine root, without the API path.
+// BaseURL возвращает корневой адрес движка без пути API.
 func (c *Client) BaseURL() string { return c.baseURL.String() }
 
-// HTTPClient exposes the configured transport so the imageio client inherits
-// the same CA trust and timeouts.
+// HTTPClient предоставляет клиенту ImageIO тот же транспорт с настроенными CA и таймаутами.
 func (c *Client) HTTPClient() *http.Client { return c.http }
 
 // DataHTTPClient — клиент для ovirt-imageio: те же TLS и доверие к
@@ -262,7 +262,7 @@ func (c *Client) DataHTTPClient() *http.Client {
 	return &http.Client{Transport: c.http.Transport, CheckRedirect: c.http.CheckRedirect}
 }
 
-// TLSConfig returns a clone of the TLS settings in use.
+// TLSConfig возвращает копию используемых настроек TLS.
 func (c *Client) TLSConfig() *tls.Config {
 	tr, ok := c.http.Transport.(*http.Transport)
 	if !ok || tr.TLSClientConfig == nil {
@@ -271,7 +271,7 @@ func (c *Client) TLSConfig() *tls.Config {
 	return tr.TLSClientConfig.Clone()
 }
 
-// ssoResponse is the payload of the token endpoint.
+// ssoResponse описывает ответ конечной точки выдачи токена.
 type ssoResponse struct {
 	AccessToken      string          `json:"access_token"`
 	TokenType        string          `json:"token_type"`
@@ -282,7 +282,7 @@ type ssoResponse struct {
 	ErrorDescription string          `json:"error_description"`
 }
 
-// authenticate obtains a fresh SSO token.
+// authenticate запрашивает новый токен SSO.
 func (c *Client) authenticate(ctx context.Context) error {
 	form := url.Values{}
 	form.Set("grant_type", "password")
@@ -322,8 +322,8 @@ func (c *Client) authenticate(ctx context.Context) error {
 		}
 		status := resp.StatusCode
 		if status == http.StatusOK {
-			// The SSO endpoint reports bad credentials with 200 + an error
-			// body; surface it as 401 so IsAuthError works.
+			// Конечная точка SSO возвращает 200 с ошибкой в теле при неверных учётных
+			// данных. Преобразуем код в 401, чтобы IsAuthError распознал отказ.
 			status = http.StatusUnauthorized
 		}
 		return &APIError{Status: status, Method: "POST", Path: "/ovirt-engine/sso/oauth/token",
@@ -346,8 +346,7 @@ func (c *Client) authenticate(ctx context.Context) error {
 	return nil
 }
 
-// parseSSOExpiry accepts both forms returned by supported engines: an epoch
-// number and the same value encoded as a JSON string.
+// parseSSOExpiry принимает время Unix как число или как строку JSON.
 func parseSSOExpiry(raw json.RawMessage) time.Time {
 	raw = bytes.TrimSpace(raw)
 	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
@@ -363,7 +362,7 @@ func parseSSOExpiry(raw json.RawMessage) time.Time {
 	return parseEngineTime(value)
 }
 
-// token returns a valid bearer token, authenticating or refreshing as needed.
+// token возвращает действующий bearer-токен и при необходимости получает или обновляет его.
 func (c *Client) bearer(ctx context.Context) (string, error) {
 	if tok, ok := c.cachedBearer(time.Now()); ok {
 		return tok, nil
@@ -371,7 +370,7 @@ func (c *Client) bearer(ctx context.Context) (string, error) {
 
 	c.authMu.Lock()
 	defer c.authMu.Unlock()
-	// Another request may have refreshed the token while this request waited.
+	// Другой запрос мог обновить токен во время ожидания.
 	if tok, ok := c.cachedBearer(time.Now()); ok {
 		return tok, nil
 	}
@@ -389,16 +388,16 @@ func (c *Client) cachedBearer(now time.Time) (string, bool) {
 	if c.token == "" {
 		return "", false
 	}
-	// Some engine versions omit exp. The official API contract permits using
-	// the token until the engine rejects it with 401, which doOnce handles.
+	// Некоторые версии движка не передают exp. API разрешает использовать токен до ответа
+	// 401, который обрабатывает doOnce.
 	if c.tokenExp.IsZero() || c.tokenExp.Sub(now) > 30*time.Second {
 		return c.token, true
 	}
 	return "", false
 }
 
-// invalidateBearer drops only the token that was actually rejected. A late
-// 401 for an older request must not erase a token refreshed by another one.
+// invalidateBearer сбрасывает только отклонённый токен. Запоздалый ответ 401 не должен
+// удалить токен, обновлённый другим запросом.
 func (c *Client) invalidateBearer(rejected string) {
 	c.tokenMu.Lock()
 	if c.token == rejected {
@@ -407,8 +406,7 @@ func (c *Client) invalidateBearer(rejected string) {
 	c.tokenMu.Unlock()
 }
 
-// Logout revokes the current SSO token. Best effort: an engine that is already
-// unreachable does not need its token cleaned up.
+// Logout отзывает текущий SSO-токен, если движок отвечает.
 func (c *Client) Logout(ctx context.Context) {
 	c.authMu.Lock()
 	defer c.authMu.Unlock()
@@ -432,7 +430,7 @@ func (c *Client) Logout(ctx context.Context) {
 	}
 }
 
-// requestOptions tunes a single call.
+// requestOptions задаёт параметры отдельного вызова.
 type requestOptions struct {
 	// query добавляется к URL.
 	query url.Values
@@ -448,7 +446,7 @@ type requestOptions struct {
 	timeout time.Duration
 }
 
-// get performs a GET and decodes the JSON body into out.
+// get выполняет GET и декодирует тело JSON в out.
 func (c *Client) get(ctx context.Context, path string, out any, opts ...func(*requestOptions)) error {
 	o := requestOptions{retries: 2}
 	for _, fn := range opts {
@@ -457,7 +455,7 @@ func (c *Client) get(ctx context.Context, path string, out any, opts ...func(*re
 	return c.do(ctx, http.MethodGet, path, nil, out, o)
 }
 
-// post performs a POST with a JSON body.
+// post выполняет POST с телом JSON.
 func (c *Client) post(ctx context.Context, path string, body, out any, opts ...func(*requestOptions)) error {
 	o := requestOptions{correlationID: newCorrelationID()}
 	for _, fn := range opts {
@@ -466,7 +464,7 @@ func (c *Client) post(ctx context.Context, path string, body, out any, opts ...f
 	return c.do(ctx, http.MethodPost, path, body, out, o)
 }
 
-// put performs a PUT with a JSON body.
+// put выполняет PUT с телом JSON.
 func (c *Client) put(ctx context.Context, path string, body, out any, opts ...func(*requestOptions)) error {
 	o := requestOptions{correlationID: newCorrelationID()}
 	for _, fn := range opts {
@@ -475,7 +473,7 @@ func (c *Client) put(ctx context.Context, path string, body, out any, opts ...fu
 	return c.do(ctx, http.MethodPut, path, body, out, o)
 }
 
-// del performs a DELETE.
+// del выполняет DELETE.
 //
 // DELETE по смыслу HTTP идемпотентен: повтор удалённого вернёт 404, а
 // удаляемого — 409. Поэтому при обрыве сети запрос повторяется, а клиенту Go
@@ -490,13 +488,13 @@ func (c *Client) del(ctx context.Context, path string, opts ...func(*requestOpti
 	return c.do(ctx, http.MethodDelete, path, nil, nil, o)
 }
 
-// withQuery adds URL query parameters.
+// withQuery добавляет параметры запроса в URL.
 func withQuery(values url.Values) func(*requestOptions) {
 	return func(o *requestOptions) { o.query = values }
 }
 
 func newCorrelationID() string {
-	return "jhv-" + uuid.NewString()[:8]
+	return uuid.NewString()
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body, out any, o requestOptions) error {
@@ -540,8 +538,8 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any, o r
 
 		var apiErr *APIError
 		if errors.As(err, &apiErr) {
-			// 5xx is worth retrying; every 4xx is a decision the engine made
-			// and repeating the call will not change it.
+			// После 5xx запрос можно повторить. Ответ 4xx отражает решение движка, которое
+			// от немедленного повтора не изменится.
 			if apiErr.Status < 500 {
 				return err
 			}
@@ -550,13 +548,13 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any, o r
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return err
 		}
-		// Network-level failure: retry.
+		// После сетевого сбоя повторяем запрос.
 	}
 	return lastErr
 }
 
-// doOnce issues one HTTP attempt. retryAuth allows a single transparent
-// re-authentication when the token turns out to be stale.
+// doOnce выполняет один HTTP-запрос. При retryAuth отклонённый токен можно обновить и
+// повторить запрос один раз.
 func (c *Client) doOnce(ctx context.Context, method, endpoint, path string, payload []byte, out any, o requestOptions, retryAuth bool) error {
 	token, err := c.bearer(ctx)
 	if err != nil {
@@ -587,9 +585,9 @@ func (c *Client) doOnce(ctx context.Context, method, endpoint, path string, payl
 
 	requestClient := c.http
 	if o.timeout > 0 {
-		// A context deadline alone cannot extend http.Client.Timeout. Copy
-		// the client so a long operation uses its own limit without changing
-		// concurrent inventory requests or their shared transport.
+		// Дедлайн контекста не увеличивает http.Client.Timeout. Копируем клиент, чтобы
+		// долгая операция получила собственный таймаут без изменения параллельных запросов
+		// и общего транспорта.
 		copy := *c.http
 		copy.Timeout = o.timeout
 		requestClient = &copy
@@ -606,8 +604,8 @@ func (c *Client) doOnce(ctx context.Context, method, endpoint, path string, payl
 	}
 
 	if resp.StatusCode == http.StatusUnauthorized && retryAuth {
-		// The token was rejected — most likely it expired earlier than the
-		// engine told us. Drop it and let the caller's retry loop run again.
+		// Движок отклонил токен, вероятно, раньше заявленного срока. Сбрасываем его, чтобы
+		// вызывающий код мог повторить запрос.
 		c.invalidateBearer(token)
 		return c.doOnce(ctx, method, endpoint, path, payload, out, o, false)
 	}
@@ -632,7 +630,7 @@ func (c *Client) doOnce(ctx context.Context, method, endpoint, path string, payl
 	return nil
 }
 
-// Info fetches the API root, which doubles as the connectivity probe.
+// Info запрашивает корень API для проверки подключения.
 func (c *Client) Info(ctx context.Context) (*APIInfo, error) {
 	var info APIInfo
 	if err := c.get(ctx, "", &info); err != nil {
@@ -641,9 +639,8 @@ func (c *Client) Info(ctx context.Context) (*APIInfo, error) {
 	return &info, nil
 }
 
-// FetchCACert downloads the engine's CA certificate over an unverified
-// connection. This is the standard bootstrap: the operator confirms the
-// fingerprint once, and every later connection is verified against it.
+// FetchCACert загружает сертификат CA движка без проверки соединения. Оператор подтверждает
+// отпечаток один раз, после чего все последующие соединения проверяются по этому CA.
 func FetchCACert(ctx context.Context, engineURL string, timeout time.Duration) (string, error) {
 	base, err := normalizeEngineURL(engineURL)
 	if err != nil {
@@ -659,8 +656,8 @@ func FetchCACert(ctx context.Context, engineURL string, timeout time.Duration) (
 			return errors.New("движок неожиданно перенаправил запрос загрузки CA")
 		},
 		Transport: &http.Transport{
-			// Unavoidable: the point of the call is to learn the CA we do not
-			// have yet. The result is shown to the operator for confirmation.
+			// На этом шаге CA ещё неизвестен. Показываем полученный сертификат оператору
+			// для подтверждения.
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12},
 		},
 	}

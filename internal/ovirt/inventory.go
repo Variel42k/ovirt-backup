@@ -9,7 +9,7 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
-// Inventory is one complete snapshot of what an engine manages.
+// Inventory — это один полный снапшот того, чем управляет движок.
 type Inventory struct {
 	Info     *APIInfo
 	Clusters []*model.Cluster
@@ -19,11 +19,11 @@ type Inventory struct {
 	Domains  []*model.StorageDomain
 }
 
-// FetchInventory collects the whole inventory of one engine.
+// FetchInventory Собирает весь инвентарь одного движка.
 //
-// It deliberately issues a handful of coarse list calls rather than walking
-// per-VM sub-resources: on an installation with hundreds of VMs the latter
-// turns one poll into thousands of requests and the engine starts throttling.
+// Он намеренно выдает несколько грубых вызовов списка, а не ходит по подресурсам ВМ: на
+// установке с сотнями ВМ последняя превращает один опрос в тысячи запросов, и движок
+// начинает дросселировать.
 func (c *Client) FetchInventory(ctx context.Context, serverID string) (*Inventory, error) {
 	info, err := c.Info(ctx)
 	if err != nil {
@@ -52,8 +52,8 @@ func (c *Client) FetchInventory(ctx context.Context, serverID string) (*Inventor
 		return nil, fmt.Errorf("диски: %w", err)
 	}
 
-	// The disk count on a VM comes from the attachments, which is the only
-	// place the engine reports it without a per-VM call.
+	// Количество дисков на ВМ происходит из вложений, что является единственным местом, где
+	// движок сообщает об этом без вызова ВМ.
 	counts := map[string]int{}
 	for _, vmIDs := range attachments {
 		for _, vmID := range vmIDs {
@@ -67,10 +67,9 @@ func (c *Client) FetchInventory(ctx context.Context, serverID string) (*Inventor
 	return inv, nil
 }
 
-// fillVMPlacementNames completes the compact VM collection response from the
-// host and cluster lists already fetched in the same inventory pass. oVirt can
-// return only the referenced object ID when reported_devices is followed, so
-// relying on vm.host.name makes the whole Host column disappear.
+// fillVMPlacementNames дополняет краткие сведения о ВМ по спискам хостов и кластеров
+// текущего опроса. При запросе reported_devices oVirt может вернуть только идентификатор
+// хоста, из-за чего vm.host.name окажется пустым.
 func fillVMPlacementNames(vms []*model.VM, hosts []*model.Host, clusters []*model.Cluster) {
 	hostNames := make(map[string]string, len(hosts))
 	for _, host := range hosts {
@@ -90,7 +89,7 @@ func fillVMPlacementNames(vms []*model.VM, hosts []*model.Host, clusters []*mode
 	}
 }
 
-// ListClusters returns the engine's clusters.
+// ListClusters возвращает кластеры движка.
 func (c *Client) ListClusters(ctx context.Context, serverID string) ([]*model.Cluster, error) {
 	var list clusterList
 	if err := c.get(ctx, "/clusters", &list); err != nil {
@@ -111,7 +110,7 @@ func (c *Client) ListClusters(ctx context.Context, serverID string) ([]*model.Cl
 	return out, nil
 }
 
-// ListHosts returns the engine's hypervisor nodes.
+// ListHosts возвращает узлы гипервизора движка.
 func (c *Client) ListHosts(ctx context.Context, serverID string) ([]*model.Host, error) {
 	var list hostList
 	if err := c.get(ctx, "/hosts", &list); err != nil {
@@ -133,8 +132,8 @@ func (c *Client) ListHosts(ctx context.Context, serverID string) ([]*model.Host,
 			CPUCores:    h.CPU.Topology.Cores.Int() * h.CPU.Topology.Sockets.Int(),
 			CPUSockets:  h.CPU.Topology.Sockets.Int(),
 			MemoryBytes: h.Memory.Int64(),
-			// max_scheduling_memory is what is still free for new VMs, so the
-			// difference is what is actually committed.
+			// max_scheduling_memory показывает доступную для новых ВМ память. По разнице
+			// определяем уже зарезервированный объём.
 			MemoryUsed:  maxInt64(0, h.Memory.Int64()-h.MaxSchedulingMemory.Int64()),
 			KSMEnabled:  h.KSM.Enabled.Bool(),
 			OSVersion:   h.OS.Version.FullVersion,
@@ -144,7 +143,7 @@ func (c *Client) ListHosts(ctx context.Context, serverID string) ([]*model.Host,
 	return out, nil
 }
 
-// ListStorageDomains returns the engine's storage domains.
+// ListStorageDomains возвращает домены хранения движка.
 func (c *Client) ListStorageDomains(ctx context.Context, serverID string) ([]*model.StorageDomain, error) {
 	var list storageDomainList
 	if err := c.get(ctx, "/storagedomains", &list); err != nil {
@@ -169,8 +168,8 @@ func (c *Client) ListStorageDomains(ctx context.Context, serverID string) ([]*mo
 	return out, nil
 }
 
-// HostStorageTargets describes domains attached to the host's data center.
-// Shared domains belong to a data center, not to an individual physical disk.
+// HostStorageTargets описывает домены, присоединенные к центру обработки данных хоста.
+// Общие домены принадлежат центру обработки данных, а не отдельному физическому диску.
 type HostStorageTargets struct {
 	HostID         string                 `json:"host_id"`
 	HostName       string                 `json:"host_name"`
@@ -223,8 +222,8 @@ func (c *Client) HostStorageDomains(ctx context.Context, serverID, hostID string
 	return result, nil
 }
 
-// GetStorageDomain reads one storage domain as the engine reports it, with
-// its free and used space.
+// GetStorageDomain считывает один домен хранения, как сообщает об этом движок, с его
+// свободным и использованным пространством.
 func (c *Client) GetStorageDomain(ctx context.Context, id string) (*StorageDomain, error) {
 	var d StorageDomain
 	if err := c.get(ctx, "/storagedomains/"+id, &d); err != nil {
@@ -233,9 +232,9 @@ func (c *Client) GetStorageDomain(ctx context.Context, id string) (*StorageDomai
 	return &d, nil
 }
 
-// ListVNICProfiles returns the engine-managed network targets accepted when a
-// NIC is created. Network IDs alone are insufficient in oVirt: CreateNIC
-// requires a vNIC profile ID.
+// ListVNICProfiles возвращает управляемые движком сетевые цели, принятые при создании NIC.
+// Одних сетевых идентификаторов недостаточно в oVirt: CreateNIC требуется vNIC
+// идентификатор профиля.
 func (c *Client) ListVNICProfiles(ctx context.Context, serverID string) ([]*model.RestoreNetworkTarget, error) {
 	var list struct {
 		Profiles []struct {
@@ -260,14 +259,14 @@ func (c *Client) ListVNICProfiles(ctx context.Context, serverID string) ([]*mode
 	return out, nil
 }
 
-// listVMsWithAttachments returns the VMs and, as a side product, the
-// disk-id → vm-ids mapping taken from their disk attachments.
+// listVMsWithAttachments возвращает ВМ и строит по подключениям соответствие
+// идентификаторов дисков идентификаторам ВМ.
 func (c *Client) listVMsWithAttachments(ctx context.Context, serverID string) ([]*model.VM, map[string][]string, error) {
 	var list vmList
 	q := url.Values{}
-	// reported_devices is not included in the ordinary VM collection response.
-	// It contains the addresses reported by the guest agent, which discovery
-	// needs in order to probe the VM instead of the Engine itself.
+	// reported_devices не включен в обычный ответ коллекции ВМ.
+	// Он содержит адреса, сообщенные гостевым агентом, для обнаружения которых требуется
+	// исследовать ВМ, а не саму Engine.
 	q.Set("follow", "disk_attachments,tags,reported_devices")
 	if err := c.get(ctx, "/vms", &list, withQuery(q)); err != nil {
 		return nil, nil, err
@@ -315,7 +314,7 @@ func (c *Client) listVMsWithAttachments(ctx context.Context, serverID string) ([
 	return vms, attachments, nil
 }
 
-// listDisks returns every disk, with attachments folded in.
+// listDisks возвращает каждый диск, со сложенными вложениями.
 func (c *Client) listDisks(ctx context.Context, serverID string, attachments map[string][]string) ([]*model.Disk, error) {
 	var list diskList
 	if err := c.get(ctx, "/disks", &list); err != nil {
@@ -326,8 +325,8 @@ func (c *Client) listDisks(ctx context.Context, serverID string, attachments map
 		d := &list.Disk[i]
 
 		vmIDs := attachments[d.ID]
-		// Some builds inline the VM references on the disk itself; use them
-		// when the attachment walk produced nothing.
+		// Некоторые встраивают ссылки на ВМ на самом диске; Используйте их, когда прогулка
+		// по привязанности ничего не произвела.
 		if len(vmIDs) == 0 && d.VMs != nil {
 			for _, ref := range d.VMs.VM {
 				if ref.ID != "" {
@@ -380,7 +379,7 @@ func (c *Client) listDisks(ctx context.Context, serverID string, attachments map
 	return out, nil
 }
 
-// GetVM fetches one VM with its disk attachments resolved.
+// GetVM извлекает одну ВМ с разрешенными вложениями на диске.
 func (c *Client) GetVM(ctx context.Context, id string) (*VM, error) {
 	var vm VM
 	q := url.Values{}
@@ -391,7 +390,7 @@ func (c *Client) GetVM(ctx context.Context, id string) (*VM, error) {
 	return &vm, nil
 }
 
-// GetDisk fetches one disk.
+// GetDisk извлекает один диск.
 func (c *Client) GetDisk(ctx context.Context, id string) (*Disk, error) {
 	var d Disk
 	if err := c.get(ctx, "/disks/"+id, &d); err != nil {
@@ -400,7 +399,7 @@ func (c *Client) GetDisk(ctx context.Context, id string) (*Disk, error) {
 	return &d, nil
 }
 
-// DiskVMs returns live attachments, including ones absent from cached inventory.
+// DiskVMs возвращает текущие вложения, в том числе отсутствующие в кэшированном инвентаре.
 func (c *Client) DiskVMs(ctx context.Context, diskID string) ([]Ref, error) {
 	var disk Disk
 	if err := c.get(ctx, "/disks/"+diskID, &disk, withQuery(url.Values{"all_content": {"true"}})); err != nil {
@@ -412,8 +411,8 @@ func (c *Client) DiskVMs(ctx context.Context, diskID string) ([]Ref, error) {
 	return disk.VMs.VM, nil
 }
 
-// ListVMDisks returns the disks attached to a VM, in attachment order, with the
-// bootable flag taken from the attachment rather than the disk.
+// ListVMDisks возвращает диски, прикрепленные к ВМ, в порядке вложения, с загрузочным
+// флагом, взятым из вложения, а не из диска.
 func (c *Client) ListVMDisks(ctx context.Context, vmID string) ([]Disk, error) {
 	var list diskAttachmentList
 	q := url.Values{}
@@ -425,8 +424,8 @@ func (c *Client) ListVMDisks(ctx context.Context, vmID string) ([]Disk, error) {
 	out := make([]Disk, 0, len(list.DiskAttachment))
 	for _, att := range list.DiskAttachment {
 		if att.Disk == nil {
-			// The engine did not inline it; fetch it directly rather than
-			// silently dropping a disk from a backup.
+			// Движок его не подводил; извлекайте его напрямую, а не бесшумно сбрасывайте
+			// диск из резервной копии.
 			d, err := c.GetDisk(ctx, att.ID)
 			if err != nil {
 				return nil, fmt.Errorf("диск %s ВМ %s: %w", att.ID, vmID, err)
@@ -446,8 +445,8 @@ func (c *Client) ListVMDisks(ctx context.Context, vmID string) ([]Disk, error) {
 	return out, nil
 }
 
-// SetDiskBackupMode turns changed block tracking on or off for a disk. oVirt
-// only accepts incremental mode on qcow2 disks.
+// SetDiskBackupMode для диска включается или выключается отслеживание измененных блоков.
+// oVirt Принимает только инкрементальный режим на дисках qcow2.
 func (c *Client) SetDiskBackupMode(ctx context.Context, diskID string, incremental bool) error {
 	mode := "none"
 	if incremental {
@@ -457,8 +456,8 @@ func (c *Client) SetDiskBackupMode(ctx context.Context, diskID string, increment
 	return c.put(ctx, "/disks/"+diskID, body, nil)
 }
 
-// ListEvents returns recent engine events, newest first. It is used to explain
-// a failed operation with the engine's own wording.
+// ListEvents возвращает недавние события в движке, сначала новые. Он используется для
+// объяснения неудачной операции с собственной формулировкой движка.
 func (c *Client) ListEvents(ctx context.Context, max int, search string) ([]Event, error) {
 	q := url.Values{}
 	if max > 0 {
@@ -474,8 +473,8 @@ func (c *Client) ListEvents(ctx context.Context, max int, search string) ([]Even
 	return list.Event, nil
 }
 
-// DescribeFailure looks for an engine event matching a correlation id, so a
-// failure can be reported in the operator's language instead of "HTTP 409".
+// DescribeFailure ищет событие движка, соответствующее идентификатору корреляции, поэтому о
+// сбое может быть сообщено на языке оператора вместо "HTTP 409".
 func (c *Client) DescribeFailure(ctx context.Context, correlationID string) string {
 	if correlationID == "" {
 		return ""

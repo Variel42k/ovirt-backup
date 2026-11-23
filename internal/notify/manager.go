@@ -22,9 +22,10 @@ const (
 	managerLease        = 45 * time.Second
 )
 
-// Manager turns due alerts into a durable per-channel outbox and drains it.
-// It may run in every replica: database leases make scheduling and delivery
-// safe without coupling notification availability to scheduler leadership.
+// Менеджер превращает надлежащие оповещения в долговечный выходной ящик для каждого канала
+// и истощает его.
+// Он может работать в каждой реплике: аренда базы данных делает планирование и доставку
+// безопасной без подключения доступности уведомлений к руководству планировщика.
 type Manager struct {
 	store  *store.Store
 	base   config.NotificationsConfig
@@ -127,7 +128,8 @@ func (m *Manager) drain(ctx context.Context) {
 		byKind[p.Kind] = p
 	}
 
-	// Bound each pass so a large retry backlog never starves alert scheduling.
+	// Ограничьте каждый проход, чтобы большое отставание в повторных попытках никогда не
+	// приводило к голоду.
 	for i := 0; i < 100; i++ {
 		a, ok, err := m.store.ClaimNotificationAlert(ctx, m.worker, managerLease)
 		if err != nil {
@@ -213,8 +215,8 @@ func (m *Manager) schedule(ctx context.Context, a *model.Alert, settings model.N
 		return
 	}
 	if m.bus != nil {
-		// No payload on purpose: the layout refreshes the alert counter, but
-		// does not show a second critical toast for an outbox state update.
+		// Событие без данных обновляет счётчик оповещений в интерфейсе. При
+		// изменении очереди доставки повторное всплывающее уведомление не нужно.
 		m.bus.Publish(events.Event{Kind: events.KindAlert, ServerID: a.ServerID,
 			ObjectID: a.ID, Message: "состояние внешней доставки обновлено"})
 	}

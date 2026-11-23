@@ -6,9 +6,8 @@ import (
 	"time"
 )
 
-// The engine renders /ovirt-engine/api with "time" as a bare JSON number. A
-// string field there made the whole document fail to decode, and since this
-// document is the connection probe, adding a server failed outright with
+// В корне /ovirt-engine/api движок отдаёт "time" числом JSON. Поле string ломало разбор
+// всего ответа и поэтому не позволяло добавить подключение.
 // "cannot unmarshal number into Go struct field APIInfo.time of type string".
 func TestAPIInfoAcceptsNumericTime(t *testing.T) {
 	payload := []byte(`{
@@ -39,8 +38,8 @@ func TestAPIInfoAcceptsNumericTime(t *testing.T) {
 	}
 }
 
-// The same field arrives quoted from upstream oVirt and as ISO-8601 from some
-// forks; one connection must not depend on which.
+// То же самое поле приходит из выше по течению oVirt и как ISO-8601 из некоторых вилок;
+// одно соединение не должно зависеть от чего.
 func TestTimestampAcceptsEveryShape(t *testing.T) {
 	iso := time.Date(2026, 8, 7, 12, 30, 0, 0, time.UTC)
 
@@ -70,8 +69,8 @@ func TestTimestampAcceptsEveryShape(t *testing.T) {
 	}
 }
 
-// A timestamp in a shape we do not recognise must not take the document with
-// it: the caller came for the object, not for the date on it.
+// Отметка времени в форме, которую мы не распознаем, не должна брать документ с собой: код
+// вызова пришел для объекта, а не для даты на нем.
 func TestUnparseableTimestampKeepsDocument(t *testing.T) {
 	var snap Snapshot
 	err := json.Unmarshal([]byte(`{"id":"snap-1","description":"до обновления","date":"позавчера"}`), &snap)
@@ -148,8 +147,8 @@ func TestStorageDomainStatusDoesNotMixTwoScales(t *testing.T) {
 	}
 }
 
-// Checkpoints and events carry the same kind of field, and both sit on the
-// backup path where a decode failure would surface as a failed backup.
+// Контрольные точки и события несут одно и то же поле, и оба находятся на пути резервного
+// копирования, где сбой декодирования всплывет как неудачное резервное копирование.
 func TestCheckpointAndEventTimestamps(t *testing.T) {
 	var cp Checkpoint
 	if err := json.Unmarshal([]byte(`{"id":"cp-1","state":"created","creation_date":1754566800000}`), &cp); err != nil {
@@ -159,7 +158,7 @@ func TestCheckpointAndEventTimestamps(t *testing.T) {
 		t.Error("дата создания checkpoint потеряна")
 	}
 
-	// POST /vms/{id}/backups answers with creation_date as a JSON number.
+	// POST /vms/{id}/backups отвечает с creation_date как с JSON число.
 	var b Backup
 	if err := json.Unmarshal([]byte(`{"id":"b-1","phase":"initializing","creation_date":1754566800000}`), &b); err != nil {
 		t.Fatalf("разбор backup: %v", err)

@@ -19,7 +19,7 @@ const serverColumns = `id, name, kind, engine_url, username, password_enc, ca_ce
 	ssh_host, ssh_port, ssh_private_key_enc, ssh_host_key, ssh_trust_any_host_key, scratch_dir,
 	insecure_tls_since, ssh_username, fleecing_storage`
 
-// CreateServer stores a new engine connection, encrypting the password.
+// CreateServer хранит новое соединение движка, шифруя пароль.
 func (s *Store) CreateServer(ctx context.Context, srv *model.Server) error {
 	if srv.ID == "" {
 		srv.ID = uuid.NewString()
@@ -70,9 +70,9 @@ func (s *Store) CreateServer(ctx context.Context, srv *model.Server) error {
 	return nil
 }
 
-// UpdateServer rewrites the editable fields. An empty Password keeps the
-// currently stored one unless ClearPassword is explicit, so the UI can submit
-// a form without echoing secrets and can still remove a migrated KVM password.
+// UpdateServer переписыва́ть редакту́емые поля. Пустой Пароль сохраняет текущий пароль,
+// если только ClearPassword не является явным, поэтому UI может отправить форму без
+// повторения секретов и все еще может удалить перенесенный KVM пароль.
 func (s *Store) UpdateServer(ctx context.Context, srv *model.Server) error {
 	existing, err := s.GetServer(ctx, srv.ID)
 	if err != nil {
@@ -90,8 +90,8 @@ func (s *Store) UpdateServer(ctx context.Context, srv *model.Server) error {
 	if srv.Password == "" && !srv.ClearPassword {
 		srv.Password = existing.Password
 	}
-	// An empty key on update means "keep the stored one", matching how the
-	// password behaves, so the edit form never has to echo a secret back.
+	// Пустое значение при обновлении сохраняет ранее заданный ключ, как и для
+	// пароля. Возвращать секрет форме редактирования не нужно.
 	if srv.SSHPrivateKey == "" && !srv.ClearSSHPrivateKey {
 		srv.SSHPrivateKey = existing.SSHPrivateKey
 	}
@@ -149,7 +149,7 @@ func (s *Store) UpdateServer(ctx context.Context, srv *model.Server) error {
 	return nil
 }
 
-// UpdateServerState records the outcome of a connectivity probe.
+// UpdateServerState запись результатов проверки соединения.
 func (s *Store) UpdateServerState(ctx context.Context, srv *model.Server) error {
 	_, err := s.db.Exec(ctx, `UPDATE servers SET
 		kind=?, state=?, state_message=?, engine_version=?, product_name=?, api_version=?,
@@ -163,9 +163,9 @@ func (s *Store) UpdateServerState(ctx context.Context, srv *model.Server) error 
 	return nil
 }
 
-// DeleteServer removes a connection and, through ON DELETE CASCADE, its cached
-// inventory. Backup runs are deliberately kept: the backups themselves still
-// exist in the repositories and must remain restorable.
+// DeleteServer удаля́ет соединение и через ON DELETE CASCADE его кэшированный инвентарь.
+// Резервные запуски намеренно сохраняются: сами резервные копии все еще существуют в
+// хранилищах и должны оставаться восстанавливаемыми.
 func (s *Store) DeleteServer(ctx context.Context, id string) error {
 	var refs int
 	if err := s.db.QueryRow(ctx, `SELECT count(*) FROM vm_transfers WHERE source_server_id=? OR target_server_id=?`, id, id).Scan(&refs); err != nil {
@@ -213,19 +213,19 @@ func (s *Store) DeleteServer(ctx context.Context, id string) error {
 	})
 }
 
-// GetServer loads one connection with its decrypted password.
+// GetServer загружает одно соединение своим расшифрованным паролем.
 func (s *Store) GetServer(ctx context.Context, id string) (*model.Server, error) {
 	row := s.db.QueryRow(ctx, `SELECT `+serverColumns+` FROM servers WHERE id=?`, id)
 	return s.scanServer(row)
 }
 
-// GetServerByName loads a connection by its unique name.
+// GetServerByName загружает соединение своим уникальным именем.
 func (s *Store) GetServerByName(ctx context.Context, name string) (*model.Server, error) {
 	row := s.db.QueryRow(ctx, `SELECT `+serverColumns+` FROM servers WHERE name=?`, name)
 	return s.scanServer(row)
 }
 
-// ListServers returns every connection ordered by name.
+// ListServers возвращает каждое соединение, указанное по имени.
 func (s *Store) ListServers(ctx context.Context) ([]*model.Server, error) {
 	rows, err := s.db.Query(ctx, `SELECT `+serverColumns+` FROM servers ORDER BY name`)
 	if err != nil {
@@ -244,7 +244,8 @@ func (s *Store) ListServers(ctx context.Context) ([]*model.Server, error) {
 	return out, rows.Err()
 }
 
-// ListEnabledServers returns the connections the pollers should work on.
+// ListEnabledServers возвращает соединения, над которыми должны работать процессы
+// мониторинга.
 func (s *Store) ListEnabledServers(ctx context.Context) ([]*model.Server, error) {
 	all, err := s.ListServers(ctx)
 	if err != nil {
@@ -259,7 +260,7 @@ func (s *Store) ListEnabledServers(ctx context.Context) ([]*model.Server, error)
 	return out, nil
 }
 
-// rowScanner unifies *sql.Row and *sql.Rows.
+// rowScanner объединяет *sql.Row и *sql.Rows.
 type rowScanner interface {
 	Scan(dest ...any) error
 }
@@ -289,8 +290,8 @@ func (s *Store) scanServer(row rowScanner) (*model.Server, error) {
 
 	password, err := s.cipher.Decrypt(enc)
 	if err != nil {
-		// A server whose password cannot be decrypted must still be listable,
-		// otherwise the operator cannot even see it to fix it.
+		// Сервер, чей пароль не может быть расшифрован, должен по-прежнему быть доступным
+		// для просмотра, иначе оператор не сможет даже увидеть его, чтобы исправить его.
 		password = ""
 		srv.StateMessage = "не удалось расшифровать пароль подключения: " + err.Error()
 	}
@@ -315,8 +316,8 @@ func (s *Store) scanServer(row rowScanner) (*model.Server, error) {
 	return &srv, nil
 }
 
-// isUniqueViolation recognises a duplicate-key error from either engine
-// without importing driver-specific error types.
+// isUniqueViolation распознает ошибку с дубликатом ключа от любого из движков без импорта
+// специфических для драйвера типов ошибок.
 func isUniqueViolation(err error) bool {
 	if err == nil {
 		return false

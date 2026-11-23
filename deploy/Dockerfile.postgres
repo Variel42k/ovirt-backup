@@ -1,10 +1,9 @@
 ARG POSTGRES_BASE_IMAGE=docker.io/library/postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
 FROM ${POSTGRES_BASE_IMAGE}
 
-# The pinned upstream image currently contains OpenSSL 3.5.7-r0 and a gosu
-# binary built with an obsolete Go runtime. Upgrade the affected libraries and
-# replace gosu with Alpine's interface-compatible, C-based privilege dropper.
-# Keeping the versions explicit avoids silently changing the database image.
+# В закреплённом базовом образе OpenSSL 3.5.7-r0, а gosu собран на старом Go.
+# Обновляем затронутые библиотеки и заменяем gosu совместимой утилитой Alpine,
+# написанной на C. Явные версии позволяют контролировать изменения образа БД.
 USER root
 RUN apk add --no-cache --upgrade \
         libcrypto3=3.5.8-r0 \
@@ -13,7 +12,7 @@ RUN apk add --no-cache --upgrade \
     && cp /sbin/su-exec /usr/local/bin/gosu \
     && gosu nobody true
 
-# Compose overrides this to root only for the main database service because
-# the official entrypoint must initialize/chown a fresh volume before dropping
-# to postgres. Backup containers keep their explicit unprivileged users.
+# Compose применяет root только к контейнеру самой БД. Скрипт входа готовит
+# новый том, назначает владельца и переключается на postgres.
+# Контейнеры резервного копирования используют заданные непривилегированные учётные записи.
 USER postgres

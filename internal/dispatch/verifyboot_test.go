@@ -49,7 +49,7 @@ func fill(b byte) []byte {
 	return buf
 }
 
-// writeChunks stores a run holding only the given chunk indices.
+// writeChunks сохраняет запуск с чанками указанных индексов.
 func writeChunks(t *testing.T, backend repo.Backend, key string, chunks map[int64][]byte) *backup.DiskManifest {
 	t.Helper()
 
@@ -78,12 +78,13 @@ func writeChunks(t *testing.T, backend repo.Backend, key string, chunks map[int6
 	return final
 }
 
-// A sparse disk must reach the hypervisor at its full logical length: dd writes
-// the stream sequentially, so a skipped hole would move everything after it.
+// Разреженный диск должен достичь гипервизора в его логической длине: dd записывает поток
+// последовательно, так что пропуск нераспределенной области переместит все после него.
 func TestWriteImageKeepsHolesInPlace(t *testing.T) {
 	backend := testBackend(t)
 
-	// Chunks 0 and 5 hold data; everything between and after them is a hole.
+	// Куски 0 и 5 содержат данные; Все, что находится между ними и после них, является
+	// дырой.
 	manifest := writeChunks(t, backend, "runs/a/vda.data", map[int64][]byte{
 		0: fill(0xA1),
 		5: fill(0xB2),
@@ -112,8 +113,7 @@ func TestWriteImageKeepsHolesInPlace(t *testing.T) {
 	if !bytes.Equal(img[:chunkSize], fill(0xA1)) {
 		t.Error("первый чанк потерян")
 	}
-	// The point of the test: chunk 5 has to sit at offset 5*chunkSize, not
-	// right after chunk 0.
+	// Суть теста: чанк 5 должен сидеть при смещении 5*chunkSize, а не сразу после чанка 0.
 	if !bytes.Equal(img[5*chunkSize:6*chunkSize], fill(0xB2)) {
 		t.Error("чанк 5 оказался не на своём смещении — дыры сдвинули образ")
 	}
@@ -125,8 +125,8 @@ func TestWriteImageKeepsHolesInPlace(t *testing.T) {
 	}
 }
 
-// The newest run in a chain must win, or the boot test would start an image
-// assembled from stale data and blame the guest for it.
+// Новейший запуск в цепочке должен выиграть, иначе тест запуска ВМ запустит образ,
+// собранное из устаревших данных, и обвинит в этом гостя.
 func TestWriteImageMergesChain(t *testing.T) {
 	backend := testBackend(t)
 

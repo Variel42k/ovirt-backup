@@ -1,6 +1,6 @@
 import type { VMTransfer } from './types'
 
-// Keep the group preview aligned with vmtransfer.batchActionApplies.
+// Предпросмотр группового действия должен соответствовать vmtransfer.batchActionApplies.
 export function cancellationApplies(t: VMTransfer, action: string) {
   const live = ['running', 'queued', 'recovering'].includes(t.status)
   if (action === 'pause') return live || t.status === 'ready'

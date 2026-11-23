@@ -33,6 +33,9 @@ const leftoverWindow = 10 * time.Minute
 // могла разобрать ответ движка и не сохраняла его идентификатор.
 var decodeFailureMarks = []string{"разбор ответа POST", "/backups"}
 
+// Старые версии записывали это описание до получения идентификатора от движка.
+const legacyBackupMarkerPrefix = "jhvirt run "
+
 // ownerOf сообщает, чей открытый бэкап движка: запуска службы (его id) или
 // неизвестно чей (пусто). live — бэкап принадлежит запуску, который ещё
 // идёт: его трогать нельзя, он не остаток.
@@ -40,8 +43,18 @@ func ownerOf(b ovirt.Backup, runs []*model.BackupRun) (runID string, live bool) 
 	active := func(r *model.BackupRun) bool {
 		return r.Status == model.RunPending || r.Status == model.RunRunning
 	}
-	if strings.HasPrefix(b.Description, ovirt.BackupMarkerPrefix) {
-		id := strings.TrimSpace(strings.TrimPrefix(b.Description, ovirt.BackupMarkerPrefix))
+	for _, r := range runs {
+		if r.EngineBackupID != "" && r.EngineBackupID == b.ID {
+			return r.ID, active(r)
+		}
+	}
+	for _, r := range runs {
+		if b.Description == ovirt.BackupMarker(r.ID) {
+			return r.ID, active(r)
+		}
+	}
+	if suffix, ok := strings.CutPrefix(b.Description, legacyBackupMarkerPrefix); ok {
+		id := strings.TrimSpace(suffix)
 		for _, r := range runs {
 			if r.ID == id {
 				return r.ID, active(r)
@@ -50,11 +63,6 @@ func ownerOf(b ovirt.Backup, runs []*model.BackupRun) (runID string, live bool) 
 		// Метка наша, а запуска в базе нет (удалён вместе с историей):
 		// бэкап всё равно открыт службой, и ждать его некому.
 		return id, false
-	}
-	for _, r := range runs {
-		if r.EngineBackupID != "" && r.EngineBackupID == b.ID {
-			return r.ID, active(r)
-		}
 	}
 	created := b.CreationDate.Time()
 	if created.IsZero() {
@@ -324,7 +332,7 @@ func EngineUnlockSteps(srv *model.Server, vmID string, backups []ovirt.Backup,
 	}
 
 	for _, b := range backups {
-		ours := strings.HasPrefix(b.Description, ovirt.BackupMarkerPrefix)
+		ours := strings.HasPrefix(b.Description, legacyBackupMarkerPrefix)
 		step := model.ManualStep{
 			Title:   fmt.Sprintf("Закрыть бэкап движка %s", b.ID),
 			Where:   anywhere,

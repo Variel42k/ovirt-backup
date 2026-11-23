@@ -17,8 +17,8 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/model"
 )
 
-// s3Backend stores backups in S3-compatible object storage: AWS S3, MinIO,
-// Ceph RGW and the Russian clouds that speak the same protocol.
+// s3Backend хранит резервные копии в S3-совместимых хранилищах объектов: AWS S3, MinIO,
+// Ceph RGW и российских облаках, которые говорят по одному и тому же протоколу.
 type s3Backend struct {
 	name           string
 	client         *minio.Client
@@ -37,7 +37,7 @@ func newS3(ctx context.Context, target *model.StorageTarget) (Backend, error) {
 	if endpoint == "" {
 		return nil, errors.New("для S3-хранилища не задан endpoint")
 	}
-	// minio-go wants a bare host:port, but operators paste full URLs.
+	// minio-go хочет голый хост:порт, но операторы вставляют полный URLs.
 	secure := target.UseSSL
 	if strings.HasPrefix(endpoint, "https://") {
 		endpoint, secure = strings.TrimPrefix(endpoint, "https://"), true
@@ -107,8 +107,8 @@ func (s *s3Backend) put(ctx context.Context, key string, r io.Reader, size int64
 	if s.storageClass != "" {
 		opts.StorageClass = s.storageClass
 	}
-	// A size of -1 makes minio-go stream with multipart uploads, which is what
-	// we want for disk data whose compressed length is not known up front.
+	// Размер -1 делает поток minio-go с загрузкой нескольких частей, что мы хотим для
+	// данных диска, сжатая длина которых не известна заранее.
 	if size < 0 {
 		opts.PartSize = 64 << 20
 	}
@@ -120,8 +120,9 @@ func (s *s3Backend) put(ctx context.Context, key string, r io.Reader, size int64
 	return info.Size, nil
 }
 
-// putLocked uses an unlocked staging object so a failed upload never leaves an
-// immutable partial publication. Staging is read back before the final S3 copy.
+// putLocked загружает данные во временный объект без удержания. Сбой загрузки не оставляет
+// неизменяемую частичную копию. Перед окончательным копированием в S3 временный объект
+// перечитывается.
 func (s *s3Backend) putLocked(ctx context.Context, key string, r io.Reader, size int64) (int64, error) {
 	stage := ".jhvirt/staging/" + uuid.NewString()
 	h := sha256.New()
@@ -170,9 +171,10 @@ func (s *s3Backend) copyFrom(ctx context.Context, source Backend, key string, si
 			minio.CopyDestOptions{Bucket: s.bucket, Object: s.objectKey(stage), Size: size},
 			minio.CopySrcOptions{Bucket: src.bucket, Object: src.objectKey(key)})
 		if err != nil {
-			// Different credentials on the same endpoint may not grant the
-			// destination account read access to the source bucket. Streaming
-			// through each backend's own credentials remains valid.
+			// Различные учётные данные аутентификации на одной и той же конечной точке
+			// могут не предоставлять учётной записи назначения доступ к источнику. Поток
+			// через собственные учётные данные аутентификации каждого сервера остается
+			// действительным.
 			return 0, false, nil
 		}
 		sourceHash, err := hashS3Object(ctx, source, key)
@@ -252,8 +254,8 @@ func (s *s3Backend) GetRange(ctx context.Context, key string, offset, length int
 	if err != nil {
 		return nil, translateS3Error(key, err)
 	}
-	// GetObject is lazy: it does not contact the server until the first read,
-	// so a missing object would otherwise only surface later, far from here.
+	// GetObject ленив: он не связывается с сервером до первого чтения, так что
+	// отсутствующий объект в противном случае всплывал бы только позже, далеко отсюда.
 	if _, err := obj.Stat(); err != nil {
 		_ = obj.Close()
 		return nil, translateS3Error(key, err)
@@ -321,16 +323,13 @@ func (s *s3Backend) lockProtected(key string) bool {
 	return strings.HasPrefix(strings.TrimLeft(key, "/"), repoDataPrefix())
 }
 
-// deleteVersions never issues an unversioned DELETE in an Object Lock bucket.
-// This applies to staging and health probes too: they are not retained, but an
-// unversioned delete would only hide their data behind a delete marker and
-// leak the old version forever. Retained repository objects are checked before
-// removal and Governance bypass is never requested.
+// deleteVersions в бакете с Object Lock указывает версию в каждом DELETE.
+// Это относится и к временным объектам и проверкам доступности. Удаление без номера версии
+// лишь скрывает данные маркером удаления и оставляет старую версию. Объекты репозитория
+// проверяем перед удалением. Обход удержания Governance не запрашивается.
 //
-// In an Object Lock
-// bucket that operation can succeed by creating a delete marker, hiding a
-// retained backup from ordinary reads even though the protected version still
-// exists.
+// В бакете Object Lock удаление без указания версии может только добавить маркер удаления.
+// Обычное чтение перестанет видеть копию, хотя защищённая версия останется.
 func (s *s3Backend) deleteVersions(ctx context.Context, key string, exact bool) (int, error) {
 	full := s.objectKey(key)
 	var versions []minio.ObjectInfo
@@ -408,8 +407,9 @@ func (s *s3Backend) List(ctx context.Context, prefix string) ([]ObjectInfo, erro
 	return out, nil
 }
 
-// Usage is not answerable for object storage: S3 has no notion of free space.
-// Reporting zeros tells the caller "unknown" rather than "full".
+// Использование не отвечает за хранение объекта: S3 не имеет понятия свободного
+// пространства.
+// Отчётные нули указывают на код вызова "unknown", а не "full".
 func (s *s3Backend) Usage(ctx context.Context) (int64, int64, error) {
 	var used int64
 	objects, err := s.List(ctx, "")

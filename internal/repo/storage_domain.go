@@ -22,9 +22,9 @@ import (
 	"github.com/google/uuid"
 )
 
-// ConfigureStorageDomains binds engine connections once at application startup.
-// The repository stores only connection IDs, so password/CA rotation takes effect
-// for every new backend without copying credentials into storage definitions.
+// ConfigureStorageDomains связывает соединения движка один раз при запуске приложения.
+// Репозиторий хранит идентификаторы подключений. Смена пароля или CA действует для каждого
+// нового экземпляра хранилища без копирования учётных данных в его настройки.
 func ConfigureStorageDomains(load func(context.Context, string) (*ovirt.Client, error), tempDir string, preferProxy bool) {
 	domainConfig.Lock()
 	defer domainConfig.Unlock()
@@ -60,12 +60,12 @@ const domainObjectMarker = "jhvirt-repository-v1:"
 const domainDataMarker = "jhvirt-repository-data:"
 const domainWait = 5 * time.Minute
 
-// Keep backup bytes away from the image header: an exported qcow2 artefact
-// must still be recognised as raw by the engine's post-upload validation.
+// Держите резервные байты подальше от заголовка образа: экспортированный артефакт qcow2
+// должен по-прежнему распознаваться как необработанный при проверке после загрузки.
 const domainDataOffset int64 = 4096
 
-// The description is a durable index, independent of the application's DB.
-// The data is raw bytes, padded to a disk sector; Size excludes that padding.
+// Описание образует сохраняемый индекс независимо от БД приложения.
+// Данные выровнены по сектору диска. Размер указывается без заполнения.
 type domainObject struct {
 	Namespace  string    `json:"ns"`
 	Key        string    `json:"key"`
@@ -85,7 +85,7 @@ type domainRepository struct {
 	target      model.StorageTarget
 	tempDir     string
 	load        func(context.Context, string) (*ovirt.Client, error)
-	client      domainAPI // lazy, also permits isolated tests
+	client      domainAPI // ленивый, также допускает изолированные тесты
 	mu          sync.Mutex
 	sessions    map[string]*domainReadSession
 	index       map[string]domainObject
@@ -158,7 +158,7 @@ func (b *domainRepository) objects(ctx context.Context) ([]domainObject, error) 
 			o.Namespace != b.target.Prefix || o.Key == "" || o.Size < 0 || d.Status != "ok" {
 			continue
 		}
-		// Never operate on disks somebody attached to a VM, even with our marker.
+		// Никогда не работайте с дисками, подключенными к ВМ, даже с нашим маркером.
 		if d.VMs != nil && len(d.VMs.VM) > 0 {
 			return nil, fmt.Errorf("служебный диск %s подключён к ВМ; отключите его перед работой с репозиторием", d.ID)
 		}
@@ -215,8 +215,9 @@ func (b *domainRepository) Put(ctx context.Context, key string, r io.Reader, siz
 	if key == "" || len(key) > 1024 {
 		return 0, errors.New("пустой или слишком длинный ключ объекта домена")
 	}
-	// Compressed streams have no known final length. Stage only those streams;
-	// bounded objects are uploaded directly. TempDir follows backup.temp_dir.
+	// Конечная длина сжатого потока заранее неизвестна, поэтому сохраняем его во временный
+	// файл. Объекты известной длины отправляем напрямую. TempDir соответствует
+	// backup.temp_dir.
 	if size < 0 {
 		if b.tempDir != "" {
 			if err := os.MkdirAll(b.tempDir, 0o750); err != nil {
@@ -263,8 +264,8 @@ func (b *domainRepository) Put(ctx context.Context, key string, r io.Reader, siz
 		indexCapacity = 1 << 30
 	}
 	reserve += indexCapacity
-	// This domain may also hold running VMs. Leave 5% for the engine rather
-	// than consuming its last free extent with a repository disk.
+	// Этот домен может также содержать запущенные ВМ. Оставьте 5% для движка, а не
+	// потребляйте его последнюю свободную часть с дисковым хранилищем.
 	reserve += (domain.Available.Int64() + domain.Used.Int64()) / 20
 	if domain.Available.Int64() < reserve {
 		return 0, fmt.Errorf("недостаточно места на домене с учётом резерва 5%%: нужно не менее %d байт, свободно %d", reserve, domain.Available.Int64())
@@ -354,15 +355,16 @@ func (b *domainRepository) Put(ctx context.Context, key string, r io.Reader, siz
 	}
 	o := domainObject{Namespace: b.target.Prefix, Key: key, Size: size, Modified: time.Now().UTC(), DataDiskID: disk.ID}
 	meta, _ := json.Marshal(o)
-	// Old engines cannot edit detached disk descriptions. Publish a small
-	// index disk only after data is durable, with immutable metadata at creation.
+	// Старые движки не могут редактировать описания отдельных дисков. Опубликуйте небольшой
+	// индексный диск только после того, как данные долговечны, с неизменными метаданными
+	// при создании.
 	indexDisk, err := c.CreateDisk(ctx, ovirt.CreateDiskRequest{Alias: "jhvirt-repo-index-" + uuid.NewString(),
 		Description: domainObjectMarker + string(meta), StorageDomainID: b.target.StorageDomainID,
 		ProvisionedSize: 1 << 20, Format: "raw", Sparse: false})
 	if err != nil {
 		var apiErr *ovirt.APIError
-		// A lost POST response may still create a valid index. Keep its data;
-		// deleting it now would publish a dangling reference in the engine.
+		// Потерянный POST ответ может по-прежнему создавать действительный индекс. хранить
+		// свои данные; Удаление его сейчас опубликует свисающую ссылку в движке.
 		preservePayload = !errors.As(err, &apiErr)
 		return offset, err
 	}
@@ -374,7 +376,7 @@ func (b *domainRepository) Put(ctx context.Context, key string, r io.Reader, siz
 	b.mu.Lock()
 	delete(b.index, key)
 	b.mu.Unlock()
-	// Publish first. Failed uploads must never destroy an earlier object.
+	// Публикуй первым. Неудачные загрузки никогда не должны уничтожать более ранний объект.
 	for _, previous := range old {
 		if previous.Key == key {
 			if err = b.deleteObject(ctx, previous); err != nil {
@@ -461,12 +463,13 @@ func (b *domainRepository) GetRange(ctx context.Context, key string, offset, len
 		defer stopBackend()
 		defer stopReader()
 		defer cancel()
-		// imageio's raw/NBD API requires sector-aligned ranges. Trim its
-		// padding so callers see precisely the repository object's bytes.
+		// imageio сырой / NBD API требует секторных диапазонов. Обрежьте его, чтобы клиенты
+		// этого интерфейса точно видели байты объекта хранилища.
 		start := offset / 512 * 512
 		end := (offset + length + 511) / 512 * 512
 		w := &domainRangeWriter{w: pw, skip: offset - start, left: length}
-		// Bound individual requests, not the total download of a large backup.
+		// Ограничьте отдельные запросы, а не общую загрузку большого резервного
+		// копирования.
 		for start < end {
 			n := min(int64(4<<20), end-start)
 			if _, err := s.data.ReadRange(readCtx, domainDataOffset+start, n, w); err != nil {

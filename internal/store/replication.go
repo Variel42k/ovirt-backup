@@ -372,10 +372,9 @@ func (s *Store) UpdateBackupCopy(ctx context.Context, c *model.BackupCopy) error
 	return nil
 }
 
-// RecoverInterruptedReplications makes object-level resume effective after an
-// unclean process stop. Verified replication_objects remain intact, while the
-// in-flight copy returns to the persistent queue and its unfinished attempt is
-// closed as failed evidence instead of remaining "running" forever.
+// RecoverInterruptedReplications позволяет продолжить репликацию с уровня объектов после
+// сбоя. Проверенные replication_objects сохраняются, незавершённая копия возвращается в
+// очередь, а прерванная попытка закрывается со статусом ошибки.
 func (s *Store) RecoverInterruptedReplications(ctx context.Context) (int64, error) {
 	now := time.Now().UTC()
 	var recovered int64

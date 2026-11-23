@@ -35,7 +35,7 @@ type bootTargetsResponse struct {
 	Basis string `json:"basis"`
 }
 
-// handleBootTargets: GET /boot-verify/engines/{id}/targets
+// handleBootTargets обрабатывает GET /boot-verify/engines/{id}/targets.
 //
 //	?run_id=…&copy_id=… — оценка по данным конкретной копии;
 //	?server_id=…&vm_ids=a,b — по дискам ВМ из инвентаря (форма задания);

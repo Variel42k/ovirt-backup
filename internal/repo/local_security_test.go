@@ -109,8 +109,8 @@ func TestMountPointsFromExcludesSystemAndServiceMounts(t *testing.T) {
 func TestMountPointsFromDoesNotRequireWritableMountRoot(t *testing.T) {
 	raw := []byte("41 36 253:2 / /storage rw,relatime - xfs /dev/mapper/storage-data rw\n")
 	got := mountPointsFrom(raw, func(path string) bool {
-		// The mount root may be only traversable while a child directory is
-		// writable. Storage browsing must still expose the root.
+		// Корень mount может быть только проходимым, в то время как дочерний каталог может
+		// быть записан. Просмотр хранилища должен по-прежнему отображать корень.
 		return path == "/storage"
 	})
 	if len(got) != 1 || got[0] != "/storage" {

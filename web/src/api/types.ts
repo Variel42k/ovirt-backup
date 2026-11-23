@@ -177,6 +177,10 @@ export interface Cluster {
   seen_at: string
 }
 
+export type VMDuplicate = Pick<VM, 'id' | 'name' | 'server_id' | 'cluster_id' | 'cluster_name' | 'status' | 'seen_at'> & {
+  server_name: string
+}
+
 export interface VM {
   id: string
   server_id: string
@@ -358,7 +362,7 @@ export interface BackupJob {
   verify_options?: BootVerifyOptions
   export_qcow2: boolean
   encrypt: boolean
-  /** Empty inherits the system algorithm; none explicitly disables compression. */
+  /** Пустое значение наследует системный алгоритм. Значение none отключает сжатие. */
   compression?: string
   priority: number
   concurrency: number
@@ -832,75 +836,6 @@ export interface RepositoryArtifact {
   started_at?: string
   ended_at?: string
   created_at: string
-}
-
-/** Подключение к ВМ с GitLab, на которой стоит хелпер очистки репозиториев. */
-export interface GitlabHost {
-  id: string
-  name: string
-  address: string
-  port: number
-  username: string
-  private_key_stored: boolean
-  host_key?: string
-  trust_any_host_key: boolean
-  probe?: {
-    hostname: string
-    user: string
-    repos_root: string
-    gitlab?: string
-    git?: string
-    filter_repo?: string
-    /** На хосте есть файл-разрешение: это копия, очистка возможна. */
-    clean_allowed: boolean
-    services_running?: string[]
-  } | null
-  probed_at?: string
-  probe_error?: string
-}
-
-/** Что считается мусором в истории репозитория. */
-export interface GitCleanRules {
-  dirs: string[]
-  extensions: string[]
-  /** Порог большого файла в байтах; 0 — не искать. */
-  big_file_bytes: number
-}
-
-export interface GitCleanRepo {
-  /** Путь внутри каталога Gitaly; full_path — группа/проект. */
-  path: string
-  full_path?: string
-  disk_bytes: number
-  blob_count?: number
-  /** rule: dir:<имя> | ext:<расширение> | big. */
-  findings?: Array<{ rule: string; count: number; bytes: number; disk_bytes: number }>
-  top_paths?: Array<{ rule: string; path: string; count: number; bytes: number; disk_bytes: number }>
-  reclaim_bytes: number
-  in_pool?: boolean
-  cleaned?: boolean
-  before_bytes?: number
-  after_bytes?: number
-  error?: string
-}
-
-export interface GitCleanRun {
-  id: string
-  host_id: string
-  host_name: string
-  kind: 'analyze' | 'clean'
-  status: RunStatus
-  rules: GitCleanRules
-  /** В списке запусков не приходит: отчёт отдаёт запрос одного запуска. */
-  repos?: GitCleanRepo[]
-  total: number
-  done: number
-  current?: string
-  error?: string
-  triggered_by?: string
-  created_at: string
-  started_at?: string
-  ended_at?: string
 }
 
 /** Один уровень каталогов и файлов подключённого хранилища. */
@@ -1542,7 +1477,6 @@ export interface DocGuideContent extends DocGuide {
 
 export interface WebSections {
   discovery: boolean
-  gitlab_clean: boolean
 }
 
 export interface Meta {

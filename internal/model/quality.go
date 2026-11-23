@@ -2,9 +2,9 @@ package model
 
 import "time"
 
-// StorageUsageSample is one repository capacity observation. CapacityKnown is
-// false for object stores and SFTP servers that cannot report a quota; used
-// bytes may still be useful for a growth chart.
+// StorageUsageSample является одним наблюдением емкости репозитория. CapacityKnown это
+// false для хранилищ объектов и SFTP серверов, которые не могут сообщить о квоте;
+// Используемые байты все еще могут быть полезны для диаграммы роста.
 type StorageUsageSample struct {
 	ID              int64     `json:"id"`
 	StorageTargetID string    `json:"storage_target_id"`

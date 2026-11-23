@@ -14,9 +14,8 @@ import (
 	"github.com/Variel42k/ovirt-backup/internal/secret"
 )
 
-// Verification and restore work entirely from the repository. Nothing here
-// consults a database, because the situation this command exists for is the
-// one where there is no database left to consult.
+// Проверка и восстановление используют только объекты репозитория. Команды рассчитаны на
+// аварийную ситуацию, когда базы данных уже нет.
 
 func cmdVerify(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("verify", flag.ExitOnError)
@@ -124,8 +123,8 @@ func verifyChain(manifests []*backup.DiskManifest) int {
 				m.RunID, m.ParentRunID, prev.RunID)
 			problems++
 		}
-		// The increment was computed against the parent's checkpoint; a break
-		// here means the delta was taken from somewhere else entirely.
+		// Прибавка была вычислена в сравнении с родительской checkpoint; Перелом здесь
+		// означает, что дельта была взята откуда-то совершенно из другого места.
 		if m.FromCheckpointID != "" && prev.ToCheckpointID != "" &&
 			m.FromCheckpointID != prev.ToCheckpointID {
 			fmt.Printf("  ✗ %s посчитан от checkpoint %s, а родитель закончился на %s\n",
@@ -335,8 +334,8 @@ func cmdRestore(ctx context.Context, args []string) error {
 			reader.Close()
 			return err
 		}
-		// Setting the size up front makes the file sparse, so zero regions
-		// cost neither space nor writes.
+		// Установка размера вперед делает файл разреженным, поэтому нулевые области не
+		// стоят ни места, ни записи.
 		if err := file.Truncate(reader.VirtualSize()); err != nil {
 			file.Close()
 			reader.Close()
@@ -388,9 +387,9 @@ func cmdRestore(ctx context.Context, args []string) error {
 	return nil
 }
 
-// loadCipherIfPresent opens the encryption key when the file exists. A
-// repository holding unencrypted backups needs no key, and demanding one would
-// make the common case harder for no reason.
+// loadCipherIfPresent открывает ключ шифрования, когда файл существует. Хранилище, в
+// котором хранятся незашифрованные резервные копии, не нуждается в ключе, и требование
+// одного из них усложнит общий случай без причины.
 func loadCipherIfPresent(keyFile string) *secret.Cipher {
 	if _, err := os.Stat(keyFile); err != nil {
 		return nil

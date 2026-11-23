@@ -12,12 +12,11 @@ import (
 	"time"
 )
 
-// maxStatusQuery bounds one NBD_CMD_BLOCK_STATUS request. The wire format
-// carries the length in 32 bits, and servers cap replies anyway, so a sweep
-// over a large disk is issued in slices.
+// maxStatusQuery ограничивает объём запроса NBD_CMD_BLOCK_STATUS. Поле длины занимает 32
+// бита, а серверы ограничивают ответы, поэтому большие диски опрашиваем по частям.
 const maxStatusQuery int64 = 1 << 30 // 1 GiB
 
-// Export describes what the server published.
+// Export описывает экспорт, опубликованный сервером.
 type Export struct {
 	Name               string
 	Size               int64
@@ -28,10 +27,10 @@ type Export struct {
 	Description        string
 }
 
-// ReadOnly reports whether the export refuses writes.
+// ReadOnly показывает, доступен ли экспорт только для чтения.
 func (e Export) ReadOnly() bool { return e.TransmissionFlags&TransmissionReadOnly != 0 }
 
-// Options configure the handshake.
+// Options задаёт параметры согласования соединения.
 type Options struct {
 	// ExportName — имя экспорта. Для бэкапа libvirt это то, что задано в
 	// <disk exportname='...'> в XML запроса бэкапа.
@@ -51,9 +50,8 @@ type Options struct {
 	HandshakeTimeout time.Duration
 }
 
-// Client is a connected NBD session. Methods are safe for concurrent use, but
-// commands are serialised: one request is in flight at a time. Parallelism for
-// a backup comes from opening several connections, not from pipelining.
+// Client представляет открытый сеанс NBD. Методы допускают одновременные вызовы, но запросы
+// выполняются последовательно. Для параллельного чтения открываем несколько соединений.
 type Client struct {
 	conn net.Conn
 	r    *bufio.Reader
@@ -70,9 +68,8 @@ type Client struct {
 	idByContext map[string]uint32
 }
 
-// Connect performs the handshake over an established connection. The caller
-// owns dialing, which is what lets the same client work over TCP, a unix
-// socket or an SSH-forwarded channel without knowing the difference.
+// Connect согласует параметры на уже открытом соединении. Его открывает вызывающий код,
+// поэтому клиент одинаково работает через TCP, сокет Unix и канал SSH.
 func Connect(ctx context.Context, conn net.Conn, opts Options) (*Client, error) {
 	timeout := opts.HandshakeTimeout
 	if timeout <= 0 {
@@ -97,8 +94,8 @@ func Connect(ctx context.Context, conn net.Conn, opts Options) (*Client, error) 
 		_ = conn.Close()
 		return nil, err
 	}
-	// Transmission has no inherent timeout: reading a terabyte legitimately
-	// takes hours, and a deadline set here would kill it.
+	// В фазе передачи таймаут по умолчанию отсутствует. Чтение терабайта может занять часы,
+	// и фиксированный дедлайн оборвал бы его.
 	_ = conn.SetDeadline(time.Time{})
 	return c, nil
 }
@@ -116,8 +113,8 @@ func (c *Client) handshake(opts Options) error {
 		return fmt.Errorf("это не NBD-сервер: получена сигнатура %#x", greeting.Magic)
 	}
 	if greeting.IHaveOpt != magicIHaveOpt {
-		// The old-style protocol sends the export size here instead. It has no
-		// option haggling, so nothing this client needs can be negotiated.
+		// Старая версия протокола передаёт здесь размер экспорта. Она не поддерживает
+		// согласование необходимых клиенту параметров.
 		return errors.New("сервер использует устаревший протокол NBD без согласования опций")
 	}
 	if greeting.Flags&flagFixedNewstyle == 0 {
@@ -131,8 +128,8 @@ func (c *Client) handshake(opts Options) error {
 		return err
 	}
 
-	// Structured replies must be negotiated before metadata contexts: block
-	// status is only ever delivered as a structured chunk.
+	// Структурированные ответы согласуются до контекстов метаданных. Состояние блоков
+	// передаётся только структурированными фрагментами.
 	if err := c.negotiateStructuredReplies(opts.RequireStructuredReplies); err != nil {
 		return err
 	}
@@ -156,7 +153,7 @@ func (c *Client) negotiateStructuredReplies(required bool) error {
 		if err != nil {
 			var optErr *OptionError
 			if errors.As(err, &optErr) && optErr.Unsupported() && !required {
-				// Plain reads still work; only incremental backup is lost.
+				// Обычное чтение доступно, инкрементальное копирование невозможно.
 				c.structured = false
 				return nil
 			}
@@ -203,8 +200,8 @@ func (c *Client) setMetaContexts(export string, queries []string) error {
 func (c *Client) optionGo(export string) error {
 	payload := make([]byte, 0, 32)
 	payload = appendString32(payload, export)
-	// Ask for the block size limits explicitly: a server that requires block
-	// size negotiation refuses NBD_OPT_GO otherwise.
+	// Явно запрашиваем границы размера блока. Сервер с обязательным согласованием размера
+	// иначе отклонит NBD_OPT_GO.
 	payload = binary.BigEndian.AppendUint16(payload, 1)
 	payload = binary.BigEndian.AppendUint16(payload, infoBlockSize)
 
@@ -300,8 +297,7 @@ func (c *Client) readOptionReply(expected uint32) (*optionReply, error) {
 		return nil, fmt.Errorf("сервер ответил на опцию %s вместо %s",
 			optionName(head.Option), optionName(expected))
 	}
-	// A malicious or broken server must not be able to make the client
-	// allocate arbitrary memory during handshake.
+	// Ограничиваем память, которую сервер может заставить клиент выделить при согласовании.
 	if head.Length > 4<<20 {
 		return nil, fmt.Errorf("ответ на опцию %s неправдоподобно велик: %d байт",
 			optionName(expected), head.Length)
@@ -318,14 +314,14 @@ func (c *Client) readOptionReply(expected uint32) (*optionReply, error) {
 	return &optionReply{Type: head.Type, Data: data}, nil
 }
 
-// Export returns what the server published about the opened export.
+// Export возвращает сведения, которые сервер сообщил об открытом экспорте.
 func (c *Client) Export() Export { return c.export }
 
-// StructuredReplies reports whether the session negotiated structured replies,
-// without which BlockStatus is unavailable.
+// StructuredReplies показывает, согласованы ли структурированные ответы, необходимые для
+// BlockStatus.
 func (c *Client) StructuredReplies() bool { return c.structured }
 
-// Contexts returns the metadata contexts the server agreed to, keyed by name.
+// Contexts возвращает согласованные контексты метаданных по именам.
 func (c *Client) Contexts() map[string]uint32 {
 	out := make(map[string]uint32, len(c.idByContext))
 	for name, id := range c.idByContext {
@@ -334,13 +330,13 @@ func (c *Client) Contexts() map[string]uint32 {
 	return out
 }
 
-// HasContext reports whether a metadata context was negotiated.
+// HasContext проверяет, был ли согласован указанный контекст метаданных.
 func (c *Client) HasContext(name string) bool {
 	_, ok := c.idByContext[name]
 	return ok
 }
 
-// Close disconnects politely and releases the connection.
+// Close отправляет запрос на отключение и освобождает соединение.
 func (c *Client) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -349,8 +345,7 @@ func (c *Client) Close() error {
 	}
 	c.closed = true
 
-	// Best effort: the server may already be gone, and the connection is
-	// closing either way.
+	// Соединение закрываем в любом случае, даже если сервер уже недоступен.
 	_ = c.conn.SetDeadline(time.Now().Add(5 * time.Second))
 	if err := c.sendRequest(cmdDisconnect, 0, 0, 0); err == nil {
 		_ = c.w.Flush()
@@ -358,7 +353,7 @@ func (c *Client) Close() error {
 	return c.conn.Close()
 }
 
-// ReadAt fills p with the export's contents starting at off.
+// ReadAt заполняет p данными экспорта со смещения off.
 func (c *Client) ReadAt(ctx context.Context, p []byte, off int64) error {
 	if len(p) == 0 {
 		return nil
@@ -391,7 +386,7 @@ func (c *Client) ReadAt(ctx context.Context, p []byte, off int64) error {
 	return c.readDataChunks(cookie, p, off)
 }
 
-// Extent is one contiguous region described by a metadata context.
+// Extent описывает непрерывный диапазон в контексте метаданных.
 type Extent struct {
 	// Offset — смещение от начала экспорта.
 	Offset int64
@@ -401,22 +396,22 @@ type Extent struct {
 	Flags uint32
 }
 
-// End returns the exclusive end offset.
+// End возвращает смещение первого байта за диапазоном.
 func (e Extent) End() int64 { return e.Offset + e.Length }
 
-// Zero reports whether a base:allocation extent reads as zeroes.
+// Zero показывает, читается ли диапазон base:allocation как нули.
 func (e Extent) Zero() bool { return e.Flags&StateZero != 0 }
 
-// Hole reports whether a base:allocation extent is unallocated.
+// Hole показывает, является ли диапазон base:allocation невыделенным.
 func (e Extent) Hole() bool { return e.Flags&StateHole != 0 }
 
-// Dirty reports whether a dirty-bitmap extent changed since the checkpoint.
+// Dirty показывает, менялся ли диапазон dirty-bitmap после checkpoint.
 func (e Extent) Dirty() bool { return e.Flags&StateDirty != 0 }
 
-// BlockStatus queries one metadata context over [offset, offset+length).
+// BlockStatus запрашивает один контекст метаданных в диапазоне [offset, offset+length).
 //
-// The server is allowed to describe less than was asked for, so the returned
-// extents may stop short; ExtentMap handles the looping.
+// Сервер может описать лишь часть запрошенного диапазона. ExtentMap продолжит опрос с
+// места, где закончился ответ.
 func (c *Client) BlockStatus(ctx context.Context, contextName string, offset, length int64) ([]Extent, error) {
 	if !c.structured {
 		return nil, errors.New("BLOCK_STATUS требует структурированных ответов, которых сервер не поддерживает")
@@ -459,11 +454,8 @@ func (c *Client) BlockStatus(ctx context.Context, contextName string, offset, le
 	cursor := offset
 	done := false
 
-	// The server answers for every context negotiated in the session, not just
-	// the one asked about, and it decides the order. The DONE flag can
-	// therefore land on a chunk describing a context we are discarding, so the
-	// loop has to check it for every chunk regardless of what it did with the
-	// payload.
+	// Сервер отвечает по всем согласованным контекстам в своём порядке. Флаг DONE может прийти
+	// во фрагменте ненужного контекста, поэтому проверяем его даже после пропуска данных.
 	for !done {
 		chunk, err := c.readChunkHeader(cookie)
 		if err != nil {
@@ -494,8 +486,8 @@ func (c *Client) BlockStatus(ctx context.Context, contextName string, offset, le
 				if extentLen <= 0 {
 					return nil, errors.New("сервер вернул экстент нулевой длины")
 				}
-				// The final descriptor may run past what was requested; it must
-				// never run past the export.
+				// Последний дескриптор может выйти за конец запрошенного диапазона, но
+				// должен оставаться внутри экспорта.
 				if cursor+extentLen > c.export.Size {
 					extentLen = c.export.Size - cursor
 					if extentLen <= 0 {
@@ -510,7 +502,7 @@ func (c *Client) BlockStatus(ctx context.Context, contextName string, offset, le
 			return nil, parseErrorChunk(chunk.Type, payload)
 
 		case replyTypeNone:
-			// Terminator with nothing to say.
+			// Завершающий фрагмент без данных.
 
 		default:
 			return nil, fmt.Errorf("неожиданный тип чанка %#x в ответе BLOCK_STATUS", chunk.Type)
@@ -523,17 +515,14 @@ func (c *Client) BlockStatus(ctx context.Context, contextName string, offset, le
 	return extents, nil
 }
 
-// ExtentMap sweeps the whole export and returns the extents of one metadata
-// context, merging neighbours that share the same flags.
+// ExtentMap обходит весь экспорт, возвращает диапазоны одного контекста и объединяет
+// соседние диапазоны с одинаковыми флагами.
 //
-// The sweep deliberately does not set NBD_CMD_FLAG_REQ_ONE: that flag asks the
-// server for a single extent per request, which suits probing one offset and is
-// wasteful here, where the whole map is wanted and the server can pack many
-// descriptors into one reply.
+// Флаг NBD_CMD_FLAG_REQ_ONE запрашивает один диапазон и подходит для проверки одного
+// смещения. При обходе всей карты сервер может вернуть несколько дескрипторов сразу.
 //
-// Merging matters: qemu describes a mostly-clean terabyte disk in thousands of
-// tiny descriptors, and the caller only cares where the boundaries between
-// dirty and clean actually are.
+// QEMU описывает терабайтный диск тысячами мелких диапазонов. Объединяем соседние, чтобы
+// сохранить только границы между изменёнными и неизменёнными участками.
 func (c *Client) ExtentMap(ctx context.Context, contextName string) ([]Extent, error) {
 	var out []Extent
 	offset := int64(0)
@@ -550,7 +539,7 @@ func (c *Client) ExtentMap(ctx context.Context, contextName string) ([]Extent, e
 		var advanced int64
 		for _, e := range batch {
 			if e.Offset < offset {
-				// Overlapping descriptors would corrupt the map silently.
+				// Пересекающиеся дескрипторы исказили бы карту диапазонов.
 				return nil, fmt.Errorf("сервер вернул экстент со смещением %d, ожидалось не меньше %d",
 					e.Offset, offset)
 			}
@@ -569,9 +558,8 @@ func (c *Client) ExtentMap(ctx context.Context, contextName string) ([]Extent, e
 	return out, nil
 }
 
-// Flush asks the server to commit buffered writes. A read-only backup export
-// never needs it; kept because a server may advertise it and a caller may want
-// it after a restore path is added.
+// Flush просит сервер записать буферизированные данные. Для экспорта только на чтение не
+// нужен. Метод оставлен для серверов с этой возможностью и будущего восстановления.
 func (c *Client) Flush(ctx context.Context) error {
 	if c.export.TransmissionFlags&TransmissionSendFlush == 0 {
 		return nil
@@ -598,7 +586,7 @@ func (c *Client) Flush(ctx context.Context) error {
 func (c *Client) sendRequest(command uint16, cookie uint64, offset int64, length uint32) error {
 	buf := make([]byte, 0, 28)
 	buf = binary.BigEndian.AppendUint32(buf, magicRequest)
-	buf = binary.BigEndian.AppendUint16(buf, 0) // command flags
+	buf = binary.BigEndian.AppendUint16(buf, 0) // флаги команды
 	buf = binary.BigEndian.AppendUint16(buf, command)
 	buf = binary.BigEndian.AppendUint64(buf, cookie)
 	buf = binary.BigEndian.AppendUint64(buf, uint64(offset))
@@ -674,8 +662,8 @@ func (c *Client) readChunkPayload(chunk *chunkHeader) ([]byte, error) {
 	return buf, nil
 }
 
-// readDataChunks assembles a read reply. Holes are left as the zeroes the
-// buffer already contains, which is why p is cleared first.
+// readDataChunks собирает ответ на чтение. Сначала обнуляем p, чтобы невыделенные диапазоны
+// уже содержали нули.
 func (c *Client) readDataChunks(cookie uint64, p []byte, base int64) error {
 	for i := range p {
 		p[i] = 0
@@ -723,7 +711,7 @@ func (c *Client) readDataChunks(cookie uint64, p []byte, base int64) error {
 			if start < 0 || start+int64(hole.Size) > int64(len(p)) {
 				return fmt.Errorf("сервер прислал дыру вне запрошенного диапазона")
 			}
-			// Already zero; just account for the coverage.
+			// Данные уже нулевые. Учитываем только покрытие диапазона.
 			covered += int64(hole.Size)
 
 		case replyTypeError, replyTypeErrorOffset:
@@ -739,7 +727,7 @@ func (c *Client) readDataChunks(cookie uint64, p []byte, base int64) error {
 			}
 
 		default:
-			// Unknown chunk types must be skipped, not guessed at.
+			// Неизвестные типы фрагментов пропускаем.
 			if _, err := c.readChunkPayload(chunk); err != nil {
 				return err
 			}
@@ -756,7 +744,7 @@ func (c *Client) readDataChunks(cookie uint64, p []byte, base int64) error {
 	return nil
 }
 
-// drainChunks consumes a structured reply whose payload is not needed.
+// drainChunks считывает структурированный ответ, данные которого не нужны.
 func (c *Client) drainChunks(cookie uint64) error {
 	for {
 		chunk, err := c.readChunkHeader(cookie)
@@ -797,8 +785,8 @@ func (c *Client) nextCookie() uint64 {
 	return c.cookie
 }
 
-// applyDeadline mirrors a context deadline onto the connection, since the NBD
-// conversation is synchronous and cannot otherwise be interrupted.
+// applyDeadline переносит дедлайн контекста на соединение. Синхронный обмен NBD иначе
+// прервать нельзя.
 func (c *Client) applyDeadline(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err

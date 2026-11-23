@@ -14,8 +14,8 @@ import (
 	"golang.org/x/crypto/ssh/knownhosts"
 )
 
-// The whole point of this package: no key and no explicit decision must not
-// silently become "connect to anyone".
+// Без ключа или явного решения пропустить проверку нельзя автоматически доверять любому
+// хосту.
 func TestCallbackRefusesWithoutKeyOrDecision(t *testing.T) {
 	if _, err := Callback("", false); !errors.Is(err, ErrNoHostKey) {
 		t.Fatalf("ожидалась ErrNoHostKey, получено %v", err)
@@ -35,7 +35,7 @@ func TestCallbackAllowsExplicitlyUnverified(t *testing.T) {
 	}
 }
 
-// A pinned key must actually pin: the same key passes, a different one does not.
+// Прикрепленный ключ должен фактически прикрепляться: тот же ключ проходит, другой нет.
 func TestCallbackPinsTheConfiguredKey(t *testing.T) {
 	pinned, pinnedLine := generateHostKey(t)
 	other, _ := generateHostKey(t)
@@ -104,8 +104,8 @@ func TestCallbackRejectsKnownHostsPatterns(t *testing.T) {
 	}
 }
 
-// A pinned key that does not parse must fail loudly at configuration time,
-// not degrade into no verification at connection time.
+// Прикрепленный ключ, который не разбирается, должен громко выходить из строя во время
+// настройки, а не деградировать в отсутствие проверки во время подключения.
 func TestCallbackRejectsMalformedKey(t *testing.T) {
 	if _, err := Callback("не ключ вовсе", false); err == nil {
 		t.Fatal("нечитаемый ключ принят")
@@ -115,8 +115,8 @@ func TestCallbackRejectsMalformedKey(t *testing.T) {
 	}
 }
 
-// Scan has to return the key the host actually presented, and must not
-// authenticate: it runs against addresses nobody has trusted yet.
+// Сканирование должно возвращать ключ, фактически представленный хостом, и не должно
+// аутентифицироваться: он работает по адресам, которым никто еще не доверял.
 func TestScanReturnsThePresentedKey(t *testing.T) {
 	signer, line := generateHostKey(t)
 	addr, stop := startSSHServer(t, signer)
@@ -138,7 +138,7 @@ func TestScanReturnsThePresentedKey(t *testing.T) {
 }
 
 func TestScanReportsUnreachableHost(t *testing.T) {
-	// Port 1 on the loopback: nothing listens there, and the attempt fails fast.
+	// Порт 1 на loopback: там ничего не слушается, и попытка быстро проваливается.
 	if _, err := Scan(context.Background(), "127.0.0.1:1", time.Second); err == nil {
 		t.Fatal("недоступный хост не должен возвращать ключ")
 	}
@@ -158,8 +158,8 @@ func generateHostKey(t *testing.T) (ssh.Signer, string) {
 	return signer, line
 }
 
-// startSSHServer runs a listener that completes just enough of the handshake
-// for a client to see the host key.
+// startSSHServer запускает слушатель, который завершает достаточное количество рукопожатия,
+// чтобы клиент мог увидеть ключ хоста.
 func startSSHServer(t *testing.T, signer ssh.Signer) (string, func()) {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -178,8 +178,8 @@ func startSSHServer(t *testing.T, signer ssh.Signer) (string, func()) {
 			return
 		}
 		defer func() { _ = conn.Close() }()
-		// The client aborts once it has the key, so this handshake is expected
-		// to fail; the error is not interesting.
+		// Клиент прерывает работу, как только у него есть ключ, поэтому ожидается, что это
+		// рукопожатие потерпит неудачу; Ошибка не интересна.
 		serverConn, _, _, _ := ssh.NewServerConn(conn, cfg)
 		if serverConn != nil {
 			_ = serverConn.Close()

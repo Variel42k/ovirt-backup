@@ -3,12 +3,15 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 )
+
+var errJobActive = errors.New("это задание уже выполняется другим процессом")
 
 type jobRecord struct {
 	Path     string `json:"path"`
@@ -56,6 +59,8 @@ type savedJob struct {
 	directory string
 	date      time.Time
 	task      deliveryJob
+	tracked   bool
+	active    bool
 }
 
 func discoverSavedJobs(ctx context.Context) ([]savedJob, error) {
@@ -98,7 +103,13 @@ func discoverSavedJobs(ctx context.Context) ([]savedJob, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if job, ok := inspectSavedJob(directory); ok && !records[job.task.ID].Complete {
+		job, ok := inspectSavedJob(directory)
+		if !ok {
+			continue
+		}
+		record := records[job.task.ID]
+		job.tracked = record.Path == directory
+		if !record.Complete {
 			jobs = append(jobs, job)
 		}
 	}
@@ -131,7 +142,56 @@ func inspectSavedJob(directory string) (savedJob, bool) {
 		return savedJob{}, false
 	}
 	task, err := readDelivery(file)
-	return savedJob{directory: directory, date: info.ModTime(), task: task}, err == nil
+	if err != nil {
+		return savedJob{}, false
+	}
+	// Closing the manifest releases the probe lock. The transfer takes its own
+	// exclusive lock before connecting to the recipient.
+	active := errors.Is(lockDelivery(file), errJobActive)
+	return savedJob{directory: directory, date: info.ModTime(), task: task, active: active}, true
+}
+
+func printSavedJobs(ui console, jobs []savedJob) {
+	ui.say("SSH-задания, ожидающие подтверждения:")
+	for index, job := range jobs {
+		var images []string
+		for _, image := range job.task.Files {
+			label := image.Label
+			if label == "" {
+				label = image.Name
+			}
+			images = append(images, label)
+		}
+		ui.say("  %d. %s · %s:%s · %q", index+1, job.date.Format("02.01.2006 15:04"),
+			job.task.Host, job.task.Directory, strings.Join(images, ", "))
+		ui.say("     %s", job.directory)
+		if job.active {
+			ui.say("     Уже выполняется.")
+		}
+	}
+}
+
+func pickSavedJob(ui console, jobs []savedJob, alternative string) (string, error) {
+	printSavedJobs(ui, jobs)
+	ui.say("  0. %s", alternative)
+	for {
+		answer, err := ui.ask("Номер задания (Enter — последнее)")
+		if err != nil {
+			return "", err
+		}
+		switch answer {
+		case "":
+			answer = "1"
+		case "0":
+			return "", nil
+		}
+		index, err := selectIndexes(answer, len(jobs))
+		if err != nil || len(index) != 1 {
+			ui.say("Выберите один номер задания.")
+			continue
+		}
+		return jobs[index[0]].directory, nil
+	}
 }
 
 func chooseSavedJob(ctx context.Context, ui console) (string, error) {
@@ -140,39 +200,32 @@ func chooseSavedJob(ctx context.Context, ui console) (string, error) {
 		return "", err
 	}
 	if len(jobs) > 0 {
-		ui.say("SSH-задания, ожидающие подтверждения:")
-		for index, job := range jobs {
-			var images []string
-			for _, image := range job.task.Files {
-				label := image.Label
-				if label == "" {
-					label = image.Name
-				}
-				images = append(images, label)
-			}
-			ui.say("  %d. %s · %s:%s · %q", index+1, job.date.Format("02.01.2006 15:04"),
-				job.task.Host, job.task.Directory, strings.Join(images, ", "))
-			ui.say("     %s", job.directory)
+		job, err := pickSavedJob(ui, jobs, "Ввести рабочий каталог вручную")
+		if err != nil || job != "" {
+			return job, err
 		}
-		ui.say("  0. Ввести рабочий каталог вручную")
-		for {
-			answer, err := ui.ask("Номер задания (Enter — последнее)")
-			if err != nil {
-				return "", err
-			}
-			switch answer {
-			case "":
-				return jobs[0].directory, nil
-			case "0":
-				return ui.ask("Абсолютный путь к рабочему каталогу на источнике")
-			}
-			index, err := selectIndexes(answer, len(jobs))
-			if err == nil && len(index) == 1 {
-				return jobs[index[0]].directory, nil
-			}
-			ui.say("Выберите один номер задания.")
+	} else {
+		ui.say("В доступных каталогах нет заданий, ожидающих подтверждения.")
+	}
+	return ui.ask("Абсолютный путь к рабочему каталогу на источнике")
+}
+
+func chooseStartupJob(ui console, jobs []savedJob) (string, error) {
+	for _, job := range jobs {
+		if job.active {
+			ui.say("Передача уже выполняется: %s", job.directory)
+			return "", nil
 		}
 	}
-	ui.say("В доступных каталогах нет заданий, ожидающих подтверждения.")
-	return ui.ask("Абсолютный путь к рабочему каталогу на источнике")
+	switch len(jobs) {
+	case 0:
+		return "", nil
+	case 1:
+		if jobs[0].tracked {
+			ui.say("Найдено незавершённое задание. Продолжаю %s", jobs[0].directory)
+			ui.say("Для нового задания запустите мастер с --new.")
+			return jobs[0].directory, nil
+		}
+	}
+	return pickSavedJob(ui, jobs, "Открыть главное меню")
 }

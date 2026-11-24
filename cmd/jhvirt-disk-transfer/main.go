@@ -409,8 +409,9 @@ func exportFormat(source sourceDisk, forceQCOW2 bool) string {
 func main() {
 	dryRun := flag.Bool("dry-run", false, "выбрать диски и показать план без сборки и передачи")
 	resume := flag.String("resume", "", "возобновить SSH-передачу из рабочего каталога на источнике")
+	newJob := flag.Bool("new", false, "открыть меню без автовозобновления")
 	flag.Parse()
-	if flag.NArg() != 0 {
+	if flag.NArg() != 0 || (*resume != "" && *newJob) {
 		flag.Usage()
 		os.Exit(2)
 	}
@@ -421,14 +422,22 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	ui := console{ctx: ctx, input: bufio.NewReader(os.Stdin), output: os.Stderr}
+	job := *resume
 	var err error
-	if *resume != "" {
-		err = resumeDelivery(ctx, ui, *resume, *dryRun)
-	} else {
+	if job == "" && !*newJob && !*dryRun {
+		var jobs []savedJob
+		jobs, err = consoleRead(ctx, func() ([]savedJob, error) { return discoverSavedJobs(ctx) })
+		if err == nil {
+			job, err = chooseStartupJob(ui, jobs)
+		}
+	}
+	if err == nil && job != "" {
+		err = resumeDelivery(ctx, ui, job, *dryRun)
+	} else if err == nil {
 		err = run(ctx, ui, *dryRun, hostMounts)
 	}
 	if ctx.Err() != nil {
-		fmt.Fprintln(os.Stderr, "\nОтменено. Для ранее начатой SSH-передачи используйте пункт 4 и её рабочий каталог.")
+		fmt.Fprintln(os.Stderr, "\nОтменено. Незавершённую SSH-передачу можно продолжить при следующем запуске.")
 		os.Exit(130)
 	}
 	if err != nil {

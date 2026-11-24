@@ -144,6 +144,9 @@ transfer:
 			names, _ := filepath.Glob(filepath.Join(remote+".part", ".*"))
 			for _, name := range names {
 				if stat, err := os.Stat(name); err == nil && stat.Mode().IsRegular() && stat.Size() > 128<<10 {
+					if saved, ok := inspectSavedJob(job); !ok || !saved.active {
+						t.Fatal("running job was not marked active")
+					}
 					cancel()
 					break transfer
 				}
@@ -163,6 +166,9 @@ transfer:
 	found := false
 	for _, saved := range jobs {
 		if saved.directory == job {
+			if !saved.tracked || saved.active {
+				t.Fatalf("interrupted job was not eligible for startup resume: %+v", saved)
+			}
 			found = true
 		}
 	}

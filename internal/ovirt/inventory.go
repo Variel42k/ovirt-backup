@@ -390,6 +390,15 @@ func (c *Client) GetVM(ctx context.Context, id string) (*VM, error) {
 	return &vm, nil
 }
 
+// SearchDisks возвращает диски по запросу поиска Engine, например alias=Example*.
+func (c *Client) SearchDisks(ctx context.Context, query string) ([]Disk, error) {
+	var list diskList
+	if err := c.get(ctx, "/disks", &list, withQuery(url.Values{"search": {query}})); err != nil {
+		return nil, err
+	}
+	return list.Disk, nil
+}
+
 // GetDisk извлекает один диск.
 func (c *Client) GetDisk(ctx context.Context, id string) (*Disk, error) {
 	var d Disk
